@@ -288,6 +288,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._toolbar,
             settings_dialog_factory=lambda: None,
             agent_builder_factory=lambda: getattr(self, "_builder_dialog", None),
+            on_runtimes_refresh=self._on_providers_changed,  # SPEC-01
         )
 
         # Prompts handler — wired to left_panel after both are created
@@ -1436,6 +1437,17 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_settings_btn_clicked(self):
         """⚙ -> open the existing Settings dialog (fresh instance each call)."""
         self._open_settings()
+
+    def _on_providers_changed(self) -> None:
+        """SPEC-01: a provider save landed — refresh cached runtime provider config.
+
+        Fired via wire_settings_handler's on_providers_changed closure after a
+        SettingsHandler.add_or_update/remove. Guarded: Settings can save before the
+        runtime handler is constructed (first-run wizard ordering).
+        """
+        arh = getattr(self, "_agent_runtime_handler", None)
+        if arh is not None:
+            arh.refresh_provider_config()
 
     def update_agent_id_display(self, agent_id: str) -> None:
         """A-9: Update the agent_id label in the status bar."""

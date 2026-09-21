@@ -59,6 +59,7 @@ def wire_settings_handler(
     *,
     settings_dialog_factory: Callable | None = None,
     agent_builder_factory: Callable | None = None,
+    on_runtimes_refresh: Callable[[], None] | None = None,
 ) -> SettingsHandler:
     """Wire the SettingsHandler's callbacks to the toolbar and (optionally) the dialogs.
 
@@ -66,6 +67,9 @@ def wire_settings_handler(
     - on_providers_changed → settings_dialog_factory().refresh_providers(providers)
       and agent_builder_factory().set_provider_options(providers)
       (both no-op if the factory is None or returns None)
+    - on_providers_changed also invokes ``on_runtimes_refresh()`` (SPEC-01) after the
+      dialog refreshes, so cached AgentRuntimes pick up edited provider config without
+      an app restart. No-op when not provided.
     - Sets initial toolbar status from the current state of providers.yaml.
 
     Idempotent: calling twice on the same handler is a no-op.
@@ -89,6 +93,14 @@ def wire_settings_handler(
                 type(providers).__name__,
             )
             return
+
+        if on_runtimes_refresh is not None:
+            try:
+                on_runtimes_refresh()
+            except Exception as e:
+                logger.warning(
+                    "Runtime provider refresh failed after provider save: %s", e
+                )
 
         if settings_dialog_factory is not None:
             try:
