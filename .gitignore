@@ -54,3 +54,4 @@ memory/
 
 # Local debug scratch (audit probes, measurement scripts) — kept on disk, out of git
 .debug/
+.crabcakes/feed-updates.jsonl
