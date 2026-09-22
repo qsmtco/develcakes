@@ -457,3 +457,299 @@ class TestEndToEndChain:
         assert load_providers() == []  # the file really is an empty list
         assert providers_dict == {}
         assert runtime._config.providers is providers_dict  # cleared in place
+
+
+# ── SPEC-01 Phase 2 — _call_llm live base_url/caller refresh ─────────────────
+#
+# The live-lookup block used to be gated on `not effective_api_key`, so an
+# agent with a per-agent key never saw base_url/caller fixes (the 2026-09-20
+# z.ai incident). Phase 2 decouples: the live CARD is resolved unconditionally,
+# base_url/caller mutate the runtime's OWN clone in place before the
+# streaming/non-streaming branch split, and api_key precedence is unchanged
+# (per-agent key > live card key > frozen snapshot key).
+#
+# Test seams (no network, no GTK):
+#   - leave caller="" on the frozen card → _call_llm raises ValueError("No
+#     caller…") AFTER the mutation → assert on config.providers afterwards;
+#   - set a valid caller + monkeypatch agent.runtime._get_provider to capture
+#     the kwargs actually handed to the provider (api_key precedence evidence);
+#   - streaming path: monkeypatch rt._call_llm_streaming (instance attribute
+#     shadows the bound method) to capture its kwargs.
+
+import pytest
+
+from agent.config import AgentConfig, LLMProviderConfig
+from agent.runtime import AgentRuntime
+
+_RUNTIME_LOGGER = "agent.runtime"
+_LIVE_URL = "https://live.example.com/v1"
+_OLD_URL = "https://old.example.com/v1"
+
+
+class _CapturingProvider:
+    """Stands in for the real provider behind _get_provider; records kwargs."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def call(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"content": "captured"}
+
+
+def _make_runtime(providers: dict[str, LLMProviderConfig]) -> AgentRuntime:
+    """Headless AgentRuntime: no threads start until send_message is called;
+    migrate_conversation_files() failure is caught non-fatal (runtime :503)."""
+    return AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
+
+
+def _inject_conversation(rt: AgentRuntime, api_key: str | None = None) -> None:
+    """_call_llm needs self._conversations[session_key] with .api_key, .model,
+    .app_title — inject directly (Phase 2 instructions, verified facts)."""
+    rt._conversations["s1"] = SimpleNamespace(
+        api_key=api_key, model="p1/m1", app_title="t"
+    )
+
+
+def _patch_provider(monkeypatch) -> _CapturingProvider:
+    cap = _CapturingProvider()
+    monkeypatch.setattr("agent.runtime._get_provider", lambda _key: cap)
+    return cap
+
+
+class TestCallLlmLiveRefresh:
+    def test_stale_base_url_refreshed_next_call(self, tmp_config_dir):
+        # The original incident: a corrected base_url never reached a running
+        # runtime. Mutation must land BEFORE the branch split — proven by the
+        # no-caller ValueError firing after provider_cfg.base_url is live.
+        frozen = _make_provider("p1", base_url=_OLD_URL)  # caller="" (default)
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL)])
+
+        with pytest.raises(ValueError, match="No caller"):
+            rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].base_url == _LIVE_URL
+
+    def test_per_agent_key_does_not_skip_base_url_refresh(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # THE Phase 2 defect: the old `if not effective_api_key:` gate meant a
+        # per-agent key skipped live resolution entirely. The refresh must run
+        # AND the per-agent key must still beat the live card's key.
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt, api_key="sk-override")
+        save_providers(
+            [_make_provider("p1", base_url=_LIVE_URL, api_key="sk-live-key")]
+        )
+        cap = _patch_provider(monkeypatch)
+
+        result = rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert result == {"content": "captured"}
+        assert cap.calls, "provider.call never reached — refresh untestable"
+        assert cap.calls[0]["base_url"] == _LIVE_URL  # refresh ran despite override
+        assert cap.calls[0]["api_key"] == "sk-override"  # precedence unchanged
+
+    def test_caller_refreshed_lowercased(self, tmp_config_dir, monkeypatch):
+        # Caller assignment lowercases (matches _resolve_caller_key at :2053).
+        # _from_dict keeps an invalid-but-present caller as-is (warning only),
+        # so "ZAI" survives the yaml round-trip and reaches the mutator.
+        frozen = _make_provider("p1", base_url=_LIVE_URL)  # caller="" (default)
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL, caller="ZAI")])
+        _patch_provider(monkeypatch)  # caller becomes valid mid-call; no network
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].caller == "zai"
+
+    def test_no_live_match_leaves_snapshot_untouched(self, tmp_config_dir):
+        # Unrelated live provider (name and default_model prefix both miss)
+        # must not mutate the frozen card.
+        frozen = _make_provider("p1", base_url=_OLD_URL)
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("other", default_model="openai/other-model")])
+
+        with pytest.raises(ValueError, match="No caller"):
+            rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].base_url == _OLD_URL
+        assert rt._config.providers["p1"].caller == ""
+
+    def test_load_providers_failure_uses_frozen_values(
+        self, tmp_config_dir, monkeypatch, caplog
+    ):
+        # Store failure → warning logged, frozen values kept, and the call
+        # proceeds to its NORMAL failure (ValueError), not a new exception type.
+        frozen = _make_provider("p1", base_url=_OLD_URL)
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+
+        def boom():
+            raise RuntimeError("disk on fire")
+
+        monkeypatch.setattr("utils.providers_store.load_providers", boom)
+
+        with (
+            caplog.at_level(logging.WARNING, logger=_RUNTIME_LOGGER),
+            pytest.raises(ValueError, match="No caller"),
+        ):
+            rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].base_url == _OLD_URL
+        assert rt._config.providers["p1"].caller == ""
+        assert any(
+            "Cannot load providers.yaml" in r.getMessage() for r in caplog.records
+        )
+
+    def test_streaming_path_uses_refreshed_base_url(self, tmp_config_dir):
+        # The mutation happens before the branch split, so the STREAMING branch
+        # must also see the refreshed base_url (and lowercased caller).
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="")
+        frozen.supports_streaming = True
+        rt = _make_runtime(providers={"p1": frozen})
+        rt._on_text_delta = lambda *a, **k: None
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL, caller="zai")])
+
+        captured: list[dict] = []
+        rt._call_llm_streaming = lambda **kwargs: captured.append(kwargs)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert captured, "streaming branch never invoked"
+        assert captured[0]["base_url"] == _LIVE_URL
+        assert captured[0]["caller_key"] == "zai"
+
+    def test_live_card_empty_api_key_falls_back_to_frozen_key(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # A keyless live card still refreshes base_url, but must NOT zero out
+        # the key — the frozen snapshot remains the last-resort api_key source.
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL, api_key="")])
+        cap = _patch_provider(monkeypatch)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert cap.calls[0]["base_url"] == _LIVE_URL  # card WAS matched…
+        assert cap.calls[0]["api_key"] == "sk-p1-key"  # …but frozen key survived
+
+    def test_invalid_live_caller_keeps_frozen_caller(
+        self, tmp_config_dir, monkeypatch, caplog
+    ):
+        # A truthy-but-invalid live caller (unknown key) must NOT poison the
+        # frozen snapshot: warn and keep the last known-good caller so
+        # _PROVIDER_CALLERS.get still resolves downstream.
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers(
+            [_make_provider("p1", base_url=_LIVE_URL, caller="NotARealCaller")]
+        )
+        cap = _patch_provider(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_RUNTIME_LOGGER):
+            result = rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].caller == "zai"
+        assert cap.calls[0]["base_url"] == _LIVE_URL  # base_url refresh unaffected
+        # Downstream caller resolution still good: the call completed through
+        # the patched provider (no "No caller" ValueError) — _resolve_caller_key
+        # returned the KEPT frozen caller, not the invalid live value.
+        assert result == {"content": "captured"}
+        assert any("not a valid caller" in r.getMessage() for r in caplog.records)
+
+    def test_whitespace_only_live_caller_keeps_frozen_caller(
+        self, tmp_config_dir, monkeypatch, caplog
+    ):
+        # Whitespace-only is truthy-but-invalid: warn and KEEP the frozen
+        # caller (strip().lower() collapses it to "" — cannot validate, so it
+        # must not clobber the snapshot's last known-good caller).
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL, caller="   ")])
+        cap = _patch_provider(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=_RUNTIME_LOGGER):
+            rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].caller == "zai"
+        assert cap.calls[0]["base_url"] == _LIVE_URL  # refresh still ran
+        assert any("not a valid caller" in r.getMessage() for r in caplog.records)
+
+    def test_valid_live_caller_with_whitespace_is_stripped_and_applied(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # " ZAI " strips+lowers to "zai" — valid — so the override APPLIES.
+        frozen = _make_provider("p1", base_url=_OLD_URL)  # caller="" (default)
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers([_make_provider("p1", base_url=_LIVE_URL, caller=" ZAI ")])
+        cap = _patch_provider(monkeypatch)
+
+        result = rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert result == {"content": "captured"}  # resolved caller was valid
+        assert rt._config.providers["p1"].caller == "zai"
+        assert cap.calls[0]["base_url"] == _LIVE_URL
+
+    def test_whitespace_padded_live_base_url_is_stripped_before_compare(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # Same truthy-but-whitespace class as the caller field: strip before
+        # comparing so padded-but-equal URLs don't churn the snapshot, and
+        # store the stripped form so downstream comparisons are consistent.
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)
+        save_providers(
+            [_make_provider("p1", base_url=f"  {_LIVE_URL}  ", caller="zai")]
+        )
+        cap = _patch_provider(monkeypatch)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert rt._config.providers["p1"].base_url == _LIVE_URL
+        assert cap.calls[0]["base_url"] == _LIVE_URL  # sent to the wire stripped
+
+    def test_name_match_wins_regardless_of_live_list_order(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # Pins the two-pass scan order (adjudicated audit behavior): pass 1
+        # matches by display name, pass 2 by default_model prefix — so the
+        # name-match card wins EVEN when a prefix-matching card appears
+        # FIRST in the live list. (Debugger finding #4 was REJECTED — the
+        # supervisor probe proved the scan already guarantees this; this
+        # test guards the property against future restructuring.)
+        prefix_card = _make_provider(
+            "other",
+            default_model="p1/other-model",  # prefix "p1" — would match pass 2
+            base_url="https://prefix-match.example.com/v1",
+        )
+        name_card = _make_provider(
+            "p1", default_model="openai/x", base_url="https://name-match.example.com/v1"
+        )
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt)  # model="p1/m1" → provider_name="p1"
+        save_providers([prefix_card, name_card])  # prefix-match card FIRST
+        cap = _patch_provider(monkeypatch)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        # A naive first-match scan would have taken prefix_card (it appears
+        # first AND its default_model prefix is "p1"); the two-pass scan
+        # must resolve to the name-match card instead.
+        assert (
+            rt._config.providers["p1"].base_url == "https://name-match.example.com/v1"
+        )
+        assert cap.calls[0]["base_url"] == "https://name-match.example.com/v1"

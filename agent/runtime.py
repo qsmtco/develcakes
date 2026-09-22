@@ -2129,32 +2129,68 @@ class AgentRuntime:
         # provider change). Re-reading providers.yaml on every call means a token
         # update takes effect immediately without requiring an app restart.
         # (See BUG-fix: "token expired or incorrect" 401 despite a valid key.)
-        effective_api_key = conv.api_key  # per-agent override wins (authoritative)
-        if not effective_api_key:
-            try:
-                from utils.providers_store import load_providers
-                # Match live provider by display name (p.name) OR by the
-                # provider-prefix derived from its default_model (e.g. name
-                # 'glm5.2' with default_model 'zai/glm-5.2' → prefix 'zai').
-                # So both provider_name='zai' (model prefix) and a display-name
-                # match resolve to the live key.
-                live_providers = load_providers()
+        effective_api_key = conv.api_key  # per-agent key wins (authoritative)
+        # SPEC-01 Phase 2: resolve the live provider CARD once — base_url/caller
+        # refresh must run even when a per-agent key is set (the old block was gated
+        # on `not effective_api_key`, so a corrected base_url never reached agents
+        # with per-agent keys). api_key precedence is UNCHANGED.
+        live_card = None
+        try:
+            from utils.providers_store import load_providers
+            # Match by display name (p.name) OR by the provider-prefix derived from
+            # its default_model (e.g. name 'glm5.2' with default_model 'zai/glm-5.2'
+            # → prefix 'zai'). The match does NOT require a key: a keyless card
+            # still carries a valid base_url fix.
+            live_providers = load_providers()
+            for p in live_providers:
+                if p.name == provider_name:
+                    live_card = p
+                    break
+            if live_card is None:
                 for p in live_providers:
-                    if p.name == provider_name and p.api_key:
-                        effective_api_key = p.api_key
+                    pm = (p.default_model or "")
+                    live_prefix = pm.split("/")[0] if "/" in pm else pm
+                    if live_prefix == provider_name:
+                        live_card = p
                         break
-                if not effective_api_key:
-                    for p in live_providers:
-                        pm = (p.default_model or "")
-                        live_prefix = pm.split("/")[0] if "/" in pm else pm
-                        if live_prefix == provider_name and p.api_key:
-                            effective_api_key = p.api_key
-                            break
-            except Exception as e:
-                logger.warning("Cannot load providers.yaml for %s: %s", provider_name, e)
-            if not effective_api_key:
-                # Last resort: the (possibly stale) frozen runtime snapshot.
-                effective_api_key = provider_cfg.api_key
+        except Exception as e:
+            logger.warning("Cannot load providers.yaml for %s: %s", provider_name, e)
+
+        if live_card is not None:
+            # Live base_url/caller override (SPEC-01). provider_cfg is this
+            # runtime's OWN clone (Phase 1 BUG 6 fix), so in-place mutation
+            # cannot leak across runtimes. Invalid or empty live values never
+            # clobber the snapshot (caller validated against _PROVIDER_CALLERS;
+            # base_url stripped before compare); api_key precedence is
+            # untouched (per-agent key > live card key > frozen snapshot key).
+            live_base_url = live_card.base_url.strip()
+            if live_base_url and live_base_url != provider_cfg.base_url:
+                logger.info("[call-llm] live base_url override for %s: %s -> %s",
+                            provider_name, provider_cfg.base_url, live_base_url)
+                provider_cfg.base_url = live_base_url
+            # SPEC-01 fix round: validate the live caller against
+            # _PROVIDER_CALLERS BEFORE mutating. A truthy-but-invalid value
+            # (unknown key, whitespace-only) must NOT poison the frozen
+            # snapshot — warn and keep it instead, so _resolve_caller_key /
+            # _PROVIDER_CALLERS.get still see the last known-good caller.
+            new_caller = live_card.caller.strip().lower()
+            caller_is_valid = bool(new_caller) and new_caller in _PROVIDER_CALLERS
+            if caller_is_valid and new_caller != provider_cfg.caller:
+                logger.info("[call-llm] live caller override for %s: %s -> %s",
+                            provider_name, provider_cfg.caller, new_caller)
+                provider_cfg.caller = new_caller
+            elif live_card.caller and not caller_is_valid:
+                logger.warning(
+                    "[call-llm] live caller %r for %s is not a valid caller "
+                    "(expected one of %s); keeping frozen caller %r",
+                    live_card.caller, provider_name,
+                    sorted(_PROVIDER_CALLERS), provider_cfg.caller,
+                )
+            if not effective_api_key and live_card.api_key:
+                effective_api_key = live_card.api_key
+        if not effective_api_key:
+            # Last resort: the (possibly stale) frozen runtime snapshot.
+            effective_api_key = provider_cfg.api_key
         # Use app_title as X-Title header for OpenRouter attribution
         x_title = conv.app_title or ""
 
