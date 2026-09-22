@@ -33,10 +33,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
-from models.feed_card import AutoAcceptPrefs
+from models.feed_card import AutoAcceptPrefs, FeedCardData
 from utils import feed_store
 from utils.feed_store import (
     LIVE_WINDOW_DEFAULT,
@@ -268,6 +270,11 @@ class TestLiveWindowConfig:
         assert on_disk["version"] == 2
         assert on_disk["live_window"] == 150
 
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="running as root: file modes are not enforced, the negative "
+        "permission test cannot exercise a read-only lock file",
+    )
     def test_readonly_lock_file_returns_false_no_raise(self, tmp_path):
         """Micro-fix #7a: an unwritable lock file (or read-only parent) must
         NOT blow through set_live_window's bool contract — PermissionError
@@ -400,3 +407,266 @@ def _isolated_config_home():
 _fixture_config_root: str | None = (
     None  # set by _isolated_config_home; read by the isolation sentinel test
 )
+
+
+# ── SP2: headless doubles for eviction-cap wiring tests ──────────────────────
+
+
+class _LiteGLib:
+    """MockGLib equivalent (tests/test_feed_handler.py:53-61 pattern):
+    idle_add dispatches synchronously so add-driven eviction runs inline."""
+
+    def __init__(self):
+        self._pending = []
+
+    def idle_add(self, fn, *args, **kwargs):
+        self._pending.append((fn, args, kwargs))
+        fn(*args, **kwargs)
+        return 0
+
+
+class _StubWidget:
+    """Widget double for the eviction pass: only get_height() is read
+    (scroll compensation) and is_above_viewport() takes it opaquely."""
+
+    def __init__(self, height=56):
+        self._height = height
+
+    def get_height(self):
+        return self._height
+
+
+class _LiteFeedTab:
+    """FeedTab double covering ONLY what set_feed_tab + the eviction pass
+    touch. SP2 tests must run headless: the repo's gi/cairo segfault makes
+    tests/test_feed_handler.py unrunnable in this env (exit 139 at clean
+    HEAD, re-verified this round), so its MockFeedTab cannot be imported
+    (that module imports feed_card → real GTK widget builds). _LiteFeedTab
+    avoids build_feed_card entirely — no widget is ever constructed."""
+
+    def __init__(self):
+        self.removed = []
+        self._near_bottom = True
+        self._above_viewport = True
+        self._card_spacing = 8
+        self._vadjustment = None
+        self.scroll_to_bottom_calls = 0
+        self.batch_callback = None
+
+    # set_feed_tab surface
+    def set_batch_accept_callback(self, cb):
+        self.batch_callback = cb
+
+    def set_auto_accept_callback(self, cb):
+        pass
+
+    # eviction-pass surface
+    def is_near_bottom(self, slack: int = 80) -> bool:
+        return self._near_bottom
+
+    def is_above_viewport(self, widget) -> bool:
+        return self._above_viewport
+
+    def get_vadjustment(self):
+        return self._vadjustment
+
+    def get_card_container(self):
+        return None  # handler catches (AttributeError, TypeError) → spacing 0
+
+    def remove_card(self, card_id):
+        self.removed.append(card_id)
+
+    def prepend_card(self, widget, card_id=None):
+        pass
+
+    def schedule_scroll_to_bottom(self):
+        self.scroll_to_bottom_calls += 1
+
+
+class TestEvictionWindowWiring:
+    """SPEC-03 SP2 — the eviction cap resolves from the SP1 accessors.
+
+    Headless by construction: _LiteFeedTab + stub widgets + a patched
+    Load-More builder, so no real GTK widget is ever built. The eviction
+    pass itself is UNCHANGED code under test — only its cap source is
+    wired to config (R1/R3/R5)."""
+
+    def _handler(self, project="wiring-proj", register=True):
+        from ui.handlers.feed_handler import FeedHandler
+
+        h = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
+        h.set_feed_tab(_LiteFeedTab())
+        if register:
+            # Direct attribute registration: the R3/R5 helper reads only
+            # _project_paths + _active_project_name; driving the full
+            # on_project_opened path would drag in loads/prefs/seq-migration
+            # (and the GTK-heavy surface this env cannot run).
+            h._project_paths[project] = str(self._root / project)
+            h._active_project_name = project
+        return h
+
+    def _seed(self, h, count, project="wiring-proj", seq_start=1):
+        """Seed N live widgets + card data directly (mirrors
+        test_feed_handler.TestEvictionSurplus._seed) so the over-cap state
+        exists WITHOUT the append path's own eviction running first."""
+        ts = datetime.now(UTC)
+        ids = []
+        for seq in range(seq_start, seq_start + count):
+            cid = f"{project}-c{seq}"
+            h._cards[cid] = FeedCardData(
+                card_type="diff",
+                source="agent",
+                title=cid,
+                body="",
+                author="x",
+                timestamp=ts.replace(microsecond=seq),
+                project_name=project,
+                card_id=cid,
+                seq_num=seq,
+            )
+            h._project_cards.setdefault(project, []).insert(0, cid)
+            h._card_widgets[cid] = _StubWidget(height=56)
+            ids.append(cid)
+        h._project_seq[project] = seq_start + count - 1
+        return ids
+
+    def _patch_load_more_builder(self, monkeypatch):
+        """Replace _build_load_more_widget (real one builds Gtk widgets —
+        impossible headless). The patch is an aknowledged test seam: the
+        eviction tail's bookkeeping (widget reset, prepend, backlog label)
+        still runs against the stub return value."""
+        from ui.handlers import feed_handler as fh_mod
+
+        monkeypatch.setattr(
+            fh_mod.FeedHandler,
+            "_build_load_more_widget",
+            lambda self, remaining: _StubWidget(height=10),
+        )
+
+    def test_default_effective_cap_is_120(self, tmp_path, monkeypatch):
+        """R1 pin (lower bound side): no prefs file → get_live_window
+        returns 300 → min(120, 300) = 120. The retention default must
+        NEVER raise the widget cap (post-mortem budget)."""
+        self._root = tmp_path
+        h = self._handler()
+        assert feed_store.get_live_window(h._project_paths["wiring-proj"]) == 300
+        assert h._effective_live_window() == 120
+
+    def test_configured_below_reduces_cap(self, tmp_path, monkeypatch):
+        """R1: a config BELOW the constant lowers the cap — set 80, seed
+        120 live widgets (the old constant cap), one pass evicts down
+        toward 80 and the post-pass count never exceeds 80."""
+        self._root = tmp_path
+        h = self._handler()
+        project_path = h._project_paths["wiring-proj"]
+        assert set_live_window(project_path, 80) is True
+        self._patch_load_more_builder(monkeypatch)
+        self._seed(h, 120)
+        assert len(h._card_widgets) == 120
+        h._evict_surplus_card_widgets()
+        assert len(h._card_widgets) <= 80
+        assert get_live_window(project_path) == 80
+
+    def test_configured_above_never_raises_cap(self, tmp_path, monkeypatch):
+        """THE R1 pin: set_live_window(9000) clamps to 5000, yet the widget
+        cap STAYS 120 — config can only lower, never raise (post-mortem
+        slope 0.82 > 0.5 budget)."""
+        self._root = tmp_path
+        h = self._handler()
+        project_path = h._project_paths["wiring-proj"]
+        assert set_live_window(project_path, 9000) is True
+        assert get_live_window(project_path) == 5000  # clamp holds (SP1)
+        assert h._effective_live_window() == 120
+        self._patch_load_more_builder(monkeypatch)
+        self._seed(h, 120)
+        h._evict_surplus_card_widgets()
+        assert len(h._card_widgets) == 120  # at cap, not raised by config
+
+    def test_missing_project_falls_back(self, tmp_path, monkeypatch):
+        """R3/R5: no active project path → the helper returns the constant
+        without ever touching the accessor."""
+        self._root = tmp_path
+        h = self._handler(register=False)
+        calls = []
+        monkeypatch.setattr(
+            feed_store,
+            "get_live_window",
+            lambda p: calls.append(p) or 1,
+        )
+        assert h._effective_live_window() == 120
+        assert calls == [], "accessor must not be consulted without a path"
+
+    def test_get_live_window_exception_falls_back(self, tmp_path, monkeypatch):
+        """R5: an accessor explosion must not break the eviction pass —
+        cap falls back to 120 and eviction proceeds normally."""
+        self._root = tmp_path
+        h = self._handler()
+        monkeypatch.setattr(
+            feed_store,
+            "get_live_window",
+            lambda p: (_ for _ in ()).throw(RuntimeError("disk smoke")),
+        )
+        assert h._effective_live_window() == 120
+        self._patch_load_more_builder(monkeypatch)
+        self._seed(h, 130)
+        h._evict_surplus_card_widgets()  # must not raise
+        assert len(h._card_widgets) <= 120
+
+    def test_cap_read_per_pass_not_cached(self, tmp_path, monkeypatch):
+        """R3: the cap resolves at eviction-call time — lower the config
+        BETWEEN passes and the second pass must honor the new value."""
+        self._root = tmp_path
+        h = self._handler()
+        project_path = h._project_paths["wiring-proj"]
+        self._patch_load_more_builder(monkeypatch)
+        set_live_window(project_path, 100)
+        self._seed(h, 110, seq_start=1)
+        h._evict_surplus_card_widgets()
+        after_first = len(h._card_widgets)
+        assert after_first <= 100
+        # Re-seed above the NEW cap so the second pass has work to do.
+        self._seed(h, 10, seq_start=after_first + 1)
+        set_live_window(project_path, 90)
+        h._evict_surplus_card_widgets()
+        assert len(h._card_widgets) <= 90
+
+    def test_eviction_still_respects_keep_newest(self, tmp_path, monkeypatch):
+        """R2: KEEP_NEWEST_CARDS is untouched by config wiring — with cap
+        60 (below the KEEP floor of 40's headroom), the newest 40 by
+        seq_num must survive every pass."""
+        from ui.handlers.feed_handler import KEEP_NEWEST_CARDS
+
+        self._root = tmp_path
+        h = self._handler()
+        project_path = h._project_paths["wiring-proj"]
+        self._patch_load_more_builder(monkeypatch)
+        set_live_window(project_path, 60)
+        self._seed(h, 100, seq_start=1)
+        h._evict_surplus_card_widgets()
+        newest = {
+            c.card_id
+            for c in sorted(
+                h._cards.values(), key=lambda c: c.seq_num or 0, reverse=True
+            )[:KEEP_NEWEST_CARDS]
+        }
+        assert newest <= set(h._card_widgets), (
+            "the newest KEEP_NEWEST_CARDS must never be evicted (R2)"
+        )
+        assert len(h._card_widgets) <= 60
+
+    def test_prefs_file_corrupt_falls_back(self, tmp_path, monkeypatch):
+        """R3 tolerance: a corrupt prefs file reads as default 300 →
+        min(120, 300) = 120; eviction proceeds at the constant cap."""
+        self._root = tmp_path
+        h = self._handler()
+        project_path = h._project_paths["wiring-proj"]
+        path = _prefs_path(project_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"\\x00\\x01garbage not json")
+        assert get_live_window(project_path) == 300  # SP1 tolerance holds
+        assert h._effective_live_window() == 120
+        self._patch_load_more_builder(monkeypatch)
+        self._seed(h, 125)
+        h._evict_surplus_card_widgets()
+        assert len(h._card_widgets) == 120

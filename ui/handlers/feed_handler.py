@@ -1918,6 +1918,39 @@ class FeedHandler:
 
         self._GLib.idle_add(_render)
 
+    def _effective_live_window(self) -> int:
+        """Resolve the eviction cap for THIS pass (SPEC-03 SP2 rulings).
+
+        R1: effective cap = min(MAX_LIVE_CARD_WIDGETS, get_live_window())
+        — config can only LOWER the widget cap, never raise it. The 300
+        retention default is a card-retention figure (SP3's harness), not a
+        widget raise: the post-mortem budget is 0.5 MB/min and the measured
+        clean slope was already 0.82, so the default must not add widgets.
+
+        R3: read at eviction-call time (MEMRATCHET §2.1) — never cached in
+        __init__, so a config edit lands on the next pass.
+
+        R4: get_live_window is a lock-free read-only prefs read (file
+        open + json parse, µs–ms) — safe on the main thread; the eviction
+        pass must never take the prefs flock.
+
+        R5: any failure — no active project path, I/O error, parse error —
+        logs and falls back to MAX_LIVE_CARD_WIDGETS (pre-SP2 behavior):
+        config is non-critical and must never break the append/evict path.
+        """
+        try:
+            project_path = self._project_paths.get(self._active_project_name or "")
+            if not project_path:
+                return MAX_LIVE_CARD_WIDGETS  # R3/R5: no active project
+            configured = feed_store.get_live_window(project_path)
+        except Exception as e:  # noqa: BLE001 — R5: config is non-critical
+            _logger.warning(
+                "eviction cap: live-window read failed; using %d: %s",
+                MAX_LIVE_CARD_WIDGETS, e,
+            )
+            return MAX_LIVE_CARD_WIDGETS
+        return min(MAX_LIVE_CARD_WIDGETS, configured)  # R1
+
     def _evict_surplus_card_widgets(self, exclude: frozenset[str] = frozenset()) -> None:
         """Release card widgets for the oldest cards beyond the live window.
 
@@ -1940,8 +1973,13 @@ class FeedHandler:
         """
         if self._feed_tab is None:
             return
+        # SP2 (SPEC-03): the cap is CONFIG — resolved per pass (R3 call-time
+        # read) as min(constant, get_live_window) (R1: config can only lower;
+        # R5: failure → 120 inside the helper). Read OUTSIDE the lock: the
+        # helper does file I/O and must never hold self._lock (R4).
+        cap = self._effective_live_window()
         with self._lock:
-            if len(self._card_widgets) <= MAX_LIVE_CARD_WIDGETS:
+            if len(self._card_widgets) <= cap:
                 return
             candidates = {
                 cid for ids in self._project_cards.values() for cid in ids
@@ -1952,7 +1990,7 @@ class FeedHandler:
                 return
             live.sort(key=lambda cid: self._cards[cid].seq_num or 0)  # oldest first
             victims = live[: len(live) - KEEP_NEWEST_CARDS]
-            target = len(self._card_widgets) - MAX_LIVE_CARD_WIDGETS
+            target = len(self._card_widgets) - cap
 
         was_near_bottom = self._feed_tab.is_near_bottom()
         vadj = self._feed_tab.get_vadjustment()
