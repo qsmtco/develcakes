@@ -31,6 +31,15 @@
 # the rate-limited post-append check, and the FeedHandler's one-time open-time
 # request for a legacy oversized feed. `load_feed` never compacts.
 #
+# §2.3.4 — live-window config (SPEC-03). `get_live_window`/`set_live_window`
+# expose a per-project `live_window` key in the same feed-prefs.json the
+# auto-accept prefs use. Default 300 (LIVE_WINDOW_DEFAULT); set_live_window
+# clamps to 50–5000 and rejects non-int/bool with ValueError (bool is an int
+# subclass); get is tolerant of a missing/corrupt file and clamps
+# out-of-range persisted values. This is a VIEW-level window — the disk
+# store keeps every card, the feed view is a projection of it. Writes are
+# read-modify-write so sibling prefs keys are preserved.
+#
 # DOCUMENTED DEVIATION from the "pure functions — no state" contract above:
 # `_compact_last` / `_compact_rl_lock` keep per-project compaction
 # timestamps so the append-triggered compaction is rate-limited. This is
@@ -56,6 +65,9 @@ JOURNAL_COMPACT_THRESHOLD = 500   # lines; compact when exceeded
 _LOCK_TIMEOUT_SEC = 2.0           # bounded lock deadline (was unbounded)
 _COMPACT_MIN_INTERVAL = 60.0      # seconds between append-triggered compacts
 FEED_WINDOW_DEFAULT = 2000        # newest N cards retained at compaction
+LIVE_WINDOW_DEFAULT = 300         # SPEC-03 §2.3.4: default view-level live window
+LIVE_WINDOW_MIN = 50              # clamp floor for live_window (config + persisted)
+LIVE_WINDOW_MAX = 5000            # clamp ceiling for live_window (config + persisted)
 _logger = logging.getLogger(__name__)
 
 # Documented deviation from this module's "pure functions" docstring: the
@@ -944,6 +956,27 @@ def save_feed_prefs(project_path: str, prefs: dict) -> None:
     Creates .crabcakes/ directory if missing. Validates that prefs is a
     dict with version == PREFS_VERSION. Writes atomically via
     _atomic_write_json (chmod 0o600). Logs errors instead of raising.
+
+    Clobber-proofing (SP1 audit #1): the write is read-modify-write under
+    the prefs flock, NOT a blind overwrite — callers legitimately send an
+    auto-accept-only payload (AutoAcceptPrefs.to_dict() emits
+    {version, auto_accept}), and a blind write silently dropped sibling
+    keys such as live_window (probe A: the handler's debounced save
+    reverted the window to its default after every set_live_window). Keys
+    the payload DOES carry overwrite their file counterparts (the caller
+    owns what it sends); keys it does not carry are preserved verbatim. A
+    missing/corrupt existing file seeds from {} — and cannot lose the
+    version marker there: the up-front validation already guaranteed
+    prefs["version"] == PREFS_VERSION, so the merged payload always
+    carries it (micro-fix #6 — set_live_window is the one that needs the
+    explicit setdefault, because its clamped key is all it writes). A
+    stale file carrying an outdated version marker is overwritten by the
+    caller's version (caller owns what it sends).
+
+    On prefs-lock timeout: logs a WARNING and skips the write (prefs are
+    non-critical, same philosophy as a skipped feed append). Contrast
+    set_live_window, which retries 3× and reports failure — a lost window
+    size is not self-healing, a lost auto-accept toggle is.
     """
     if not isinstance(prefs, dict):
         _logger.error("save_feed_prefs: prefs must be a dict, got %s", type(prefs).__name__)
@@ -953,7 +986,207 @@ def save_feed_prefs(project_path: str, prefs: dict) -> None:
         return
     try:
         _ensure_crabcakes_dir(project_path)
+    except OSError as e:
+        # Setup-stage wrap (micro-fix #7): a read-only parent must log +
+        # skip, never raise.
+        _logger.error("save_feed_prefs: failed to create dir: %s", e)
+        return
+    try:
+        acquired = _acquire_prefs_lock(project_path)
+    except OSError as e:
+        # Same wrap for the lock itself: an unwritable lock file is treated
+        # as lock-unavailable — log + skip, never raise.
+        _logger.error(
+            "save_feed_prefs: prefs lock unavailable for %s: %s",
+            project_path, e,
+        )
+        return
+    if acquired is None:
+        _logger.warning(
+            "save_feed_prefs: prefs lock busy for %s — write skipped",
+            _prefs_path(project_path),
+        )
+        return
+    fd, lock_path = acquired
+    try:
         path = _prefs_path(project_path)
-        _atomic_write_json(path, prefs)
+        raw = _read_prefs_raw_dict(project_path)
+        raw.update(prefs)
+        _atomic_write_json(path, raw)
     except OSError as e:
         _logger.error("save_feed_prefs: failed to write prefs: %s", e)
+    finally:
+        _release_lock(fd, lock_path)
+
+
+# ── §2.3.4: live-window config (SPEC-03) ─────────────────────────────────────
+
+# Both prefs writers (save_feed_prefs, set_live_window) hold THIS lock around
+# their read-modify-write, so an auto-accept save can never clobber a
+# live_window key written between its read and write (SP1 audit #1: 3/5 probe
+# runs lost the value, 1/5 corrupted the file — no lock + a shared .tmp).
+# Readers take no lock: os.replace makes a torn read impossible, and a
+# reader that misses the newest write re-reads it on the next call. The lock
+# is a separate inode from the feed flock (different file) — no nesting, no
+# ordering constraint between the two.
+_PREFS_LOCK_TIMEOUT_SEC = _LOCK_TIMEOUT_SEC  # same bounded budget as the feed lock
+
+
+def _prefs_lock_path(project_path: str) -> str:
+    """Return the path to the prefs flock file: .crabcakes/feed-prefs.json.lock.
+
+    Returns the BARE prefs path (no manual suffix): _acquire_lock appends
+    ".lock" itself, so a manual suffix here produced the accidental
+    "feed-prefs.json.lock.lock" (SP1 micro-fix #8). A stale .lock.lock file
+    left by this week's runs is harmless — it was only ever an unused flock
+    inode, and prod code deliberately does NOT migrate or delete it."""
+    return _prefs_path(project_path)
+
+
+def _acquire_prefs_lock(project_path: str) -> tuple | None:
+    """Acquire the prefs lock (same bounded, non-blocking pattern as the
+    feed lock). Returns (fd, lock_path) or None on timeout."""
+    return _acquire_lock(_prefs_lock_path(project_path), _PREFS_LOCK_TIMEOUT_SEC)
+
+
+def _read_prefs_raw_dict(project_path: str) -> dict:
+    """Read feed-prefs.json as a raw dict for read-modify-write, preserving
+    ALL sibling keys verbatim (never load_feed_prefs — its defaults-merge
+    strips unknown keys, which is what let the handler's auto-accept saves
+    drop live_window). A missing, corrupt, or non-dict file yields {} — the
+    subsequent write then seeds the file with the new key alone (documented
+    reset: load_feed_prefs already treats an unreadable prefs file as
+    defaults, so nothing else could have survived it either)."""
+    path = _prefs_path(project_path)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        # ValueError, not just JSONDecodeError: json.loads raises a BARE
+        # ValueError for an integer literal beyond the int-max-str-digits
+        # limit (>4300 digits) — SP1 audit #2 (probe G).
+        _logger.warning("prefs RMW: failed to read %s: %s", path, e)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _read_live_window_raw(project_path: str) -> int | None:
+    """Read the raw persisted `live_window` value, or None when absent/invalid.
+
+    Reads feed-prefs.json directly (NOT via load_feed_prefs): the returned
+    prefs dict is contractually auto-accept-only (tests/test_feed_handler.py
+    pins `loaded == v2` exactly), so the retention key must not ride in it.
+    A missing file, corrupt JSON, non-dict root, non-int value, or a bool
+    (bool is an int subclass — True would otherwise coerce to 1) all read as
+    None, and get_live_window substitutes the default — mirroring
+    load_feed_prefs' tolerance.
+    """
+    path = _prefs_path(project_path)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        # ValueError, not just json.JSONDecodeError: json.loads raises a BARE
+        # ValueError for an integer literal beyond the int-max-str-digits
+        # limit (>4300 digits) — SP1 audit #2 (probe G). JSONDecodeError is
+        # itself a ValueError subclass, so this covers both.
+        _logger.warning("live_window: failed to read %s: %s", path, e)
+        return None
+    if not isinstance(raw, dict):
+        _logger.warning(
+            "live_window: expected dict at %s, got %s", path, type(raw).__name__
+        )
+        return None
+    value = raw.get("live_window")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def get_live_window(project_path: str) -> int:
+    """Return the configured live-window size for a project (view-level).
+
+    SPEC-03 §2: how many newest cards the feed VIEW keeps as live widgets.
+    The disk store always keeps everything — the view is a projection of it.
+    Falls back to LIVE_WINDOW_DEFAULT (300) when unset, and clamps a
+    persisted out-of-range value into 50–5000 so a hand-edited prefs file
+    can still only ever widen/narrow the window within sane bounds.
+    """
+    value = _read_live_window_raw(project_path)
+    if value is None:
+        return LIVE_WINDOW_DEFAULT
+    return max(LIVE_WINDOW_MIN, min(LIVE_WINDOW_MAX, value))
+
+
+def set_live_window(project_path: str, n: int) -> bool:
+    """Persist the live-window size for a project, clamped to 50–5000.
+
+    Validates before clamping: non-int values — including bool (an int
+    subclass; True would silently become 1 → clamp 50) — raise ValueError.
+    A valid int is clamped into range rather than rejected, so callers can
+    pass unvalidated UI input and still get a sane persisted window.
+
+    Clobber-proofing (SP1 audit #1): RMW over the RAW prefs file, never
+    load_feed_prefs — the v2 defaults-merge strips unknown keys, and the
+    handler's debounced auto-accept saves write {version, auto_accept} only
+    (AutoAcceptPrefs.to_dict), so a load-based RMW here would resurrect that
+    stripped shape on every write. All sibling keys are preserved verbatim.
+    Takes the prefs flock; on lock-busy or write failure retries up to 3×,
+    then logs an ERROR and returns False so a caller can surface the loss
+    (the user's setting would otherwise vanish silently). Returns True on a
+    successful write. save_feed_prefs, by contrast, keeps its silent-skip
+    philosophy — prefs are non-critical, a lost auto-accept toggle is
+    self-healing on the next toggle; a lost window size is not.
+
+    A fresh or previously-corrupt file is seeded with the version marker
+    (micro-fix #6): the payload starts from the raw dict ({} when missing/
+    corrupt) and setdefault()s version so a brand-new file is born
+    v2-shaped — while an EXISTING file's own version marker is preserved
+    verbatim (setdefault never overwrites).
+    """
+    if isinstance(n, bool) or not isinstance(n, int):
+        # ValueError per SPEC-03 Sub-Phase-1 instructions (not TypeError).
+        raise ValueError(  # noqa: TRY004
+            f"live_window must be an int, got {type(n).__name__}: {n!r}"
+        )
+    clamped = max(LIVE_WINDOW_MIN, min(LIVE_WINDOW_MAX, n))
+    path = _prefs_path(project_path)
+    last_err = "unknown"
+    for attempt in range(3):
+        # Caller-side OSError wrap (micro-fix #7): dir-ensure and lock
+        # acquire can both raise (read-only parent / unwritable lock file).
+        # An escape here would blow straight through the bool contract —
+        # so both count as an attempt failure and eventually return False.
+        try:
+            _ensure_crabcakes_dir(project_path)
+            acquired = _acquire_prefs_lock(project_path)
+        except OSError as e:
+            last_err = f"setup failed: {e} (attempt {attempt + 1}/3)"
+            continue
+        if acquired is None:
+            last_err = (
+                f"prefs lock busy >{_PREFS_LOCK_TIMEOUT_SEC:.1f}s "
+                f"(attempt {attempt + 1}/3)"
+            )
+            continue
+        fd, lock_path = acquired
+        try:
+            payload = _read_prefs_raw_dict(project_path)
+            payload.setdefault("version", PREFS_VERSION)  # micro-fix #6
+            payload["live_window"] = clamped
+            _atomic_write_json(path, payload)
+        except OSError as e:
+            last_err = f"write failed: {e} (attempt {attempt + 1}/3)"
+            continue
+        finally:
+            _release_lock(fd, lock_path)
+        return True
+    _logger.error(
+        "set_live_window: could not persist %d for %s — %s",
+        n, project_path, last_err,
+    )
+    return False
