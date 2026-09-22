@@ -102,6 +102,10 @@ __all__ = [
     # added in Phase 2a; full terminal-path routing is Phase 2b).
     "TurnStatus",
     "TurnResult",
+    # SPEC-02: single source of truth for the cancel dispatch text — the
+    # handler skips the turn-error feed card for this message (a deliberate
+    # cancel is not a turn-fatal provider error).
+    "CANCEL_MESSAGE",
 ]
 
 logger = logging.getLogger(__name__)
@@ -116,6 +120,15 @@ logger = logging.getLogger(__name__)
 #
 # Invariant: a turn transitions RUNNING → STREAMING → exactly one of
 # {COMPLETED, FAILED, CANCELLED}. STREAMING is non-terminal.
+
+# SPEC-02: the exact text `cancel()` dispatches for a deliberate user
+# cancellation. A cancel is NOT a turn-fatal provider error (spec §1), so
+# the handler's `_do_error` skips the "Turn failed" feed card for this
+# message — otherwise stop-all (SPEC-09) would spray one failure card per
+# stopped agent. Runtime-internal dispatches MUST emit this constant, never
+# a bare literal, so the skip comparison can't drift. Chat-bubble rendering
+# of the message is unchanged.
+CANCEL_MESSAGE = "Cancelled by user"
 
 
 class TurnStatus(Enum):
@@ -1028,7 +1041,7 @@ class AgentRuntime:
         with self._state_lock:
             active_tk = self._turn_tokens.get(session_key, self._turn_token)
         self._dispatch(
-            self._on_error, session_key, "Cancelled by user",
+            self._on_error, session_key, CANCEL_MESSAGE,
             _turn_token=active_tk,
         )
 
@@ -1362,7 +1375,13 @@ class AgentRuntime:
                             status=TurnStatus.CANCELLED,
                             session_key=session_key,
                             turn_token=turn_token,
-                            error="Cancelled",
+                            # SPEC-02 fix round 2 (audit #6): CANCEL_MESSAGE,
+                            # never a bare literal — the handler skips the
+                            # "Turn failed" card by exact constant compare, so
+                            # the short form would emit a spurious failure
+                            # card on every deliberate mid-loop cancel
+                            # (probe: "Cancelled" → 1 card, constant → 0).
+                            error=CANCEL_MESSAGE,
                             metadata={"reason": "shutdown", "iteration": iteration},
                         ))
                         return
@@ -1374,7 +1393,12 @@ class AgentRuntime:
                                 status=TurnStatus.CANCELLED,
                                 session_key=session_key,
                                 turn_token=turn_token,
-                                error="Cancelled",
+                                # SPEC-02 fix round 2 (audit #6): same as the
+                                # _cancel_requested site above — CANCEL_MESSAGE
+                                # constant, not the short form, so the handler
+                                # skips the turn-error card for user cancels
+                                # reaching the loop's own cancellation check.
+                                error=CANCEL_MESSAGE,
                                 metadata={"reason": "user", "iteration": iteration},
                             ))
                             return
@@ -1941,6 +1965,46 @@ class AgentRuntime:
                 # The original QTR-FIX noted that partial progress must be
                 # persisted; _terminate_turn's persistence path handles this
                 # via _auto_save on FAILED.
+                # SPEC-02: rollback trailing EMPTY assistant messages (no
+                # content, no tool_calls) so a failed turn never persists
+                # them (FAILED's _auto_save runs below, same thread,
+                # sequential — so this must run first). The strip is
+                # ORIGIN-AGNOSTIC — the predicate never asks which turn
+                # added a message. In the normal mid-loop failure the
+                # turn's own user message (Step 1) shields pre-existing
+                # history from the tail-up strip; only a failure before
+                # that user message lands (e.g. add_user_message itself
+                # raising) exposes a pre-existing trailing empty, which is
+                # then also cleaned on the failed turn. Note the earlier
+                # terminal paths (prepare_failed, prompt_build_failed,
+                # no_conversation) return BEFORE this block — they run no
+                # rollback at all. Partial content is real progress and
+                # stays. Looked up via _conversations, NOT the local conv
+                # binding (the exception may predate conv resolution).
+                # Guarded: a rollback failure must never mask the original
+                # error.
+                try:
+                    conv_rb = self._conversations.get(session_key)
+                    if conv_rb is not None and conv_rb.messages:
+                        removed = 0
+                        while conv_rb.messages and removed < 5:
+                            m = conv_rb.messages[-1]
+                            is_empty_assistant = (
+                                str(getattr(m.role, "value", m.role)) == "assistant"
+                                and not (m.content or "").strip()
+                                and not (m.tool_calls or [])
+                            )
+                            if not is_empty_assistant:
+                                break
+                            conv_rb.messages.pop()
+                            removed += 1
+                        if removed:
+                            logger.info(
+                                "[turn-fail] rolled back %d empty assistant message(s) for %s",
+                                removed, session_key,
+                            )
+                except Exception:
+                    logger.exception("empty-message rollback failed for %s", session_key)
                 self._terminate_turn(TurnResult(
                     status=TurnStatus.FAILED,
                     session_key=session_key,

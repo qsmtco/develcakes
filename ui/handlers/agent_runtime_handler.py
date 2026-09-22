@@ -2396,8 +2396,13 @@ class AgentRuntimeHandler:
             status["detail"],
         )
 
-    def _do_error(self, session_key: str, message: str, error_token: object = None) -> None:
-        """Main-thread portion of _on_error."""
+    def _do_error(self, session_key: str, message: str | BaseException, error_token: object = None) -> None:
+        """Main-thread portion of _on_error.
+
+        ``message`` mirrors OnError's contract (agent/callbacks.py): either a
+        user-friendly string or the raw exception object — provider errors
+        arrive as exceptions so _last_error_exception can enrich the display.
+        """
         # RACE-FIX v4: Reject stale errors from a previous turn.
         if error_token is not None:
             current_token = self._turn_tokens.get(session_key)
@@ -2458,6 +2463,62 @@ class AgentRuntimeHandler:
                 if bubble is not None:
                     chat_box.append(bubble)
                 self._mc.scroll_chat_to_bottom()
+
+        # SPEC-02: turn-fatal errors surface in the Project Feed too, not just
+        # chat + stderr. Same guard pattern as publish_cli_nudge_card (:538):
+        # the card is skipped only when no feed handler is wired (headless),
+        # never because no project is active — project_name falls back to
+        # "(none)" exactly like the nudge card.
+        #
+        # SPEC-02 fix round (audit #2/#3): the WHOLE card block is
+        # best-effort. The original narrow try covered only the context
+        # lookup, so a non-dict `_crabcakes_context` attachment
+        # (AttributeError on `.get`) or a raising `add_card` (lock
+        # contention / mid-shutdown) escaped `_do_error` entirely — no card,
+        # and the `_on_agent_end_cb` lifecycle fire below never ran, leaving
+        # the activity drawer stuck on "running". Everything — metadata
+        # read, card construction, add_card — is now inside one guard;
+        # a failure logs and falls through to the lifecycle fire.
+        if self._fh is not None:
+            try:
+                from agent.runtime import CANCEL_MESSAGE
+                from models.feed_card import FeedCardData
+                provider_meta = None
+                exc_obj = self._last_error_exception.get(session_key)
+                if exc_obj is not None:
+                    ctx = getattr(exc_obj, "_crabcakes_context", None)
+                    # Audit #2: the runtime attaches this as a dict, but a
+                    # truthy non-dict (corrupt attachment) must not escape —
+                    # treat anything but a dict as absent.
+                    provider_meta = ctx if isinstance(ctx, dict) else None
+                # SPEC-02 fix round (audit #4): a deliberate user cancel is
+                # not a turn-fatal provider error — no "Turn failed" card
+                # (stop-all in SPEC-09 would otherwise spray one per agent).
+                # Compared against the runtime's constant, never a bare
+                # string, so the two sides can't drift.
+                if display_msg != CANCEL_MESSAGE:
+                    card = FeedCardData(
+                        card_type="system",
+                        source="agent",
+                        title=f"Turn failed: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}",
+                        body=display_msg[:2000],
+                        author="Runtime",
+                        timestamp=datetime.now(timezone.utc),  # noqa: UP017 — same pattern as publish_cli_nudge_card (:565)
+                        project_name=self._active_project[0] if self._active_project else "(none)",
+                        metadata={
+                            "session_key": session_key,
+                            "kind": "turn_error",
+                            "provider": (provider_meta or {}).get("provider"),
+                            "model": (provider_meta or {}).get("model"),
+                            "exception_type": (provider_meta or {}).get("exception_type"),
+                        },
+                    )
+                    self._fh.add_card(card)
+            except Exception:
+                logger.exception(
+                    "turn-error feed card emission failed for %s (non-fatal)",
+                    session_key,
+                )
 
         # Fire lifecycle: agent finished (error) → ActivityHandler returns to idle
         if self._on_agent_end_cb:
