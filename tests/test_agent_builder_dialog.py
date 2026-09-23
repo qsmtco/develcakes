@@ -159,13 +159,13 @@ class TestCreateVsEditMode:
 class TestFallbackRowVisibility:
     """The Fallback Provider row is always visible, regardless of primary.
 
-    Regression: previously the row was hidden unless the primary was 'local-kb'.
+    The row is always visible (no primary-conditional visibility).
     """
 
-    def test_fallback_row_visible_for_kb_primary(self, gtk_parent):
-        """local-kb as primary → fallback row visible (was: visible in old code)."""
+    def test_fallback_row_visible_for_first_provider(self, gtk_parent):
+        """First provider as primary → fallback row visible."""
         providers = [
-            ProviderConfig("local-kb", "u", "k", "local-kb", True),
+            ProviderConfig("firstprov", "u", "k", "firstprov", True),
             ProviderConfig("openrouter", "u", "k", "or-m", True),
         ]
         dlg = _make_dlg(gtk_parent, providers)
@@ -183,30 +183,29 @@ class TestFallbackRowVisibility:
     def test_fallback_excludes_current_primary(self, gtk_parent):
         """The current primary is excluded from the fallback dropdown options."""
         providers = [
-            ProviderConfig("local-kb", "u", "k", "local-kb", True),
+            ProviderConfig("firstprov", "u", "k", "firstprov", True),
             ProviderConfig("openai", "u", "k", "gpt-4o", True),
             ProviderConfig("anthropic", "u", "k", "c", True),
         ]
         dlg = _make_dlg(gtk_parent, providers)
-        # Primary defaults to first non-KB provider (openai) since local-kb is seeded first
-        # but the actual selection depends on what _rebuild_provider_dropdown selects.
+        # The selection depends on what _rebuild_provider_dropdown selects.
         # Check the fallback list excludes the currently-selected primary.
         primary = dlg._get_selected_llm_name()
         fallback_names = [p.name for p in dlg._fallback_providers]
         assert primary not in fallback_names
 
-    def test_fallback_excludes_local_kb(self, gtk_parent):
-        """local-kb is never a valid fallback target (can't fall back to KB)."""
+    def test_fallback_excludes_selected_primary(self, gtk_parent):
+        """The selected primary is never a valid fallback target."""
         providers = [
-            ProviderConfig("local-kb", "u", "k", "local-kb", True),
+            ProviderConfig("firstprov", "u", "k", "firstprov", True),
             ProviderConfig("openai", "u", "k", "gpt-4o", True),
             ProviderConfig("anthropic", "u", "k", "c", True),
         ]
         dlg = _make_dlg(gtk_parent, providers)
-        # Switch primary to openai
-        dlg._provider_dropdown.set_selected(0)  # openai (or whichever is first non-KB)
+        # Switch primary to the first provider
+        dlg._provider_dropdown.set_selected(0)
         fallback_names = [p.name for p in dlg._fallback_providers]
-        assert "local-kb" not in fallback_names
+        assert dlg._get_selected_llm_name() not in fallback_names
 
 
 class TestSaveButtonRequiresFallback:
@@ -215,7 +214,7 @@ class TestSaveButtonRequiresFallback:
     def test_save_disabled_when_no_fallback(self, gtk_parent):
         """Empty fallback selection → save button is not sensitive."""
         providers = [
-            ProviderConfig("local-kb", "u", "k", "local-kb", True),
+            ProviderConfig("firstprov", "u", "k", "firstprov", True),
             ProviderConfig("openai", "u", "k", "gpt-4o", True),
         ]
         dlg = _make_dlg(gtk_parent, providers)
@@ -229,7 +228,7 @@ class TestSaveButtonRequiresFallback:
     def test_save_enabled_when_fallback_selected(self, gtk_parent):
         """Non-None fallback → save button becomes sensitive (other conditions met)."""
         providers = [
-            ProviderConfig("local-kb", "u", "k", "local-kb", True),
+            ProviderConfig("firstprov", "u", "k", "firstprov", True),
             ProviderConfig("openai", "u", "k", "gpt-4o", True),
             ProviderConfig("anthropic", "u", "k", "c", True),
         ]

@@ -62,7 +62,7 @@ class TestSaveValidation:
             "role": "tester",
             "prompts": ["system/coder.md"],
             "tools": ["read_file", "list_files"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         ok, errors = h.save(agent)
@@ -83,7 +83,7 @@ class TestSaveValidation:
             "name": "NoFallback",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
         })
         assert not ok
         assert any("fallback_provider" in e for e in errors)
@@ -94,7 +94,7 @@ class TestSaveValidation:
             "name": "CallbackTest",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-123",
         })
@@ -108,7 +108,7 @@ class TestLoadForEdit:
             "name": "Editable",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-edit",
         })
@@ -128,7 +128,7 @@ class TestDelete:
             "name": "Deletable",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-del",
         })
@@ -145,7 +145,7 @@ class TestDelete:
             "name": "ToDelete",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-del2",
         })

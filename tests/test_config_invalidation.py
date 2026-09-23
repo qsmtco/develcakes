@@ -130,8 +130,7 @@ class TestRefreshProviderConfig:
         providers = h._runtimes["Coder"]._config.providers
         # Every value object in the runtime's dict must carry the new card
         # (keys repeat per card — by derived id and by display name — see
-        # agent/config.py _load_providers_from_yaml; local-kb is seeded into
-        # the tmp yaml by handler construction and is unaffected).
+        # agent/config.py _load_providers_from_yaml).
         for value in providers.values():
             if value.name == "p1":
                 assert value.base_url == "https://new.example.com/v1"
@@ -190,7 +189,7 @@ class TestRefreshProviderConfig:
         # SPEC-01 §7: a missing file must NOT wipe cached snapshots. This is
         # the keep case the empty-guard originally protected.
         save_providers([_make_provider("p1", base_url="https://old.example.com/v1")])
-        h = _make_handler()  # seeds local-kb alongside p1
+        h = _make_handler()
         old = _make_provider("p1", base_url="https://old.example.com/v1")
         rt = _stub_runtime(providers={"p1": old})
         h._runtimes["Coder"] = rt
@@ -445,11 +444,11 @@ class TestEndToEndChain:
 
     def test_settings_remove_last_provider_reaches_runtimes(self, tmp_config_dir):
         # BUG 2 end-to-end: removing the last real provider through Settings
-        # (local-kb included — it was seeded into the file by handler
-        # construction) must clear the cached runtime's providers.
+        # (whatever exists in the tmp providers.yaml) must clear the cached
+        # runtime's providers.
         settings, _h, runtime, providers_dict = self._build_chain(tmp_config_dir)
         assert runtime._config.providers != {}  # precondition
-        assert settings.list_providers() != []  # precondition: p1 + seeded local-kb
+        assert settings.list_providers() != []  # precondition: p1 present
 
         for name in [p.name for p in settings.list_providers()]:
             settings.remove(name)

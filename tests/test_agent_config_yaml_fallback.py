@@ -157,8 +157,8 @@ class TestUserIdWireUp:
         """A-4: user_id from agent.json should populate AgentConfig.user_id."""
         agent_json = tmp_config_dir / "agent.json"
         agent_json.write_text(json.dumps({
-            "default_provider": "local-kb",
-            "default_model": "local-kb/local-kb",
+            "default_provider": "openrouter",
+            "default_model": "openrouter/gpt-4o",
             "user_id": "alice@example.com",
         }))
         os.chmod(agent_json, 0o600)
@@ -169,8 +169,8 @@ class TestUserIdWireUp:
         """A-4: user_id is empty string when not present in agent.json."""
         agent_json = tmp_config_dir / "agent.json"
         agent_json.write_text(json.dumps({
-            "default_provider": "local-kb",
-            "default_model": "local-kb/local-kb",
+            "default_provider": "openrouter",
+            "default_model": "openrouter/gpt-4o",
         }))
         os.chmod(agent_json, 0o600)
         config = load_agent_config(str(agent_json))

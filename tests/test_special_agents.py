@@ -246,9 +246,8 @@ class TestRegistry:
 class TestSupervisorDef:
     """Tests for the built-in Supervisor agent definition (SOR Phase 1).
 
-    Supervisor is manually added by the user (auto_add_to_projects: false),
-    is write-capable (write_file/edit_file in tools), and Auxilium no longer
-    auto-adds to projects but remains auto-open.
+    Supervisor is manually added by the user (auto_add_to_projects: false)
+    and is write-capable (write_file/edit_file in tools).
     """
 
     @pytest.fixture
@@ -258,7 +257,7 @@ class TestSupervisorDef:
         Reload_registry may seed supervisor.yaml depending on test ordering;
         copy the real built-in YAML directly to guarantee the registry sees it
         and to refresh any stale user copy to the current built-in (Phase 2
-        changed auxilium.yaml's auto_add_to_projects flag).
+        built-in set).
         """
         import shutil
         from utils.agent_defs import _get_agents_dir
@@ -272,17 +271,11 @@ class TestSupervisorDef:
         src = os.path.join(defaults, "supervisor.yaml")
         dst = os.path.join(agents_dir, "supervisor.yaml")
         shutil.copy2(src, dst)
-        # Refresh the stale seeded auxilium.yaml so it reflects the current
-        # built-in (auto_add_to_projects flipped to false).
-        aux_src = os.path.join(defaults, "auxilium.yaml")
-        aux_dst = os.path.join(agents_dir, "auxilium.yaml")
-        shutil.copy2(aux_src, aux_dst)
         reload_registry()
         yield
         try:
-            for path in (dst, aux_dst):
-                if os.path.exists(path):
-                    os.remove(path)
+            if os.path.exists(dst):
+                os.remove(dst)
         finally:
             reload_registry()
 
@@ -309,16 +302,6 @@ class TestSupervisorDef:
         with open(prompt_path, encoding="utf-8") as f:
             content = f.read()
         assert content.strip() != ""
-
-    def test_auxilium_not_auto_added(self, supervisor_def_present):
-        aux = get_special_agent("special:helper")
-        assert aux is not None
-        assert aux.auto_add_to_projects is False
-
-    def test_auxilium_auto_open_still_true(self, supervisor_def_present):
-        aux = get_special_agent("special:helper")
-        assert aux is not None
-        assert aux.auto_open is True
 
 
 class TestSpecialAgentColorStability:
@@ -408,16 +391,15 @@ class TestSeedDefaultsPerFile:
                     "# built-in\n"
                     f"name: {name}\n"
                     f"role: {name.lower()}\n"
-                    "prompts: [system/auxilium.md]\n"
+                    "prompts: [system/coder.md]\n"
                     "tools: [read_file]\n"
-                    "llm_name: local-kb\n"
+                    "llm_name: openrouter\n"
                     "fallback_provider: openrouter\n"
                 )
 
         # Populate the default source with the built-in set.
         _write_default("coder.yaml", "Coder")
         _write_default("debugger.yaml", "Debugger")
-        _write_default("auxilium.yaml", "Auxilium")
         _write_default("supervisor.yaml", "Supervisor")
 
         monkeypatch.setattr(ad, "_get_agents_dir", lambda: agents_dir)
@@ -430,9 +412,9 @@ class TestSeedDefaultsPerFile:
             f.write(
                 f"name: {name}\n"
                 f"role: {name.lower()}\n"
-                "prompts: [system/auxilium.md]\n"
+                "prompts: [system/coder.md]\n"
                 "tools: [read_file]\n"
-                "llm_name: local-kb\n"
+                "llm_name: openrouter\n"
                 "fallback_provider: openrouter\n"
             )
 
@@ -468,7 +450,7 @@ class TestSeedDefaultsPerFile:
         with open(os.path.join(iso_agents_dir, "custom.yaml"), encoding="utf-8") as f:
             content = f.read()
         assert "Custom" in content
-        # Other built-ins (coder/debugger/auxilium) seeded alongside it.
-        for fname in ("coder.yaml", "debugger.yaml", "auxilium.yaml"):
+        # Other built-ins (coder/debugger) seeded alongside it.
+        for fname in ("coder.yaml", "debugger.yaml"):
             assert os.path.isfile(os.path.join(iso_agents_dir, fname)), fname
 

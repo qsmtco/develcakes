@@ -172,7 +172,7 @@ def test_argv_parse_nudge_forms():
 
 
 def test_nudge_refused_for_non_supervisor_agent():
-    for target in ("@Coder", "@Debugger", "@Auxilium", "@unknown-agent"):
+    for target in ("@Coder", "@Debugger", "@Tester", "@unknown-agent"):
         app, handler = make_app()
         code, msg = handle_cli_args(app, ["--nudge", target, "do things"])
         assert code == 3, f"{target} must be refused with exit 3"

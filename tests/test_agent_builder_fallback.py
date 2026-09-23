@@ -74,9 +74,9 @@ class TestYamlRoundTrip:
             "name": "TestAgent",
             "emoji": "🤖",
             "role": "test",
-            "prompts": ["system/auxilium.md"],
+            "prompts": ["system/coder.md"],
             "tools": ["read_file", "list_files"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "self_improvement": {},
         }
@@ -97,7 +97,7 @@ class TestYamlRoundTrip:
             "name": "SimpleAgent",
             "emoji": "🤖",
             "role": "simple",
-            "prompts": ["system/auxilium.md"],
+            "prompts": ["system/coder.md"],
             "tools": ["read_file"],
             "llm_name": "openrouter",
             "self_improvement": {},
@@ -118,9 +118,9 @@ class TestYamlRoundTrip:
             "name": "KBOnly",
             "emoji": "🤖",
             "role": "kb",
-            "prompts": ["system/auxilium.md"],
+            "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": None,
             "self_improvement": {},
         }
@@ -136,7 +136,7 @@ class TestYamlRoundTrip:
             "name": "NoModel",
             "emoji": "🤖",
             "role": "nomodel",
-            "prompts": ["system/auxilium.md"],
+            "prompts": ["system/coder.md"],
             "tools": ["read_file"],
             "llm_name": "openrouter",
             "fallback_provider": "openrouter",
@@ -159,9 +159,9 @@ class TestYamlRoundTrip:
             "name: LegacyAgent\n"
             "emoji: 🤖\n"
             "role: legacy\n"
-            "prompts: [system/auxilium.md]\n"
+            "prompts: [system/coder.md]\n"
             "tools: [read_file]\n"
-            "llm_name: local-kb\n"
+            "llm_name: openrouter\n"
             "fallback_provider: openrouter\n"
             "fallback_model: openrouter/owl-alpha\n"
             "self_improvement: {}\n"
@@ -180,9 +180,9 @@ class TestHandlerSaveLoad:
             "name": "RoundTrip",
             "emoji": "🤖",
             "role": "roundtrip",
-            "prompts": ["system/auxilium.md"],
+            "prompts": ["system/coder.md"],
             "tools": ["read_file", "list_files", "search_files"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "self_improvement": {},
         }

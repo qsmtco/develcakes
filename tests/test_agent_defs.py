@@ -79,7 +79,7 @@ class TestSaveLoad:
             "role": "tester",
             "prompts": ["system/coder.md"],
             "tools": ["read_file", "list_files"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         path = ad.save_agent_def(agent)
@@ -93,7 +93,7 @@ class TestSaveLoad:
         assert loaded["tools"] == ["read_file", "list_files"]
 
     def test_save_sanitizes_filename(self, tmp_agents_dir):
-        agent = {"name": "My Cool Agent!", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "local-kb", "fallback_provider": "openrouter"}
+        agent = {"name": "My Cool Agent!", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "openrouter", "fallback_provider": "openrouter"}
         path = ad.save_agent_def(agent)
         basename = os.path.basename(path)
         assert " " not in basename
@@ -109,7 +109,7 @@ class TestSaveLoad:
             "role": "custom-role",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         ad.save_agent_def(agent)
@@ -123,7 +123,7 @@ class TestSaveLoad:
             "role": "Custom-Role",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         ad.save_agent_def(agent)
@@ -135,7 +135,7 @@ class TestSaveLoad:
             "name": "My Agent",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         ad.save_agent_def(agent)
@@ -160,7 +160,7 @@ class TestLoadAgentDefs:
             "role": "coder",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         with open(os.path.join(default_agents_src, "coder.yaml"), "w") as f:
@@ -174,14 +174,14 @@ class TestLoadAgentDefs:
     def test_does_not_overwrite_existing(self, tmp_agents_dir, default_agents_src):
         # User already has a custom agent
         os.makedirs(tmp_agents_dir, exist_ok=True)
-        custom = {"name": "Custom", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "local-kb", "fallback_provider": "openrouter"}
+        custom = {"name": "Custom", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "openrouter", "fallback_provider": "openrouter"}
         with open(os.path.join(tmp_agents_dir, "custom.yaml"), "w") as f:
             import yaml
             yaml.dump(custom, f)
 
         # Default source has a different file
         with open(os.path.join(default_agents_src, "coder.yaml"), "w") as f:
-            yaml.dump({"name": "Coder", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "local-kb", "fallback_provider": "openrouter"}, f)
+            yaml.dump({"name": "Coder", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "openrouter", "fallback_provider": "openrouter"}, f)
 
         defs = ad.load_agent_defs()
         names = [d["name"] for d in defs]
@@ -193,7 +193,7 @@ class TestLoadAgentDefs:
 
     def test_deduplicates_by_name(self, tmp_agents_dir):
         os.makedirs(tmp_agents_dir, exist_ok=True)
-        agent = {"name": "Dup", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "local-kb", "fallback_provider": "openrouter"}
+        agent = {"name": "Dup", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "openrouter", "fallback_provider": "openrouter"}
         with open(os.path.join(tmp_agents_dir, "dup.yaml"), "w") as f:
             import yaml
             yaml.dump(agent, f)
@@ -210,7 +210,7 @@ class TestLoadAgentDefs:
 
 class TestDeleteAgentDef:
     def test_delete_existing(self, tmp_agents_dir):
-        agent = {"name": "ToDelete", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "local-kb", "fallback_provider": "openrouter"}
+        agent = {"name": "ToDelete", "tools": ["read_file"], "prompts": ["system/coder.md"], "llm_name": "openrouter", "fallback_provider": "openrouter"}
         ad.save_agent_def(agent)
         assert ad.load_agent_def("ToDelete") is not None
 
@@ -230,7 +230,7 @@ class TestValidateAgentDef:
             "name": "ValidAgent",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         errors = ad.validate_agent_def(agent)
@@ -250,7 +250,7 @@ class TestValidateAgentDef:
             "name": "NoFallback",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
         }
         errors = ad.validate_agent_def(agent)
         assert any("fallback_provider" in e for e in errors)
@@ -261,7 +261,7 @@ class TestValidateAgentDef:
             "name": "NullFallback",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": None,
         }
         errors = ad.validate_agent_def(agent)
@@ -272,7 +272,7 @@ class TestValidateAgentDef:
             "name": "BadTools",
             "prompts": ["system/coder.md"],
             "tools": ["read_file", "not_a_real_tool"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         errors = ad.validate_agent_def(agent)
@@ -304,7 +304,7 @@ class TestValidateAgentDef:
             "name": "BadPrompt",
             "prompts": ["nonexistent_prompt.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         errors = ad.validate_agent_def(agent)
@@ -315,7 +315,7 @@ class TestValidateAgentDef:
             "name": "",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         }
         errors = ad.validate_agent_def(agent)

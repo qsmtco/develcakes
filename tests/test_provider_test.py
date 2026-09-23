@@ -432,7 +432,7 @@ class TestUnknownProvider:
 # BUG #1 regression: _do_request used to call urllib.request.install_opener()
 # without restoring the previous value, leaking _NoAuthRedirectHandler into
 # every subsequent urlopen() in the process (agent/runtime.py,
-# agent/kb_server.py, etc.). This test confirms the fix.
+# other consumers, etc.). This test confirms the fix.
 
 
 class TestGlobalStateRegression:

@@ -142,7 +142,7 @@ class TestYAMLLoading(TestState):
             "prompts": ["system/default.md"],
             "tools": ["read_file"],
             "provider": "openai",
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",  # LOW-11: every agent needs a fallback
             "mcp_servers": "memory",  # String, not list
         }

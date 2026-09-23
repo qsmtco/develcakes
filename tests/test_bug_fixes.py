@@ -87,7 +87,7 @@ class TestSIOverridesPreserved:
             "name": "TestAgent",
             "prompts": ["system/coder.md"],
             "tools": ["read_file", "write_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-si",
             "self_improvement": {
@@ -122,7 +122,7 @@ class TestRenameCleanup:
             "name": "Original",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-ren",
         })
@@ -150,7 +150,7 @@ class TestRenameCleanup:
             "name": "Stable",
             "prompts": ["system/coder.md"],
             "tools": ["read_file"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
             "api_key": "sk-test-stable",
         })
@@ -246,7 +246,7 @@ class TestNameCollision:
             "name": "My Agent",
             "tools": ["read_file"],
             "prompts": ["system/coder.md"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         })
 
@@ -254,7 +254,7 @@ class TestNameCollision:
             "name": "My-Agent",
             "tools": ["read_file"],
             "prompts": ["system/coder.md"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         })
         assert any("collision" in e.lower() for e in errors)
@@ -265,7 +265,7 @@ class TestNameCollision:
             "name": "My Agent",
             "tools": ["read_file"],
             "prompts": ["system/coder.md"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         })
 
@@ -273,7 +273,7 @@ class TestNameCollision:
             "name": "My Agent",
             "tools": ["read_file"],
             "prompts": ["system/coder.md"],
-            "llm_name": "local-kb",
+            "llm_name": "openrouter",
             "fallback_provider": "openrouter",
         })
         assert not any("collision" in e.lower() for e in errors)

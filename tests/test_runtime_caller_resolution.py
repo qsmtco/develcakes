@@ -77,18 +77,30 @@ class TestResolveAgentModelNoDoublePrefix:
     """Tests for the P4 fix: _resolve_agent_model must not double-prefix
     model names that already contain a slash."""
 
-    def test_slashed_default_model_returned_as_is(self):
+    def test_slashed_default_model_returned_as_is(self, monkeypatch):
         """If default_model contains a slash, return it as-is (no double prefix)."""
         from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+        from agent.config import AgentConfig, LLMProviderConfig
 
         handler = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
         fn = types.MethodType(AgentRuntimeHandler._resolve_agent_model, handler)
 
         class MockAgentDef:
-            llm_name = "local-kb"
+            llm_name = "testprov"
+
+        # Pin the config source so the test doesn't depend on the host
+        # machine's providers.yaml (previously depended on the host's provider set).
+        cfg = AgentConfig(
+            providers={"testprov": LLMProviderConfig(
+                name="testprov", base_url="https://x/v1", api_key="k",
+                default_model="testprov/some-model", caller="openai",
+            )},
+        )
+        import agent.config as config_mod
+        monkeypatch.setattr(config_mod, "load_agent_config", lambda *a, **k: cfg)
 
         result = fn(MockAgentDef())
-        assert result == "local-kb/local-kb", f"got {result!r}"
+        assert result == "testprov/some-model", f"got {result!r}"
 
 
 if __name__ == "__main__":

@@ -385,7 +385,7 @@ class TestTestProviderPrefillsMaxTokens:
         providers = load_providers()
         assert providers[0].max_tokens == 200_000  # unchanged
 
-    # BUG #7 regression: when auxilium wizard sets default_max_tokens=N AND
+    # BUG #7 regression: when the agent builder sets default_max_tokens=N AND
     # max_tokens == N (the sentinel value), Test Connection's pre-fill check
     # `p.max_tokens == 128_000` must NOT overwrite — because default_max_tokens
     # is non-zero, indicating a deliberate wizard-set choice.
@@ -401,7 +401,7 @@ class TestTestProviderPrefillsMaxTokens:
 
         callback = threading.Event()
         h = SettingsHandler()
-        # Simulate auxilium wizard output for openrouter: sentinel max_tokens=128K
+        # Simulate agent-builder output for openrouter: sentinel max_tokens=128K
         # but default_max_tokens=128_000 (the wizard stamped it)
         wizard_provider = ProviderConfig(
             name="openrouter",

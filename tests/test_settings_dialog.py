@@ -418,7 +418,7 @@ class TestMaxTokensSpinButton:
         assert card._provider.max_tokens == 500_000
 
     # BUG #7 regression (dialog side): if default_max_tokens is stamped (by
-    # auxilium wizard), the dialog's pre-fill must NOT overwrite max_tokens
+    # agent builder), the dialog's pre-fill must NOT overwrite max_tokens
     # even when it equals the 128K sentinel — same sentinel as settings_handler.
 
     def test_on_test_result_respects_default_max_tokens_sentinel(self, tmp_config_dir):
