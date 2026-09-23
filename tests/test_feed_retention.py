@@ -705,11 +705,20 @@ class TestEvictionWindowWiring:
 # sp3_probe.py): 100 cards through the real add_card path with the
 # build_feed_card seam patched → build_feed_card is the ONLY headless
 # blocker (nothing else in the funnel touched real GTK). One finding: the
-# per-card persist threads race _ensure_gitignore_entry's shared
-# .gitignore.tmp path (pre-existing feed_store limitation, same class as
-# SP1 audit #1) — the probe lost 1/100 cards to it. Mitigation below: the
-# fixture pre-creates .crabcakes/.gitignore so the racy ensure path is a
-# no-op, and joins every persist thread before asserting disk state.
+# probe lost 1/100 cards on disk. ATTRIBUTION (SP3 audit BUG #3, corrected —
+# the loss mechanism is append_feed_card's flock-timeout silent skip: the
+# per-card persist threads stampede the feed lock, and a thread that cannot
+# take it inside the lock deadline logs a warning and returns WITHOUT
+# appending — the same path the 2,000-card batch run later measured at
+# scale: 1,538/2,000 appends skipped, 462 cards on disk; see the fixture
+# comment below). The _ensure_gitignore_entry shared-.gitignore.tmp RMW race
+# (pre-existing feed_store limitation, same class as SP1 audit #1) is REAL
+# but NON-LOSSY for feed cards: the race's outcome set is entry-added or
+# no-op (worst case it drops a concurrent .gitignore LINE), read failures
+# are caught (OSError → treated as empty), and it targets .gitignore —
+# never feed.json — so it cannot lose card data. Mitigation below: the fixture pre-creates the project
+# .gitignore so the racy ensure path is a no-op, and joins every persist
+# thread before asserting disk state.
 
 
 class TestTwoThousandCardRetention:
@@ -749,9 +758,11 @@ class TestTwoThousandCardRetention:
         # SP1 accessors pin the window the acceptance criteria reference.
         assert set_live_window(project_path, cls.WINDOW) is True
 
-        # Mitigation for the probe finding: pre-create .gitignore so the
-        # racy _ensure_gitignore_entry RMW (shared .tmp, no lock) never
-        # runs during the persist pass.
+        # Mitigation (probe finding, see module comment above for the
+        # corrected attribution): pre-create .gitignore so the racy
+        # _ensure_gitignore_entry RMW (shared .tmp, no lock) never runs
+        # during the persist pass — it is non-lossy, but removing it keeps
+        # the disk asserts free of unrelated I/O.
         os.makedirs(os.path.join(project_path, ".crabcakes"), exist_ok=True)
         with open(os.path.join(project_path, ".gitignore"), "w", encoding="utf-8") as f:
             f.write(".crabcakes/feed.json\n")
@@ -1041,9 +1052,22 @@ class TestTwoThousandCardRetention:
         non-pinned cards down to the store's own 2,000 window. Demonstrated
         below: an explicit compact at the store default prunes nothing at
         2,000; an explicit compact(300) prunes to 300 — proving the two
-        windows are independent knobs, not one mechanism."""
+        windows are independent knobs, not one mechanism.
+
+        DEPENDENCY (SP3 audit BUG #4): this test consumes state installed
+        by the class fixture _two_k_run (2,000-card run, ~40 s) — running
+        it in isolation re-triggers that fixture, so a -k compaction run
+        is NOT independent and must not be read as a cheap unit test. The
+        guard below fails with that stated, rather than a misleading
+        AttributeError deep in the body, if the fixture chain is broken."""
         from utils import feed_store as fs
 
+        # Guard the shared fixture's state explicitly (see DEPENDENCY note).
+        assert getattr(self, "_project_path", None), (
+            "class fixture _two_k_run has not run — _project_path missing; "
+            "this test depends on the shared 2,000-card run (selecting it "
+            "with -k re-runs that fixture)"
+        )
         assert fs.FEED_WINDOW_DEFAULT * 1.25 == 2500 > self.COUNT
         # No journal updates happened (append path, not update path) and no
         # compaction fired — disk is still the full 2,000.
