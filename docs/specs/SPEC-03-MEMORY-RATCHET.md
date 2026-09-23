@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** IMPLEMENTED 2026-09-22 (sub-phases 1-4; see docs/post-mortems/2026-09-22-SPEC-03-POST-MORTEM.md)
 **Implements:** docs/specs/SPEC-MEMORY-WIDGET-RATCHET.md (v1 master, kept);
 docs/post-mortems/2026-09-17-MEMRATCHET-POST-MORTEM.md (closure + baseline data)
 **Depends on:** none (parallel with SPEC-04)
@@ -138,6 +138,10 @@ cards) + summary row from disk store.
 | Window shrunk at runtime (config edit) | Next append pass enforces new cap; no eager teardown burst |
 | Cards with live timers/animn (activity pulse) | Window teardown must cancel pending GLib sources on removed cards — follow MEMRATCHET phase patterns (source_remove guards, e.g. activity_handler.py:869 pattern) |
 
-## 8. ARCHITECTURE.md Updates
+## 8. ARCHITECTURE.md Updates — RESOLVED
 
-§Modules/Feed — note implemented invariant + config key.
+§Modules/Feed invariant implemented as: handler-side live window (MEMRATCHET machinery,
+untouched) + configurable cap via feed-prefs.json `live_window` (clamp 50–5000, default
+300; **view cap = min(120, config)** — config can only lower, per the 0.5 MB/min budget).
+Disk window (compaction, §2.3) remains a separate mechanism. Spec §2's view-side
+pseudocode superseded by the landed handler-side mechanism.
