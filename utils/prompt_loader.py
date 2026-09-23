@@ -162,7 +162,7 @@ def compose_system_prompt(
       project-onboarding.md (only when agent_role == "supervisor" and
       project not yet onboarded)
     - Review (when review_mode != "off"): code-review.md
-    - Role (exactly one): coder.md / debugger.md / auxilium.md / supervisor.md
+    - Role (exactly one): coder.md / debugger.md / supervisor.md
     - Self-improvement (project active + role): {role}-bugs.md, {role}-rules.md
 
     Templates are concatenated with double-newline separators.
@@ -242,10 +242,6 @@ def compose_system_prompt(
         dt = load_prompt_template("debugger")
         if dt:
             parts.append(dt)
-    elif agent_role == "helper":
-        ct = load_prompt_template("auxilium")
-        if ct:
-            parts.append(ct)
     elif agent_role == "supervisor":
         st = load_prompt_template("supervisor")
         if st:

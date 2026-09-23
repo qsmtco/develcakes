@@ -180,23 +180,6 @@ class AgentRuntimeHandler:
         self._first_compaction_seen: dict[str, bool] = {}
         self._on_token_breakdown_extra: Callable | None = None
 
-        # Ensure KB provider is registered, then start KB HTTP server if KB index is available
-        try:
-            from utils.providers_store import ensure_kb_provider
-            ensure_kb_provider()
-            logger.info("KB provider registration ensured")
-        except Exception as e:
-            logger.warning("Failed to ensure KB provider: %s", e)
-
-        try:
-            from agent.kb_server import start_kb_server, is_kb_server_running
-            from agent.kb_lookup import is_index_available as _kb_index_available
-            if _kb_index_available() and not is_kb_server_running():
-                start_kb_server()
-                logger.info("KB HTTP server started from AgentRuntimeHandler")
-        except Exception as e:
-            logger.warning("Failed to start KB server: %s", e)
-
     def set_on_agent_start(self, cb: Callable[[str], None]) -> None:
         """Set callback fired when a local agent starts processing. Signature: cb(session_key)."""
         self._on_agent_start_cb = cb
@@ -924,10 +907,9 @@ class AgentRuntimeHandler:
             provider = config.providers.get(config.default_provider)
 
         if not provider:
-            raise RuntimeError(f"No provider configured for {config.default_provider}")
+            raise RuntimeError("No provider configured — add one in Settings → Providers.")
 
-        # local-kb uses a placeholder key — skip the API key check
-        if provider.name != "local-kb" and not provider.api_key:
+        if not provider.api_key:
             raise RuntimeError(f"No API key configured for provider {provider.name}")
 
         rt = AgentRuntime(
@@ -1275,16 +1257,7 @@ class AgentRuntimeHandler:
                 conv.step_count = 0
 
     def stop_all(self) -> None:
-        """Stop all agent runtimes and the KB server. Called on window shutdown."""
-        # Stop the KB HTTP server
-        try:
-            from agent.kb_server import stop_kb_server, is_kb_server_running
-            if is_kb_server_running():
-                stop_kb_server()
-                logger.info("KB HTTP server stopped")
-        except Exception as e:
-            logger.warning("Failed to stop KB server: %s", e)
-
+        """Stop all agent runtimes. Called on window shutdown."""
         # BUG #31: Clean up MCP connections before stopping runtimes
         try:
             from utils.mcp_client import disconnect_all as mcp_disconnect_all

@@ -69,3 +69,67 @@ def test_runtime_imports_clean() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_source_tree_free_of_kb_strings() -> None:
+    """Whole-tree grep: no auxilium/kb_server/kb_lookup/local-kb anywhere.
+
+    Whitelists nothing — if a hit is ever legitimately needed, this test must
+    be revisited with an explicit adjudication (SPEC-04 SP3 pin).
+    """
+    needles = ("auxilium", "kb_server", "kb_lookup", "local-kb")
+    roots = [
+        os.path.join(REPO_ROOT, "agent"),
+        os.path.join(REPO_ROOT, "ui"),
+        os.path.join(REPO_ROOT, "utils"),
+        os.path.join(REPO_ROOT, "models"),
+        os.path.join(REPO_ROOT, "main.py"),
+    ]
+    hits: list[str] = []
+    for root in roots:
+        paths = [root] if os.path.isfile(root) else [
+            os.path.join(dirpath, name)
+            for dirpath, _dirnames, filenames in os.walk(root)
+            for name in filenames
+            if name.endswith(".py")
+        ]
+        for path in paths:
+            with open(path, "r", encoding="utf-8") as f:
+                src = f.read()
+            low = src.lower()
+            for needle in needles:
+                if needle in low:
+                    hits.append(f"{path}: contains {needle!r}")
+    assert not hits, "KB residue found:\n" + "\n".join(hits)
+
+
+def test_special_auxilium_session_unknown() -> None:
+    """The special-agents registry cannot contain special:auxilium.
+
+    Checked by construction: no built-in default-agent YAML seeds an auxilium
+    definition (the machine state on a dev box may still hold a stale seeded
+    copy, so the live registry is deliberately not asserted here).
+    """
+    import yaml
+
+    defaults_dir = os.path.join(REPO_ROOT, "prompts", "default_agents")
+    assert os.path.isdir(defaults_dir)
+    for fname in os.listdir(defaults_dir):
+        assert not fname.lower().startswith("auxilium"), (
+            f"{fname} re-seeds the removed auxilium agent"
+        )
+        if not fname.endswith((".yaml", ".yml")):
+            continue
+        with open(os.path.join(defaults_dir, fname), "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        role = str(data.get("role", "")).lower()
+        assert role != "helper", (
+            f"{fname} still declares role: helper — re-seeds special:helper"
+        )
+
+
+def test_window_has_no_wizard_refs() -> None:
+    """ui/window.py carries no Auxilium wizard scaffolding (SP3 R7)."""
+    src = _read(os.path.join(REPO_ROOT, "ui", "window.py"))
+    assert "auxilium" not in src.lower()
+    assert "is_auxilium_wizard_needed" not in src

@@ -196,7 +196,7 @@ class MainWindow(Gtk.ApplicationWindow):
         for agent_def in get_special_agents():
             self._agent_runtime_handler.add_special_agent(agent_def)
 
-        # Phase 4 — Auto-open Auxilium tab on every launch.
+        # Phase 4 — Auto-open agent tabs on every launch.
         # Creates a tab for each agent with auto_open=True.
         auto_open_agents = get_auto_open_agents()
         if auto_open_agents:
@@ -208,46 +208,6 @@ class MainWindow(Gtk.ApplicationWindow):
                     "Auto-opened agent tab: %s",
                     agent_def.display_name,
                 )
-
-        # ── Auxilium first-run wizard (D7 Phase 3) ────────────────────────────
-        # If the user has no provider configured, show the wizard in the
-        # Auxilium tab. On completion, dismiss the wizard and reload agents
-        # so the new provider is picked up.
-        self._auxilium_wizard = None
-        self._auxilium_wizard_handler = None
-        try:
-            from pathlib import Path as _Path
-            from ui.handlers.auxilium_wizard_handler import is_auxilium_wizard_needed
-            from utils.config import get_config_dir as _get_config_dir
-            _config_dir = _Path(_get_config_dir())
-        except Exception:
-            _config_dir = None
-
-        if _config_dir is not None and is_auxilium_wizard_needed(_config_dir):
-            try:
-                from ui.handlers.auxilium_wizard_handler import AuxiliumWizardHandler
-                from ui.views.auxilium_wizard import AuxiliumWizard
-
-                _wizard_chat_box = self._main_content.get_chat_box_for_session("special:helper")
-                if _wizard_chat_box is not None:
-                    self._auxilium_wizard_handler = AuxiliumWizardHandler(
-                        config_dir=_config_dir,
-                        on_complete=lambda: self._on_auxilium_wizard_complete(),
-                        on_error=lambda msg: logger.error("Auxilium wizard error: %s", msg),
-                    )
-                    self._auxilium_wizard = AuxiliumWizard(
-                        handler=self._auxilium_wizard_handler,
-                        on_install_check_complete=lambda: self._auxilium_wizard_handler.advance_to_gateway(),
-                        on_gateway_check_complete=lambda: self._auxilium_wizard_handler.advance_to_provider(),
-                        on_provider_selected=lambda: None,
-                    )
-                    _wizard_chat_box.append(self._auxilium_wizard)
-                    self._auxilium_wizard_handler.start()
-                    logger.info("Auxilium wizard shown — no provider configured")
-            except Exception:
-                logger.exception("Failed to show Auxilium wizard — continuing without it")
-                self._auxilium_wizard = None
-                self._auxilium_wizard_handler = None
 
         # Inject into dependents after _agent_runtime_handler is assigned
         self._chat_handler.set_agent_runtime_handler(self._agent_runtime_handler)
@@ -1080,34 +1040,6 @@ class MainWindow(Gtk.ApplicationWindow):
         if bubble is not None:
             chat_box.append(bubble)
             self._main_content.scroll_chat_to_bottom()
-
-    # ── Auxilium wizard completion ───────────────────────────────────────────
-
-    def _on_auxilium_wizard_complete(self) -> None:
-        """Called when the Auxilium first-run wizard finishes successfully.
-
-        Removes the wizard widget from the Auxilium chat tab and reloads
-        agent config so the new provider is picked up.
-        """
-        logger.info("Auxilium wizard complete — reloading agent config")
-
-        # Remove wizard from chat_box
-        if hasattr(self, "_auxilium_wizard") and self._auxilium_wizard is not None:
-            self._auxilium_wizard.cleanup()
-            chat_box = self._main_content.get_chat_box_for_session("special:helper")
-            if chat_box is not None:
-                chat_box.remove(self._auxilium_wizard)
-            self._auxilium_wizard = None
-        if hasattr(self, "_auxilium_wizard_handler"):
-            self._auxilium_wizard_handler = None
-
-        # Reload agent config so the new provider is picked up
-        try:
-            self._agent_runtime_handler.reload_agents_and_mcp(
-                on_complete=lambda: logger.info("Agents reloaded after Auxilium wizard")
-            )
-        except Exception as e:
-            logger.exception("Failed to reload agents after Auxilium wizard: %s", e)
 
     # ── Gateway toggle ──────────────────────────────────────────────────────
 

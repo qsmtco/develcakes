@@ -145,7 +145,7 @@ class Conversation:
     This dataclass holds everything that persists across turns.
     """
     agent_name: str
-    agent_role: str = ""          # "helper" for Auxilium, "" for other agents
+    agent_role: str = ""          # role from agent def (e.g. "coder", "")
     # project_path: The directory the agent is "working in". Written to disk
     # by _save_conversation_to_disk for audit, but NOT authoritative at load
     # time — see _load_conversation_from_disk (which always sets it to None)
@@ -171,8 +171,8 @@ class Conversation:
     api_key: str | None = None           # per-agent API key override (from agent def)
     si_enforcement: bool | None = None     # per-agent enforcement override (None → use global)
     app_title: str = ""                   # OpenRouter X-Title header value (e.g. "Coder:Crabcakes")
-    fallback_provider: str | None = None   # KB fallback provider (from agent def)
-    fallback_model: str | None = None      # KB fallback model (from agent def)
+    fallback_provider: str | None = None   # plain provider fallback (user-set)
+    fallback_model: str | None = None      # plain provider fallback model
     created_at: datetime = field(default_factory=datetime.now)
     total_tokens: int = 0
     total_cost: float = 0.0              # cumulative USD cost

@@ -40,8 +40,8 @@ class SpecialAgentDef:
     tools: list[str]              # tool names this agent can use
     can_write: bool               # whether write_file is in the default tool set
     llm_name: str | None = None   # per-agent provider card name (None → global default)
-    fallback_provider: str | None = None   # KB fallback provider name (e.g. "openrouter")
-    fallback_model: str | None = None      # KB fallback model (e.g. "openrouter/owl-alpha")
+    fallback_provider: str | None = None   # plain provider fallback (user-set, e.g. "openrouter")
+    fallback_model: str | None = None      # plain provider fallback model (e.g. "openrouter/owl-alpha")
     api_key: str | None = None    # per-agent API key override (None → provider config)
     app_title: str | None = None   # OpenRouter X-Title header (e.g. "Coder:Crabcakes")
     self_improvement: dict = field(default_factory=dict)  # SI layer toggles
@@ -159,8 +159,6 @@ def get_special_agent(prefix: str) -> SpecialAgentDef | None:
 
 def unregister_special_agent(prefix: str) -> bool:
     """Remove a special agent from the registry by its session key prefix.
-
-    LOW-2: Used by the KB server DELETE /agents/{id} endpoint.
 
     Args:
         prefix: The agent's conv_id_prefix (e.g. "special:coder").

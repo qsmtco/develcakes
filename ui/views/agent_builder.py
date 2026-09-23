@@ -386,14 +386,12 @@ class AgentBuilderDialog:
 
         Includes a 'None' option at index 0 (invalid for save — the save button
         stays disabled until a real provider is selected). Excludes the
-        currently-selected primary provider and 'local-kb' (can't fall back to KB).
+        currently-selected primary provider.
         """
         primary = self._get_selected_llm_name()
         names = ["None"]
         self._fallback_providers: list = []  # parallel list of ProviderConfig (index 0 = None sentinel)
         for p in self._providers:
-            if p.name == "local-kb":
-                continue  # exclude KB as a fallback target
             if p.name == primary:
                 continue  # exclude the current primary — can't fall back to itself
             names.append(p.name)

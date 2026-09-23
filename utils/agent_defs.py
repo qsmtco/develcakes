@@ -220,22 +220,15 @@ def load_agent_defs() -> list[dict]:
         # LOW-11: validate at load time; skip invalid defs with a WARNING
         errors = validate_agent_def(agent_def)
         # Role-aware exemptions ---
-        # (a) helper: llm_name may be empty; ensure_kb_provider patches it to "local-kb"
-        #     at startup. If we treated empty llm_name as a hard error here,
-        #     ensure_kb_provider would always see None and fail to patch.
+        # (a) helper: llm_name/fallback_provider may be empty — helper-role
+        #     agents resolve to the global default provider at runtime.
         #     All other validation (tools, prompts, unknown providers) stays strict.
         # (b) all roles: mcp_servers string values are tolerated here because
         #     _load_registry in agent/special_agents.py handles the coercion
         #     (BUG #30: single-string → list).  The validation error for non-list
         #     types is still filtered so the coercion can run.
         if agent_def.get("role") == "helper":
-            # Helper (Auxilium) is patched at startup by ensure_kb_provider
-            # (utils/providers_store.py) — which may set llm_name=local-kb AND
-            # inherit a fallback from the user's existing provider config. The
-            # helper exemption covers both fields so a fresh-install helper
-            # agent (which has no real provider yet) can still load. Once the
-            # user configures providers, _ensure_auxilium_uses_kb patches the
-            # agent to use a real provider.
+            # Helper-role agents are not required to name a provider.
             errors = [e for e in errors if "llm_name" not in e and "fallback_provider" not in e]
         errors = [e for e in errors if not (
             e == "Field 'mcp_servers' must be a list" and
@@ -437,9 +430,6 @@ def validate_agent_def(agent_def: dict) -> list[str]:
             valid_ids.add(p["name"])
             if p.get("default_model") and "/" in p["default_model"]:
                 valid_ids.add(p["default_model"].split("/")[0])
-        # local-kb is a built-in provider seeded by ensure_kb_provider();
-        # always valid regardless of providers.yaml contents.
-        valid_ids.add("local-kb")
         if display_names and llm_name not in valid_ids:
             errors.append(
                 f"Unknown provider: {llm_name}. Available: {', '.join(sorted(display_names))}"

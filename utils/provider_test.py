@@ -301,7 +301,7 @@ def _do_request(
         # Restore module-global urllib state to what it was before this call.
         # Critical: urllib.request.install_opener() mutates urllib.request._opener
         # for the entire process — without this restore, our _NoAuthRedirectHandler
-        # would leak into every subsequent urlopen() in agent/runtime.py,
-        # agent/kb_server.py, and tests/generate_synthetic_conversations.py
+        # would leak into every subsequent urlopen() in agent/runtime.py and
+        # tests/generate_synthetic_conversations.py
         # (audit BUG #1).
         urllib.request._opener = _saved_opener
