@@ -70,8 +70,10 @@ class EnforcementConfig:
 class AgentConfig:
     """Top-level agent runtime configuration."""
     providers: dict[str, LLMProviderConfig] = field(default_factory=dict)
-    default_provider: str = "openai"
-    default_model: str = "openai/gpt-4o"
+    # Empty defaults — no provider is auto-seeded; the user configures one via
+    # Settings → Providers or the first-run wizard.
+    default_provider: str = ""
+    default_model: str = ""
     max_tool_iterations: int = 50
     tool_timeout_seconds: int = 120
     auto_save_conversations: bool = True
@@ -79,8 +81,8 @@ class AgentConfig:
     step_limit: int | None = None      # per-conversation turn limit
     review_staging_dirname: str = ".crabcakes_review_staging"  # shadow dir for review-mode writes
     enforcement: EnforcementConfig = field(default_factory=EnforcementConfig)
-    fallback_provider: str | None = None   # KB provider fallback (e.g. "openrouter")
-    fallback_model: str | None = None      # KB provider fallback model (e.g. "openrouter/owl-alpha")
+    fallback_provider: str | None = None   # plain provider fallback (user-set, e.g. "openrouter")
+    fallback_model: str | None = None      # plain provider fallback model
     user_id: str = ""                     # A-4: user identity for audit log traceability
 
 
@@ -236,8 +238,8 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
 
     return AgentConfig(
         providers=providers,
-        default_provider=raw.get("default_provider", "local-kb"),
-        default_model=raw.get("default_model", "local-kb/local-kb"),
+        default_provider=raw.get("default_provider", ""),
+        default_model=raw.get("default_model", ""),
         max_tool_iterations=raw.get("max_tool_iterations", 50),
         tool_timeout_seconds=raw.get("tool_timeout_seconds", 120),
         auto_save_conversations=raw.get("auto_save_conversations", True),
@@ -253,15 +255,15 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
 def _create_default_config(path: str) -> None:
     """Create agent.json with minimal default config.
 
-    No providers are seeded here — providers.yaml is the canonical store,
-    and ensure_kb_provider() seeds local-kb at startup. The user adds
-    real providers via Settings → Providers.
+    No provider is seeded — default_provider/default_model start empty and
+    the user configures a provider via Settings → Providers or the
+    first-run wizard.
     """
     example = {
         "_comment": "CrabCakes agent configuration. Providers are managed in providers.yaml.",
         "_security": "chmod 600 agent.json — this file may contain API keys",
-        "default_provider": "local-kb",
-        "default_model": "local-kb/local-kb",
+        "default_provider": "",
+        "default_model": "",
         "max_tool_iterations": 50,
         "tool_timeout_seconds": 120,
         "cost_limit": 5.0,

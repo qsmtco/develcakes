@@ -58,13 +58,6 @@ from agent.persistence import (
     save_conversation_to_disk,
 )
 
-# KB provider sentinel — imported lazily to avoid requiring kb_server when KB is unused.
-try:
-    from agent.kb_server import KB_OUT_OF_SCOPE
-except ImportError:
-    KB_OUT_OF_SCOPE = "[KB_OUT_OF_SCOPE]"
-
-
 # ── Streaming call interface (PHASE-FOLLOWUP-1) ──────────────────────────────────
 
 class StreamingCallKwargs(TypedDict, total=False):
@@ -177,7 +170,7 @@ class TurnResult:
             May be a string (user-friendly) or a `BaseException` (raw,
             for the handler to translate via `friendly_error_message`).
         metadata: Free-form dict. Keys vary by status:
-            - COMPLETED: ``{"fallback_used": bool, "stream_error": dict|None}``
+            - COMPLETED: ``{"stream_error": dict|None}``
             - FAILED: ``{"reason": str, "iteration": int, ...}``
             - CANCELLED: ``{"reason": "user"|"shutdown", "iteration": int,
               "persist": bool}``  (``persist`` defaults False; only True
@@ -325,23 +318,6 @@ def _is_empty_content(text) -> bool:
         if text.translate(str.maketrans("", "", _ZWS)).strip() == "":
             return True
     return False
-
-
-# ── KB synthesis helper ───────────────────────────────────────────────────────
-
-def _format_chunks_for_llm(chunks: list) -> str:
-    """Format KB chunks as context for LLM synthesis.
-
-    Takes a list of KBChunk objects and returns a formatted string
-    suitable for injection into LLM messages as context.
-    """
-    if not chunks:
-        return ""
-    parts = ["[KB Context — relevant documentation chunks:]"]
-    for chunk in chunks:
-        parts.append(f"\nSource: {chunk.source} :: {chunk.section}\n{chunk.text}\n")
-    parts.append("[End KB Context]\n")
-    return "\n".join(parts)
 
 
 # ── Streaming argument validation ────────────────────────────────────────────
@@ -818,8 +794,8 @@ class AgentRuntime:
         si_enforcement: bool | None = None,      # per-agent enforcement override
         api_key: str | None = None,             # per-agent API key override
         app_title: str = "",                    # app identifier (e.g. "crabcakes")
-        fallback_provider: str | None = None,    # KB fallback provider (from agent def)
-        fallback_model: str | None = None,       # KB fallback model (from agent def)
+        fallback_provider: str | None = None,
+        fallback_model: str | None = None,
         defer_prompt_build: bool = False,        # NEW: build system prompt on background thread
     ) -> str:
         """
@@ -989,11 +965,6 @@ class AgentRuntime:
         _rebuild_conversation_context here — the short-circuit in that
         method makes this O(1) when already in sync.
         """
-        # Reset fallback flag for this new user message
-        conv = self._conversations.get(session_key)
-        if conv is not None:
-            conv._fallback_attempted = False
-
         t = threading.Thread(
             target=self._run_loop,
             args=(session_key, text, self._turn_token, prepare),
@@ -1046,34 +1017,6 @@ class AgentRuntime:
         )
 
     # ── Tool loop ─────────────────────────────────────────────────────────────
-
-    def _inject_kb_context(self, messages: list[dict], kb_context: str, text: str) -> list[dict]:
-        """Inject KB context into the most recent user message.
-
-        Modifies a copy of messages. The KB context is prepended to the last
-        user message's content so the LLM sees it as part of the current turn.
-
-        Args:
-            messages: The full message list from to_api_messages().
-            kb_context: Formatted KB context string from _format_chunks_for_llm().
-            text: The current user message text (used as a fallback search key).
-
-        Returns:
-            A new message list with KB context injected into the last user message.
-        """
-        # Build a shallow copy — only the modified message is a new dict
-        injected = list(messages)
-        # Find the last user message and prepend KB context to it
-        for i in range(len(injected) - 1, -1, -1):
-            if injected[i].get("role") == "user":
-                original_content = injected[i].get("content", "")
-                injected[i] = {
-                    "role": "user",
-                    "content": f"{kb_context}\n\nUser question: {original_content or text}",
-                }
-                return injected
-        # No user message found — return unchanged
-        return messages
 
     def _compute_model_max(self, conv: "Conversation") -> int:
         """Return the model's context window for the current conversation's provider.
@@ -1187,64 +1130,6 @@ class AgentRuntime:
                 if not ev.session_key or ev.session_key == target_session:
                     return ev.messages_removed
         return 0
-
-    def _prepare_kb_synthesis(
-        self,
-        conv: "Conversation",
-        text: str,
-        messages: list[dict],
-        kb_cache: str | None,
-    ) -> tuple[list[dict], str | None, str | None]:
-        """Prepare KB-synthesis messages for the primary LLM call (Tier 2).
-
-        If conv.agent_role == "helper", runs kb_lookup on the current user
-        message (or reuses the cached result) and injects the chunks into
-        the messages list. Returns (messages_for_call, kb_context, new_cache).
-        For non-auxilium agents or empty KB results, returns
-        (messages, None, None) — no injection, no change to the messages.
-
-        The per-turn cache is the caller's responsibility. Pass the current
-        cache value in kb_cache; assign the returned new_cache back to the
-        caller's variable. This keeps the cache in _run_loop's scope so
-        it survives across tool-loop iterations.
-
-        Called once per tool-loop iteration. kb_lookup is invoked at most
-        once per _run_loop invocation: the per-turn cache (passed in via
-        kb_cache, returned via the new_cache element of the tuple) is set
-        to a non-None value on the first call — the formatted string for
-        matches, or the empty string for no-results or exceptions. The
-        empty-string sentinel is what makes the cache an actual invariant
-        (rather than "cached only on success"); it prevents re-querying a
-        failing backend on every iteration and prevents re-querying for
-        off-topic user messages that have no KB coverage.
-        """
-        # Gate: only fire for auxilium (type-safe, case-insensitive)
-        is_helper = (
-            isinstance(conv.agent_role, str)
-            and conv.agent_role.strip().lower() == "helper"
-        )
-        if not is_helper:
-            return messages, None, None
-
-        # Per-turn cache: only fetch on first call within a turn.
-        # After the first call, new_cache is ALWAYS set (to the formatted
-        # string for matches, or to "" for no-results / exception). The
-        # empty-string sentinel is what makes this an actual cache invariant
-        # rather than "sometimes a cache when KB has something to say."
-        new_cache = kb_cache
-        if new_cache is None:
-            try:
-                from agent.kb_lookup import kb_lookup
-                chunks = kb_lookup(text, top_k=5, min_score=0.35)
-                new_cache = _format_chunks_for_llm(chunks)
-            except Exception:
-                new_cache = ""  # queried, but failed; do not retry
-
-        kb_context = new_cache
-        messages_for_call = messages
-        if kb_context:
-            messages_for_call = self._inject_kb_context(messages, kb_context, text)
-        return messages_for_call, kb_context, new_cache
 
     def _run_loop(self, session_key: str, text: str, turn_token: object = None,
                   prepare: Callable[[], None] | None = None) -> None:
@@ -1361,11 +1246,6 @@ class AgentRuntime:
                 # Step 2: loop until no tool calls or limit hit
                 iteration = 0
                 max_iter = self._config.max_tool_iterations
-
-                # Per-turn cache: KB chunks fetched once and reused for the entire
-                # multi-iteration loop. The user question is the same throughout;
-                # re-running kb_lookup on every iteration is wasted work and tokens.
-                _kb_cache_for_turn: str | None = None
 
                 while iteration < max_iter:
                     # Check immediate cancel signal first
@@ -1492,13 +1372,6 @@ class AgentRuntime:
                         )
                     messages = conv.to_api_messages()
 
-                    # KB synthesis (Tier 2): prepare messages with KB context if applicable.
-                    # The helper is called once per tool-loop iteration, but kb_lookup itself
-                    # only runs once per _run_loop invocation (gated by the per-turn cache
-                    # passed in via kb_cache). The cache survives across iterations.
-                    messages_for_call, kb_context, _kb_cache_for_turn = self._prepare_kb_synthesis(
-                        conv, text, messages, _kb_cache_for_turn
-                    )
                     # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
                     # §2.2 Edit G): transition RUNNING → STREAMING (non-terminal)
                     # before the first LLM call. Keyed by (sk, tk) tuple (BUG #3,
@@ -1507,7 +1380,7 @@ class AgentRuntime:
                     with self._state_lock:
                         if self._turn_state.get((session_key, turn_token)) == TurnStatus.RUNNING:
                             self._turn_state[(session_key, turn_token)] = TurnStatus.STREAMING
-                    response = self._call_llm(session_key, messages_for_call, tools, turn_token=turn_token)
+                    response = self._call_llm(session_key, messages, tools, turn_token=turn_token)
 
                     # Extract content and tool calls
                     # Determine provider from conversation model
@@ -1642,62 +1515,6 @@ class AgentRuntime:
                             ))
                             return
 
-                        # ── KB fallback chain ────────────────────────────────────
-                        # If the primary provider returned [KB_OUT_OF_SCOPE] and a
-                        # fallback_provider is configured, retry with the fallback
-                        # model. One-shot guard prevents infinite loops.
-                        if (
-                            text_content == KB_OUT_OF_SCOPE
-                            and conv.fallback_provider
-                            and not getattr(conv, "_fallback_attempted", False)
-                        ):
-                            conv._fallback_attempted = True
-                            logger.info(
-                                "[tool-loop] sk=%s KB_OUT_OF_SCOPE — retrying with fallback provider %s",
-                                session_key, conv.fallback_provider,
-                            )
-                            original_model = conv.model
-                            # Resolve fallback model the same way the primary path does:
-                            #   f"{provider_name}/{provider.default_model}"
-                            # See AgentRuntimeHandler._resolve_agent_model() at ui/handlers/agent_runtime_handler.py
-                            fallback_provider_name = conv.fallback_provider
-                            fallback_provider_cfg = self._config.providers.get(fallback_provider_name) if fallback_provider_name else None
-                            if fallback_provider_cfg and fallback_provider_cfg.default_model:
-                                default_model = fallback_provider_cfg.default_model
-                                if "/" in default_model:
-                                    fallback_model = default_model
-                                else:
-                                    fallback_model = f"{fallback_provider_name}/{default_model}"
-                            else:
-                                # Provider not configured — fall back to provider name (runtime will error clearly)
-                                fallback_model = fallback_provider_name
-                            conv.model = fallback_model
-                            try:
-                                # Inject KB context into fallback LLM call. Uses the
-                                # same helper as the Tier 2 primary-call path so
-                                # both paths share one format string.
-                                messages_with_context = self._inject_kb_context(messages, kb_context, text)
-                                fb_response = self._call_llm(session_key, messages_with_context, tools, turn_token=turn_token)
-                                fb_provider = fallback_model.split("/")[0] if "/" in fallback_model else fallback_model
-                                fb_fmt = _RESPONSE_FORMAT.get(fb_provider, "openai")
-                                fb_text = extract_text_content(fb_response, response_format=fb_fmt)
-                                fb_tool_calls = extract_tool_calls(fb_response, response_format=fb_fmt)
-                                # Use fallback response as the text content
-                                text_content = fb_text
-                                tool_calls_raw = fb_tool_calls
-                                # Record fallback usage
-                                fb_prompt, fb_comp = extract_usage(fb_response, response_format=fb_fmt)
-                                fb_cost = cost_for_model(fallback_model, fb_prompt, fb_comp)
-                                conv.record_usage(fb_prompt + fb_comp, fb_cost)
-                                self._dispatch(self._on_token_usage, session_key, fb_prompt + fb_comp, fb_cost)
-                                logger.debug("[tool-loop] sk=%s fallback response: text_len=%d tool_calls=%d",
-                                             session_key, len(fb_text or ""), len(fb_tool_calls))
-                            except Exception as e:
-                                logger.warning("[tool-loop] sk=%s fallback call failed: %s", session_key, e)
-                                # Fallback failed — show the original sentinel (or error message)
-                            finally:
-                                conv.model = original_model
-
                         # Text-only response — but check for _stream_error first.
                         # OpenRouter mid-stream error with non-empty partial content:
                         # the stream was cut short by a provider error but some text
@@ -1764,7 +1581,6 @@ class AgentRuntime:
                             turn_token=turn_token,
                             text=text_content,
                             metadata={
-                                "fallback_used": getattr(conv, "_fallback_attempted", False),
                                 "stream_error": response.get("_stream_error"),
                             },
                         ))
