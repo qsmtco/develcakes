@@ -1934,22 +1934,27 @@ class FeedHandler:
         open + json parse, µs–ms) — safe on the main thread; the eviction
         pass must never take the prefs flock.
 
-        R5: any failure — no active project path, I/O error, parse error —
-        logs and falls back to MAX_LIVE_CARD_WIDGETS (pre-SP2 behavior):
-        config is non-critical and must never break the append/evict path.
+        R5: any failure — no active project path, I/O error, parse error,
+        or a garbage (non-int) value from the accessor that the clamp
+        itself cannot compare — logs and falls back to
+        MAX_LIVE_CARD_WIDGETS (pre-SP2 behavior): config is non-critical
+        and must never break the append/evict path.
         """
         try:
             project_path = self._project_paths.get(self._active_project_name or "")
             if not project_path:
                 return MAX_LIVE_CARD_WIDGETS  # R3/R5: no active project
             configured = feed_store.get_live_window(project_path)
+            return min(MAX_LIVE_CARD_WIDGETS, configured)  # R1: inside try —
+            # a garbage return raises TypeError at the clamp (077bdd64 latent
+            # bug, caught by SPEC-04's gate); guarded here like any other
+            # accessor failure.
         except Exception as e:  # noqa: BLE001 — R5: config is non-critical
             _logger.warning(
                 "eviction cap: live-window read failed; using %d: %s",
                 MAX_LIVE_CARD_WIDGETS, e,
             )
             return MAX_LIVE_CARD_WIDGETS
-        return min(MAX_LIVE_CARD_WIDGETS, configured)  # R1
 
     def _evict_surplus_card_widgets(self, exclude: frozenset[str] = frozenset()) -> None:
         """Release card widgets for the oldest cards beyond the live window.

@@ -640,6 +640,25 @@ class TestEvictionWindowWiring:
         h._evict_surplus_card_widgets()  # must not raise
         assert len(h._card_widgets) <= 120
 
+    def test_garbage_config_return_falls_back_to_constant(self, tmp_path, monkeypatch):
+        """R5 garbage-RETURN shape (SPEC-04 SP4 micro-fix; latent since
+        077bdd64): the accessor SUCCEEDS but hands back non-int junk —
+        legacy suites mock the whole feed_store module, so get_live_window
+        yields a MagicMock and the R1 clamp raises TypeError ("'<' not
+        supported between instances of 'MagicMock' and 'int'"). The clamp
+        lives INSIDE the R5 guard, so any garbage return degrades to the
+        constant (120) and an over-cap eviction pass proceeds no-raise."""
+        self._root = tmp_path
+        h = self._handler()
+        monkeypatch.setattr(
+            feed_store, "get_live_window", lambda p: MagicMock(),
+        )
+        assert h._effective_live_window() == 120
+        self._patch_load_more_builder(monkeypatch)
+        self._seed(h, 130)
+        h._evict_surplus_card_widgets()  # must not raise
+        assert len(h._card_widgets) <= 120
+
     def test_cap_read_per_pass_not_cached(self, tmp_path, monkeypatch):
         """R3: the cap resolves at eviction-call time — lower the config
         BETWEEN passes and the second pass must honor the new value."""
