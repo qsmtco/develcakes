@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** REMOVED 2026-09-22 (sub-phases 1-4; see docs/post-mortems/2026-09-22-SPEC-04-POST-MORTEM.md)
 **Implements:** docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md §5 R5 (with [SUP-REV] notes)
 **Depends on:** none (parallel with SPEC-03)
 **Target branch:** main
