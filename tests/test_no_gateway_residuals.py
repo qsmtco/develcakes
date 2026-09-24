@@ -58,6 +58,17 @@ class TestNoGatewaySendSites:
             "window.py must not import GatewayHandler"
         )
 
+    def test_config_has_no_gateway_functions(self):
+        """SPEC-05 SP3c: the gateway config accessors are gone from utils/config.py."""
+        src = (REPO / "utils/config.py").read_text(encoding="utf-8")
+        assert "get_gateway_url" not in src
+        assert "get_identity_dir" not in src
+
+    def test_toolbar_tooltip_honest(self):
+        """SPEC-05 SP3c: toolbar.py carries no gateway references at all."""
+        src = (REPO / "ui/toolbar.py").read_text(encoding="utf-8")
+        assert "gateway" not in src.lower()
+
     def test_send_raw_message_gone(self):
         src = (REPO / "ui/handlers/chat_handler.py").read_text(encoding="utf-8")
         assert "send_raw_message" not in src, (

@@ -48,23 +48,6 @@ def get_projects_dir() -> str:
     )
 
 
-def get_gateway_url() -> str:
-    """Return the OpenClaw gateway WebSocket URL.
-
-    Controlled by $CRABCAKES_GATEWAY_URL, defaults to ws://localhost:18789.
-    """
-    return os.environ.get("CRABCAKES_GATEWAY_URL", "ws://localhost:18789")
-
-
-def get_identity_dir() -> str:
-    """Return the OpenClaw device identity directory.
-
-    This is an OpenClaw-owned path, not a CrabCakes path.
-    Defaults to ~/.openclaw/identity/.
-    """
-    return os.path.join(os.path.expanduser("~"), ".openclaw", "identity")
-
-
 def get_project_root() -> str:
     """Return the CrabCakes repository root (the directory containing main.py).
 
@@ -83,6 +66,6 @@ def get_project_root() -> str:
 
 # Command system configuration
 # Backtick prefix — triggers command parsing in ChatHandler.on_send().
-# Zero collision with gateway commands (/approve, /status, etc.) which use /.
+# Distinct from slash commands (/approve, /status, etc.) which use "/".
 COMMAND_PREFIX = "/"
 

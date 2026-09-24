@@ -46,13 +46,14 @@ class Toolbar(Gtk.Box):
         self._status_label.set_valign(Gtk.Align.CENTER)
         self._status_label.set_margin_end(8)
         self._status_label.set_markup(
-            '<span foreground="#6b6b7a" font_desc="Sans 10">● Not connected</span>')
+            '<span foreground="#6b6b7a" font_desc="Sans 10">● No transport</span>')
 
         # Connect button
         self._connect_btn = Gtk.Button(label="Connect")
         self._connect_btn.add_css_class("suggested-action")
         self._connect_btn.set_size_request(90, -1)
-        self._connect_btn.set_tooltip_text("Connect to the gateway server")  # LOW-9
+        self._connect_btn.set_tooltip_text(
+            "Toggle remote transport (none configured — Telegram arrives post-MVP)")
         self._connect_btn.connect("clicked", self._on_connect_click)
 
         # Settings button + red status dot
@@ -87,9 +88,15 @@ class Toolbar(Gtk.Box):
         self.append(right_box)
 
     def _on_connect_click(self, *args):
-        """Called when Connect button is clicked. Delegates to window's callback."""
+        """Called when Connect button is clicked. Delegates to window's callback.
+
+        No transport is configured in MVP (SPEC-05 R1 strip; Telegram arrives
+        post-MVP) — surface the honest state instead of toggling.
+        """
         if self._on_connect_clicked is not None:
             self._on_connect_clicked()
+        self._status_label.set_markup(
+            '<span foreground="#6b6b7a" font_desc="Sans 10">● No transport</span>')
 
     def _on_stream_toggled(self, button):
         """Toggle streaming on/off and update the button label."""

@@ -63,31 +63,3 @@ class TestGetProjectsDir:
             from utils.config import get_projects_dir
             assert get_projects_dir() == "/opt/my-projects"
             importlib.reload(utils.config)
-
-
-class TestGetGatewayUrl:
-    def test_defaults_to_localhost(self):
-        """Default gateway URL is ws://localhost:18789."""
-        with patch.dict(os.environ, {}, clear=True):
-            from utils.config import get_gateway_url
-            assert get_gateway_url() == "ws://localhost:18789"
-
-    def test_respects_crabcakes_gateway_url_env(self):
-        """$CRABCAKES_GATEWAY_URL overrides the default."""
-        with patch.dict(os.environ, {"CRABCAKES_GATEWAY_URL": "ws://my.server:9999"}):
-            import importlib
-            import utils.config
-            importlib.reload(utils.config)
-            from utils.config import get_gateway_url
-            assert get_gateway_url() == "ws://my.server:9999"
-            importlib.reload(utils.config)
-
-
-class TestGetIdentityDir:
-    def test_defaults_to_openclaw_identity(self):
-        """Default identity dir is ~/.openclaw/identity."""
-        with patch.dict(os.environ, {}, clear=True):
-            from utils.config import get_identity_dir
-            result = get_identity_dir()
-            assert ".openclaw" in result
-            assert result.endswith(".openclaw/identity")
