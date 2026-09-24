@@ -41,4 +41,4 @@ py-modules = ["main"]
 # Patterns are PACKAGE names, not filesystem paths. "ui/*" matched nothing
 # (0 packages discovered); "ui*" matches the ui package and its subpackages
 # (ui.handlers, ui.views, agent.llm, ...).
-include = ["ui*", "gateway*", "agent*", "utils*", "models*", "prompts*"]
+include = ["ui*", "gateway*", "agent*", "utils*", "models*", "prompts*", "transport*"]
