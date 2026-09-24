@@ -54,6 +54,15 @@ class FeedHandler:
         on_send_to_agent:        Callable[[str, str], None] — send message to agent
         on_tab_switch:           Callable[[], None] — switch to feed tab
         on_card_added:           Callable[[str], None] | None — card_id after add
+        project_handler:         ProjectHandler | None — git-reject member
+                                 fan-out lookup (get_project_members). FIX 8
+                                 (SPEC-05 SP2 audit): was previously NEVER
+                                 assigned — the git-reject path died with
+                                 AttributeError before notifying members or
+                                 adding the git card. Passed as a ctor arg
+                                 (not a setter) because window.py builds
+                                 ProjectHandler (:387) before FeedHandler
+                                 (:441) — no construction-order hazard.
     """
 
     def __init__(
@@ -64,6 +73,7 @@ class FeedHandler:
         on_card_added=None,           # callback(card_id) | None
         on_approve_exec=None,         # callback(approval_id, approved: bool) | None — Phase E
         get_chat_box_for_session=None,  # callback(session_key) -> Gtk.Box | None
+        project_handler=None,         # ProjectHandler | None — git-reject fan-out
     ):
         self._GLib = GLib
         self._feed_tab = None         # set via set_feed_tab() after FeedTab is created
@@ -71,6 +81,7 @@ class FeedHandler:
         self._on_card_added = on_card_added
         self._on_approve_exec = on_approve_exec  # Phase E
         self._get_chat_box_for_session = get_chat_box_for_session
+        self._project_handler = project_handler
 
         # Card storage: card_id → FeedCardData
         self._cards: dict[str, FeedCardData] = {}

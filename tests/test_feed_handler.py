@@ -4,7 +4,7 @@
 # Tests the FeedHandler API without GTK (mock GLib.idle_add).
 
 import pytest
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 import logging
 import sys
 import threading
@@ -678,6 +678,83 @@ class TestPersistentBadges:
         card = feed_handler.get_card(approval_id)
         assert card is not None
         assert card.accepted is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  TestGitRejectMemberFanout — FIX 8 (SPEC-05 SP2 micro-round)
+#  The git-reject _mark() callback needs _project_handler for the
+#  member fan-out. Pre-fix it was NEVER assigned (no ctor arg, no
+#  setter) → AttributeError killed the callback before the member
+#  notify, the special:supervisor fallback, AND _add_git_card.
+# ═══════════════════════════════════════════════════════════════════
+
+class TestGitRejectMemberFanout:
+    """FIX 8 (SPEC-05 SP2 audit): git-reject notifies members + adds card.
+
+    Deterministic: _SyncThreading runs the reject git thread inline and
+    MockGLib.idle_add runs _mark() synchronously; git_ops + feed_store are
+    patched. Asserts the FULL repaired path: member fan-out (not the
+    supervisor fallback) AND the git card actually lands.
+    """
+
+    def test_git_reject_notifies_members_and_adds_card(
+        self, mock_feed_tab, monkeypatch
+    ):
+        import ui.handlers.feed_handler as fh
+        from ui.handlers.feed_handler import FeedHandler
+
+        monkeypatch.setattr(fh, "threading", _SyncThreading)
+        project_handler = MagicMock(name="ProjectHandler")
+        project_handler.get_project_members.return_value = [
+            "special:coder", "special:qa",
+        ]
+        on_send = MagicMock(name="on_send_to_agent")
+        h = FeedHandler(
+            GLib=MockGLib(),
+            on_send_to_agent=on_send,
+            project_handler=project_handler,
+        )
+        h.set_feed_tab(mock_feed_tab)
+        h._ensure_persist_writer = lambda: None  # _no_writer pattern
+
+        card = FeedCardData(
+            card_type="diff", source="agent", title="Fix auth bug",
+            body="+from auth import middleware", author="Coder",
+            timestamp=datetime.now(UTC), project_name="proj",
+            file_path="src/auth.py",
+            metadata={"project_path": "/tmp/fh8-proj"},
+        )
+        card_id = h.add_card(card)
+
+        with patch("ui.handlers.feed_handler.git_ops") as mock_git_ops, \
+             patch("ui.handlers.feed_handler.feed_store"):
+            mock_git_ops.checkout_paths.return_value = MockGitResult(
+                success=True, stdout="[main abc123d] Rejected",
+                sha="abc123def456",
+            )
+            h.handle_reject(card_id)
+
+        # Member fan-out — one call per member, NOT the supervisor fallback.
+        expected = "[PM] Rejected change: Fix auth bug"
+        assert on_send.call_count == 2, (
+            f"both members must be notified; got {on_send.call_args_list!r}"
+        )
+        assert [c.args[0] for c in on_send.call_args_list] == [
+            "special:coder", "special:qa",
+        ]
+        assert all(c.args[1] == expected for c in on_send.call_args_list)
+
+        # The git card must actually be added (the pre-fix AttributeError
+        # died BEFORE this line).
+        git_cards = [
+            c for c in h._cards.values() if c.card_type == "git_commit"
+        ]
+        assert len(git_cards) == 1, (
+            "git-reject must add exactly one git_commit card; "
+            f"got {len(git_cards)}"
+        )
+        assert git_cards[0].accepted is False
+        assert git_cards[0].title == "Rejected: Fix auth bug"
 
 
 # ═══════════════════════════════════════════════════════════════════

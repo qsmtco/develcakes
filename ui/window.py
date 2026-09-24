@@ -443,6 +443,10 @@ class MainWindow(Gtk.ApplicationWindow):
             on_send_to_agent=_on_send_to_agent,
             get_chat_box_for_session=self._main_content.get_chat_box_for_session,
             on_approve_exec=self._agent_runtime_handler.approve_exec,  # Phase E
+            # FIX 8 (SPEC-05 SP2 audit): git-reject member fan-out needs
+            # get_project_members. Safe as ctor arg: ProjectHandler is built
+            # at :387, BEFORE this site (:441).
+            project_handler=self._project_handler,
         )
 
         # CrabWatch — filesystem watcher for project feed

@@ -20,6 +20,8 @@
 # are self-contained) and §8.6 (handlers do not import other handlers).
 
 import inspect
+import logging
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -472,3 +474,33 @@ class TestForwardHandlerConstruction:
         assert h._chat_render_handler is chat_render_handler
         assert h._agent_runtime_handler is arh
         assert h._gateway_handler is gh
+
+
+class TestForwardARHNoneGuard:
+    """FIX 11 (SPEC-05 SP2 micro-round): forward_to_agent's None-guard.
+
+    Pre-SP2 an early return protected the (then gateway-routing) body;
+    SP2 dropped the guard while repointing, so ARH=None → AttributeError
+    from inside a GTK callback. Mirrors ChatHandler._send_local's
+    contract: drop the forward with a WARNING, never raise.
+    """
+
+    def test_forward_no_raise_when_arh_none(self, monkeypatch, caplog):
+        from ui.handlers.forward_handler import ForwardHandler
+
+        popover = MagicMock(name="popover")
+        h = ForwardHandler(
+            main_content=MagicMock(name="MainContent"),
+            chat_handler=MagicMock(name="ChatHandler"),
+            chat_render_handler=MagicMock(name="ChatRenderHandler"),
+            agent_runtime_handler=None,
+            gateway_handler=MagicMock(name="GatewayHandler"),
+        )
+        with caplog.at_level(logging.WARNING, logger="ui.handlers.forward_handler"):
+            # No raise above is the assertion — pre-fix this raised
+            # AttributeError ('NoneType' has no send_to_special_agent).
+            h.forward_to_agent("sk-target", "hello", "sk-source", popover)
+
+        assert "not wired yet" in caplog.text, (
+            "guard must log the drop with a WARNING"
+        )

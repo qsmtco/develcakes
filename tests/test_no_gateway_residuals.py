@@ -89,9 +89,13 @@ class TestBroadenedNeedleSweep:
 
     # The local receiver API — `rt.send_message(...)` on AgentRuntime — is the
     # post-R1 SEND PATH ITSELF (agent_runtime_handler.py:1134). Debugger's
-    # needle would ban the repoint destination, so this one call shape is
-    # allowed with an explicit inline annotation at the site. Any OTHER
-    # `.send_message(` still fails the sweep. (Flagged deviation in report.)
+    # needle would ban the repoint destination, so that exact call shape is
+    # the ONLY exemption. Any OTHER `.send_message(` still fails the sweep.
+    # FIX 9 (SP2 audit BUG #9): the exemption previously skipped the WHOLE
+    # line before needle matching, so a smuggled `conn.send_message(...)` on
+    # the same line as an `rt.send_message(...)` evaded the sweep. Now every
+    # allowed substring is REMOVED from the line first; needles run on what
+    # remains.
     ALLOWED_SEND_SITES = ("rt.send_message(",)
 
     def test_all_handlers_match_no_needles(self):
@@ -100,10 +104,13 @@ class TestBroadenedNeedleSweep:
                 continue
             src = rel.read_text(encoding="utf-8")
             for line in src.splitlines():
-                if any(ok in line for ok in self.ALLOWED_SEND_SITES):
-                    continue
+                # Substring removal, NOT a whole-line skip: an allowed call
+                # no longer shields anything else on its line.
+                remainder = line
+                for ok in self.ALLOWED_SEND_SITES:
+                    remainder = remainder.replace(ok, "")
                 for needle in PIN_NEEDLES:
-                    hits = _re.findall(needle, line)
+                    hits = _re.findall(needle, remainder)
                     assert not hits, (
                         f"{rel.name}: needle {needle!r} matched {hits!r} "
                         f"in: {line.strip()[:90]}"

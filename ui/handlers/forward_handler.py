@@ -18,10 +18,14 @@ may be None at first call" edge case. See ARCHITECTURE.md §3.6 (window.py
 is the composition root) and §8.6 (handlers do not import each other).
 """
 
+import logging
+
 import gi
 
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402  (gi.require_version must run first)
+
+_logger = logging.getLogger(__name__)
 
 
 class ForwardHandler:
@@ -140,6 +144,18 @@ class ForwardHandler:
         """
         popover.popdown()
         if not text:
+            return
+        # FIX 11 (SPEC-05 SP2 micro-round): forward_to_agent calls
+        # send_to_special_agent unconditionally in the non-special else
+        # branch — pre-SP2 an early-return guarded a None ARH. Mirror the
+        # ChatHandler._send_local contract: drop the send with a WARNING
+        # instead of raising AttributeError inside a GTK callback.
+        if self._agent_runtime_handler is None:
+            _logger.warning(
+                "[forward] Forward dropped for %r - AgentRuntimeHandler "
+                "not wired yet",
+                target_session_key,
+            )
             return
         # Resolve source name from either special agents or gateway
         source_name = None
