@@ -50,6 +50,19 @@ class TestNoGatewaySendSites:
                 f"{name} missing — SP3 landed? Fold the exclusion out of this pin."
             )
 
+    def test_window_has_no_gateway_construction(self):
+        """SPEC-05 SP3a: window.py no longer constructs GatewayHandler /
+        ConnectionSyncHandler and no longer imports GatewayHandler. The
+        handler FILES still exist until SP3b — this pins the window side only."""
+        src = (REPO / "ui/window.py").read_text(encoding="utf-8")
+        assert "GatewayHandler(" not in src, "window.py must not construct GatewayHandler"
+        assert "ConnectionSyncHandler(" not in src, (
+            "window.py must not construct ConnectionSyncHandler"
+        )
+        assert "from ui.handlers.gateway_handler import GatewayHandler" not in src, (
+            "window.py must not import GatewayHandler"
+        )
+
     def test_send_raw_message_gone(self):
         src = (REPO / "ui/handlers/chat_handler.py").read_text(encoding="utf-8")
         assert "send_raw_message" not in src, (

@@ -10,13 +10,12 @@
 #   _on_improve_*             — moved to MediaHandler (Phase 4)
 #   _on_stt_*                 — moved to MediaHandler (Phase 4)
 #   _on_project_*             — project tab management
-#   GatewayHandler            — owns GatewayClient + AgentManager (Phase 2)
 #   ChatHandler               — owns send/fan-out/routing (Phase 1)
 #   MediaHandler              — owns STT + improve (Phase 4)
 #
 # Thread safety: GTK calls from background threads MUST go through GLib.idle_add().
-# This applies to: _on_improve_result, _on_stt_partial, gateway callbacks.
-# GatewayHandler.dispatch is used internally for its own thread safety.
+# This applies to: _on_improve_result, _on_stt_partial, and any other
+# callback that may fire from a background thread (marshal via GLib.idle_add).
 #
 # Project fan-out: _on_send checks if current tab is "project:<name>".
 # If so, it calls load_members() and sends to each member independently.
@@ -40,7 +39,6 @@ from ui.views.main_content import MainContent
 from ui.views.activity_drawer import ActivityDrawer
 from ui.handlers.chat_handler import ChatHandler
 from ui.handlers.file_tree_handler import FileTreeHandler
-from ui.handlers.gateway_handler import GatewayHandler
 from ui.handlers.media_handler import MediaHandler
 from ui.handlers.project_handler import ProjectHandler
 from ui.handlers.activity_handler import ActivityHandler
@@ -73,8 +71,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Chat handler — owns message sending, fan-out, and response routing (Phase 1)
         self._chat_handler = None
-        # Gateway handler — owns GatewayClient + AgentManager (Phase 2)
-        self._gateway_handler = None
         # Media handler — owns STT + improve (Phase 4)
         self._media_handler = None
         # Input toolbar handler — owns find/replace, spell check, file I/O (Phase 5)
@@ -91,8 +87,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self._collab_handler = None
         # Session handler — owns session switching logic (Phase 7)
         self._session_handler = None
-        # Connection sync handler — owns post-connect wiring (Phase 3a extraction)
-        self._connection_sync_handler = None
         # Forward handler — owns agent-to-agent message forwarding (Phase 3b extraction)
         self._forward_handler = None
 
@@ -139,7 +133,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._main_content = MainContent()
 
-        # Session switch menu needs AgentManager — set after gateway connects
+        # Session switch menu needs AgentManager — None in MVP (gateway strip:
+        # handlers fall back to the local special-agent registry)
         self._main_content.set_agent_manager(None)
         self._main_content.set_chat_render_handler(self._chat_render_handler)
         self._chat_render_handler.set_main_content(self._main_content)
@@ -158,7 +153,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Wire Send button
         self._main_content.send_button.connect("clicked", self._chat_handler.on_send_clicked)
 
-        # Left panel — created BEFORE GatewayHandler. FileTreeHandler must be
+        # Left panel — FileTreeHandler must be
         # built first: it is injected into LeftPanel, which wires sort/git-status
         # callbacks to it during __init__.
         file_tree_handler = FileTreeHandler()
@@ -171,7 +166,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._left_panel = left_panel
         self._left_panel.set_main_content(self._main_content)
 
-        # Agent card handler — agent_mgr set in ConnectionSyncHandler.sync() after connect
+        # Agent card handler — agent_mgr stays None in MVP (no gateway agents;
+        # AgentListHandler falls back to the local special-agent registry)
         from ui.handlers.agent_list_handler import AgentListHandler
         self._agent_list_handler = AgentListHandler(
             agent_mgr=None,
@@ -256,15 +252,6 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self._left_panel.set_prompts_handler(self._prompts_handler)
 
-        # Gateway handler — owns GatewayClient + AgentManager (Phase 2)
-        # Note: connect button is wired via Toolbar(on_connect_clicked=...) — not here
-        self._gateway_handler = GatewayHandler(
-            toolbar=self._toolbar,
-            left_panel=left_panel,
-            on_agent_selected=self._on_agent_selected,
-            on_event=self._on_ws_event,
-            GLib_module=GLib,
-        )
         # # Response Status bar (right side)
         self._response_status = FeedBar()
 
@@ -518,7 +505,7 @@ class MainWindow(Gtk.ApplicationWindow):
             from ui.views.chat_bubble import _set_crabcards_registry
             _set_crabcards_registry(cards, _on_show_feed_subtab)
             for card in cards:
-                card.metadata["session_key"] = session_key  # agent's gateway key
+                card.metadata["session_key"] = session_key  # agent session key
                 card.metadata["tab_key"] = tab_key or session_key  # chat box key (project:xxx or agent:xxx)
                 self._feed_handler.add_card(card)
 
@@ -609,7 +596,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Session handler — session switching (Phase 7)
         # Needs AgentManager and ProjectHandler injected via setters after connect
         self._session_handler = SessionHandler(
-            agent_manager=None,   # synced in ConnectionSyncHandler.sync()
+            agent_manager=None,   # stays None in MVP (gateway strip; local agents only)
             project_handler=self._project_handler,
         )
 
@@ -632,7 +619,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Created AFTER ProjectHandler and ReviewHandler are initialized.
         from ui.handlers.command_handler import CommandHandler
         self._command_handler = CommandHandler(
-            agent_manager=None,    # synced after connect via ConnectionSyncHandler.sync()
+            agent_manager=None,    # stays None in MVP (gateway strip; local agents only)
             project_handler=self._project_handler,
             GLib_module=GLib,
             on_display_card=self._on_command_card,
@@ -742,31 +729,8 @@ class MainWindow(Gtk.ApplicationWindow):
             chat_handler=self._chat_handler,
             chat_render_handler=self._chat_render_handler,
             agent_runtime_handler=self._agent_runtime_handler,
-            gateway_handler=self._gateway_handler,
+            gateway_handler=None,  # gateway strip: ARH does the sends; source_name falls back to ARH
         )
-
-        # Connection sync handler — owns post-connect wiring (Phase 3a extraction)
-        from ui.handlers.connection_sync_handler import ConnectionSyncHandler
-        self._connection_sync_handler = ConnectionSyncHandler(
-            chat_handler=self._chat_handler,
-            main_content=self._main_content,
-            agent_list_handler=self._agent_list_handler,
-            gateway_handler=self._gateway_handler,
-            project_handler=self._project_handler,
-            command_handler=self._command_handler,
-            agent_command_handler=self._agent_command_handler,
-            session_handler=self._session_handler,
-            feed_handler=self._feed_handler,
-            left_panel=self._left_panel,
-            review_handler=self._review_handler,
-            activity_handler=self._activity_handler,
-            agent_to_project=self._agent_to_project,
-            on_forward_clicked=self._forward_handler.show_forward_popover,
-            project_path_provider=lambda: self._project_handler.get_active_project_path() if self._project_handler else None,
-            main_window=self,
-        )
-        # Wire the sync callback to fire on gateway connect
-        self._gateway_handler.set_sync_callback(self._connection_sync_handler.sync)
 
         # SPEC-activity-drawer Phase 1: construct the ActivityDrawer BEFORE the
         # connection sync handler tries to wire it. The drawer widget itself is
@@ -849,9 +813,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # ── Activity Drawer (SPEC-activity-drawer Phase 1) ───────────────
         # Wrap main_content in a vertical Paned with the drawer below.
         # The drawer is global (one per window), not per-tab.
-        # NOTE: self._activity_drawer is constructed earlier in _build() so
-        # ConnectionSyncHandler can hold a reference to it. This block now
-        # only handles the re-parenting of main_content into the Paned.
+        # NOTE: self._activity_drawer is constructed earlier in _build();
+        # this block only handles the re-parenting of main_content into the Paned.
         self._activity_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         self._activity_paned.set_end_child(self._activity_drawer)
         # Default: most space to chat (chat ~600px of ~800px window)
@@ -1043,16 +1006,15 @@ class MainWindow(Gtk.ApplicationWindow):
             chat_box.append(bubble)
             self._main_content.scroll_chat_to_bottom()
 
-    # ── Gateway toggle ──────────────────────────────────────────────────────
+    # ── Connect toggle ──────────────────────────────────────────────────────
 
     def _on_connect_clicked(self, *args):
-        """Toggle gateway connection — delegates to GatewayHandler."""
-        gh = self._gateway_handler
-        if gh.is_connected():
-            gh.disconnect()
-            self._main_content.set_agent_manager(None)
-        else:
-            gh.connect()
+        """Connect button — no-op in MVP (gateway strip; no transport configured).
+
+        Kept alive as the future transport toggle (SPEC-05 SP3c wires the
+        transport on/off switch behind this button).
+        """
+        logger.info("Connect pressed — no transport configured (SPEC-05 SP3c wires the transport toggle)")
 
     def _close_project_tab(self, name: str):
         """
@@ -1386,16 +1348,6 @@ class MainWindow(Gtk.ApplicationWindow):
         """A-9: Update the agent_id label in the status bar."""
         if hasattr(self, "_agent_id_label") and self._agent_id_label:
             self._agent_id_label.set_text(f"Agent: {agent_id}")
-
-    def _on_ws_event(self, event, payload):
-        """Handle incoming gateway events — route to handlers.
-
-        All events go to ActivityHandler for progress tracking. Chat events also
-        go to ChatHandler for bubble rendering (separate responsibility).
-        """
-        self._activity_handler.on_gateway_event(event, payload)
-        if event == "chat":
-            self._chat_handler.on_chat_event(event, payload)
 
     # ── Agent selection callback ────────────────────────────────────────────
 
