@@ -28,7 +28,7 @@ _CORPUS = [
     "<h1>H1</h1><ul><li>item</li></ul><pre><code>code()</code></pre>",
     "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody></table>",
     '<img src="https://x/i.png" alt="alt text">',
-    '<a href="/relative">rel</a>',
+    '<a href="/relative">clickme</a>',
 ]
 
 
@@ -97,7 +97,41 @@ class TestStripped:
         """Policy: relative URIs die (no base-URL context in a chat surface)."""
         out = sanitize_html(_CORPUS[16])
         assert "href" not in out.lower()
-        assert "rel" in out.lower()  # link text kept, ammonia rel still added
+        # Attribute-exact: ammonia's rel injection must survive on the kept
+        # link text (FIX C — substring "rel" is vacuous; pin the attribute).
+        assert 'rel="noopener noreferrer nofollow"' in out
+
+    @pytest.mark.parametrize("scheme", ["HTTPS", "HTTP", "Https", "hTTps"])
+    def test_uppercase_scheme_link_passes(self, scheme):
+        """FIX A (audit): scheme check normalizes case but returns the ORIGINAL
+        value — uppercase-scheme links keep their href un-rewritten."""
+        raw = f'<a href="{scheme}://ok.example">clickme</a>'
+        out = sanitize_html(raw)
+        assert f'href="{scheme}://ok.example"' in out, f"href lost/rewritten: {out!r}"
+
+    def test_attacker_rel_stripped(self):
+        """FIX B (audit): end-to-end — an author-supplied rel="opener" must
+        never survive (reverse tabnabbing). Output rel is only the injected
+        value, or absent. NOTE: ammonia alone already neutralizes author rel
+        (mutant probe 2026-09-24: gate removed → test STILL passes); the
+        filter-level pin below is what actually bites."""
+        out = sanitize_html('<a href="https://ok.example" rel="opener">x</a>')
+        assert 'rel="opener"' not in out.lower()
+        assert 'rel="noopener noreferrer nofollow"' in out
+
+    def test_filter_gate_rejects_noninjected_rel(self):
+        """FIX B (audit): the filter's rel gate ITSELF — only the exact
+        injected value passes; anything else is stripped. This is the
+        mutation-sensitive pin (falsifier-proven)."""
+        from render.sanitize import _attribute_filter
+
+        assert (
+            _attribute_filter("a", "rel", "noopener noreferrer nofollow")
+            == "noopener noreferrer nofollow"
+        )
+        assert _attribute_filter("a", "rel", "opener") is None
+        assert _attribute_filter("a", "rel", "noopener") is None
+        assert _attribute_filter("a", "rel", "") is None
 
 
 class TestPasses:

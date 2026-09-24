@@ -27,14 +27,20 @@ def _attribute_filter(element: str, attribute: str, value: str) -> str | None:
     Returns the value to keep, or None to strip.
 
     nh3 0.3.7 behavior (probe-verified 2026-09-24): ammonia injects link_rel
-    BEFORE this filter runs, so "rel" must pass or the injection dies. No
-    other rel exists in this policy (_SAFE_ATTRS has none), so allowing it
-    here only ever admits ammonia's own "noopener noreferrer nofollow".
+    BEFORE this filter runs, so the injection dies without a rel pass — but
+    this filter OWNS the rel gate: only the EXACT injected value
+    ("noopener noreferrer nofollow") passes. Any author-supplied rel
+    (e.g. rel="opener") is stripped here, closing the reverse-tabnabbing
+    hole — this does NOT rely on ammonia's attribute allowlist.
+
+    Scheme check (FIX A, audit): case-normalized test, ORIGINAL value
+    returned — HTTPS://X is a valid URL per RFC 3986 and must survive
+    un-rewritten.
     """
     if attribute == "rel":
-        return value
+        return value if value == "noopener noreferrer nofollow" else None
     if attribute in ("href", "src"):
-        if value.startswith(("http://", "https://")):
+        if value.lower().startswith(("http://", "https://")):
             return value
         return None
     if attribute in _SAFE_ATTRS:
