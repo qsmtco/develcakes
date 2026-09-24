@@ -3,9 +3,9 @@
 # Pattern mirror: tests/test_no_kb_residuals.py (SPEC-04).
 #
 # Pins:
-#   1. No gateway send sites / client refs remain in the repointed handlers
-#      (gateway_handler.py + connection_sync_handler.py are SP3 deletions —
-#      excluded here until then; the exclusion list is itself guarded).
+#   1. No gateway send sites / client refs remain anywhere in ui/handlers/
+#      (SP3b deleted gateway_handler.py + connection_sync_handler.py — the
+#      sweep covers the whole directory with no exclusions).
 #   2. send_raw_message is gone from chat_handler (SP2 R2 dead-code deletion).
 #   3. Source-shape: on_send routes via send_to_special_agent and no longer
 #      touches _gw (behavioral-through-GTK is covered by the receiver pins).
@@ -25,30 +25,25 @@ REPOINTED_FILES = [
     "ui/handlers/command_handler.py",
 ]
 
-# SP3 will DELETE these files — excluded from the sweep until then.
-SP3_DELETE_TARGETS = {
-    "gateway_handler.py",
-    "connection_sync_handler.py",
-}
-
-
 class TestNoGatewaySendSites:
     def test_repointed_handlers_have_no_gw_sends(self):
         """All repointed handlers are free of _gw sends / gateway_client refs."""
         for rel in REPO.glob("ui/handlers/*.py"):
-            if rel.name in SP3_DELETE_TARGETS:
-                continue
             src = rel.read_text(encoding="utf-8")
             for needle in ("_gw.send_message", "gateway_client", "self._gw"):
                 assert needle not in src, f"{rel.name}: found {needle!r}"
 
-    def test_excluded_files_still_exist_for_now(self):
-        """The SP3 delete targets are present — guards the exclusion set above
-        against drifting while SP3 is pending."""
-        for name in SP3_DELETE_TARGETS:
-            assert (REPO / "ui/handlers" / name).is_file(), (
-                f"{name} missing — SP3 landed? Fold the exclusion out of this pin."
-            )
+    def test_gateway_package_is_gone(self):
+        """SPEC-05 SP3b: the gateway package and the two deleted handlers are
+        gone from the tree — nothing can re-import them. (Subsumes the old
+        exclusion-set guard and the deleted connection_sync source pin.)"""
+        import importlib.util
+
+        assert importlib.util.find_spec("gateway") is None, (
+            "gateway/ package must be deleted (SPEC-05 R1)"
+        )
+        assert not (REPO / "ui/handlers" / "gateway_handler.py").exists()
+        assert not (REPO / "ui/handlers" / "connection_sync_handler.py").exists()
 
     def test_window_has_no_gateway_construction(self):
         """SPEC-05 SP3a: window.py no longer constructs GatewayHandler /
@@ -113,8 +108,6 @@ class TestBroadenedNeedleSweep:
 
     def test_all_handlers_match_no_needles(self):
         for rel in sorted(REPO.glob("ui/handlers/*.py")):
-            if rel.name in SP3_DELETE_TARGETS:
-                continue
             src = rel.read_text(encoding="utf-8")
             for line in src.splitlines():
                 # Substring removal, NOT a whole-line skip: an allowed call
@@ -128,13 +121,6 @@ class TestBroadenedNeedleSweep:
                         f"{rel.name}: needle {needle!r} matched {hits!r} "
                         f"in: {line.strip()[:90]}"
                     )
-
-    def test_set_gateway_client_not_in_connection_sync_source(self):
-        """Debugger's explicit second pin (FIX 1)."""
-        src = (REPO / "ui/handlers/connection_sync_handler.py").read_text(
-            encoding="utf-8"
-        )
-        assert "set_gateway_client" not in src
 
     def test_chat_handler_has_no_set_gateway_client_attr(self):
         """Debugger's explicit first pin (FIX 1/BUG #1)."""
