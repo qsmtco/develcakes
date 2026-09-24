@@ -327,8 +327,10 @@ class TestRelay:
         _, relay_text = fake_rt.sent[0]
         assert relay_text.startswith("[Debugger responded]:")
 
-    def test_relay_gateway_to_special(self):
-        """When target is gateway agent but source is special agent, relay to special via special handler."""
+    def test_relay_nonspecial_target_to_special(self):
+        """When the ask target is a non-special (agent-manager-registered) agent
+        but the asker is a special agent, the response relays to the asker via
+        the runtime receiver."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={"special:coder": "Coder"})
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
@@ -584,7 +586,7 @@ class TestDisplayNameResolution:
         handler.set_agent_runtime_handler(fake_rt)
 
         # Session key contains a "/" so split("/")[-1] produces a readable fallback name
-        # Use a gateway-style session key with embedded "/" (not a real format, just for test)
+        # Session key with an embedded "/" (remote-style key; ensures parsing handles it)
         target_sk = "agent/unknown/12345"
         handler._pending_asks[target_sk] = "special:coder"
 

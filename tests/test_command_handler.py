@@ -2,7 +2,7 @@
 # Unit tests for ui/handlers/command_handler.py.
 #
 # Philosophy: test the parsing and routing logic with fake collaborators
-# (no GTK, no gateway, no AgentManager — fake objects instead).
+# (no GTK, no AgentManager — fake objects instead).
 #
 # Coverage:
 #   1. Prefix detection (backtick vs wrong prefix, empty prefix, set_prefix)
@@ -261,7 +261,7 @@ class TestSetters:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCommandFlow:
-    def test_response_text_not_forwarded_to_gateway(self, configured_handler):
+    def test_response_text_sets_no_forward_to(self, configured_handler):
         result = configured_handler.process_input("agent:1", "/echo @Debugger \"hello\"")
         assert result.handled is True
         assert result.response_text == "echo: echo"
@@ -438,27 +438,29 @@ class TestSpecialAgentMentionResolution:
         assert isinstance(resolved, CommandResult)
         assert "Unknown" in resolved.response_text
 
-    def test_special_and_gateway_coexist_no_collision(self):
-        """Special agent and gateway agent with same name — special wins (checked first)."""
-        # Gateway agent named "Coder" (unusual but possible)
+    def test_agentmgr_and_special_coexist_no_collision(self):
+        """Agent-manager-registered agent and special agent share a name — the
+        agent-manager name wins (checked first in _resolve_mention). MVP note:
+        agent_manager is always None post-R1 (accepted wiring gap), so this
+        precedence is currently inert but pinned."""
+        # Agent-manager-registered agent named "Coder" (unusual but possible)
         agnt = FakeAgentManager({"Coder": "agent:coder:gateway:1"})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
         # Special agent registry also has Coder
         h.set_special_agents({"special:coder": "Coder"})
-        # Currently special agents are checked AFTER gateway agents in _resolve_mention
-        # This test documents current behavior: gateway wins (checked first)
-        # Build plan decides order — for now verify current (gateway-first) behavior
+        # _resolve_mention checks agent-manager names BEFORE the special registry
+        # This test documents current behavior: agent-mgr wins (checked first)
         resolved = h._resolve_mention("@Coder")
-        # Gateway agent checked first → returns gateway sk
+        # Agent-mgr name checked first → returns its session key
         assert resolved == "agent:coder:gateway:1"
 
     def test_mixed_resolve_via_resolve_inline_mention(self):
-        """resolve_inline_mention works for both gateway and special agents."""
+        """resolve_inline_mention works for both agent-manager-registered and special agents."""
         agnt = FakeAgentManager({"QTR": "agent:qtr:telegram:direct:7478874934"})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
 
-        # Gateway agent
+        # Agent-manager-registered agent
         r1 = h.resolve_inline_mention("@QTR hello", "project:testproj")
         assert r1.target_session_key == "agent:qtr:telegram:direct:7478874934"
 
