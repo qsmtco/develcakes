@@ -144,11 +144,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._main_content.set_chat_render_handler(self._chat_render_handler)
         self._chat_render_handler.set_main_content(self._main_content)
 
-        # Chat handler — gateway_client is a lambda to avoid stale None reference
-        # (self._gw is None at construction, only set when Connect is clicked)
+        # Chat handler — SPEC-05 R1: local runtime path only (no gateway arg).
         self._chat_handler = ChatHandler(
             main_content=self._main_content,
-            gateway_client=None,  # synced after connect via set_sync_callback
             agent_to_project=self._agent_to_project,
             projects_module=__import__("utils.projects", fromlist=["projects"]),
             GLib_module=GLib,
@@ -190,7 +188,6 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib_module=GLib,
             review_handler=None,  # ReviewHandler created later in _build; Phase 1.5 will wire via setter
         )
-
         # Register built-in special agents from the registry
         from agent.special_agents import get_special_agents, get_auto_open_agents
         for agent_def in get_special_agents():
@@ -433,7 +430,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def _on_send_to_agent(session_key: str, text: str):
             """Send a message to an agent tab (used for rejection notifications)."""
-            self._chat_handler.send_raw_message(session_key, text)
+            # SPEC-05 R1: local runtime path; receiver no-ops for unknown keys.
+            self._agent_runtime_handler.send_to_special_agent(session_key, text)
 
         def _on_show_feed_subtab():
             """Switch Projects notebook to the Feed sub-tab."""
@@ -624,12 +622,12 @@ class MainWindow(Gtk.ApplicationWindow):
             on_display_text=self._on_command_text,
             on_feed_card=self._feed_handler.add_card,
         )
+        self._review_handler.set_agent_runtime_handler(self._agent_runtime_handler)
 
         # Command handler — owns backtick command parsing + routing (Phase 0.2)
         # Created AFTER ProjectHandler and ReviewHandler are initialized.
         from ui.handlers.command_handler import CommandHandler
         self._command_handler = CommandHandler(
-            gateway_client=None,   # synced after connect via ConnectionSyncHandler.sync()
             agent_manager=None,    # synced after connect via ConnectionSyncHandler.sync()
             project_handler=self._project_handler,
             GLib_module=GLib,
@@ -1048,7 +1046,6 @@ class MainWindow(Gtk.ApplicationWindow):
         gh = self._gateway_handler
         if gh.is_connected():
             gh.disconnect()
-            self._chat_handler.set_gateway_client(None)
             self._main_content.set_agent_manager(None)
         else:
             gh.connect()

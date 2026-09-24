@@ -969,7 +969,6 @@ class TestChatHandlerActivityBubbleRender:
 
         handler = ChatHandler(
             main_content=mock_mc,
-            gateway_client=MagicMock(),
             agent_to_project=routing,
             projects_module=MagicMock(),
             GLib_module=fake_glib,

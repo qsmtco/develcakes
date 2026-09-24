@@ -313,46 +313,7 @@ class TestForwardToAgent:
         handler._agent_runtime_handler.send_to_special_agent.assert_called_once_with(
             "sk-qa", "forwarded text"
         )
-        # gateway path NOT taken
-        handler._gateway_handler._gw.send_message.assert_not_called()
-
-    def test_routes_to_gateway_agent(self, handler):
-        """When target is NOT in get_special_agents(), gw.send_message
-        is called with (target_sk, text)."""
-        popover = MagicMock()
-        handler.forward_to_agent(
-            target_session_key="sk-tab1",
-            text="forwarded text",
-            source_session_key="sk-qa",
-            popover=popover,
-        )
-        handler._gateway_handler._gw.send_message.assert_called_once_with(
-            "sk-tab1", "forwarded text"
-        )
-        # special-agent path NOT taken
-        handler._agent_runtime_handler.send_to_special_agent.assert_not_called()
-
-    def test_returns_early_when_gateway_disconnected(self, handler):
-        """If gw is None OR gw.is_connected() is False, forward_to_agent
-        returns without routing, creating a tab, or rendering a bubble."""
-        handler._gateway_handler._gw.is_connected.return_value = False
-        popover = MagicMock()
-
-        handler.forward_to_agent(
-            target_session_key="sk-tab1",
-            text="forwarded text",
-            source_session_key="sk-qa",
-            popover=popover,
-        )
-        # Nothing was sent
-        handler._gateway_handler._gw.send_message.assert_not_called()
-        # No tab was created or selected
-        handler._main_content.create_chat_tab.assert_not_called()
-        handler._main_content._chat_notebook.set_current_page.assert_not_called()
-        # No bubble was rendered
-        handler._chat_render_handler.render_sync.assert_not_called()
-        # The popover WAS popped down (that's done before the connectivity check)
-        popover.popdown.assert_called_once()
+        # (SPEC-05 R1: no gateway path exists to assert against anymore.)
 
     def test_creates_new_tab_if_none_exists(self, handler):
         """If the target_session_key is not in _tab_sessions, create_chat_tab

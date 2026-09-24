@@ -49,8 +49,8 @@ class ForwardHandler:
                                  "may be None on first call" edge case)
         agent_runtime_handler:  AgentRuntimeHandler — for get_special_agents()
                                  and send_to_special_agent()
-        gateway_handler:        GatewayHandler — for agent_mgr.get_name(),
-                                 gw.send_message(), gw.is_connected()
+        gateway_handler:        GatewayHandler — for agent_mgr.get_name()
+                                 (SPEC-05: send path is local-only now)
     """
 
     def __init__(
@@ -162,10 +162,9 @@ class ForwardHandler:
                 if self._gateway_handler and self._gateway_handler.agent_mgr
                 else "Agent"
             )
-            gw = self._gateway_handler._gw if self._gateway_handler else None
-            if gw is None or not gw.is_connected():
-                return
-            gw.send_message(target_session_key, text)
+            # Local path only (SPEC-05 R1); receiver no-ops for
+            # unregistered/remote keys.
+            self._agent_runtime_handler.send_to_special_agent(target_session_key, text)
 
         # Check if target agent already has an open tab
         target_tab_exists = None

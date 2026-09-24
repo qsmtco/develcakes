@@ -43,11 +43,10 @@ def deps():
     review_handler = MagicMock(name="ReviewHandler")
 
     # ChatHandler is a "wider" target — multiple setters, plus internal
-    # attributes that sync() reads (e.g. chat_handler._awareness_sent,
-    # chat_handler._handle_lifecycle_completed, etc.). Set these as real
-    # sentinels so equality assertions are readable.
+    # attributes that sync() reads (e.g. chat_handler._handle_lifecycle_completed).
+    # Set these as real sentinels so equality assertions are readable.
+    # (SPEC-05 SP2: _awareness_sent sentinel deleted with the awareness machinery.)
     chat_handler = MagicMock(name="ChatHandler")
-    chat_handler._awareness_sent = MagicMock(name="awareness_sent_set")
     chat_handler._handle_lifecycle_completed = MagicMock(name="lifecycle_completed")
     chat_handler._buffer_assistant_text = MagicMock(name="buffer_assistant_text")
     chat_handler._clear_render_guard = MagicMock(name="clear_render_guard")
@@ -121,10 +120,6 @@ def handler(deps):
 class TestChatHandlerWiring:
     """sync() injects the live GatewayClient and AgentManager into ChatHandler."""
 
-    def test_sync_calls_chat_handler_set_gateway_client_with_gw(self, handler, deps, gw):
-        handler.sync(gw)
-        deps["chat_handler"].set_gateway_client.assert_called_once_with(gw)
-
     def test_sync_calls_chat_handler_set_agent_manager_once(
         self, handler, deps, gw
     ):
@@ -181,10 +176,6 @@ class TestMainContentAndAgentListWiring:
 class TestCommandHandlerWiring:
     """sync() wires GatewayClient and AgentManager into CommandHandler."""
 
-    def test_sync_calls_command_handler_set_gateway_client(self, handler, deps, gw):
-        handler.sync(gw)
-        deps["command_handler"].set_gateway_client.assert_called_once_with(gw)
-
     def test_sync_calls_command_handler_set_agent_manager(self, handler, deps, gw):
         handler.sync(gw)
         deps["command_handler"].set_agent_manager.assert_called_once_with(
@@ -211,14 +202,10 @@ class TestProjectHandlerWiring:
 
 
 class TestAgentCommandHandlerWiring:
-    """sync() wires the most state into AgentCommandHandler — see the bug
-    where set_awareness_sent was the missing piece during spec development."""
+    """sync() wires AgentManager/routing/project refs into AgentCommandHandler.
 
-    def test_sync_calls_agent_command_handler_set_gateway_client(
-        self, handler, deps, gw
-    ):
-        handler.sync(gw)
-        deps["agent_command_handler"].set_gateway_client.assert_called_once_with(gw)
+    (SPEC-05 SP2: the set_gateway_client and set_awareness_sent wiring tests
+    were deleted with the setters themselves — both died with the R1 strip.)"""
 
     def test_sync_calls_agent_command_handler_set_agent_manager(
         self, handler, deps, gw
@@ -234,16 +221,6 @@ class TestAgentCommandHandlerWiring:
         handler.sync(gw)
         deps["agent_command_handler"].set_agent_routing.assert_called_once_with(
             deps["agent_to_project"]
-        )
-
-    def test_sync_calls_agent_command_handler_set_awareness_sent_from_chat(
-        self, handler, deps, gw
-    ):
-        """The bug we just hit in the spec: awareness_sent must come from
-        chat_handler._awareness_sent (the live set, not a fresh mock)."""
-        handler.sync(gw)
-        deps["agent_command_handler"].set_awareness_sent.assert_called_once_with(
-            deps["chat_handler"]._awareness_sent
         )
 
     def test_sync_calls_agent_command_handler_set_project_handler(
@@ -462,3 +439,125 @@ class TestOrder:
             caller.set_agent_manager.call_count for caller in all_callers
         )
         assert total == 6
+
+
+class TestSyncRealHandlerClasses:
+    """FIX 2 pin (SP2 audit BUG #1): sync() must run to COMPLETION against REAL
+    handler classes — not MagicMocks, which silently absorb AttributeError on
+    deleted setters and masked the 3-call break for a full audit cycle.
+
+    Completion is asserted structurally: every setter sync() is required to
+    call post-SP2 has actually fired by the time sync() returns. The LAST
+    statement in sync() is the agent-start → clear-render-guard wiring, so
+    set_on_agent_start firing proves the whole body executed (Debugger's
+    amended framing: not just no-raise, but ran-to-end)."""
+
+    def test_sync_runs_to_completion_post_sp2(self):
+        from unittest.mock import MagicMock
+
+        from ui.handlers.agent_command_handler import AgentCommandHandler
+        from ui.handlers.chat_handler import ChatHandler
+        from ui.handlers.command_handler import CommandHandler
+
+        chat_handler = ChatHandler(
+            main_content=MagicMock(name="mc"),
+            agent_to_project=MagicMock(name="routing"),
+            projects_module=MagicMock(name="projects"),
+            GLib_module=None,
+        )
+        command_handler = CommandHandler(
+            agent_manager=None, project_handler=None, GLib_module=None
+        )
+        agent_command_handler = AgentCommandHandler(GLib_module=None)
+
+        recorded: dict[str, object] = {}
+
+        class GWHandler:
+            """Minimal gateway handler stub — sync() reads .agent_mgr."""
+
+            agent_mgr = MagicMock(name="AgentManager")
+
+        class ProjectHandler:
+            def get_active_project_name(self):
+                return None  # skip left-panel refresh branch
+
+            def get_active_project_path(self):
+                return None
+
+            def set_agent_manager(self, mgr):
+                recorded["project_agent_mgr"] = mgr
+
+            def set_review_handler(self, rh):
+                recorded["project_review"] = rh
+
+        class ActivityHandler:
+            on_send_initiated = staticmethod(lambda sk: None)
+            on_res_confirmed = staticmethod(lambda sk: None)
+
+            def set_agent_manager(self, mgr):
+                recorded["activity_agent_mgr"] = mgr
+
+            def set_on_lifecycle_completed(self, cb):
+                recorded["lifecycle"] = cb
+
+            def set_on_assistant_buffer(self, cb):
+                recorded["buffer"] = cb
+
+            def set_on_agent_start(self, cb):
+                recorded["agent_start"] = cb  # <- the completion sentinel
+
+        class MainContent:
+            def set_agent_manager(self, mgr):
+                recorded["mc_agent_mgr"] = mgr
+
+        class AgentListHandler:
+            def set_agent_mgr(self, mgr):
+                recorded["list_agent_mgr"] = mgr
+
+        class SessionHandler:
+            def set_agent_manager(self, mgr):
+                recorded["session_agent_mgr"] = mgr
+
+        class FeedHandler:
+            def add_audit_report_card(self, report, project_name=None):
+                pass
+
+        class LeftPanel:
+            def refresh_agents_with_project(self, name):
+                recorded["refresh"] = name
+
+        class GW:
+            def get_identity(self):
+                return {"device_id": "test-device"}
+
+        handler = ConnectionSyncHandler(
+            chat_handler=chat_handler,
+            main_content=MainContent(),
+            agent_list_handler=AgentListHandler(),
+            gateway_handler=GWHandler(),
+            project_handler=ProjectHandler(),
+            command_handler=command_handler,
+            agent_command_handler=agent_command_handler,
+            session_handler=SessionHandler(),
+            feed_handler=FeedHandler(),
+            left_panel=LeftPanel(),
+            review_handler=MagicMock(name="review"),
+            activity_handler=ActivityHandler(),
+            agent_to_project={},
+            on_forward_clicked=lambda *a, **k: None,
+            project_path_provider=lambda: None,
+            main_window=None,
+        )
+
+        # Must not raise — and must reach the final wiring statement.
+        handler.sync(GW())
+
+        # Ran-to-completion proof: the LAST wiring call in sync() fired.
+        assert "agent_start" in recorded, (
+            "sync() did not run to completion — set_on_agent_start (its final "
+            "statement) never fired"
+        )
+        assert recorded["agent_start"] == chat_handler._clear_render_guard
+        # Spot-check the mid-body wiring on the real classes.
+        assert recorded["project_review"] is not None
+        assert chat_handler._agent_mgr is GWHandler.agent_mgr

@@ -64,6 +64,7 @@ class ReviewHandler:
         self._on_display_card = on_display_card
         self._on_display_text = on_display_text
         self._on_feed_card = on_feed_card
+        self._agent_runtime_handler = None  # injected via set_agent_runtime_handler()
 
         # Per-project review states: project_name -> ReviewState
         self._states: dict[str, ReviewState] = {}
@@ -75,8 +76,6 @@ class ReviewHandler:
         # set_feed_handler; REVIEW-PERSIST-1 Edit B)
         self._feed_handler = None
 
-        # Gateway client for sending messages to agents (set via set_gateway_client)
-        self._gw = None
 
     def set_chat_handler(self, chat_handler):
         """Set ChatHandler reference for rejection message sending."""
@@ -142,9 +141,6 @@ class ReviewHandler:
                     card.card_id, project_name,
                 )
 
-    def set_gateway_client(self, gw):
-        """Set GatewayClient reference for sending messages to agents."""
-        self._gw = gw
 
     def _emit_feed_card(self, card_dict: dict) -> None:
         """Convert git_commit card dict to FeedCardData and fire feed callback.
@@ -563,16 +559,44 @@ class ReviewHandler:
         threading.Thread(target=_do, daemon=True).start()
 
     def _send_rejection_messages(self, project_name: str, reason: str, sha: str) -> None:
-        """Send rejection reason to all project members via gateway."""
-        if self._gw is None:
+        """Send rejection reason to all project members via the local runtime path.
+
+        Thread contract (FIX 7.2): this runs on a background thread but
+        AgentRuntimeHandler is documented main-thread — so each member send is
+        marshalled via GLib.idle_add when GLib is available, mirroring how the
+        rest of ReviewHandler dispatches. Without GLib (tests) we call directly.
+        Per-member error isolation (FIX 6.1) is preserved: one failure logs a
+        WARNING and continues, it never aborts the loop.
+        """
+        if self._agent_runtime_handler is None:
             return
         members = self._ph.get_project_members(project_name)
         message = f"Changes rejected: {reason}. Files reverted to checkpoint {sha[:7]}."
-        for member in members:
+
+        def _send_to(member: str, msg: str) -> None:
+            # Local path only (SPEC-05 R1); receiver no-ops for
+            # unregistered/remote keys.
+            self._agent_runtime_handler.send_to_special_agent(member, msg)
+
+        def _send_isolated(member: str = "", msg: str = "") -> None:
             try:
-                self._gw.send_message(member, message)
-            except Exception:
-                pass  # Don't fail the whole operation if one message fails
+                _send_to(member, msg)
+            except Exception as exc:
+                _logger.warning(
+                    "review: rejection message to %s failed: %s", member, exc
+                )
+
+        for member in members:
+            if self._GLib is not None:
+                # Marshal to the GTK main thread — ARH is main-thread-documented.
+                self._GLib.idle_add(lambda m=member: _send_isolated(m, message))
+            else:
+                _send_isolated(member, message)
+
+    def set_agent_runtime_handler(self, handler) -> None:
+        """Inject AgentRuntimeHandler — the local send path for rejection
+        messages (SPEC-05 R1). Called by window.py after ARH is built."""
+        self._agent_runtime_handler = handler
 
     def get_state(self, project_name: str) -> ReviewState | None:
         """Get current review state for a project."""

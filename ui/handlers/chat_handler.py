@@ -31,7 +31,6 @@ class ChatHandler:
 
     Args:
         main_content:       MainContent instance — for tab ops and input access
-        gateway_client:     GatewayClient instance — for send_message()
         agent_to_project   — AgentRoutingTable — ProjectHandler writes, ChatHandler reads
         projects_module:    utils.projects module — for load_members()
         GLib_module:        gi.repository.GLib or None — for thread-safe GTK calls
@@ -40,13 +39,11 @@ class ChatHandler:
     def __init__(
         self,
         main_content,      # MainContent
-        gateway_client,    # GatewayClient
         agent_to_project,  # AgentRoutingTable — ProjectHandler writes, ChatHandler reads
         projects_module,   # module — utils.projects
         GLib_module=None,  # gi.repository.GLib or None
     ):
         self._mc = main_content
-        self._gw = gateway_client
         # agent_to_project is an AgentRoutingTable — ProjectHandler writes, ChatHandler reads
         self._agent_to_project = agent_to_project
         self._projects = projects_module
@@ -60,7 +57,6 @@ class ChatHandler:
         self._on_agent_response: Callable[[str, str, str | None], None] | None = None  # agent response hook (Phase 6.2)
         self._on_res_confirmed: Callable[[str], None] | None = None  # pre-flight confirm via res
         self._agent_runtime_handler = None  # injected via set_agent_runtime_handler()
-        self._awareness_sent: set[str] = set()  # track "project:agent" pairs that received awareness
         self._agent_mgr = None  # injected via set_agent_manager() after gateway connect
         # Bug fix: state for missing message recovery (Phase 1 of SPEC-smarter-chat-ux)
         self._assistant_text_buffer: dict[str, str] = {}  # session_key → last assistant text
@@ -75,24 +71,6 @@ class ChatHandler:
         self._agent_runtime_handler = handler
 
     # ── Public API ───────────────────────────────────────────────────────────
-
-    def set_gateway_client(self, gw):
-        """
-        Set or replace the live GatewayClient reference.
-        Called by GatewayHandler after successful connect.
-        Window no longer needs to reach into _gw directly.
-        """
-        self._gw = gw
-
-    def send_raw_message(self, session_key: str, text: str) -> None:
-        """
-        Send a raw message to a session via the gateway.
-        Used by window callbacks (e.g., FeedHandler agent notifications).
-
-        No routing, no echo, no broadcast — just sends.
-        """
-        if self._gw is not None and self._gw.is_connected():
-            self._gw.send_message(session_key, text)
 
     def set_on_forward_message(self, cb):
         """Set callback for forward button: cb(text, anchor_widget)."""
@@ -179,6 +157,24 @@ class ChatHandler:
         """Inject the live AgentManager after gateway connect. Called by window.py."""
         self._agent_mgr = agent_mgr
 
+    def _send_local(self, session_key: str, text: str) -> None:
+        """Single local send entry point - ALL send sites route through here.
+
+        FIX 7 (SPEC-05 SP2 audit BUG #7): ONE None-guard instead of eight
+        scattered ones. If the AgentRuntimeHandler is not wired yet (early
+        startup, partial construction), the send is dropped with a WARNING
+        instead of raising AttributeError from inside a GTK callback.
+        """
+        if self._agent_runtime_handler is None:
+            _logger.warning(
+                "[chat] Send dropped for %r - AgentRuntimeHandler not wired yet",
+                session_key,
+            )
+            return
+        # Local path only (SPEC-05 R1); the receiver no-ops with a warning
+        # for unregistered/remote keys.
+        self._agent_runtime_handler.send_to_special_agent(session_key, text)
+
     def _show_forward_menu(self, text, anchor_widget):
         """
         Show a popover listing other agents to forward text to.
@@ -235,12 +231,9 @@ class ChatHandler:
                                     agent_name="You",
                                 )
                         # Route through AgentRuntime for special agents, gateway for others
-                        is_special = (self._agent_runtime_handler is not None
-                                      and result.forward_to in self._agent_runtime_handler.get_special_agents())
-                        if is_special:
-                            self._agent_runtime_handler.send_to_special_agent(result.forward_to, result.forward_text)
-                        elif self._gw is not None and self._gw.is_connected():
-                            self._gw.send_message(result.forward_to, result.forward_text)
+                        # Local path only (SPEC-05 R1): the receiver no-ops
+                        # with a warning for unregistered/remote keys.
+                        self._send_local(result.forward_to, result.forward_text)
                     self._dispatch(_show_echo_and_forward)
                 elif result.broadcast_targets and result.forward_text:
                     # BUG #4 fix: fan-out @ broadcast to all project members
@@ -260,16 +253,9 @@ class ChatHandler:
                                     agent_name="You",
                                 )
                         for target in result.broadcast_targets:
-                            # Special agents route through AgentRuntimeHandler, not gateway
-                            is_special = (self._agent_runtime_handler is not None
-                                          and target in self._agent_runtime_handler.get_special_agents())
-                            if is_special:
-                                self._agent_runtime_handler.send_to_special_agent(target, result.forward_text)
-                                continue
-                            # Gateway agent — skip silently when offline
-                            if self._gw is None or not self._gw.is_connected():
-                                continue
-                            self._gw.send_message(target, result.forward_text)
+                            # Local path only (SPEC-05 R1); receiver no-ops for
+                            # unregistered/remote keys.
+                            self._send_local(target, result.forward_text)
                     self._dispatch(_show_broadcast_and_forward)
                 # Note: response_text is handled by CommandHandler._dispatch_result()
                 # via on_display_text callback. No need to render it here.
@@ -294,46 +280,16 @@ class ChatHandler:
                             on_forward_click=self._on_forward_message,
                             agent_name="You",
                         )
-                self._agent_runtime_handler.send_to_special_agent(session_key, text)
+                self._send_local(session_key, text)
             self._dispatch(_show_and_route_to_agent)
             buf.set_text("")
             if self._on_send_initiated:
                 self._on_send_initiated(session_key)
             return
 
-        # ── Gateway guard (project-tab sends fall through to fan-out) ──────────────
-        if self._gw is None or not self._gw.is_connected():
-            # Only block direct gateway-agent sends when offline.
-            # Project-tab sends reach _show_and_send() which handles fan-out locally.
-            if not session_key.startswith("project:"):
-                def _show_offline_error():
-                    chat_box = self._mc.get_chat_box()
-                    if chat_box is not None:
-                        if self._chat_render_handler is not None:
-                            def _on_echo(bubble):
-                                if bubble is not None:
-                                    chat_box.append(bubble)
-                                self._mc.scroll_chat_to_bottom()
-                            self._chat_render_handler.render_async(
-                                "You", text, session_key,
-                                on_bubble_ready=_on_echo,
-                                on_forward_click=self._on_forward_message,
-                                agent_name="You",
-                            )
-                            def _on_error_bubble(bubble):
-                                if bubble is not None:
-                                    chat_box.append(bubble)
-                                self._mc.scroll_chat_to_bottom()
-                            self._chat_render_handler.render_async(
-                                "System",
-                                "⚠️ Not connected to gateway. Start the gateway or use a local agent.",
-                                session_key,
-                                on_bubble_ready=_on_error_bubble,
-                            )
-                self._dispatch(_show_offline_error)
-                buf.set_text("")
-                return
-            # else: project-tab — fall through to _show_and_send for fan-out
+        # ── (SPEC-05 R6): gateway-availability guard removed — the local
+        # runtime path is always "connected"; the receiver handles
+        # agent-not-found itself.
 
         # ── Inline @mention routing (project tabs only) ─────────────────────
         # After command handler returned handled=False, check for @mentions in
@@ -375,12 +331,9 @@ class ChatHandler:
                             )
                     # Special agents route through AgentRuntimeHandler, not gateway
                     # (they have no gateway session; gateway would silently drop the message)
-                    is_special = (self._agent_runtime_handler is not None
-                                  and resolution.target_session_key in self._agent_runtime_handler.get_special_agents())
-                    if is_special:
-                        self._agent_runtime_handler.send_to_special_agent(resolution.target_session_key, forward_text)
-                    elif self._gw is not None and self._gw.is_connected():
-                        self._gw.send_message(resolution.target_session_key, forward_text)
+                    # Local path only (SPEC-05 R1); receiver no-ops for
+                    # unregistered/remote keys.
+                    self._send_local(resolution.target_session_key, forward_text)
                 self._dispatch(_show_and_route_solo)
                 if self._on_send_initiated:
                     self._on_send_initiated(session_key)
@@ -404,18 +357,10 @@ class ChatHandler:
                                 on_forward_click=self._on_forward_message,
                                 agent_name="You",
                             )
-                    if self._gw is not None and self._gw.is_connected():
-                        for target in resolution.broadcast_targets:
-                            # Special agents route through AgentRuntimeHandler, not gateway
-                            is_special = (self._agent_runtime_handler is not None
-                                          and target in self._agent_runtime_handler.get_special_agents())
-                            if is_special:
-                                self._agent_runtime_handler.send_to_special_agent(target, forward_text)
-                                continue
-                            # Gateway agent — skip silently when offline
-                            if self._gw is None or not self._gw.is_connected():
-                                continue
-                            self._gw.send_message(target, forward_text)
+                    for target in resolution.broadcast_targets:
+                        # Local path only (SPEC-05 R1); receiver no-ops for
+                        # unregistered/remote keys.
+                        self._send_local(target, forward_text)
                 self._dispatch(_show_and_route_broadcast)
                 if self._on_send_initiated:
                     self._on_send_initiated(session_key)
@@ -450,22 +395,9 @@ class ChatHandler:
                 if solo_target:
                     # Solo DM — send only to the selected member
                     # Special agents route through AgentRuntimeHandler, not gateway
-                    is_special = (self._agent_runtime_handler is not None
-                                  and solo_target in self._agent_runtime_handler.get_special_agents())
-                    if is_special:
-                        self._agent_runtime_handler.send_to_special_agent(solo_target, text)
-                    else:
-                        # Skip gateway-agent sends when offline (no crash)
-                        if self._gw is None or not self._gw.is_connected():
-                            pass  # silently skip — gateway agent unavailable offline
-                        else:
-                            key = f"{project_name}:{solo_target}"
-                            if key not in self._awareness_sent:
-                                prefix = self._build_awareness_prefix(project_name)
-                            else:
-                                prefix = ""
-                            self._gw.send_message(solo_target, prefix + text)
-                            self._awareness_sent.add(key)
+                    # Local path only (SPEC-05 R1); receiver no-ops for
+                    # unregistered/remote keys.
+                    self._send_local(solo_target, text)
                 else:
                     # Group broadcast — fan out to all members
                     if self._project_handler:
@@ -475,28 +407,13 @@ class ChatHandler:
                     else:
                         members = []
                     for member in members:
-                        # Special agents route through AgentRuntimeHandler,
-                        # not gateway (they have no gateway session)
-                        is_special_member = (
-                            self._agent_runtime_handler is not None
-                            and member in self._agent_runtime_handler.get_special_agents()
-                        )
-                        if is_special_member:
-                            self._agent_runtime_handler.send_to_special_agent(member, text)
-                            continue
-
-                        # Gateway agent — skip silently when offline (no crash)
-                        if self._gw is None or not self._gw.is_connected():
-                            continue
-                        key = f"{project_name}:{member}"
-                        if key not in self._awareness_sent:
-                            prefix = self._build_awareness_prefix(project_name)
-                        else:
-                            prefix = ""
-                        self._gw.send_message(member, prefix + text)
-                        self._awareness_sent.add(key)
+                        # Local path only (SPEC-05 R1); receiver no-ops for
+                        # unregistered/remote keys.
+                        self._send_local(member, text)
             else:
-                self._gw.send_message(session_key, text)
+                # Local path only (SPEC-05 R1); receiver no-ops for
+                # unregistered/remote keys.
+                self._send_local(session_key, text)
         self._dispatch(_show_and_send)
         buf.set_text("")
 
@@ -728,61 +645,6 @@ class ChatHandler:
                 break
 
     # ── Internal ─────────────────────────────────────────────────────────────
-
-    def _build_awareness_prefix(self, project_name: str) -> str:
-        """Build project awareness prefix for a gateway agent message.
-
-        Returns raw awareness data (build_awareness_block) prefixed with a
-        neutral header, plus the collaboration protocol (collab.md).
-
-        Special agents are NOT routed through this method — they go through
-        AgentRuntimeHandler.send_to_special_agent() which has its own prompt
-        pipeline (agent/context.py build_system_prompt() via prompt_loader).
-
-        Awareness tracking (send-once-only) is handled by the caller via
-        the _awareness_sent set.
-
-        Returns empty string if awareness not available.
-        """
-        if not self._project_handler:
-            return ""
-        project_path = self._project_handler.get_active_project_path()
-        if not project_path:
-            return ""
-        parts = []
-        try:
-            from utils.project_awareness import build_awareness_block
-            block = build_awareness_block(project_path)
-            if block.strip():
-                parts.append(f"## Project Context\n\n{block}")
-        except Exception:
-            pass
-
-        # Inject collaboration protocol — same collab.md injected into special
-        # agents via prompt_loader. Gateway agents need it too so they understand
-        # how to use mentions correctly in project chats.
-        try:
-            from utils.prompt_loader import load_prompt_template
-            collab = load_prompt_template("collab")
-            if collab and collab.strip():
-                parts.append(collab)
-        except Exception:
-            pass
-
-        # Inject CrabCakes platform context — rendering formats, commands, review layer
-        # Same template injected for special agents via compose_system_prompt().
-        # Gateway agents do not reach compose_system_prompt(), so this is the injection point.
-        try:
-            from utils.prompt_loader import load_prompt_template
-            cc_ctx = load_prompt_template("crabcakes-context")
-            if cc_ctx and cc_ctx.strip():
-                parts.append(cc_ctx)
-        except Exception:
-            pass
-
-        if parts:
-            return "\n\n".join(parts) + "\n\n"
-        return ""
 
     def _dispatch(self, fn: Callable):
         """Call fn on the GTK main thread. Direct call if GLib not available."""

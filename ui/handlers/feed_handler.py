@@ -2248,9 +2248,31 @@ class FeedHandler:
                     self._update_card_visual(card_id, accepted=False)
                     # Persist to feed.json (Phase 1: via the background writer)
                     self._enqueue_card_update(project_path, card_id, {"accepted": False})
-                    # Notify agent
+                    # Notify agents — FIX 6.2 (SP2 audit): the former
+                    # f"project:{name}" key was a guaranteed no-op receiver.
+                    # Per-member routing mirrors ReviewHandler's rejection
+                    # fan-out; special:supervisor is the fallback when the
+                    # project has no registered members (honest minimal
+                    # option — the FeedHandler callback shape is a single
+                    # (session_key, text) pair, so member iteration happens
+                    # here rather than in the callback).
                     msg = f"[PM] Rejected change: {card.title}"
-                    self._on_send_to_agent(f"project:{card.project_name}", msg)
+                    members = []
+                    if self._project_handler is not None:
+                        try:
+                            members = list(
+                                self._project_handler.get_project_members(
+                                    card.project_name
+                                )
+                            )
+                        except Exception as exc:
+                            _logger.warning(
+                                "feed: member lookup for %s failed: %s",
+                                card.project_name, exc,
+                            )
+                    targets = members or ["special:supervisor"]
+                    for target in targets:
+                        self._on_send_to_agent(target, msg)
                     # Add git card
                     self._add_git_card(card, result_reject)
                 self._GLib.idle_add(_mark)

@@ -134,6 +134,7 @@ gateway object exists anywhere in the graph.
 | Case | Behavior |
 |---|---|
 | Message addressed to a remote-agent session key | Local path no-ops with warning (MVP has no remote agents) |
+| Stale/persisted `agent:` gateway tabs | Sends no-op with a runtime warning; no UI surface (MVP has no remote agents; surfaced properly when a remote transport returns in a future spec) |
 | Connect pressed in MVP | Status cycles to "no transport configured"; no crash |
 | Persisted conversations from gateway era | Load unchanged (no gateway fields consulted) |
 | `models/activity.py` event catalog comments | Update doc-comment to "locally defined" (comment-only) |

@@ -4,7 +4,7 @@
 # Manifest:
 #   reads:   nothing
 #   writes:  nothing
-#   network: gateway_client.send_message() for gateway agent routing
+#   network: (SPEC-05 R1) local runtime path only — send_to_special_agent
 #   GTK:     none (callbacks dispatched by callers on main thread)
 #
 # Architecture:
@@ -17,11 +17,9 @@
 # Wire points (window.py):
 #   - set_command_handler()      → CommandHandler instance
 #   - set_agent_runtime_handler() → AgentRuntimeHandler instance
-#   - set_gateway_client()       → GatewayClient instance (may be None offline)
 #   - set_agent_manager()        → AgentManager instance
 #   - set_agent_routing()        → AgentRoutingTable instance
 #   - set_project_handler()       → ProjectHandler instance
-#   - set_awareness_sent()       → shared _awareness_sent set from ChatHandler
 
 import re
 import logging
@@ -187,11 +185,9 @@ class AgentCommandHandler:
     def __init__(self, *, GLib_module=None):
         self._command_handler = None       # CommandHandler
         self._agent_runtime_handler = None  # AgentRuntimeHandler
-        self._gw = None                     # GatewayClient
         self._agent_mgr = None              # AgentManager
         self._agent_to_project = None       # AgentRoutingTable
         self._project_handler = None        # ProjectHandler
-        self._awareness_sent: set[str] | None = None  # Shared set from ChatHandler
 
         # Chain depth: session_key → depth counter
         self._chain_depth: dict[str, int] = {}
@@ -218,10 +214,6 @@ class AgentCommandHandler:
         """AgentRuntimeHandler — for special agent routing."""
         self._agent_runtime_handler = handler
 
-    def set_gateway_client(self, gw) -> None:
-        """GatewayClient — for gateway agent routing. May be None if offline."""
-        self._gw = gw
-
     def set_agent_manager(self, mgr) -> None:
         """AgentManager — for display name resolution."""
         self._agent_mgr = mgr
@@ -231,14 +223,8 @@ class AgentCommandHandler:
         self._agent_to_project = routing_table
 
     def set_project_handler(self, handler) -> None:
-        """ProjectHandler — for project_path (awareness prefix in agent-initiated
-        gateway messages)."""
+        """ProjectHandler — for project lookups in agent-initiated commands."""
         self._project_handler = handler
-
-    def set_awareness_sent(self, awareness_set: set[str]) -> None:
-        """"Shared _awareness_sent set from ChatHandler — for first-time
-        project awareness prefix injection on gateway agent sends."""
-        self._awareness_sent = awareness_set
 
     def set_project_path_provider(self, provider: Any) -> None:
         """Callable that returns the active project path, or None."""
@@ -491,19 +477,13 @@ class AgentCommandHandler:
             self._agent_runtime_handler.send_to_special_agent(resolved_sk, text)
             return
 
-        # Fallback to gateway routing for gateway agents
-        if self._gw is not None and self._gw.is_connected():
-            # Inject awareness prefix for first-time (project, agent) pairs
-            prefix = ""
-            if project_name and self._awareness_sent is not None:
-                key = f"{project_name}:{target_sk}"
-                if key not in self._awareness_sent:
-                    prefix = self._build_awareness_prefix(project_name)
-                    self._awareness_sent.add(key)
-            self._gw.send_message(target_sk, prefix + text)
+        # Local path only (SPEC-05 R1): receiver no-ops with a warning for
+        # unregistered/remote keys — that no-op IS the former gateway branch.
+        if self._agent_runtime_handler is not None:
+            self._agent_runtime_handler.send_to_special_agent(target_sk, text)
         else:
             logger.debug(
-                "[agent-cmd] Cannot route to %s — no gateway connection", target_sk
+                "[agent-cmd] No runtime handler — cannot route to %s", target_sk
             )
 
     def _resolve_special_agent_sk(self, display_name: str) -> str | None:
@@ -608,35 +588,6 @@ class AgentCommandHandler:
             if name:
                 return name
         return session_key.split("/")[-1]
-
-    def _build_awareness_prefix(self, project_name: str) -> str:
-        """Build project awareness prefix for gateway agent messages.
-
-        NOTE: Duplicated from ChatHandler because handlers cannot import each other.
-        """
-        if not self._project_handler:
-            return ""
-        project_path = self._project_handler.get_active_project_path()
-        if not project_path:
-            return ""
-        parts: list[str] = []
-        try:
-            from utils.project_awareness import build_awareness_block
-            block = build_awareness_block(project_path)
-            if block.strip():
-                parts.append(block.strip())
-        except Exception:
-            pass  # Awareness is best-effort
-        try:
-            from utils.prompt_loader import load_prompt_template
-            collab = load_prompt_template("collab")
-            if collab and collab.strip():
-                parts.append(collab.strip())
-        except Exception:
-            pass
-        if not parts:
-            return ""
-        return "\n\n".join(parts) + "\n\n"
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

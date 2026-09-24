@@ -101,7 +101,6 @@ class ConnectionSyncHandler:
         owner of this logic, ui/window.py lines 613–685). Same order, same comments,
         same bare-except around the optional agent_defs import.
         """
-        self._chat_handler.set_gateway_client(gw)
         self._main_content.set_agent_manager(self._gateway_handler.agent_mgr)
         # Wire AgentListHandler to the live AgentManager
         self._agent_list_handler.set_agent_mgr(self._gateway_handler.agent_mgr)
@@ -118,17 +117,14 @@ class ConnectionSyncHandler:
                 self._project_handler.get_active_project_name()
             )
         # Wire CommandHandler with live references after connect
-        self._command_handler.set_gateway_client(gw)
         self._command_handler.set_agent_manager(self._gateway_handler.agent_mgr)
         # Wire ProjectHandler with live AgentManager for session lookup
         self._project_handler.set_agent_manager(self._gateway_handler.agent_mgr)
         # Wire ProjectHandler → ReviewHandler for cmd_status review state queries
         self._project_handler.set_review_handler(self._review_handler)
         # Wire AgentCommandHandler with live references after connect
-        self._agent_command_handler.set_gateway_client(gw)
         self._agent_command_handler.set_agent_manager(self._gateway_handler.agent_mgr)
         self._agent_command_handler.set_agent_routing(self._agent_to_project)
-        self._agent_command_handler.set_awareness_sent(self._chat_handler._awareness_sent)
         self._agent_command_handler.set_project_handler(self._project_handler)
         self._agent_command_handler.set_project_path_provider(
             lambda: self._project_handler.get_active_project_path()

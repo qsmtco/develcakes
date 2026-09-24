@@ -146,12 +146,27 @@ class FakeMainContent:
 
 
 class FakeGatewayClient:
-    """Pretends to be GatewayClient — tracks what ChatHandler calls on it."""
+    """Post-R1 (SPEC-05 SP2): records what the local runtime receiver gets.
+
+    The gateway branch is gone — ChatHandler sends everything through
+    AgentRuntimeHandler.send_to_special_agent. This fake is wired as that
+    receiver (via set_agent_runtime_handler in make_handler) so tests can
+    keep asserting on gw.get_sent() with zero assertion churn. is_connected /
+    send_message / clear_sent are kept as inert compatibility shims.
+    """
 
     def __init__(self, connected=True):
-        self._connected = connected
+        self._connected = connected  # vestigial — nothing consults it post-R1
         self._sent = []  # (session_key, text)
 
+    # ── The real receiver interface (what ChatHandler now calls) ──
+    def get_special_agents(self):
+        return {}
+
+    def send_to_special_agent(self, session_key, text):
+        self._sent.append((session_key, text))
+
+    # ── Compat shims (dead post-R1, kept for fixtures) ──
     def is_connected(self):
         return self._connected
 
@@ -178,8 +193,14 @@ class FakeProjectsModule:
 
 # ── Subject under test ───────────────────────────────────────────────────────────
 
-def make_handler(main_content, gateway_client, agent_to_project=None, projects_module=None):
-    """Create a ChatHandler with all dependencies injected."""
+def make_handler(main_content, gateway_client=None, agent_to_project=None, projects_module=None):
+    """Create a ChatHandler with all dependencies injected.
+
+    SPEC-05 R1 (SP2): gateway_client is accepted for call-site compatibility
+    but IGNORED — ChatHandler no longer takes a gateway. Tests that create
+    FakeGatewayClient instances do so only to pass truthy/disconnected values;
+    the fixture keeps the callsites one-line-diffable.
+    """
     from ui.handlers.chat_handler import ChatHandler
     from models import AgentRoutingTable
 
@@ -194,10 +215,13 @@ def make_handler(main_content, gateway_client, agent_to_project=None, projects_m
 
     handler = ChatHandler(
         main_content=main_content,
-        gateway_client=gateway_client,
         agent_to_project=agent_to_project,
         projects_module=projects_module,
     )
+    # Post-R1: the gateway fake IS the local receiver — wire it so sends land
+    # in gw.get_sent() exactly as they did pre-strip (assertion-compatible).
+    if gateway_client is not None:
+        handler.set_agent_runtime_handler(gateway_client)
     return handler
 
 
@@ -213,13 +237,14 @@ class TestSendClicked:
         handler.on_send_clicked()  # must not raise
 
     def test_noop_when_disconnected(self):
-        """Gateway exists but not connected: must not crash, no message sent."""
-        gw = FakeGatewayClient(connected=False)
+        """SPEC-05 R6: the connectivity gate is deleted — the local runtime
+        path is always "connected". Send proceeds; no crash, message delivered."""
+        gw = FakeGatewayClient(connected=False)  # vestigial flag, nothing reads it
         mc = FakeMainContent(session_key="agent:main", input_text="hello")
         handler = make_handler(mc, gw)
         handler.on_send_clicked()
 
-        assert gw.get_sent() == []
+        assert gw.get_sent() == [("agent:main", "hello")]
 
     def test_noop_when_no_text(self):
         """Input is empty string: must not crash, no message sent."""
@@ -334,7 +359,7 @@ class TestSendProjectFanOut:
 
         # The fan-out path renders the You message to the project tab.
         # It may also send via gw.send_message to each member, but that's
-        # covered by the FakeGatewayClient._sent log — not under test here.
+        # covered by the runtime receiver no-op — not under test here.
         render_calls = mc._chat_render_handler.render_async.call_args_list
         you_calls = [c for c in render_calls if c[0][0] == "You" and c[0][1] == "broadcast"]
         assert len(you_calls) >= 1, (
@@ -759,10 +784,10 @@ class TestInlineMentionRouting:
 
         handler.on_send()
 
-        # Must NOT call AgentRuntimeHandler
-        mock_arh.send_to_special_agent.assert_not_called()
-        # Must send to gateway
-        assert gw.get_sent() == [("agent:qtr", "status")]
+        # SPEC-05 R1: the gateway branch is gone — the receiver handles ALL
+        # targets (its no-op for unregistered keys IS the former gateway path).
+        mock_arh.send_to_special_agent.assert_called_once_with("agent:qtr", "status")
+        assert gw.get_sent() == []
 
     def test_inline_mention_broadcast_with_special_member_routes_to_runtime(self):
         """Inline @all hello with mixed members → special agents via runtime, gateway agents via gw."""
@@ -780,10 +805,12 @@ class TestInlineMentionRouting:
 
         handler.on_send()
 
-        # Coder routed through AgentRuntimeHandler
-        mock_arh.send_to_special_agent.assert_called_once_with("special:coder", "hello")
-        # QTR routed through gateway
-        assert gw.get_sent() == [("agent:qtr", "hello")]
+        # SPEC-05 R1: both targets route through the receiver — one call per
+        # member (Coder a special agent, QTR handled by the receiver's no-op).
+        assert mock_arh.send_to_special_agent.call_count == 2
+        mock_arh.send_to_special_agent.assert_any_call("special:coder", "hello")
+        mock_arh.send_to_special_agent.assert_any_call("agent:qtr", "hello")
+        assert gw.get_sent() == []
 
     def test_inline_mention_to_special_agent_does_not_call_gw(self):
         """Regression guard: inline @Coder must NOT call gw.send_message at all."""

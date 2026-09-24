@@ -1059,8 +1059,9 @@ class AgentRuntimeHandler:
             )
             return
 
-        # Special agents require an active project — except the helper (KB-based)
-        if self._active_project is None and getattr(agent_def, 'role', '') != 'helper':
+        # Special agents require an active project.
+        # (The KB-helper carve-out died with the KB stack, SPEC-04.)
+        if self._active_project is None:
             if self._GLib is not None:
                 self._GLib.idle_add(self._do_error, session_key,
                                     "Open a project first. Special agents work within projects.")

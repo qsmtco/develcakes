@@ -212,7 +212,6 @@ class TestChatHandlerBufferRecovery:
         from ui.handlers.chat_handler import ChatHandler
         handler = ChatHandler(
             main_content=MagicMock(),
-            gateway_client=MagicMock(),
             agent_to_project=MagicMock(),
             projects_module=MagicMock(),
             GLib_module=fake_glib,
@@ -227,7 +226,6 @@ class TestChatHandlerBufferRecovery:
         from ui.handlers.chat_handler import ChatHandler
         handler = ChatHandler(
             main_content=MagicMock(),
-            gateway_client=MagicMock(),
             agent_to_project=MagicMock(),
             projects_module=MagicMock(),
             GLib_module=fake_glib,
@@ -255,7 +253,6 @@ class TestChatHandlerBufferRecovery:
         from ui.handlers.chat_handler import ChatHandler
         handler = ChatHandler(
             main_content=MagicMock(),
-            gateway_client=MagicMock(),
             agent_to_project=MagicMock(),
             projects_module=MagicMock(),
             GLib_module=fake_glib,
@@ -318,7 +315,6 @@ class TestRenderGuardClearsOnNewRound:
         from ui.handlers.chat_handler import ChatHandler
         handler = ChatHandler(
             main_content=MagicMock(),
-            gateway_client=MagicMock(),
             agent_to_project=MagicMock(),
             projects_module=MagicMock(),
             GLib_module=fake_glib,
@@ -359,7 +355,6 @@ class TestRenderGuardClearsOnNewRound:
         ah = ActivityHandler(feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib)
         ch = ChatHandler(
             main_content=mc,
-            gateway_client=MagicMock(),
             agent_to_project=MagicMock(),
             projects_module=MagicMock(),
             GLib_module=fake_glib,

@@ -2,7 +2,8 @@
 # Tests for ui/handlers/agent_command_handler.py — Phase 6.2.
 #
 # Principle: mock at the boundary, test behavior not internals.
-# All tests use FakeCommandHandler, FakeAgentRuntimeHandler, FakeGateway
+# All tests use FakeCommandHandler, FakeAgentRuntimeHandler (gateway fakes
+# deleted with the R1 gateway branch, SPEC-05 SP2).
 # to isolate AgentCommandHandler logic from the rest of the codebase.
 #
 # Architecture §8.6 handler pattern: receives all deps via setters,
@@ -68,20 +69,6 @@ class FakeAgentRuntimeHandler:
         return self._agents
 
     def send_to_special_agent(self, sk, text):
-        self.sent.append((sk, text))
-
-
-class FakeGateway:
-    """Mock GatewayClient — records gateway sends and connection state."""
-
-    def __init__(self, connected=True):
-        self._connected = connected
-        self.sent = []  # [(session_key, text), ...]
-
-    def is_connected(self):
-        return self._connected
-
-    def send_message(self, sk, text):
         self.sent.append((sk, text))
 
 
@@ -201,16 +188,16 @@ class TestAskCommand:
         assert "special:debugger" in handler._pending_asks
         assert handler._pending_asks["special:debugger"] == "special:coder"
 
-    def test_ask_unknown_target_routes_via_gateway(self):
-        """/ask @Qaster where Qaster is not a special agent → via gateway."""
+    def test_ask_unknown_target_routes_via_runtime_receiver(self):
+        """/ask @Qaster where Qaster is not a special agent → routed through the
+        local runtime receiver. SPEC-05 R1 deleted the gateway branch; the
+        receiver no-ops with a warning for unregistered/remote keys."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
         fake_rt = FakeAgentRuntimeHandler()  # no special agents
-        fake_gw = FakeGateway(connected=True)
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
         handler.set_agent_manager(fake_am)
 
         handler.on_agent_response(
@@ -219,8 +206,8 @@ class TestAskCommand:
             "crabwatch"
         )
 
-        # Gateway send should contain the message (forward_to="Qaster" is sent as-is)
-        assert len(fake_gw.sent) == 1
+        # Routed via the local receiver — one send recorded
+        assert len(fake_rt.sent) == 1
 
 
 class TestTellCommand:
@@ -344,10 +331,8 @@ class TestRelay:
         """When target is gateway agent but source is special agent, relay to special via special handler."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={"special:coder": "Coder"})
-        fake_gw = FakeGateway(connected=True)
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
         handler.set_agent_manager(fake_am)
 
         # Qaster was asked by Coder
@@ -369,11 +354,9 @@ class TestMultiHop:
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
         fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
-        fake_gw = FakeGateway(connected=True)
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
         handler.set_agent_manager(fake_am)
 
         handler._chain_depth["special:coder"] = 0
@@ -390,11 +373,9 @@ class TestMultiHop:
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
         fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
-        fake_gw = FakeGateway(connected=True)
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
         handler.set_agent_manager(fake_am)
 
         # Simulate Coder at max depth
@@ -562,104 +543,6 @@ class TestMultipleCommands:
         )
 
         assert len(fake_rt.sent) == 0
-
-
-class TestOfflineGateway:
-    """Tests for offline/disconnected gateway behavior."""
-
-    def test_offline_gateway_no_crash(self):
-        """Gateway disconnected — gateway targets silently skipped, no crash."""
-        handler = AgentCommandHandler()
-        fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler()  # no special agents
-        fake_gw = FakeGateway(connected=False)
-        fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
-        handler.set_command_handler(fake_cmd)
-        handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
-        handler.set_agent_manager(fake_am)
-
-        # Should not raise — gateway target skipped
-        handler.on_agent_response(
-            "special:coder",
-            "/ask @Qaster \"is X compatible?\"",
-            "crabwatch"
-        )
-
-        assert len(fake_gw.sent) == 0  # gateway not connected — skipped
-
-
-class TestAwarenessPrefix:
-    """Tests for awareness prefix injection on gateway sends."""
-
-    def test_awareness_prefix_first_time_gateway_send(self):
-        """First gateway send to (project, agent) pair includes awareness prefix."""
-        handler = AgentCommandHandler()
-        fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler()
-        fake_gw = FakeGateway(connected=True)
-        fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
-        fake_routing = FakeRoutingTable(routing={"agent:qaster:...": "crabwatch"})
-        handler.set_command_handler(fake_cmd)
-        handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
-        handler.set_agent_manager(fake_am)
-        handler.set_agent_routing(fake_routing)
-
-        awareness_set = set()
-        handler.set_awareness_sent(awareness_set)
-
-        # Mock project handler for awareness prefix
-        class FakeProjectHandler:
-            def get_active_project_path(self):
-                return "/path/to/crabwatch"
-        handler.set_project_handler(FakeProjectHandler())
-
-        handler.on_agent_response(
-            "special:coder",
-            "/ask @Qaster \"is X compatible?\"",
-            "crabwatch"
-        )
-
-        # First send includes awareness (set is empty)
-        _, text = fake_gw.sent[0]
-        # When project_awareness and prompt_loader are unavailable in test,
-        # _build_awareness_prefix returns "" — this is acceptable.
-        # What we CAN test: awareness_set was checked and updated
-        # (the prefix being empty is fine since the real imports may not work in test)
-        assert len(fake_gw.sent) == 1
-
-    def test_awareness_prefix_not_duplicated(self):
-        """If (project, agent) already in _awareness_sent, prefix not added again."""
-        handler = AgentCommandHandler()
-        fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler()
-        fake_gw = FakeGateway(connected=True)
-        fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
-        fake_routing = FakeRoutingTable(routing={"agent:qaster:...": "crabwatch"})
-        handler.set_command_handler(fake_cmd)
-        handler.set_agent_runtime_handler(fake_rt)
-        handler.set_gateway_client(fake_gw)
-        handler.set_agent_manager(fake_am)
-        handler.set_agent_routing(fake_routing)
-
-        # Pre-populate awareness_sent — prefix should NOT be added again
-        awareness_set = {"crabwatch:agent:qaster:..."}
-        handler.set_awareness_sent(awareness_set)
-
-        class FakeProjectHandler:
-            def get_active_project_path(self):
-                return "/path/to/crabwatch"
-        handler.set_project_handler(FakeProjectHandler())
-
-        handler.on_agent_response(
-            "special:coder",
-            "/ask @Qaster \"is X compatible?\"",
-            "crabwatch"
-        )
-
-        # Gateway send happened (awareness prefix may be empty, but no crash)
-        assert len(fake_gw.sent) == 1
 
 
 class TestDisplayNameResolution:

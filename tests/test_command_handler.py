@@ -11,7 +11,7 @@
 #   4. @mention resolution (exact, partial, empty, no match, multiple)
 #   5. Body extraction (from quoted payload)
 #   6. Error handling in handler → error response_text
-#   7. set_gateway_client / set_agent_manager setters
+#   7. set_agent_manager setter (gateway setter deleted, SPEC-05 SP2)
 #   8. Command flow end-to-end
 #   9. Internal _parse_flags and _parse_mentions unit tests
 
@@ -60,7 +60,6 @@ class FakeProjectHandler:
 @pytest.fixture
 def empty_handler():
     return CommandHandler(
-        gateway_client=None,
         agent_manager=None,
         project_handler=None,
         GLib_module=None,
@@ -78,7 +77,6 @@ def configured_handler():
     })
     proj = FakeProjectHandler("testproj", ["agent:a:1", "agent:b:2"])
     h = CommandHandler(
-        gateway_client=None,
         agent_manager=agnt,
         project_handler=proj,
         GLib_module=None,
@@ -195,7 +193,7 @@ class TestMentionResolution:
         """Empty @ with no project handler → error response_text."""
         agnt = FakeAgentManager({})
         h = CommandHandler(
-            gateway_client=None, agent_manager=agnt,
+            agent_manager=agnt,
             project_handler=None, GLib_module=None,
         )
         h.register_command("stop", lambda c: CommandResult(handled=True, response_text="ok"))
@@ -215,7 +213,7 @@ class TestMentionResolution:
             "DebugB": "agent:db:2",
         })
         h = CommandHandler(
-            gateway_client=None, agent_manager=agnt,
+            agent_manager=agnt,
             project_handler=None, GLib_module=None,
         )
         h.register_command("echo", lambda c: CommandResult(handled=True, response_text="ok"))
@@ -245,13 +243,6 @@ class TestErrorHandling:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestSetters:
-    def test_set_gateway_client(self, empty_handler):
-        class FakeGW:
-            pass
-        gw = FakeGW()
-        empty_handler.set_gateway_client(gw)
-        assert empty_handler._gw is gw
-
     def test_set_agent_manager(self, empty_handler):
         class FakeAM:
             pass
@@ -408,7 +399,7 @@ class TestSpecialAgentMentionResolution:
     def test_exact_special_agent_resolves(self):
         """@Coder → special:coder via special agents registry."""
         agnt = FakeAgentManager({"QTR": "agent:qtr:telegram:direct:7478874934"})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
         resolved = h._resolve_mention("@Coder")
         assert resolved == "special:coder"
@@ -416,7 +407,7 @@ class TestSpecialAgentMentionResolution:
     def test_exact_debugger_resolves(self):
         """@Debugger → special:debugger via special agents registry."""
         agnt = FakeAgentManager({})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
         resolved = h._resolve_mention("@Debugger")
         assert resolved == "special:debugger"
@@ -424,7 +415,7 @@ class TestSpecialAgentMentionResolution:
     def test_prefix_match_special_agent(self):
         """@Co → special:coder via prefix match (min 2 chars)."""
         agnt = FakeAgentManager({})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
         resolved = h._resolve_mention("@Co")
         assert resolved == "special:coder"
@@ -432,7 +423,7 @@ class TestSpecialAgentMentionResolution:
     def test_single_char_no_partial_match(self):
         """@C (single char) → no prefix match, falls through to unknown."""
         agnt = FakeAgentManager({})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
         resolved = h._resolve_mention("@C")
         assert isinstance(resolved, CommandResult)
@@ -441,7 +432,7 @@ class TestSpecialAgentMentionResolution:
     def test_unknown_special_agent_returns_error(self):
         """@NotAnAgent → error via special agents registry."""
         agnt = FakeAgentManager({})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
         resolved = h._resolve_mention("@NotAnAgent")
         assert isinstance(resolved, CommandResult)
@@ -451,7 +442,7 @@ class TestSpecialAgentMentionResolution:
         """Special agent and gateway agent with same name — special wins (checked first)."""
         # Gateway agent named "Coder" (unusual but possible)
         agnt = FakeAgentManager({"Coder": "agent:coder:gateway:1"})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         # Special agent registry also has Coder
         h.set_special_agents({"special:coder": "Coder"})
         # Currently special agents are checked AFTER gateway agents in _resolve_mention
@@ -464,7 +455,7 @@ class TestSpecialAgentMentionResolution:
     def test_mixed_resolve_via_resolve_inline_mention(self):
         """resolve_inline_mention works for both gateway and special agents."""
         agnt = FakeAgentManager({"QTR": "agent:qtr:telegram:direct:7478874934"})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
 
         # Gateway agent
@@ -478,7 +469,7 @@ class TestSpecialAgentMentionResolution:
     def test_resolve_inline_mention_debugger(self):
         """resolve_inline_mention for @Debugger → special:debugger."""
         agnt = FakeAgentManager({})
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         h.set_special_agents({"special:debugger": "Debugger"})
         r = h.resolve_inline_mention("@Debugger fix this", "project:testproj")
         assert r.target_session_key == "special:debugger"
@@ -532,7 +523,7 @@ class TestBugFixes:
             "Beta": "agent:b:2",
             "Gamma": "agent:g:3",
         })
-        h = CommandHandler(None, agnt, None)
+        h = CommandHandler(agent_manager=agnt, project_handler=None)
         # 1-char query: exact match only (no partial), so @a with no agent named "a" → unknown
         resolved = h._resolve_mention("@a")
         assert isinstance(resolved, CommandResult)
@@ -564,7 +555,7 @@ class TestBugFixes:
                 return ["agent:other:99"]
 
         ph = MultiProjectHandler()
-        h = CommandHandler(None, agnt, ph)
+        h = CommandHandler(agent_manager=agnt, project_handler=ph)
         # @ broadcast from project:right-project tab should use right-project
         resolved = h._resolve_mention("@", session_key="project:right-project")
         assert isinstance(resolved, list)
@@ -601,7 +592,6 @@ class TestWorkHandlerRegistration:
 
         wh = FakeWorkHandler()
         h = CommandHandler(
-            gateway_client=None,
             agent_manager=None,
             project_handler=None,
             GLib_module=None,

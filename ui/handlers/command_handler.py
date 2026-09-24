@@ -4,7 +4,7 @@
 # Manifest:
 #   reads:   nothing
 #   writes:  nothing
-#   network: gateway_client.send_message() for forward_routing
+#   network: (SPEC-05 R1) local runtime path only — no gateway transport
 #   GTK:     on_display_card(), on_display_text() callbacks only
 #
 # Owns:
@@ -49,7 +49,6 @@ class CommandHandler:
 
     def __init__(
         self,
-        gateway_client,           # GatewayClient — for send_message()
         agent_manager,            # AgentManager — for @mention resolution
         project_handler,          # ProjectHandler — for project member lookups
         GLib_module=None,         # gi.repository.GLib or None
@@ -60,7 +59,6 @@ class CommandHandler:
         review_handler=None,     # ReviewHandler — for review/check/accept/reject
         session_handler=None,    # SessionHandler — for session
     ):
-        self._gw = gateway_client
         self._agent_mgr = agent_manager
         self._project_handler = project_handler
         self._GLib = GLib_module
@@ -175,10 +173,6 @@ class CommandHandler:
                 payload_free=True)
 
     # ── Public API ─────────────────────────────────────────────────────────────
-
-    def set_gateway_client(self, gw) -> None:
-        """Inject the live GatewayClient after connect. Called by window.py."""
-        self._gw = gw
 
     def set_agent_manager(self, agent_mgr) -> None:
         """Inject the live AgentManager after connect. Called by window.py."""
@@ -623,8 +617,8 @@ class CommandHandler:
         """Dispatch GTK side effects of a handled CommandResult.
 
         Note: forward_to/forward_text routing is handled by ChatHandler, not here.
-        This avoids double-send (ChatHandler already calls _gw.send_message for
-        forward commands after process_input returns).
+        This avoids double-send (ChatHandler routes forward commands via the
+        local runtime path after process_input returns).
         """
         def _do():
             try:
