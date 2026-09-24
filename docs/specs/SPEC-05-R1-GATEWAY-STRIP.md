@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** IMPLEMENTED 2026-09-23 (SP1-5; see docs/post-mortems/2026-09-23-SPEC-05-POST-MORTEM.md)
 **Implements:** docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md §5 R1 (with [SUP-REV] notes)
 **Depends on:** SPEC-04 (R5 before R1 — gateway work must not touch dying Auxilium files)
 **Target branch:** main
@@ -139,6 +139,9 @@ gateway object exists anywhere in the graph.
 | Persisted conversations from gateway era | Load unchanged (no gateway fields consulted) |
 | `models/activity.py` event catalog comments | Update doc-comment to "locally defined" (comment-only) |
 
-## 8. ARCHITECTURE.md Updates
+## 8. ARCHITECTURE.md Updates — RESOLVED
 
-§Modules/transport — mark implemented; §Data Flow already reflects post-R1 shape.
+§Modules/transport implemented 2026-09-23: Transport ABC + cleaned WebSocketTransport
+(357 lines; backoff/correlation/redaction kept, auth/catalog/UI deleted). All send
+sites route through the local runtime; Connect button = honest no-transport stub
+(Telegram post-MVP). See the SPEC-05 post-mortem for the audit trail and register.

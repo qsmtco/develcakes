@@ -20,7 +20,7 @@ import websockets
 
 from transport import openclaw as oc
 from transport.base import Transport
-from transport.openclaw import WebSocketTransport
+from transport.openclaw import WebSocketTransport, redact_log_preview
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 OPENCLAW_SRC = (REPO / "transport" / "openclaw.py").read_text(encoding="utf-8")
@@ -235,3 +235,83 @@ def _wait_sync(pred, timeout=10.0):
             return True
         time.sleep(0.01)
     return False
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  LOW-4 redaction behavioral coverage (SPEC-05 SP5 rider)
+#  Ported from the deleted tests/test_low345_gateway_hardening.py
+#  (SP3b) — redact_log_preview survived into transport/; its tests
+#  now live here. Shapes preserved verbatim from git history.
+# ═══════════════════════════════════════════════════════════════════
+
+class TestRedactLogPreview:
+    """transport.redact_log_preview scrubs sensitive keys from raw frames."""
+
+    def test_redact_apikey(self):
+        raw = '{"apiKey":"secret123","other":"x"}'
+        result = redact_log_preview(raw)
+        assert "secret123" not in result, f"apiKey value leaked: {result}"
+        assert "***" in result
+
+    def test_redact_apikey_case_insensitive(self):
+        for key in ("apiKey", "api_key", "apikey", "APIKEY"):
+            raw = f'{{"{key}":"hunter42"}}'
+            result = redact_log_preview(raw)
+            assert "hunter42" not in result, f"Failed for {key}: {result}"
+            assert "***" in result
+
+    def test_redact_token(self):
+        raw = '{"token":"mysecret","data":"ok"}'
+        result = redact_log_preview(raw)
+        assert "mysecret" not in result
+        assert "***" in result
+
+    def test_redact_device_token(self):
+        for key in ("deviceToken", "device_token"):
+            raw = f'{{"{key}":"dev_tok_xyz"}}'
+            result = redact_log_preview(raw)
+            assert "dev_tok_xyz" not in result
+
+    def test_redact_password(self):
+        raw = '{"username":"alice","password":"s3cr3t"}'
+        result = redact_log_preview(raw)
+        assert "s3cr3t" not in result
+
+    def test_redact_secret(self):
+        raw = '{"algorithm":"HS256","secret":"my-shared-secret"}'
+        result = redact_log_preview(raw)
+        assert "my-shared-secret" not in result
+
+    def test_redact_truncation_respected(self):
+        raw = "x" * 1000
+        result = redact_log_preview(raw)
+        assert len(result) <= len(raw)
+
+    def test_redact_no_op_for_clean_input(self):
+        raw = '{"type":"event","event":"chat.final","payload":{}}'
+        result = redact_log_preview(raw)
+        assert "chat.final" in result
+        assert "event" in result
+
+    def test_redact_key_without_value(self):
+        raw = '{"apiKey"}'
+        result = redact_log_preview(raw)
+        assert isinstance(result, str)
+
+    def test_redact_url_query_apiKey(self):
+        raw = "GET /api/v1/foo?apiKey=secret123&limit=10 HTTP/1.1"
+        result = redact_log_preview(raw)
+        assert "secret123" not in result
+        assert "apiKey=***" in result
+        assert "limit=10" in result
+
+    def test_redact_bearer_token(self):
+        raw = 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJhYmMifQ.sig'
+        result = redact_log_preview(raw)
+        assert "eyJhbGciOiJSUzI1NiJ9" not in result
+        assert "Bearer ***" in result
+
+    def test_malformed_preview_truncated(self):
+        long_raw = '{"apiKey":"a_very_long_value_that_exceeds_eighty_chars","other":"x"}'
+        preview = redact_log_preview(long_raw[:80])
+        assert len(preview) <= 80
