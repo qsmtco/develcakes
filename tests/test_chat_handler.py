@@ -2,7 +2,8 @@
 # Tests for ui/handlers/chat_handler.py — ChatHandler.
 #
 # Principle: test the failure modes that could break callers.
-# Mock GatewayClient and MainContent at the boundary.
+# Mock the local-runtime receiver (AgentRuntimeHandler spy) and MainContent
+# at the boundary.
 # Do NOT mock internal state — test what the handler does, not how it does it.
 
 import pytest
@@ -196,10 +197,11 @@ class FakeProjectsModule:
 def make_handler(main_content, gateway_client=None, agent_to_project=None, projects_module=None):
     """Create a ChatHandler with all dependencies injected.
 
-    SPEC-05 R1 (SP2): gateway_client is accepted for call-site compatibility
-    but IGNORED — ChatHandler no longer takes a gateway. Tests that create
-    FakeGatewayClient instances do so only to pass truthy/disconnected values;
-    the fixture keeps the callsites one-line-diffable.
+    gateway_client is a LEGACY ALIAS for the local-runtime receiver (SPEC-05
+    R1): when passed, it is wired via set_agent_runtime_handler so sends land
+    in gw.get_sent() exactly as before the strip — zero assertion churn at
+    30+ call sites. The param name stays for call-site compatibility
+    (renaming it would touch every test — deliberate).
     """
     from ui.handlers.chat_handler import ChatHandler
     from models import AgentRoutingTable
@@ -230,8 +232,8 @@ def make_handler(main_content, gateway_client=None, agent_to_project=None, proje
 class TestSendClicked:
     """on_send_clicked is the GTK signal handler — must not crash on None/empty."""
 
-    def test_noop_when_no_gateway(self):
-        """Gateway=None: must not crash."""
+    def test_noop_when_arh_none(self):
+        """ARH=None (no receiver injected): must not crash."""
         mc = FakeMainContent(session_key="agent:main", input_text="hello")
         handler = make_handler(mc, None)
         handler.on_send_clicked()  # must not raise
@@ -710,7 +712,7 @@ class TestCommandErrorDisplay:
 
 class TestInlineMentionRouting:
     """Inline @Agent and @all mentions in project tabs must route special agents
-    through AgentRuntimeHandler, not gateway. Otherwise messages are silently dropped."""
+    through AgentRuntimeHandler. Otherwise messages are silently dropped."""
 
     def _make_handler_with_inline_mention(
         self,
@@ -750,7 +752,7 @@ class TestInlineMentionRouting:
         return handler, mc, gw, mock_arh
 
     def test_inline_mention_to_special_agent_routes_to_runtime(self):
-        """Inline @Coder hello from project tab → routes to AgentRuntimeHandler, not gateway."""
+        """Inline @Coder hello from project tab → routes to AgentRuntimeHandler."""
         from models.command import MentionResolution
         resolution = MentionResolution(
             target_session_key="special:coder",
@@ -766,11 +768,12 @@ class TestInlineMentionRouting:
 
         # Must route through AgentRuntimeHandler
         mock_arh.send_to_special_agent.assert_called_once_with("special:coder", "hello")
-        # Must NOT send to gateway
+        # Receiver spy got nothing — the send went via the injected ARH mock only
         assert gw.get_sent() == []
 
-    def test_inline_mention_to_gateway_agent_routes_to_gw(self):
-        """Inline @QTR status from project tab → routes to gateway (not a special agent)."""
+    def test_inline_mention_to_unregistered_agent_routes_via_receiver(self):
+        """Inline @QTR status from project tab → routes via the receiver
+        (unregistered key — the receiver's no-op IS the former gateway path)."""
         from models.command import MentionResolution
         resolution = MentionResolution(
             target_session_key="agent:qtr",
@@ -790,7 +793,8 @@ class TestInlineMentionRouting:
         assert gw.get_sent() == []
 
     def test_inline_mention_broadcast_with_special_member_routes_to_runtime(self):
-        """Inline @all hello with mixed members → special agents via runtime, gateway agents via gw."""
+        """Inline @all hello with mixed members → both targets route via the receiver
+        (special agent direct; unregistered key via the receiver's no-op)."""
         from models.command import MentionResolution
         resolution = MentionResolution(
             broadcast_targets=["special:coder", "agent:qtr"],
