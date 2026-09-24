@@ -74,7 +74,7 @@ class TestActivityBubbleModel:
 
 
 class TestActivityHandlerActivityBubbles:
-    """ActivityHandler fires _activity_bubble_callback for gateway events."""
+    """ActivityHandler fires _activity_bubble_callback for events ingested via on_gateway_event."""
 
     def test_lifecycle_start_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
@@ -342,7 +342,7 @@ class TestActivityHandlerActivityBubbles:
 
     def test_command_output_status_failed_with_no_exit_code_is_error(self, fake_glib):
         """BUGFIX-1 audit BUG B: status='failed' with missing exitCode must show ERROR.
-        Gateway may send status='failed' with no exitCode (timeout, killed signal).
+        Upstream may send status='failed' with no exitCode (timeout, killed signal).
         The error determination must honor status even when exit_code is 0/absent.
         """
         from ui.handlers.activity_handler import ActivityHandler
@@ -425,7 +425,7 @@ class TestActivityHandlerActivityBubbles:
         lc_cb.assert_called_once_with("sk-1", "Final response text")
 
     def test_tool_start_bubble_has_agent_name(self, fake_glib):
-        """Tool bubbles carry agent_name from the gateway payload (spec §2.4).
+        """Tool bubbles carry agent_name from the event payload (spec §2.4).
 
         Regression test for PHASE 4 — guards against removing the
         agent_name=_agent_name keyword arg from the tool_start ActivityBubble
@@ -471,9 +471,9 @@ class TestActivityHandlerActivityBubbles:
         assert bubble.duration_ms == 1247
 
     def test_tool_bubble_agent_name_defaults_to_empty(self, fake_glib):
-        """When the gateway doesn't send agentName on tool events, agent_name defaults to ''.
+        """When the payload omits agentName on tool events, agent_name defaults to ''.
 
-        Defensive — per audit TODO, the gateway may not always send agentName
+        Defensive — per audit TODO, upstream may not always send agentName
         on stream=item events. The drawer falls back to "[Agent]" for unknown
         agents, which is acceptable.
         """
@@ -591,7 +591,7 @@ class TestActivityHandlerActivityBubbles:
         assert bubble.agent_name == ""
 
     def test_data_null_does_not_crash(self, fake_glib):
-        """Gateway payload with data=None must not crash the handler (PHASE 7 Bug #4).
+        """Event payload with data=None must not crash the handler (PHASE 7 Bug #4).
 
         Bug #4 root cause: payload.get('data', {}) returns the default {} only
         when the key is MISSING. When the key is present-but-null (data: None),
@@ -616,10 +616,10 @@ class TestActivityHandlerActivityBubbles:
                 pytest.fail(f"handler crashed on data=None for stream={stream!r}: {e}")
 
     def test_data_missing_does_not_crash(self, fake_glib):
-        """Gateway payload with data key MISSING must not crash the handler.
+        """Event payload with data key MISSING must not crash the handler.
 
         Defensive complement to test_data_null_does_not_crash — covers the
-        case where the gateway omits the 'data' key entirely.
+        case where upstream omits the 'data' key entirely.
         """
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
@@ -638,7 +638,7 @@ class TestActivityHandlerActivityBubbles:
                 pytest.fail(f"handler crashed on missing-data for stream={stream!r}: {e}")
 
     def test_data_non_dict_does_not_crash(self, fake_glib):
-        """Gateway payload with data=42 (or other non-dict) must not crash the handler.
+        """Event payload with data=42 (or other non-dict) must not crash the handler.
 
         Defensive — _safe_data() coerces any non-dict value to {}.
         """
@@ -678,8 +678,8 @@ class TestActivityHandlerActivityBubbles:
         )
 
     # ── Phase 4E: streaming token count field-name fix ────────────────
-    # BUG: activity_handler.py:469 used to read payload["text"], but the gateway
-    # sends text at payload["message"]["content"]. Helper _extract_chat_text
+    # BUG: activity_handler.py:469 used to read payload["text"], but text arrives
+    # at payload["message"]["content"]. Helper _extract_chat_text
     # normalizes the field. These tests pin the regression and the helper contract.
 
     def test_chat_delta_increments_token_count_from_string_content(self, fake_glib):
@@ -704,7 +704,7 @@ class TestActivityHandlerActivityBubbles:
         """Three deltas with DISTINCT text must each contribute their length to the running
         counter. This pins the per-delta accumulation via the helper field path.
 
-        Design note: per models/streaming.py:28 the gateway sends cumulative text in
+        Design note: per models/streaming.py:28 upstream sends cumulative text in
         production, so real deltas would be 'Hello', 'Hello world', 'Hello world!'
         and the += accumulator would over-count (5+11+12=28 for a 12-char final).
         That cumulative-vs-delta semantics quirk is out of scope for Phase 4E —
@@ -789,7 +789,7 @@ class TestActivityHandlerActivityBubbles:
         )
 
     def test_chat_delta_handles_string_message_field(self, fake_glib):
-        """Some hypothetical gateway variant might send message as a raw string.
+        """Some hypothetical upstream variant might send message as a raw string.
         The helper's `else: content = msg_obj` branch handles this — the string
         is treated as the content directly and contributes its length.
         """
@@ -826,7 +826,7 @@ class TestActivityHandlerStateMachineGuard:
     only fire for `stream == "lifecycle"` events. Other stream types
     (item, plan, approval, patch, command_output) must NOT trigger the
     state machine even if they carry a top-level `phase` field, because
-    a future gateway payload could surface a `phase: "end"` on a non-
+    a future upstream payload could surface a `phase: "end"` on a non-
     lifecycle event and prematurely end the agent session.
 
     Pre-BUGFIX-4: the second `if event == "agent":` block fell to
@@ -917,7 +917,7 @@ class TestActivityHandlerStateMachineGuard:
 
     def test_command_output_end_does_not_trigger_state_machine(self, fake_glib):
         """stream=command_output phase=end must NOT trigger on_agent_end.
-        Real-world BUGFIX-1+ scenario: gateway sends command_output end events
+        Real-world BUGFIX-1+ scenario: upstream sends command_output end events
         with a phase field. They must not end the agent session.
         """
         handler = self._make_handler(fake_glib)
@@ -930,7 +930,7 @@ class TestActivityHandlerStateMachineGuard:
         })
         assert handler._state == "reasoning"
 
-        # Send command_output with phase=end (real gateway shape)
+        # Send command_output with phase=end (real upstream payload shape)
         handler.on_gateway_event("agent", {
             "stream": "command_output",
             "sessionKey": "sk-1",
@@ -1071,7 +1071,7 @@ class TestActivityPerfGuard:
          (250ms), not two 200ms timers.
       2. Consecutive ticks with unchanged state/phase/hops/elapsed-bucket skip
          the _update_feedbar markup rebuild AND _streaming_label construction.
-      3. _resolve_agent_name fires at most ONCE per gateway event, resolved
+      3. _resolve_agent_name fires at most ONCE per event, resolved
          lazily — per-delta assistant events must pay zero resolution cost.
 
     NOTE (flagged, not fixed here — outside Phase 1 scope): ActivityHandler
@@ -1185,7 +1185,7 @@ class TestActivityPerfGuard:
         )
 
     def test_tick_with_changed_hops_rebuilds(self, fake_glib, monkeypatch):
-        """A hop-count change (gateway event progress) must rebuild the markup."""
+        """""A hop-count change (upstream event progress) must rebuild the markup."""
         h = self._make_handler(fake_glib)
         monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
         h._set_state("reasoning", "sk-1")
@@ -1271,7 +1271,7 @@ class TestActivityPerfGuard:
 
     def test_tool_bubble_still_carries_resolved_name(self, fake_glib):
         """Behavior preservation: the tool-start bubble still receives the
-        gateway agentName after the hoist (single resolution, same value)."""
+        payload agentName after the hoist (single resolution, same value)."""
         h = self._make_handler(fake_glib)
         bubbles = []
         h.set_on_activity_bubble(lambda b: bubbles.append(b))
