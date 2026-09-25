@@ -186,3 +186,103 @@ class TestClassSurvival:
         assert "<code>x</code>" in out
         out2 = sanitize_html('<span class="tok-kw evil other">x</span>')
         assert out2 == '<span class="tok-kw">x</span>'
+
+
+# ── SP3 audit fixes ──────────────────────────────────────────────────────
+
+class TestSanitizePanicPin:
+    def test_baseexception_derived_yields_empty(self, monkeypatch):
+        """FIX 1 (BUG #1): a BaseException-derived failure (pyo3
+        PanicException is not Exception-derived) must yield "" — the
+        widest-net catch is the fail-closed contract."""
+        from render import sanitize as san
+
+        class SyntheticPanic(BaseException):
+            pass
+
+        def boom(*a, **k):  # kwarg-proof — nh3.clean passes 6 kwargs
+            raise SyntheticPanic("simulated Rust panic")
+
+        monkeypatch.setattr(san.nh3, "clean", boom)
+        assert san.sanitize_html("<p>hi</p>") == ""
+
+
+class TestDestroyCancelsPendingRender:
+    def test_no_rebuild_after_destroy(self):
+        """FIX 2 (BUG #2): a queued idle render must NOT fire post-destroy
+        (probe: rebuild resurrected a webview after destroy)."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        loads: list[str] = []
+        s._load_html = lambda doc: loads.append(doc)  # type: ignore[method-assign]
+        s.append_message("agent", "<p>before</p>")
+        s.destroy()
+        s._drain_renders()  # what an already-queued idle callback would do
+        assert loads == []  # rebuild count UNCHANGED — nothing rendered
+        assert s._webview is None  # no resurrection
+
+
+class TestWebKitlessBox:
+    def test_fallback_is_the_surface_when_webkit_none(self, monkeypatch):
+        """FIX 3+4 (BUGs #3/#4): WebKit=None → the fallback IS the surface;
+        append+drain must not raise and text must land."""
+        import ui.views.chat_surface as cs
+
+        monkeypatch.setattr(cs, "WebKit", None)
+        s = cs.create_chat_surface()
+        s.append_message("agent", "<p>hello</p>", "Coder")
+        assert "hello" in s._text()
+        s.destroy()
+
+
+class TestByteBudgetCap:
+    def test_multibyte_cap_is_byte_exact(self):
+        """FIX 5 (BUG #5): the cap is a BYTE budget — multi-byte rows are
+        sliced on bytes and re-decoded, never over budget."""
+        row = "<p>" + "\u2603" * 200_000 + "</p>"  # snowman = 3 bytes UTF-8
+        capped = _cap_row_html(row)
+        assert len(capped.encode("utf-8")) <= 512 * 1024 + len("[truncated]")
+        assert capped.endswith("[truncated]")
+
+
+class TestFallbackBufferBound:
+    def test_text_buffer_bounded_under_load(self):
+        """FIX 7 (BUG #7, P11): the fallback TextBuffer trims from the top —
+        bounded memory after heavy appends."""
+        s = TextViewFallback(window_max=50)
+        for i in range(1000):
+            s.append_message("agent", f"<p>line {i}</p>")
+        buf = s._view.get_buffer()
+        assert buf.get_line_count() <= 55  # window_max + small slack
+        assert "line 999" in s._text()  # newest content present
+        s.destroy()
+
+
+class TestImportTimeAlias:
+    def test_module_source_aliases_chat_surface_when_webkit_none(self):
+        """FIX 4 mechanism pin: the module's import block BINDS the alias —
+        on a genuinely WebKit-less box, ChatSurface IS TextViewFallback.
+        Source-structure pin (import-once semantics make exec/reload pins
+        untestable here; falsifier = remove the alias line)."""
+        import ui.views.chat_surface as cs
+
+        with open(cs.__file__, encoding="utf-8") as f:
+            src = f.read()
+        # The alias lives at the module BOTTOM (after all class defs) — pin
+        # the full source: the guarded alias + factory must both exist, and
+        # the alias must be the module-level ChatSurface binding for
+        # WebKit-less imports (import-once semantics keep this untestable
+        # at runtime; falsifier = delete either line).
+        assert "if WebKit is None:" in src
+        assert "    ChatSurface = TextViewFallback" in src
+        assert "def create_chat_surface" in src
+        # And the factory (runtime path) resolves the fallback for real.
+        monkey = __import__("unittest.mock", fromlist=["patch"])
+        with monkey.patch(f"{cs.__name__}.WebKit", None):
+            s = cs.create_chat_surface()
+            assert type(s) is cs.TextViewFallback
+            s.destroy()
+

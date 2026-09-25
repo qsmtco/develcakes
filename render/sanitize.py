@@ -8,17 +8,6 @@ import re
 
 import nh3
 
-# pyo3 (nh3's runtime) raises PanicException for Rust-side assertion panics.
-# It is NOT an Exception subclass — the fail-closed catch must name it
-# explicitly or a panic would propagate instead of yielding "".
-_EXC_TYPES: tuple = (Exception,)
-try:
-    from pyo3_runtime import PanicException  # type: ignore[import-not-found]
-
-    _EXC_TYPES = (Exception, PanicException)
-except ImportError:  # pragma: no cover - runtime-dependent
-    pass
-
 # Markdown-render vocabulary (spec §2): headings, lists, code, emphasis,
 # links, tables, images. No script/iframe/style/form anywhere.
 _ALLOWED_TAGS = frozenset({
@@ -30,8 +19,12 @@ _ALLOWED_TAGS = frozenset({
 })
 
 # Per-tag attribute admission. NOTE (probe-verified 2026-09-24): passing
-# `attributes` REPLACES ammonia's entire default tag_attributes map, so this
-# map re-admits every legacy attribute (href/src/title/alt) explicitly.
+# `attributes` REPLACES ammonia's entire default tag_attributes map. DELTA vs
+# ammonia defaults (BUG #6, register): width/height/hreflang/target/colspan/
+# rowspan/usemap/ismap/enctype/etc. are now DROPPED — the SP2 emitter emits
+# none of them, so nothing is lost today. REGISTER for future emitters
+# (table alignment wants colspan/rowspan; these must be re-admitted here
+# deliberately, with filter gates, if ever emitted).
 # "class" is admitted ONLY for the tags the chat surface styles; the filter
 # below owns the class VALUE gate.
 #
@@ -111,9 +104,13 @@ def sanitize_html(html: str) -> str:
             link_rel="noopener noreferrer nofollow",
             url_schemes={"http", "https"},
         )
-    except _EXC_TYPES:
-        # Fail-closed contract: ANY error shape (TypeError from None, Rust
-        # panics via PanicException, filter bugs) must yield "", never raw
-        # passthrough. (Not a blind Exception catch — _EXC_TYPES is an
-        # explicit tuple; PanicException is named for the panic case.)
+    except BaseException:  # noqa: BLE001 — sanctioned fail-closed (see below)
+        # Fail-closed contract: the WIDEST net is correct here, not lazy.
+        # nh3's failure shapes include pyo3 PanicException (Rust-side
+        # assertion panics), which does NOT derive from Exception — and the
+        # import-guard tuple approach (SP3 audit BUG #1) was inert on this
+        # box: pyo3_runtime is unimportable standalone, so it degraded to
+        # (Exception,) and a panic would have propagated. Sanitizing is not
+        # interrupt-critical: "" on Ctrl-C is acceptable; raw passthrough
+        # is not.
         return ""
