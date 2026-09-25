@@ -34,19 +34,30 @@ from gi.repository import GLib, Gtk
 
 logger = logging.getLogger(__name__)
 
-try:
-    gi.require_version("WebKit", "6.0")
-    from gi.repository import WebKit
+# CRABCAKES_NO_WEBKIT=1 forces the TextViewFallback path (spec §7 runtime-failure
+# case). Needed on Ubuntu 24.04 with apparmor_restrict_unprivileged_userns=1:
+# WebKit 6.0 IMPORTS fine but its bwrap sandbox + dbus-proxy cannot launch, so
+# the first page render SIGTRAPs the whole app. The env var makes the import
+# fail deliberately → the alias below routes to the fallback surface.
+import os as _os
 
-    _WEBKIT_VERSION = "6.0"
-except (ValueError, ImportError):  # pragma: no cover - environment-dependent
-    # FIX 3 (SP3 audit BUG #3): no 4.1 fallback branch. The 4.x family's
-    # introspection namespace is "WebKit2", NOT "WebKit" — the old branch
-    # requested a nonexistent namespace (dead code). Register: a
-    # WebKit2-4.1-only box would need an explicit `require_version("WebKit2",
-    # "4.1")` import here; unsupported until one matters.
+if _os.environ.get("CRABCAKES_NO_WEBKIT"):
     WebKit = None
     _WEBKIT_VERSION = None
+else:
+    try:
+        gi.require_version("WebKit", "6.0")
+        from gi.repository import WebKit
+
+        _WEBKIT_VERSION = "6.0"
+    except (ValueError, ImportError):  # pragma: no cover - environment-dependent
+        # FIX 3 (SP3 audit BUG #3): no 4.1 fallback branch. The 4.x family's
+        # introspection namespace is "WebKit2", NOT "WebKit" — the old branch
+        # requested a nonexistent namespace (dead code). Register: a
+        # WebKit2-4.1-only box would need an explicit `require_version("WebKit2",
+        # "4.1") import here; unsupported until one matters.
+        WebKit = None
+        _WEBKIT_VERSION = None
 
 # Spec §7 huge-message cap.
 _MAX_ROW_BYTES = 512 * 1024
