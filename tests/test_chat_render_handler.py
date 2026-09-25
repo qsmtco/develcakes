@@ -669,3 +669,206 @@ class TestSurfaceMountLifecycle:
         assert "hello" in doc and "<strong>world</strong>" in doc
         assert "<script" not in doc.lower()      # element neutralized
         assert "&lt;script&gt;" in doc           # inert escaped form only
+
+
+# ── SPEC-06 SP5a FIX ROUND 2: #7 streaming mount, #9 allocation, ───────────
+#    #10+#4 mount-relationship lifecycle, #5 bulk drain, #11 caps + O(1) idx
+
+
+class TestStreamingMountLifecycle:
+    """Round 2: FIX 7 (mount_key through the STREAMING path — production
+    ALWAYS streams, so round-1's render_sync-only wiring never fired on the
+    real path), FIX 10/#4 (project close kills agent surfaces mounted
+    there; tombstones drop late renders), FIX 11 (unmountable surfaces
+    evicted after _MOUNT_MISS_LIMIT consecutive getter misses)."""
+
+    def _wired(self, monkeypatch, boxes):
+        """Real create-path handler wired to a dict of chat boxes; returns
+        (handler, created_surfaces)."""
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        handler = ChatRenderHandler()
+        handler.set_chat_container_getter(lambda sk: boxes.get(sk))
+        return handler, created
+
+    def test_streaming_end_mounts_surface_in_project_box(self, monkeypatch):
+        """FIX 7 — THE headline pin: start → update → end_streaming with a
+        PROJECT-ONLY getter (no personal tab) mounts the final row's surface
+        in the project box. Falsifier: drop the mount_key threading (or the
+        ARH caller) → the surface lands unmounted and this fails."""
+        project_box = Gtk.Box()
+        boxes = {"project:alpha": project_box}  # NO box for "agent:sk"
+        handler, created = self._wired(monkeypatch, boxes)
+        handler.start_streaming("agent:sk", role="Agent")
+        handler.update_streaming("agent:sk", "final **answer**")
+        handler.end_streaming("agent:sk", agent_name="Coder",
+                              mount_key="project:alpha")
+        assert len(created) == 1
+        assert created[0].get_parent() is project_box
+        from ui.views.chat_surface import _document
+        assert "final" in _document(list(created[0]._rows))
+        assert "<strong>answer</strong>" in _document(list(created[0]._rows))
+
+    def test_close_project_kills_agent_surface_mounted_there(self, monkeypatch):
+        """FIX 10 — closing the PROJECT session destroys the AGENT-keyed
+        surface mounted in the project box and tombstones the agent key."""
+        project_box = Gtk.Box()
+        boxes = {"project:alpha": project_box}
+        handler, created = self._wired(monkeypatch, boxes)
+        handler.render_sync("Agent", "routed reply", "agent:sk",
+                            mount_key="project:alpha")
+        surface = created[0]
+        assert surface.get_parent() is project_box
+        destroyed: list = []
+        surface.destroy = lambda: destroyed.append(True)
+        handler.close_session("project:alpha")
+        assert destroyed == [True]                     # mounted surface died
+        assert "agent:sk" not in handler._surfaces     # agent key released
+        assert handler._closed_sessions.get("agent:sk") is True
+
+    def test_reopen_remounts_after_project_close(self, monkeypatch):
+        """FIX 10 — reopen path: re-wiring (new getter) clears tombstones;
+        the next render legitimately creates a FRESH surface and mounts it
+        in the new project box."""
+        project_box = Gtk.Box()
+        handler, created = self._wired(monkeypatch, {"project:alpha": project_box})
+        handler.render_sync("Agent", "first life", "agent:sk",
+                            mount_key="project:alpha")
+        handler.close_session("project:alpha")
+        new_box = Gtk.Box()  # reopened tab = new widget tree
+        handler.set_chat_container_getter(lambda sk: {("project:alpha"): new_box}.get(sk))
+        handler.render_sync("Agent", "second life", "agent:sk",
+                            mount_key="project:alpha")
+        assert len(created) == 2                       # fresh surface, not the old one
+        assert created[1].get_parent() is new_box
+
+    def test_late_render_after_close_does_not_resurrect(self, monkeypatch):
+        """FIX #4 — a render in flight when close_session lands must be
+        DROPPED, not resurrect an unmounted orphan surface. Falsifier:
+        remove the tombstone guard → a second surface is created+mounted."""
+        box = Gtk.Box()
+        handler, created = self._wired(monkeypatch, {"sk": box})
+        handler.render_sync("Agent", "before close", "sk")
+        assert len(created) == 1
+        handler.close_session("sk")
+        handler.render_sync("Agent", "late render", "sk")  # compose landed late
+        assert len(created) == 1                        # NO new surface
+        assert "sk" not in handler._surfaces
+        assert box.get_first_child() is None            # nothing remounted
+
+    def test_unmountable_surface_evicted_after_miss_cap(self, monkeypatch):
+        """FIX 11 — a getter that returns None forever cannot accumulate
+        surfaces: after _MOUNT_MISS_LIMIT consecutive misses the surface is
+        EVICTED and recreation is LAZY (this render drops — SP3's destroyed-
+        surface contract already swallows late appends). Six HARDCODED
+        dead-getter renders → exactly TWO creations (one per cap window),
+        _surfaces drains to empty, no crash. The count is deliberately NOT
+        derived from _MOUNT_MISS_LIMIT — a falsifier that scales with the
+        constant under test can never fail (that variant PASSED under a
+        limit=999 mutation; hardcoding kills it).
+        Falsifier: remove the cap → 6 creations."""
+        handler, created = self._wired(monkeypatch, {})  # getter → always None
+        for i in range(6):
+            handler.render_sync("Agent", f"msg {i}", "sk-doomed")  # must not raise
+        assert len(created) == 2                        # bounded: 1 per cap window
+        assert handler._surfaces == {}                  # lazy — nothing lingers
+
+
+class TestSurfaceAllocationAndCaps:
+    """Round 2: FIX 9 (realized surface fills its viewport — the 69px
+    sliver), FIX 5 (bulk close drains surfaces), FIX 11 (O(1) box index)."""
+
+    def _wired(self, monkeypatch, boxes):
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        handler = ChatRenderHandler()
+        handler.set_chat_container_getter(lambda sk: boxes.get(sk))
+        return handler, created
+
+    def test_realized_surface_fills_viewport(self):
+        """FIX 9 — REALIZED chain: a mounted surface is ~viewport-height.
+        With the old valign=END the box shrink-wrapped to the child minimum
+        (69px in a 317px viewport — Debugger's sliver). Needs a display:
+        runs under xvfb-run like the rest of the GUI suite."""
+        from ui.views.main_content import MainContent
+
+        mc = MainContent()
+        win = Gtk.Window()
+        win.set_default_size(800, 600)
+        win.set_child(mc)
+        # Wire the handler FIRST — production order (window._build wires
+        # handlers; tabs are created later, at runtime, when agents
+        # connect). create_chat_tab consults the wiring to suppress the
+        # welcome bubble on surface tabs.
+        orig = crh_module.create_chat_surface
+        crh_module.create_chat_surface = TextViewFallback
+        try:
+            handler = ChatRenderHandler()
+            mc.set_chat_render_handler(handler)
+            win.present()
+            mc.create_chat_tab("agent:alloc", "Alloc")
+            box = mc._tab_chat_boxes[0]
+            # The alignment pin (falsifier: restore END → this fails).
+            assert box.get_valign() == Gtk.Align.FILL
+            handler.render_sync("Agent", "hello", "agent:alloc")
+            surface = handler._surfaces["agent:alloc"]
+            ctx = GLib.MainContext.default()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                while ctx.pending():
+                    ctx.iteration(False)
+                time.sleep(0.005)
+            viewport_h = mc._tab_scrolls[0].get_height()
+            surface_h = surface.get_height()
+            assert viewport_h > 100, f"viewport not realized ({viewport_h}px)"
+            assert surface_h >= viewport_h * 0.8, (
+                f"surface is a sliver: {surface_h}px in {viewport_h}px viewport")
+        finally:
+            crh_module.create_chat_surface = orig
+            win.destroy()
+
+    def test_close_tabs_drains_surfaces(self, monkeypatch):
+        """FIX 5 — bulk close routes through _close_tab per index, so EVERY
+        closed tab fires close_session: the handler's surfaces DRAIN
+        (round 1 leaked them — close_tabs replicated dict-pops only)."""
+        from unittest.mock import MagicMock
+
+        from ui.views.main_content import MainContent
+
+        handler, _created = self._wired(monkeypatch, {})
+        mc = MainContent.__new__(MainContent)
+        mc._chat_notebook = MagicMock(spec=Gtk.Notebook)
+        mc._chat_notebook.get_n_pages.return_value = 0
+        mc._tab_sessions = {0: "sk-a", 1: "sk-b", 2: "sk-c"}
+        mc._tab_chat_boxes = {0: Gtk.Box(), 1: Gtk.Box(), 2: Gtk.Box()}
+        mc._tab_scrolls = {}
+        mc._tab_overlays = {}
+        mc._bulk_closing = False
+        mc._chat_render_handler = handler
+        for sk in ("sk-a", "sk-b", "sk-c"):
+            handler._surface_for(sk)
+        assert len(handler._surfaces) == 3
+        mc.close_tabs([0, 1, 2])
+        assert handler._surfaces == {}                  # drained
+
+    def test_surface_for_box_index_roundtrip(self, monkeypatch):
+        """FIX 11 — the id(box) index is maintained at mount and the lookup
+        returns the SAME surface as the authoritative scan (O(1) sanity)."""
+        box = Gtk.Box()
+        handler, created = self._wired(monkeypatch, {"sk": box})
+        handler.render_sync("Agent", "hello", "sk")
+        assert id(box) in handler._surfaces_by_parent   # index kept at mount
+        assert handler.surface_for_box(box) is created[0]
+        assert handler.surface_for_box(Gtk.Box()) is None

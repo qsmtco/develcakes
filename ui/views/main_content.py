@@ -518,6 +518,12 @@ class MainContent(Gtk.Box):
 
         # Scrollable container for the chat content — wrapped in Overlay so the
         # project settings bar can float over it (below the tab row).
+        # REGISTER (#12, SP5a round 2) — TWO-SCROLLER CONTRACT, Phase-A shape:
+        # this page-level chat_scroll scrolls Pango children appended to the
+        # chat box (welcome bubble, event/task cards); the HTML surface owns
+        # its OWN internal ScrolledWindow (single-scroll ruling). Cards render
+        # OUTSIDE the surface today; Phase-B direction is cards-inside-surface
+        # (one scroller per tab) — revisit when the card pipeline converts.
         chat_scroll = Gtk.ScrolledWindow()
         chat_scroll.set_vexpand(True)
         chat_scroll.set_hexpand(True)
@@ -535,7 +541,16 @@ class MainContent(Gtk.Box):
         # Vertical box for chat messages
         chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         chat_box.set_halign(Gtk.Align.FILL)
-        chat_box.set_valign(Gtk.Align.END)
+        # FIX 9 (SP5a round 2): valign stays FILL and the box EXPANDS — END
+        # shrink-wrapped the box to its minimum content height (a 69px
+        # sliver at the bottom of the 317px scroll viewport), defeating the
+        # mounted surface's vexpand. vexpand is REQUIRED, not just FILL: a
+        # ScrolledWindow allocates its child the MINIMUM size unless the
+        # child expands (probe-verified — FILL alone still measured 81px).
+        # The old END alignment shrink-wrapped v1 PANGO BUBBLES to the
+        # bottom — load-bearing only for that retired layout.
+        chat_box.set_hexpand(True)
+        chat_box.set_vexpand(True)
         chat_scroll.set_child(chat_box)
 
         # Tab label = [dot] [agent name bold] [•] [session name] [spacer] [×]
@@ -613,12 +628,17 @@ class MainContent(Gtk.Box):
             vadj.connect("value-changed", self._on_vadjustment_changed, page_idx)
         self._chat_notebook.set_show_tabs(True)
         self._chat_notebook.set_current_page(page_idx)
-        # Welcome bubble — centered logo at bottom of new chat tabs.
-        # Scrolled away naturally as messages arrive.
-        from ui.views.chat_bubble import build_welcome_bubble
-        welcome = build_welcome_bubble()
-        if welcome is not None:
-            chat_box.append(welcome)
+        # Welcome bubble — RETIRED for handler-wired tabs (SP5a FIX 9 round
+        # 2): built for the Pango bubble layout ("scrolled away naturally as
+        # messages arrive") — the surface era has no scroll-away, so it
+        # permanently ate ~196px of the viewport above the mounted surface
+        # (probe-verified: surface 81px → 317px with the bubble removed).
+        # Kept only when no render handler is wired (legacy/test paths).
+        if self._chat_render_handler is None:
+            from ui.views.chat_bubble import build_welcome_bubble
+            welcome = build_welcome_bubble()
+            if welcome is not None:
+                chat_box.append(welcome)
         return page_idx
 
     def _on_notebook_switch_page(self, notebook, _page, page_num):
@@ -812,8 +832,13 @@ class MainContent(Gtk.Box):
         """
         Close multiple tabs in one call, reindexing only once at the end.
 
-        Tabs are closed highest-index-first so that lower indices remain stable
-        for the duration of the loop.
+        FIX 5 (SP5a round 2): delegates to _close_tab per index instead of
+        replicating its dict-pops — the single-point wiring now ALSO fires
+        close_session(sk) per tab, so bulk close (stop-all / workspace
+        close) DRAINS the handler's per-session surfaces instead of leaking
+        them (round 1 left _surfaces populated after bulk close). The
+        _bulk_closing guard still suppresses per-tab reindexing; highest-
+        index-first keeps lower indices stable during the loop.
 
         Args:
             page_indices: iterable of int page indices to close
@@ -823,11 +848,7 @@ class MainContent(Gtk.Box):
         self._bulk_closing = True
         try:
             for idx in sorted(page_indices, reverse=True):
-                self._chat_notebook.remove_page(idx)
-                self._tab_sessions.pop(idx, None)
-                self._tab_chat_boxes.pop(idx, None)
-                self._tab_scrolls.pop(idx, None)
-                self._tab_overlays.pop(idx, None)
+                self._close_tab(idx)
         finally:
             self._bulk_closing = False
         self._reindex_tabs()
@@ -1047,6 +1068,11 @@ class MainContent(Gtk.Box):
             vadj = scroll.get_vadjustment()
         if vadj is None:
             return
+        # REGISTER (#8, SP5a round 2): autoscroll is NO-OP on the WebKit
+        # surface — pending the SPEC-06 register decision (JS bridge vs
+        # surface-shape). The TextViewFallback path's autoscroll WORKS and is
+        # pinned by the scroll tests; this seam stays honest until that
+        # ruling lands.
         # Defer scroll to next frame — widget layout must recalculate first
         def _do_scroll():
             vadj.set_value(vadj.get_upper() - vadj.get_page_size())

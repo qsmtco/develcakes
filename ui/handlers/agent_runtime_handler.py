@@ -2103,6 +2103,11 @@ class AgentRuntimeHandler:
             session_key,
             agent_name=resolved_name,
             render=bool(streaming_text.strip()),
+            # FIX 7 (SP5a round 2): mount_key through the STREAMING path —
+            # production always streams (was_streaming always True), so the
+            # final transcript row's surface must mount by the RESOLVED key
+            # exactly like the render_sync fallback path already does.
+            mount_key=self._resolve_mount_key(session_key),
         )
 
         # Non-streaming fallback: render from text argument with crabcard extraction

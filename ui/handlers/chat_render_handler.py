@@ -32,7 +32,10 @@
 #       → buffered streaming with a REPLACEABLE pending buffer (see
 #         _stream_text below — why surface.stream_delta is not used).
 #   close_session(session_key)
-#       → destroys that session's surface (SP3 destroy contract).
+#       → destroys that session's surface (SP3 destroy contract) AND any
+#         surface MOUNTED in that key's box (SP5a FIX 10: project close
+#         kills the agent-keyed surfaces mounted in the project box) and
+#         tombstones both keys — late renders are dropped, not resurrected.
 #   render_event_card / render_task_card
 #       → UNCHANGED Pango cards (not transcript sites; R3 catalog untouched).
 
@@ -132,11 +135,30 @@ class ChatRenderHandler:
         # main_content.set_chat_render_handler. On first surface create the
         # handler mounts the surface into the session's chat box.
         self._container_getter = None
+        # SP5a FIX 10/#4 (round 2): mount-relationship lifecycle.
+        #   _closed_sessions — tombstones: a closed key's LATE renders are
+        #     dropped instead of resurrecting an unmounted orphan surface.
+        #     Cleared when the key's box is LIVE again (tab/project reopen =
+        #     legit new render → fresh surface). Keyed dict (bounded by
+        #     sessions-ever-closed) to keep insertion order debuggable.
+        #   _mount_misses — consecutive None-getter misses per session key.
+        #     FIX 11: at _MOUNT_MISS_LIMIT the unmountable surface is evicted
+        #     (recreated lazily) so a dead getter can't accumulate surfaces.
+        #   _surfaces_by_parent — id(chat_box) → surface index for the O(1)
+        #     surface_for_box scan (FIX 11). Identity re-checked on read:
+        #     id() reuse after a box dies must not return a stale surface.
+        self._closed_sessions: dict[str, bool] = {}
+        self._mount_misses: dict[str, int] = {}
+        self._surfaces_by_parent: dict[int, object] = {}
 
     # ── Thread pool for off-main-thread processing ──────────────────
     _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crabcakes-render")
 
     # ── Surface lifecycle (SPEC-06 SP4) ─────────────────────────────
+
+    # FIX 11 (round 2): consecutive None-getter mount misses before the
+    # unmountable surface is evicted (recreated lazily on a later render).
+    _MOUNT_MISS_LIMIT = 3
 
     def set_chat_container_getter(self, getter) -> None:
         """SPEC-06 SP5a (R1): inject the session→chat-box callable.
@@ -144,8 +166,14 @@ class ChatRenderHandler:
         RULING R1, option (a): the HANDLER owns mounting — on first surface
         create it asks the getter for the session's chat box and packs the
         surface in. One wiring point (main_content.set_chat_render_handler);
-        no window.py edits; SP5c's chat_bubble deletion cannot disturb it."""
+        no window.py edits; SP5c's chat_bubble deletion cannot disturb it.
+
+        FIX 10 (round 2): a NEW getter is the wiring signal of a reopened
+        tab/project — tombstones clear here so a legitimately reopened
+        session renders a fresh surface instead of being dropped as
+        late-render noise."""
         self._container_getter = getter
+        self._closed_sessions.clear()
 
     def _mount_surface(self, session_key: str, surface, mount_key: str | None = None) -> None:
         """Mount the surface into a chat box — IDEMPOTENT RETRY (FIX 1).
@@ -174,15 +202,32 @@ class ChatRenderHandler:
         if chat_box is None:
             return
         chat_box.append(surface)
+        # FIX 11 (round 2): maintain the id(box) → surface index alongside
+        # the mount so surface_for_box is O(1). Identity re-checked on read
+        # (id reuse after a box dies → identity check False → miss, no stale
+        # surface returned).
+        self._surfaces_by_parent[id(chat_box)] = surface
 
     def surface_for_box(self, chat_box):
         """FIX 3 (SP5a audit) — the seam for the single-scroll ruling:
-        return the surface mounted in chat_box (identity check on the
-        mount parent), or None if the box holds no surface (e.g. a Pango
-        welcome bubble only). main_content.scroll_chat_to_bottom uses this
-        to drive the SURFACE's own vadjustment instead of a wrapper's."""
+        return the surface mounted in chat_box, or None if the box holds no
+        surface (e.g. a Pango welcome bubble only). main_content.
+        scroll_chat_to_bottom uses this to drive the SURFACE's own
+        vadjustment instead of a wrapper's.
+
+        FIX 11 (round 2): O(1) via the id(box) index kept by _mount_surface
+        (round 1 scanned every surface's parent — O(n)). Identity is
+        RE-CHECKED against the live parent: id() reuse after a box dies
+        must not return a stale surface. Index miss → authoritative scan
+        (and index repair) keeps correctness primary."""
+        if chat_box is None:
+            return None
+        indexed = self._surfaces_by_parent.get(id(chat_box))
+        if indexed is not None and indexed.get_parent() is chat_box:
+            return indexed
         for surface in self._surfaces.values():
             if surface.get_parent() is chat_box:
+                self._surfaces_by_parent[id(chat_box)] = surface
                 return surface
         return None
 
@@ -195,23 +240,87 @@ class ChatRenderHandler:
         FIX 2: mount_key — the display key whose box the surface mounts in
         (project-routed replies); the surface CACHE stays keyed by
         session_key (streaming continuity).
+        FIX 11 (round 2): a surface still unmounted after _MOUNT_MISS_LIMIT
+        consecutive getter misses is EVICTED (destroyed; recreated lazily if
+        a render comes later) — a dead getter can't accumulate surfaces.
         """
         surface = self._surfaces.get(session_key)
         if surface is None:
             surface = create_chat_surface()
             self._surfaces[session_key] = surface
-        self._mount_surface(session_key, surface, mount_key)  # SP5a FIX 1: retry
+        mounted = self._mount_surface(session_key, surface, mount_key)  # SP5a FIX 1: retry
+        # FIX 11: track consecutive mount misses — ONLY when a getter is
+        # actually wired (a None-getter-at-all is the pre-wiring state; the
+        # round-1 FIX 1 retry semantics apply there, and unit surfaces that
+        # work unmounted must not be evicted for it). A wired getter that
+        # keeps returning None is the dead-wiring case the cap bounds.
+        if mounted:
+            self._mount_misses.pop(session_key, None)
+        elif surface.get_parent() is None and self._container_getter is not None:
+            self._mount_misses[session_key] = self._mount_misses.get(session_key, 0) + 1
+        if (not mounted
+                and surface.get_parent() is None
+                and self._container_getter is not None
+                and self._mount_misses.get(session_key, 0) >= self._MOUNT_MISS_LIMIT):
+            surface.destroy()
+            del self._surfaces[session_key]
+            self._mount_misses.pop(session_key, None)
+            _logger.debug("surface_for: evicted unmountable surface after %d misses sk=%r",
+                          self._MOUNT_MISS_LIMIT, session_key)
+            # Brief contract: recreate LAZILY — this render drops (the SP3
+            # destroyed-surface contract already swallows late appends), so
+            # no live-but-orphaned surface lingers while wiring is dead.
+            return None
         return surface
 
     def close_session(self, session_key: str) -> None:
         """Destroy one session's surface (SP3 destroy contract: idempotent,
-        cancels pending renders, drops the webview)."""
+        cancels pending renders, drops the webview).
+
+        FIX 10/#4 (round 2): mount-relationship lifecycle — closes (a) the
+        sk-keyed surface AND (b) every surface MOUNTED in a box belonging to
+        this key (project close must kill agent-keyed surfaces mounted in
+        the project box — their mount parent is dying). Both keys are
+        TOMBSTONED so a late in-flight render after close is DROPPED instead
+        of resurrecting an unmounted orphan surface. Tombstones clear on the
+        next set_chat_container_getter (tab/project reopen = new wiring) or
+        an explicit pop_tombstone from the reopen path."""
+        self._closed_sessions[session_key] = True
         surface = self._surfaces.pop(session_key, None)
         if surface is not None:
+            # FIX 10 hygiene (round 2): unparent BEFORE destroy — GTK destroy
+            # does not reliably detach the child, and the dead surface must
+            # not linger visibly in the box (pinned by the lifecycle tests).
+            if surface.get_parent() is not None:
+                surface.unparent()
             surface.destroy()
+        # (b) kill surfaces MOUNTED to boxes of this key. Boxes of a key are
+        # tracked by main_content (id-boxed in the index) — the getter, when
+        # present, resolves the key's box; unmounted surfaces (getter None /
+        # no box) simply aren't mounted to it and are left for their own key.
+        getter = self._container_getter
+        if getter is not None:
+            box = getter(session_key)
+            if box is not None:
+                mounted = self.surface_for_box(box)
+                if mounted is not None:
+                    for sk, s in list(self._surfaces.items()):
+                        if s is mounted:
+                            self._closed_sessions[sk] = True
+                            del self._surfaces[sk]
+                            if mounted.get_parent() is not None:
+                                mounted.unparent()
+                            mounted.destroy()
+                            break
         self._streaming.discard(session_key)
         self._stream_text.pop(session_key, None)
         self._stream_role.pop(session_key, None)
+
+    def pop_tombstone(self, session_key: str) -> None:
+        """SP5a FIX 10: clear one tombstone — the reopen signal. The next
+        render for this key legitimately creates a fresh surface (a session
+        re-created after close is NOT late-render noise)."""
+        self._closed_sessions.pop(session_key, None)
 
     def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None,
                            mount_key: str | None = None):
@@ -227,8 +336,25 @@ class ChatRenderHandler:
         except Exception:
             _logger.exception("render_document failed — appending escaped raw text")
             html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
-        surface = self._surface_for(session_key or "", mount_key=mount_key)
+        # FIX 10 (round 2): tombstone check BEFORE _surface_for — a closed
+        # session's late render is DROPPED (an unmounted orphan surface must
+        # not resurrect after close). NOT cleared here: closure is only
+        # reversed by re-wiring (reopen path), not by the late render itself.
+        key = session_key or ""
+        if self._closed_sessions.get(key):
+            return
+        surface = self._surface_for(key, mount_key=mount_key)
+        # FIX 11: _surface_for returns None when the unmountable surface was
+        # JUST evicted (lazy recreation) — this render drops, exactly like
+        # the tombstone path above.
+        if surface is None:
+            _logger.debug("render dropped: surface evicted after mount misses sk=%r", key)
+            return
         surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
+        # FIX 11: a successful mount (surface gained a parent) resets the
+        # consecutive-miss counter — misses only accrue while unmounted.
+        if surface.get_parent() is not None:
+            self._mount_misses.pop(key, None)
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 
@@ -258,7 +384,17 @@ class ChatRenderHandler:
 
                 def _append_on_main():
                     try:
-                        self._surface_for(session_key).append_message(
+                        # FIX 10 (round 2): tombstone check in the async path
+                        # too — close_session during an in-flight compose
+                        # drops the late render (no resurrection).
+                        if self._closed_sessions.get(session_key):
+                            return
+                        surface = self._surface_for(session_key)
+                        # FIX 11: evicted-just-now surface → drop (lazy
+                        # recreation contract, same as _append_to_surface).
+                        if surface is None:
+                            return
+                        surface.append_message(
                             _surface_role(role), html_fragment, agent_name=agent_name
                         )
                     except Exception:
@@ -435,9 +571,15 @@ class ChatRenderHandler:
             return
         self._stream_text[session_key] = delta_text
 
-    def end_streaming(self, session_key: str, agent_name: str = None, render: bool = True):
+    def end_streaming(self, session_key: str, agent_name: str = None, render: bool = True,
+                      mount_key: str | None = None):
         """
         End streaming for session_key: append the final atomic row.
+
+        FIX 7 (round 2): mount_key threads through _finalize into
+        _append_to_surface — production ALWAYS streams, so without this the
+        round-1 mount_key fixes (wired only into render_sync) never fired on
+        the real path; project-routed sessions kept blank windows.
 
         The buffered text is composed (markdown → sanitized HTML) and
         appended as ONE row. With render=False the buffer is dropped and
@@ -449,6 +591,9 @@ class ChatRenderHandler:
             agent_name: Optional explicit display name (bypasses the
                 agent_mgr.get_name() lookup).
             render: Append the final row (default True).
+            mount_key: FIX 7 — key of the box the surface mounts in
+                (project-routed replies pass the resolved key; None →
+                mounts/verifies under session_key). Cache stays session-keyed.
         """
         if session_key not in self._streaming:
             return
@@ -468,7 +613,11 @@ class ChatRenderHandler:
                 agent_mgr = getattr(self._main_content, '_agent_mgr', None)
                 if agent_mgr is not None:
                     resolved_name = agent_mgr.get_name(session_key)
-            self._append_to_surface(role, full_text, session_key, agent_name=resolved_name)
+            # FIX 7: the mount_key threads into the shared append path so
+            # the FINAL row's surface mounts in the project box exactly like
+            # the render_sync path already did (round-1 FIX 2).
+            self._append_to_surface(role, full_text, session_key, agent_name=resolved_name,
+                                    mount_key=mount_key)
             if self._main_content is not None:
                 self._main_content.scroll_chat_to_bottom()
 
