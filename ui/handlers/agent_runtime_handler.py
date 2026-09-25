@@ -2281,6 +2281,9 @@ class AgentRuntimeHandler:
             streaming_text = self._crh.get_streaming_text(session_key) or ""
             self._crh.end_streaming(
                 session_key, agent_name=None, render=bool(streaming_text.strip()),
+                # FIX 4 (SP5a r3): thread the resolved mount key like the
+                # main :2102 path — the final row mounts in the project box.
+                mount_key=self._resolve_mount_key(session_key),
             )
 
         chat_box = self._resolve_chat_box(session_key)
@@ -2334,6 +2337,8 @@ class AgentRuntimeHandler:
             streaming_text = self._crh.get_streaming_text(session_key) or ""
             self._crh.end_streaming(
                 session_key, agent_name=None, render=bool(streaming_text.strip()),
+                # FIX 4 (SP5a r3): resolved mount key threaded like :2102.
+                mount_key=self._resolve_mount_key(session_key),
             )
             bubble = self._crh.render_sync(
                 "Agent", text, session_key, agent_name=None,
@@ -2446,6 +2451,8 @@ class AgentRuntimeHandler:
                 session_key,
                 agent_name=resolved_name,
                 render=bool(streaming_text.strip()),
+                # FIX 4 (SP5a r3): resolved mount key threaded like :2102.
+                mount_key=self._resolve_mount_key(session_key),
             )
             chat_box = self._resolve_chat_box(session_key)
             if chat_box is not None:

@@ -148,6 +148,9 @@ class ChatRenderHandler:
         #     surface_for_box scan (FIX 11). Identity re-checked on read:
         #     id() reuse after a box dies must not return a stale surface.
         self._closed_sessions: dict[str, bool] = {}
+        # r3 FIX 3: sk → the BOX key it died mounted in (fan-out tombstones
+        # are cleared per-box at reopen by pop_tombstones_for_box).
+        self._mounted_box_keys: dict[str, str] = {}
         self._mount_misses: dict[str, int] = {}
         self._surfaces_by_parent: dict[int, object] = {}
 
@@ -169,13 +172,13 @@ class ChatRenderHandler:
         no window.py edits; SP5c's chat_bubble deletion cannot disturb it.
 
         FIX 10 (round 2): a NEW getter is the wiring signal of a reopened
-        tab/project — tombstones clear here so a legitimately reopened
-        session renders a fresh surface instead of being dropped as
-        late-render noise."""
+        tab/project — r3 FIX 3 REMOVES the global tombstone clear() that
+        lived here (the latent trap: ANY setter call, incl. test wiring,
+        resurrected every closed session). Tombstones now clear ONLY per-key
+        via pop_tombstones_for_box, driven by create_chat_tab."""
         self._container_getter = getter
-        self._closed_sessions.clear()
 
-    def _mount_surface(self, session_key: str, surface, mount_key: str | None = None) -> None:
+    def _mount_surface(self, session_key: str, surface, mount_key: str | None = None) -> bool:
         """Mount the surface into a chat box — IDEMPOTENT RETRY (FIX 1).
 
         FIX 1 (SP5a audit BUG #1): the old one-shot skipped mounting forever
@@ -183,30 +186,37 @@ class ChatRenderHandler:
         project-routing), leaving the surface permanently unmounted. Now
         every _surface_for call retries until the surface HAS a parent:
 
-        - surface.get_parent() is not None → already mounted, return (the
-          retry is a cheap attribute read on the hot path);
+        - surface.get_parent() is not None → already mounted, return True
+          (the retry is a cheap attribute read on the hot path);
         - getter is None or no box for the key → still works unmounted, the
-          NEXT render retries;
+          NEXT render retries (returns False);
         - FIX 3 (single-scroll): the mount appends the surface DIRECTLY —
           the surface owns its own ScrolledWindow (chat_surface.py), no
           wrapper is created here (the old wrapper double-scrolled).
+
+        Returns:
+            bool — True if the surface is mounted after this call, False on
+            every early return. SP5a r3 FIX 1: this contract is what makes
+            the _surface_for miss-counter RESET live; without it a transient
+            miss after a successful mount evicted a LIVE surface.
         """
         if surface.get_parent() is not None:
-            return  # already mounted — nothing to do
+            return True  # already mounted — nothing to do
         getter = self._container_getter
         if getter is None:
-            return
+            return False
         # FIX 2: mount into the RESOLVED display key's box (project tabs);
         # falls back to the render session key (personal tabs unchanged).
         chat_box = getter(mount_key or session_key)
         if chat_box is None:
-            return
+            return False
         chat_box.append(surface)
         # FIX 11 (round 2): maintain the id(box) → surface index alongside
         # the mount so surface_for_box is O(1). Identity re-checked on read
         # (id reuse after a box dies → identity check False → miss, no stale
         # surface returned).
         self._surfaces_by_parent[id(chat_box)] = surface
+        return True  # FIX 1 (r3): bool contract — the miss reset reads this
 
     def surface_for_box(self, chat_box):
         """FIX 3 (SP5a audit) — the seam for the single-scroll ruling:
@@ -265,8 +275,16 @@ class ChatRenderHandler:
             surface.destroy()
             del self._surfaces[session_key]
             self._mount_misses.pop(session_key, None)
-            _logger.debug("surface_for: evicted unmountable surface after %d misses sk=%r",
-                          self._MOUNT_MISS_LIMIT, session_key)
+            # FIX 7 (r3): this is a MESSAGE DROP, not silent cleanup — the
+            # render that triggered eviction is lost. REGISTER: the
+            # lost-message window is now exactly "dead getter at the 4th
+            # consecutive render" (FIX 1's live reset shrank it from
+            # any-transient-miss to this shape); it closes entirely when the
+            # getter re-wires (tab reopen) or a later render mounts.
+            _logger.warning(
+                "chat surface evicted after %d consecutive mount misses — "
+                "dropped render for sk=%r (dead getter / closed tab)",
+                self._MOUNT_MISS_LIMIT, session_key)
             # Brief contract: recreate LAZILY — this render drops (the SP3
             # destroyed-surface contract already swallows late appends), so
             # no live-but-orphaned surface lingers while wiring is dead.
@@ -282,9 +300,14 @@ class ChatRenderHandler:
         this key (project close must kill agent-keyed surfaces mounted in
         the project box — their mount parent is dying). Both keys are
         TOMBSTONED so a late in-flight render after close is DROPPED instead
-        of resurrecting an unmounted orphan surface. Tombstones clear on the
-        next set_chat_container_getter (tab/project reopen = new wiring) or
-        an explicit pop_tombstone from the reopen path."""
+        of resurrecting an unmounted orphan surface.
+
+        SP5a r3: (b) is a FAN-OUT — every surface with `get_parent() is
+        box` dies (r2's surface_for_box+break killed only the first of N in
+        multi-agent projects). Tombstones record each dying surface's BOX
+        key so the reopen path (create_chat_tab → pop_tombstones_for_box)
+        can clear exactly the right set per key (the r2 global clear() in
+        set_chat_container_getter is REMOVED — that was the latent trap)."""
         self._closed_sessions[session_key] = True
         surface = self._surfaces.pop(session_key, None)
         if surface is not None:
@@ -294,27 +317,41 @@ class ChatRenderHandler:
             if surface.get_parent() is not None:
                 surface.unparent()
             surface.destroy()
-        # (b) kill surfaces MOUNTED to boxes of this key. Boxes of a key are
-        # tracked by main_content (id-boxed in the index) — the getter, when
-        # present, resolves the key's box; unmounted surfaces (getter None /
-        # no box) simply aren't mounted to it and are left for their own key.
+        # (b) kill ALL surfaces MOUNTED to this key's box. Boxes of a key
+        # are tracked by main_content (id-boxed in the index) — the getter,
+        # when present, resolves the key's box; unmounted surfaces (getter
+        # None / no box) simply aren't mounted to it and are left for their
+        # own key. FIX 2 (r3): iterate+destroy ALL matches (was: first-only
+        # via surface_for_box + break). FIX 6 (r3): the box's index entries
+        # are popped here — dead ids must not linger in _surfaces_by_parent.
         getter = self._container_getter
         if getter is not None:
             box = getter(session_key)
             if box is not None:
-                mounted = self.surface_for_box(box)
-                if mounted is not None:
-                    for sk, s in list(self._surfaces.items()):
-                        if s is mounted:
-                            self._closed_sessions[sk] = True
-                            del self._surfaces[sk]
-                            if mounted.get_parent() is not None:
-                                mounted.unparent()
-                            mounted.destroy()
-                            break
+                box_id = id(box)
+                for sk, s in list(self._surfaces.items()):
+                    if s.get_parent() is box:
+                        self._closed_sessions[sk] = True
+                        self._mounted_box_keys[sk] = session_key
+                        del self._surfaces[sk]
+                        if s.get_parent() is not None:
+                            s.unparent()
+                        s.destroy()
+                self._surfaces_by_parent.pop(box_id, None)
         self._streaming.discard(session_key)
         self._stream_text.pop(session_key, None)
         self._stream_role.pop(session_key, None)
+
+    def pop_tombstones_for_box(self, box_key: str) -> None:
+        """SP5a r3 FIX 3 — the reopen signal AT THE REAL ENTRY POINT: called
+        from create_chat_tab. Clears the reopened key's tombstone AND the
+        tombstones of any surfaces that died MOUNTED in that key's box
+        (project reopen: the agent surfaces killed by the close are wanted
+        again — per-key fan-pop, NOT the removed global clear())."""
+        self._closed_sessions.pop(box_key, None)
+        for sk in [k for k, v in self._mounted_box_keys.items() if v == box_key]:
+            self._closed_sessions.pop(sk, None)
+            self._mounted_box_keys.pop(sk, None)
 
     def pop_tombstone(self, session_key: str) -> None:
         """SP5a FIX 10: clear one tombstone — the reopen signal. The next
@@ -351,10 +388,10 @@ class ChatRenderHandler:
             _logger.debug("render dropped: surface evicted after mount misses sk=%r", key)
             return
         surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
-        # FIX 11: a successful mount (surface gained a parent) resets the
-        # consecutive-miss counter — misses only accrue while unmounted.
-        if surface.get_parent() is not None:
-            self._mount_misses.pop(key, None)
+        # FIX 1 (r3): the round-2 parent re-read reset that lived here is
+        # REMOVED — the _mount_surface bool contract (read inside
+        # _surface_for) is now the SOLE miss-reset mechanism, per the audit's
+        # either/or. Two reset paths made the return contract untestable.
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 

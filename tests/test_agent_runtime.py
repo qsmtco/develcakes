@@ -3233,6 +3233,52 @@ class TestLocalAgentHeaderStreaming:
                 f"{call_args!r}; expected ('special:coder', 'Coder')"
             )
 
+    def test_streaming_end_passes_project_mount_key(self):
+        """FIX 5 (SP5a r3) — the :2102 seam threads mount_key: a
+        project-routed session ends streaming with the RESOLVED key
+        ("project:alpha"), not None. Falsifier: drop ARH :2102's mount_key
+        kwarg → this fails (kwargs missing the key)."""
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        # Project-routed fixture: no direct tab; routing table says "alpha".
+        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else object()
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+
+        crh.is_streaming.return_value = True
+        handler._do_response_complete("special:coder", "hello world")
+
+        crh.end_streaming.assert_called_once()
+        call_kwargs = crh.end_streaming.call_args.kwargs
+        assert call_kwargs.get("mount_key") == "project:alpha", (
+            f"FIX 5: end_streaming mount_key={call_kwargs.get('mount_key')!r}; "
+            "expected the resolved 'project:alpha'")
+
+
+class TestEndStreamingSecondaryMountKeys:
+    """FIX 4 (SP5a r3) — the 3 SECONDARY end_streaming callers
+    (compaction :2282, error-clean :2335, error-final :2445) also thread
+    mount_key so their final rows mount in the project box like the main
+    path. Pinned on the compaction caller with streaming text present."""
+
+    def test_compaction_end_streaming_passes_mount_key(self):
+        handler, crh, mc = _make_handler()
+        # Project-routed fixture: no direct tab ("special:coder" → None);
+        # the project box resolves to a MagicMock (the handler appends to it).
+        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else unittest.mock.MagicMock()
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = "streaming text present"
+
+        handler._do_compaction_bubble("special:coder", {"messages_removed": 2})
+
+        crh.end_streaming.assert_called_once()
+        call_kwargs = crh.end_streaming.call_args.kwargs
+        assert call_kwargs.get("mount_key") == "project:alpha", (
+            f"FIX 4: compaction end_streaming mount_key="
+            f"{call_kwargs.get('mount_key')!r}; expected 'project:alpha'")
+
 
 class TestLocalAgentHeaderNonStreaming:
     """Test B: _do_response_complete non-streaming path uses real name, not hardcoded 'Agent'."""

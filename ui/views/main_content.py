@@ -639,6 +639,13 @@ class MainContent(Gtk.Box):
             welcome = build_welcome_bubble()
             if welcome is not None:
                 chat_box.append(welcome)
+        # SP5a r3 FIX 3: the reopen signal at the REAL entry point — a tab
+        # creation means the session's surfaces are wanted again. Tombstones
+        # (incl. fan-out victims mounted in this key's box) clear BEFORE the
+        # next render; getattr-tolerant for test doubles.
+        pop_box = getattr(self._chat_render_handler, "pop_tombstones_for_box", None)
+        if callable(pop_box):
+            pop_box(session_key)
         return page_idx
 
     def _on_notebook_switch_page(self, notebook, _page, page_num):

@@ -733,20 +733,35 @@ class TestStreamingMountLifecycle:
         assert handler._closed_sessions.get("agent:sk") is True
 
     def test_reopen_remounts_after_project_close(self, monkeypatch):
-        """FIX 10 — reopen path: re-wiring (new getter) clears tombstones;
-        the next render legitimately creates a FRESH surface and mounts it
-        in the new project box."""
+        """FIX 10 — reopen path, REWRITTEN for r3: a bare setter re-wire does
+        NOT clear tombstones anymore (the r2 clear-all WAS the trap — any
+        setter call resurrected every closed session). Only the production
+        reopen entry (create_chat_tab → pop_tombstones_for_box) clears; the
+        next render then creates a FRESH surface in the new box."""
+        from ui.views.main_content import MainContent
+
         project_box = Gtk.Box()
         handler, created = self._wired(monkeypatch, {"project:alpha": project_box})
         handler.render_sync("Agent", "first life", "agent:sk",
                             mount_key="project:alpha")
         handler.close_session("project:alpha")
         new_box = Gtk.Box()  # reopened tab = new widget tree
-        handler.set_chat_container_getter(lambda sk: {("project:alpha"): new_box}.get(sk))
+        handler.set_chat_container_getter(
+            lambda sk: new_box if sk == "project:alpha" else None)
+        # Trap pinned REMOVED: setter alone must NOT resurrect.
+        handler.render_sync("Agent", "dropped", "agent:sk",
+                            mount_key="project:alpha")
+        assert len(created) == 1  # still tombstoned — no render yet
+        # Production reopen: a REAL tab is created.
+        mc = MainContent()
+        win = Gtk.Window()
+        win.set_child(mc)
+        mc.set_chat_render_handler(handler)
+        mc.create_chat_tab("project:alpha", "Alpha")
         handler.render_sync("Agent", "second life", "agent:sk",
                             mount_key="project:alpha")
-        assert len(created) == 2                       # fresh surface, not the old one
-        assert created[1].get_parent() is new_box
+        assert len(created) == 2  # fresh surface — not the old orphan
+        win.destroy()
 
     def test_late_render_after_close_does_not_resurrect(self, monkeypatch):
         """FIX #4 — a render in flight when close_session lands must be
@@ -872,3 +887,104 @@ class TestSurfaceAllocationAndCaps:
         assert id(box) in handler._surfaces_by_parent   # index kept at mount
         assert handler.surface_for_box(box) is created[0]
         assert handler.surface_for_box(Gtk.Box()) is None
+
+
+# ── SPEC-06 SP5a FIX ROUND 3 (final): transient-miss, fan-out, real reopen ─
+
+class TestRound3Lifecycle:
+    """Round 3: FIX 1 (return-contract makes the miss reset live), FIX 2
+    (close fan-out destroys ALL surfaces in the box), FIX 3 (reopen clears
+    tombstones at create_chat_tab — the production entry point)."""
+
+    def _wired(self, monkeypatch, boxes):
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        handler = ChatRenderHandler()
+        handler.set_chat_container_getter(lambda sk: boxes.get(sk))
+        return handler, created
+
+    def test_transient_miss_after_success_does_not_evict(self, monkeypatch):
+        """FIX 1 — the miss counter must RESET on a successful mount, with
+        the _mount_surface bool contract as the SOLE reset mechanism (the
+        round-2 parent re-read was removed in this round — two reset paths
+        made the contract unfalsifiable: the F1 mutant PASSED while both
+        lived). 2 absent renders → box appears → _surface_for returns the
+        SAME surface with the counter reset → box absent again → still not
+        evicted. Falsifier: revert _mount_surface to return-None → the
+        counter never resets → the 4th _surface_for evicts (identity
+        changes) and this fails."""
+        boxes: dict = {}
+        handler, created = self._wired(monkeypatch, boxes)
+        s1 = handler._surface_for("sk")
+        handler._surface_for("sk")
+        assert handler._mount_misses.get("sk") == 2
+        boxes["sk"] = Gtk.Box()
+        s3 = handler._surface_for("sk")
+        assert s3 is s1                     # success mount keeps the surface
+        assert "sk" not in handler._mount_misses  # THE FIX 1 RESET — live now
+        del boxes["sk"]
+        s4 = handler._surface_for("sk")
+        assert s4 is s3                     # transient miss ≠ eviction
+        assert handler._mount_misses.get("sk") == 1  # counted from zero
+        assert len(created) == 1
+        assert "sk" in handler._surfaces
+
+    def test_close_destroys_all_surfaces_in_project_box(self, monkeypatch):
+        """FIX 2 — TWO agent surfaces mounted in one project box; closing
+        the project destroys BOTH and tombstones BOTH (the round-2 `break`
+        killed only the first). Also pins FIX 6: the id(box) index entries
+        for dead boxes are popped."""
+        project_box = Gtk.Box()
+        boxes = {"project:alpha": project_box}
+        handler, created = self._wired(monkeypatch, boxes)
+        handler.render_sync("Agent", "a", "agent:one", mount_key="project:alpha")
+        handler.render_sync("Agent", "b", "agent:two", mount_key="project:alpha")
+        assert len(created) == 2
+        destroyed: list = []
+        for s in created:
+            s.destroy = lambda s=s: destroyed.append(s)
+        handler.close_session("project:alpha")
+        assert sorted(map(id, destroyed)) == sorted(map(id, created))
+        assert set(handler._surfaces) == set()
+        assert handler._closed_sessions.get("agent:one") is True
+        assert handler._closed_sessions.get("agent:two") is True
+        assert id(project_box) not in handler._surfaces_by_parent  # FIX 6
+
+    def test_reopen_via_create_chat_tab_clears_tombstones(self, monkeypatch):
+        """FIX 3 — TEST-FIRST, rewritten to the PRODUCTION reopen path:
+        create_chat_tab pops the tab's tombstone AND the tombstones of
+        surfaces mounted in that key's box (box-scoped fan-pop; the global
+        clear() in set_chat_container_getter is REMOVED). Drives a REAL
+        MainContent.create_chat_tab (needs display: runs under xvfb-run).
+        Falsifier: drop the pop from create_chat_tab → the post-reopen
+        render is still tombstoned and this fails."""
+        from ui.views.main_content import MainContent
+
+        project_box = Gtk.Box()
+        handler, created = self._wired(monkeypatch, {"project:alpha": project_box})
+        handler.render_sync("Agent", "first life", "agent:sk",
+                            mount_key="project:alpha")
+        handler.close_session("project:alpha")
+        assert handler._closed_sessions  # tombstoned after close
+        # Production reopen: a REAL tab is created for the project key.
+        mc = MainContent()
+        win = Gtk.Window()
+        win.set_child(mc)
+        mc.set_chat_render_handler(handler)
+        mc.create_chat_tab("project:alpha", "Alpha")
+        assert not handler._closed_sessions, (
+            "create_chat_tab must clear tombstones for the reopened key "
+            "(and keys mounted in its box)")
+        # The reopened project renders again with a FRESH surface.
+        new_box = mc.get_chat_box_for_session("project:alpha")
+        handler.set_chat_container_getter(lambda sk: new_box if sk == "project:alpha" else None)
+        handler.render_sync("Agent", "second life", "agent:sk",
+                            mount_key="project:alpha")
+        assert len(created) == 2                   # fresh surface — not resurrected orphan
+        win.destroy()
