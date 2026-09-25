@@ -153,10 +153,10 @@ class TestRenderDocument:
         [
             # Inline
             ("hello **world**", "<p>hello <strong>world</strong></p>"),
-            # Code block: CURRENT sanitizer truth — class= is stripped by the
-            # SP1 policy. REGISTERED: SP3's styling hook (lang-*/tok-*) is
-            # dead until the policy admits class=. Pinned consciously.
-            ("```python\nx = 1\n```", "<pre><code>"),
+            # Code block: SP3 class= ruling — lang-/tok- classes SURVIVE
+            # (pin consciously updated when the policy changed; see the
+            # class-survival pins in test_chat_surface.py).
+            ("```python\nx = 1\n```", '<pre><code class="lang-python">'),
             # Link: emitter emits NO rel; sanitizer injects it
             (
                 "[text](https://x.example)",
