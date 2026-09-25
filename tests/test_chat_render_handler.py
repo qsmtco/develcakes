@@ -1,403 +1,399 @@
 # tests/test_chat_render_handler.py
-# Tests for ui/handlers/chat_render_handler.py
+# Tests for ui/handlers/chat_render_handler.py — SPEC-06 SP4 surface repoint.
+#
+# SP4: append/stream paths route text → render_document (markdown → HTML →
+# nh3 sanitize, ALWAYS in path) → per-session ChatSurface. Ruling R1: the
+# surface owns the widget tree — render_sync returns None and
+# on_bubble_ready fires with None (callers' `if bubble is not None` guards
+# verified at chat_handler :228/:532 and agent_runtime_handler :2101/:2116/
+# :2280/:2316/:2438). Spy surfaces (TextViewFallback instances pre-registered
+# into handler._surfaces) keep these tests environment-independent.
 
 import time
 
-import pytest
 import gi
+
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
+
+import ui.handlers.chat_render_handler as crh_module
 from ui.handlers.chat_render_handler import ChatRenderHandler
+from ui.views.chat_surface import TextViewFallback
 from utils.escaping import escape_for_pango
-from utils.markdown import format_markdown
 
 
-class TestRenderSync:
-    """Tests for render_sync() — synchronous bubble creation."""
+class SpySurface(TextViewFallback):
+    """TextViewFallback that records append_message calls (no WebKit needed)."""
 
-    def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.appended: list[dict] = []
 
-    def test_renders_bubble_for_agent(self):
-        widget = self.handler.render_sync("Agent", "Hello world")
-        assert widget is not None
-
-    def test_renders_bubble_for_you(self):
-        widget = self.handler.render_sync("You", "Hello world")
-        assert widget is not None
-
-    def test_bubble_has_chat_bubble_agent_class(self):
-        """Agent bubbles get the chat-bubble-agent CSS class."""
-        widget = self.handler.render_sync("Agent", "test")
-        # widget is a container box, bubble is inside
-        # The bubble box (first child) has the CSS class
-        container = widget
-        assert container.get_halign() == 1  # Gtk.Align.START for agent
-
-    def test_bubble_has_chat_bubble_you_class(self):
-        """You bubbles get the chat-bubble-you CSS class and END alignment."""
-        widget = self.handler.render_sync("You", "test")
-        container = widget
-        assert container.get_halign() == Gtk.Align.END  # right-aligned
-
-    def test_escape_preserves_bold_tag(self):
-        """Bold Pango tags are preserved through the pipeline."""
-        widget = self.handler.render_sync("Agent", "<b>bold</b>")
-        assert widget is not None
-
-    def test_markdown_converted_to_pango(self):
-        """Markdown **bold** is converted to Pango <b>bold</b>."""
-        widget = self.handler.render_sync("Agent", "this is **bold** text")
-        assert widget is not None
-
-    def test_markdown_italic_converted(self):
-        """Markdown *italic* is converted to Pango <i>italic</i>."""
-        widget = self.handler.render_sync("Agent", "this is *italic* text")
-        assert widget is not None
-
-    def test_markdown_inline_code_converted(self):
-        """Inline code is converted to <tt> tags."""
-        widget = self.handler.render_sync("Agent", "use `my_var` here")
-        assert widget is not None
-
-    def test_empty_text(self):
-        """Empty text produces a bubble widget."""
-        widget = self.handler.render_sync("Agent", "")
-        assert widget is not None
-
-    def test_xss_prevention(self):
-        """
-        Script tags are escaped: the '<' becomes '&lt;' so GTK renders
-        the literal text '<script>' rather than parsing it as a tag.
-        """
-        from utils.escaping import escape_for_pango
-        escaped = escape_for_pango("<script>evil()</script>")
-        assert "&lt;script&gt;" in escaped
-
-    def test_role_alignment(self):
-        """You=END, Agent=START (Gtk.Align values 3 and 1)."""
-        you_widget = self.handler.render_sync("You", "hi")
-        agent_widget = self.handler.render_sync("Agent", "hi")
-        assert you_widget.get_halign() == Gtk.Align.END
-        assert agent_widget.get_halign() == Gtk.Align.START
+    def append_message(self, role, html_fragment, agent_name=None):
+        self.appended.append(
+            {"role": role, "html": html_fragment, "agent": agent_name}
+        )
+        super().append_message(role, html_fragment, agent_name=agent_name)
 
 
-class TestReentrancyGuard:
-    """Tests for reentrancy guarding — duplicate renders are skipped."""
+class _SyncPool:
+    """Inline executor: render_async's compose runs synchronously.
+
+    The production pool is a shared 2-worker ThreadPoolExecutor — a drain
+    barrier races against it (worker B can take the drain no-op while
+    worker A is still composing). Unit pins for append/callback semantics
+    don't need thread mechanics; the compose runs inline instead."""
+
+    class _Done:
+        def result(self, timeout=None):
+            return None
+
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return _SyncPool._Done()
+
+
+def _spy_handler(**kw) -> tuple[ChatRenderHandler, SpySurface]:
+    """Handler with a pre-registered spy surface for session_key 'sk'."""
+    h = ChatRenderHandler(**kw)
+    h._pool = _SyncPool()  # instance attr shadows the class-level executor
+    spy = SpySurface()
+    h._surfaces["sk"] = spy
+    return h, spy
+
+
+# ── SP4 core contract: surface append path ────────────────────────────────
+
+class TestSurfaceAppendContract:
+    """SP4: append/stream route through render_document → sanitized HTML."""
 
     def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
+        self.handler, self.spy = _spy_handler()
 
-    def test_async_blocks_duplicate_session_key(self):
-        """render() is a no-op if a render is already in-flight for the key."""
-        results = []
-        def capture(w):
-            results.append(w)
+    def test_render_sync_appends_sanitized_html(self):
+        """Test 1: render_sync → surface.append_message with SANITIZED html —
+        no raw <script>, link rel injected (composed entry, not bare md→html).
+        NOTE: the probe uses an https link — the SP2 emitter renders
+        javascript:-scheme links as plain <span> before nh3 ever runs."""
+        out = self.handler.render_sync(
+            "Agent",
+            '[x](https://ok.example) and <script>evil()</script>',
+            "sk",
+        )
+        assert out is None  # R1: surface owns the widget tree
+        assert len(self.spy.appended) == 1
+        html_arg = self.spy.appended[0]["html"]
+        assert "<script" not in html_arg.lower()
+        assert "<script" not in html_arg.lower()  # escaped, not executed
+        assert 'rel="noopener noreferrer nofollow"' in html_arg  # sanitizer ran
+        assert 'href="https://ok.example"' in html_arg
 
-        # First call — in-flight
-        self.handler.render("Agent", "Hello", "agent:1", on_bubble_ready=capture)
-        # Second call for same key — should be skipped
-        self.handler.render("Agent", "Hello again", "agent:1", on_bubble_ready=capture)
+    def test_render_async_appends_sanitized_and_fires_none(self):
+        """Test 2 (async path): off-thread compose → surface append;
+        on_bubble_ready fires with None (R1 contract, see test below)."""
+        results: list = []
+        self.handler.render_async("Agent", "hello **world**", "sk",
+                                  on_bubble_ready=results.append)
+        assert len(self.spy.appended) == 1
+        assert "<strong>world</strong>" in self.spy.appended[0]["html"]
+        assert results == [None]  # R1: no bubble — the surface displayed it
 
-        # Should have at most 1 result (first call completed synchronously via _dispatch)
-        # because second call was blocked by reentrancy guard
-        # Note: with GLib_module=None, _dispatch calls fn() immediately,
-        # so the guard prevents the second call
-        # result depends on whether first render has finished before second is evaluated
-        assert True  # No crash — reentrancy guard prevents double-render
+    def test_on_bubble_ready_none_contract_sync_and_async(self):
+        """Test 3: pin the R1 contract on both entries — callers append the
+        return value / callback arg; None must be the guaranteed value."""
+        async_results: list = []
+        self.handler.render_async("You", "hi", "sk",
+                                  on_bubble_ready=async_results.append)
+        sync_result = self.handler.render_sync("Agent", "hi", "sk")
+        assert async_results == [None]
+        assert sync_result is None
 
-    def test_async_allows_different_session_keys(self):
-        """render() processes two different session keys independently."""
-        results = []
-        self.handler.render("Agent", "Hello", "agent:1", on_bubble_ready=lambda w: results.append(w))
-        self.handler.render("Agent", "Hi", "agent:2", on_bubble_ready=lambda w: results.append(w))
-        # Both should be in-flight (different keys)
-        assert len(results) >= 1
+    def test_role_mapping_and_agent_name_pass_through(self):
+        """Roles map You→user/Agent→agent/System→system; agent_name forwards."""
+        self.handler.render_sync("You", "a", "sk")
+        self.handler.render_sync("Agent", "b", "sk", agent_name="Coder")
+        self.handler.render_sync("System", "c", "sk")
+        assert [a["role"] for a in self.spy.appended] == ["user", "agent", "system"]
+        assert self.spy.appended[1]["agent"] == "Coder"
 
-    def test_sync_returns_none_when_inflight(self):
-        """render_sync() returns None if a render is in-flight for the session key."""
-        # Start an async render (not using render_sync path, so it's not in-flight)
-        # render_sync() guards using self._reentrancy, which is only populated by render()
-        widget = self.handler.render_sync("Agent", "Hello", "agent:1")
-        assert widget is not None
+    def test_render_document_failure_falls_back_to_escaped_text(self, monkeypatch):
+        """Test 6: composition raising must append ESCAPED raw text (still
+        sanitized path — never raw markup, never a raise). Patches the
+        HANDLER's binding (from-import copied the name at import time —
+        patching render.html would miss the call site)."""
 
-    def test_sync_blocks_on_same_key_if_inflight(self):
-        """render_sync() returns None when a render is already in-flight."""
-        # The reentrancy set is only used by render() (async), not by render_sync()
-        # So render_sync() is always allowed — this test documents the behavior
-        w1 = self.handler.render_sync("Agent", "hello", "agent:1")
-        w2 = self.handler.render_sync("Agent", "world", "agent:1")
-        # render_sync does NOT use reentrancy guard (it's not an async path)
-        assert w2 is not None
+        def boom(text):
+            raise RuntimeError("composition failed")
 
-    def test_sync_nil_key_guards_nothing(self):
-        """render_sync(nil_key) always returns a bubble — nil key is never guarded."""
-        widget = self.handler.render_sync("Agent", "hello")
-        assert widget is not None
-
-    def test_reentrancy_set_basic(self):
-        """_reentrancy set tracks session keys currently rendering."""
-        guard = self.handler._reentrancy
-        assert "agent:1" not in guard
-        guard.add("agent:1")
-        assert "agent:1" in guard
-        guard.remove("agent:1")
-        assert "agent:1" not in guard
-
-    def test_reentrancy_set_remove(self):
-        """remove() is safe on keys that are not in the set."""
-        guard = self.handler._reentrancy
-        guard.add("agent:2")
-        guard.remove("agent:2")  # no-op, no crash
-        assert "agent:2" not in guard
+        monkeypatch.setattr(crh_module, "render_document", boom)
+        self.handler.render_sync("Agent", "<b>raw & dangerous</b>", "sk")
+        html_arg = self.spy.appended[0]["html"]
+        assert "&lt;b&gt;raw &amp; dangerous&lt;/b&gt;" in html_arg
+        assert "<b>" not in html_arg
 
 
-class TestPipeline:
-    """Tests for the extract -> escape -> markdown/highlight pipeline."""
+# ── Per-session surfaces ──────────────────────────────────────────────────
+
+class TestPerSessionSurfaces:
+    """SP4: per-session surfaces, lazy creation, destroy-on-close (SP3
+    destroy contract honored via surface.destroy()).
+
+    The lazy factory is patched to yield SpySurfaces — handler tests must
+    not instantiate real WebKit widgets (crashes the combined gate run;
+    real-WebKit behavior is test_chat_surface.py's job)."""
+
+    def _handler_with_spy_factory(self, monkeypatch):
+        created: list = []
+
+        def factory():
+            s = SpySurface()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        return ChatRenderHandler(), created
+
+    def test_two_sessions_get_two_surfaces(self, monkeypatch):
+        """Test 5a: distinct session keys → distinct surface instances."""
+        handler, created = self._handler_with_spy_factory(monkeypatch)
+        handler.render_sync("Agent", "one", "s1")
+        handler.render_sync("Agent", "two", "s2")
+        assert set(handler._surfaces) == {"s1", "s2"}
+        assert handler._surfaces["s1"] is not handler._surfaces["s2"]
+        assert len(created) == 2  # exactly one surface per session
+
+    def test_close_session_destroys_only_that_surface(self, monkeypatch):
+        """Test 5b: closing one session destroys ONLY its surface — the
+        other stays live (SP3 destroy contract runs on the closed one)."""
+        handler, _created = self._handler_with_spy_factory(monkeypatch)
+        s1 = handler._surface_for("s1")
+        s2 = handler._surface_for("s2")
+        s1_destroyed, s2_destroyed = [], []
+        s1.destroy = lambda: s1_destroyed.append(True)
+        s2.destroy = lambda: s2_destroyed.append(True)
+
+        handler.close_session("s1")
+        assert s1_destroyed == [True]   # closed session destroyed
+        assert s2_destroyed == []       # other session untouched
+        assert "s1" not in handler._surfaces
+        assert handler._surface_for("s1") is not s1  # re-lazily created
+
+    def test_close_session_idempotent_and_unknown_safe(self):
+        """close_session on unknown/twice-closed keys is a no-op."""
+        handler = ChatRenderHandler()
+        handler.close_session("never-existed")
+        handler.close_session("never-existed")  # twice-safe
+
+    def test_destroyed_surface_swallows_late_append(self, monkeypatch):
+        """Append racing a close: close_session REMOVES the routing — the
+        destroyed spy never sees the late row, and no raise escapes."""
+        handler, _created = self._handler_with_spy_factory(monkeypatch)
+        spy = SpySurface()
+        handler._surfaces["s1"] = spy
+        handler.render_sync("Agent", "first", "s1")
+        assert len(spy.appended) == 1
+        handler.close_session("s1")
+        handler.render_sync("Agent", "late", "s1")  # must not raise
+        assert len(spy.appended) == 1  # the destroyed surface saw nothing more
+
+
+# ── Streaming lifecycle (buffered; atomic final row) ──────────────────────
+
+class TestStreamingSurfaceLifecycle:
+    """SP4: start/update buffer only; end_streaming renders ONE atomic row."""
 
     def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
-
-    def test_escape_and_markdown_order(self):
-        """Markdown bold (**b**) converted before final HTML-escape of <b>."""
-        widget = self.handler.render_sync("Agent", "this **is** bold")
-        assert widget is not None  # Full pipeline — no crash
-
-    def test_full_pipeline_agent_role(self):
-        """Full pipeline with code block and markdown produces an agent bubble."""
-        widget = self.handler.render_sync("Agent", "Install **bold**:\n```bash\necho hi\n```")
-        assert widget is not None
-
-
-class TestPhase3Streaming:
-    """Tests for Phase 3 streaming bubble lifecycle."""
-
-    def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
-        self.fake_box = FakeChatBox()
-        self.idle_calls = []
-
-    def _run_all_idle(self):
-        # GLib_module=None means _dispatch() calls fn() immediately
-        pass
+        self.handler, self.spy = _spy_handler()
 
     def test_is_streaming_false_initially(self):
-        """is_streaming() returns False before any start_streaming() call."""
-        assert self.handler.is_streaming("agent:1") is False
+        assert self.handler.is_streaming("sk") is False
 
-    def test_start_streaming_creates_bubble(self):
-        """start_streaming() creates a streaming bubble in the container."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        assert self.handler.is_streaming("agent:1") is True
-        assert len(self.fake_box._children) == 1  # bubble appended
+    def test_start_then_update_renders_nothing(self):
+        """Test 7 (buffer half): deltas buffer — no surface rows mid-stream."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "chunk one ")
+        self.handler.update_streaming("sk", "chunk two")
+        assert self.handler.is_streaming("sk") is True
+        assert self.spy.appended == []  # nothing rendered while streaming
+        assert self.handler.get_streaming_text("sk") == "chunk two"  # FULL replace
 
-    def test_start_streaming_twice_idempotent(self):
-        """start_streaming() twice clears the old bubble first (no duplicates)."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        assert self.handler.is_streaming("agent:1") is True
-        assert len(self.fake_box._children) == 2  # end_streaming(render=True default) removes old streaming bubble + appends final_bubble, then second start_streaming appends new streaming bubble = 2 children
+    def test_end_streaming_renders_single_atomic_sanitized_row(self):
+        """Test 7 (end half): buffered text → ONE sanitized row (SP3 stream
+        contract: atomic, sanitized at the composed entry)."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "use <script>x</script> please")
+        self.handler.end_streaming("sk", agent_name="Coder")
+        assert self.handler.is_streaming("sk") is False
+        assert len(self.spy.appended) == 1
+        html_arg = self.spy.appended[0]["html"]
+        assert "<script" not in html_arg.lower()
+        assert "&lt;script&gt;" in html_arg
+        assert self.spy.appended[0]["agent"] == "Coder"
 
-    def test_update_streaming_uses_delta_as_full_text(self):
-        """update_streaming() uses delta_text as the complete accumulated text."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        self.handler.update_streaming("agent:1", "Hello world")
-        self._run_all_idle()
-        # StreamingBubble dataclass: access .plain_text attribute directly
-        assert self.handler._streaming_bubbles["agent:1"].plain_text == "Hello world"  # last delta wins, no double-accumulation
+    def test_end_streaming_without_start_is_noop(self):
+        """Test: end_streaming() is safe to call when no stream exists."""
+        self.handler.end_streaming("sk")
+        assert self.spy.appended == []
 
-    def test_update_streaming_shows_plain_text(self):
-        """During streaming, label shows plain text (no markup escaping).
-        Escaping is applied in end_streaming → build_role_bubble."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        self.handler.update_streaming("agent:1", "<div>hello</div>")
-        self._run_all_idle()
-        # StreamingBubble dataclass: access .label attribute directly
-        label_text = self.handler._streaming_bubbles["agent:1"].label.get_label()
-        assert "<div>hello</div>" in label_text  # literal, not escaped
-        assert "&lt;" not in label_text  # no markup escaping during streaming
+    def test_restart_finalizes_previous_stream(self):
+        """start_streaming on an active session finalizes it first (no
+        buffer loss — old v1 semantics preserved)."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "first stream")
+        self.handler.start_streaming("sk")
+        assert len(self.spy.appended) == 1
+        assert "first stream" in self.spy.appended[0]["html"]
+        assert self.handler.is_streaming("sk") is True  # new session live
+        assert self.handler.get_streaming_text("sk") == ""
 
-    def test_end_streaming_escapes_html_in_final_bubble(self):
-        """end_streaming → build_role_bubble escapes < > & in the final bubble.
-        Streaming shows plain text; escaping is applied on completion."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        self.handler.update_streaming("agent:1", "Use <div> & <script>")
-        self._run_all_idle()
-        self.handler.end_streaming("agent:1")
-        self._run_all_idle()
-        # The final bubble is built by build_role_bubble, which calls
-        # escape_for_pango + format_markdown + set_markup. The streaming
-        # bubble (now removed) used set_text (plain text). Assert that the
-        # FINAL bubble has escaped content.
-        #
-        # build_role_bubble returns a Gtk.Box; the label is a child.
-        # Walk the widget tree to find Gtk.Label and check get_label():
-        assert len(self.fake_box._children) >= 1, "Expected at least one final bubble widget"
-        final_widget = self.fake_box._children[-1]
-        # Walk widget tree looking for labels
-        def find_labels(widget):
-            labels = []
-            if hasattr(widget, 'get_label') and callable(widget.get_label):
-                labels.append(widget.get_label())
-            child = getattr(widget, 'get_first_child', lambda: None)()
-            while child is not None:
-                labels.extend(find_labels(child))
-                child = child.get_next_sibling()
-            return labels
-        labels = find_labels(final_widget)
-        assert any('&lt;div&gt;' in l for l in labels), \
-            f"Expected escaped &lt;div&gt; in final bubble labels: {labels}"
+    def test_end_streaming_render_false_drops_buffer(self):
+        """render=False (ARH non-streaming finalize path): buffer dropped,
+        NO row — the caller renders final text via render_sync itself."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "will be re-rendered")
+        self.handler.end_streaming("sk", render=False)
+        assert self.spy.appended == []
+        assert self.handler.is_streaming("sk") is False
 
-    def test_is_streaming_true_after_start(self):
-        """is_streaming() returns True after start_streaming() is called."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        assert self.handler.is_streaming("agent:1") is True
+    def test_end_streaming_clears_buffer_for_new_session(self):
+        """A NEW stream with identical text still renders (no stale-skip
+        inheritance — preserves the old B4 contract)."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "repeated across sessions")
+        self.handler.end_streaming("sk")
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "repeated across sessions")
+        self.handler.end_streaming("sk")
+        assert len(self.spy.appended) == 2
 
-    def test_end_streaming_removes_entry(self):
-        """end_streaming() removes the streaming bubble entry."""
-        self.handler.start_streaming("agent:1", self.fake_box, "Agent")
-        self._run_all_idle()
-        self.handler.end_streaming("agent:1")
-        self._run_all_idle()
-        assert "agent:1" not in self.handler._streaming_bubbles
-
-    def test_end_streaming_idempotent(self):
-        """end_streaming() is safe to call when no streaming bubble exists."""
-        self.handler.end_streaming("agent:1")  # no-op, no crash
+    def test_skip_diagnostic_uses_logger_not_print(self, capsys):
+        """update_streaming for unknown key: debug log only — stdout clean."""
+        self.handler.update_streaming("agent:missing", "text")
+        captured = capsys.readouterr()
+        assert captured.out == ""
 
 
-class TestPhase5MessageGrouping:
-    """Tests for Phase 5 — message grouping and forward callback."""
+class TestStreamingReplaceContract:
+    """set_streaming_text (ARH crabcard-cleaning dependency) must REPLACE
+    the pending buffer — why the handler buffers instead of using
+    surface.stream_delta (append-only by contract)."""
 
     def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
+        self.handler, self.spy = _spy_handler()
 
-    def test_consecutive_same_role_session_gets_tight(self):
-        """Second message from same role+session gets tight=True (grouped)."""
-        # First message — should NOT be tight
-        w1 = self.handler.render_sync("Agent", "Hello", session_key="agent:1")
-        assert w1 is not None
+    def test_set_streaming_text_overwrites_pending_buffer(self):
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "with crabcard blocks")
+        assert self.handler.set_streaming_text("sk", "cleaned") is True
+        self.handler.end_streaming("sk")
+        assert self.spy.appended[0]["html"].count("cleaned") == 1
+        assert "crabcard" not in self.spy.appended[0]["html"]
 
-        # Second message from same role+session — should be tight
-        # We verify by checking _last_message_key was set
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-    def test_different_role_resets_grouping(self):
-        """Message from different role resets grouping — not tight."""
-        self.handler.render_sync("Agent", "Hello", session_key="agent:1")
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-        # Different role — new key
-        self.handler.render_sync("You", "Hi back", session_key="agent:1")
-        assert self.handler._last_message_key == "You:agent:1"
-
-    def test_different_session_resets_grouping(self):
-        """Message from different session_key resets grouping."""
-        self.handler.render_sync("Agent", "Hello", session_key="agent:1")
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-        # Different session — new key
-        self.handler.render_sync("Agent", "Hello", session_key="agent:2")
-        assert self.handler._last_message_key == "Agent:agent:2"
-
-    def test_session_switch_resets_grouping(self):
-        """Switching to a different session_key breaks grouping — not tight."""
-        self.handler.render_sync("Agent", "Hello", session_key="agent:1")
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-        # Different session — key changes, so next bubble for agent:1 would NOT be grouped
-        self.handler.render_sync("Agent", "Other session", session_key="agent:2")
-        assert self.handler._last_message_key == "Agent:agent:2"
-
-        # Back to agent:1 — different from current key, so NOT tight
-        self.handler.render_sync("Agent", "New message", session_key="agent:1")
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-    def test_forward_callback_in_render_sync(self):
-        """render_sync passes on_forward_click to build_role_bubble."""
-        calls = []
-        def forward_cb(text, widget):
-            calls.append(text)
-
-        widget = self.handler.render_sync("Agent", "Forward me",
-                                          session_key="agent:1",
-                                          on_forward_click=forward_cb)
-        assert widget is not None
-        # The forward callback is wired into the bubble — we can't easily
-        # simulate a GTK click in tests, but we verify it doesn't crash
-
-    def test_none_session_key_does_not_group(self):
-        """render_sync with no session_key sets current_key=None — no grouping with keyed messages."""
-        self.handler.render_sync("Agent", "Hello", session_key="agent:1")
-        assert self.handler._last_message_key == "Agent:agent:1"
-
-        # No session key — current_key is None, _last_message_key becomes None
-        self.handler.render_sync("Agent", "No session")
-        assert self.handler._last_message_key is None
+    def test_set_and_get_streaming_text_offline_keys(self):
+        assert self.handler.set_streaming_text("nope", "x") is False
+        assert self.handler.get_streaming_text("nope") is None
 
 
+# ── Reentrancy (kept from v1 — unchanged contract) ────────────────────────
+
+class TestReentrancyGuard:
+    """Reentrancy guard survives the repoint (concurrent renders skipped)."""
+
+    def setup_method(self):
+        self.handler, self.spy = _spy_handler()
+
+    def test_async_blocks_duplicate_session_key(self, monkeypatch):
+        """Second render_async for an in-flight key is skipped — first wins.
+
+        Uses the REAL pool + a gate: render_async adds the key to the guard
+        SYNCHRONOUSLY before submitting, so the second call is deterministically
+        blocked while the first compose is parked. (With the inline test pool
+        the whole render completes synchronously and the guard is released by
+        the time render_async returns — unobservable without real threads.)"""
+        import threading
+
+        gate = threading.Event()
+        real_compose = crh_module.render_document  # capture BEFORE patching
+
+        def gated_compose(text):
+            gate.wait(timeout=5)  # first render parks here — in-flight
+            return real_compose(text)
+
+        monkeypatch.setattr(crh_module, "render_document", gated_compose)
+        handler = ChatRenderHandler()  # REAL shared pool
+        spy = SpySurface()
+        handler._surfaces["sk"] = spy
+        results: list = []
+        handler.render_async("Agent", "first", "sk", on_bubble_ready=results.append)
+        handler.render_async("Agent", "second", "sk", on_bubble_ready=results.append)
+        gate.set()
+        deadline = time.monotonic() + 5
+        while len(results) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert results == [None]
+        assert len(spy.appended) == 1
+        assert "first" in spy.appended[0]["html"]
+
+    def test_reentrancy_released_after_render(self):
+        """The guard releases after completion — the NEXT render succeeds."""
+        self.handler.render_sync("Agent", "one", "sk")
+        self.handler.render_sync("Agent", "two", "sk")
+        assert len(self.spy.appended) == 2
+
+    def test_reentrancy_set_basics(self):
+        guard = self.handler._reentrancy
+        assert "k" not in guard
+        assert guard.add("k") is True
+        assert guard.add("k") is False  # in-flight
+        assert "k" in guard
+        guard.remove("k")
+        assert "k" not in guard
+        guard.remove("k")  # no-op on missing
+
+
+# ── Event cards: UNCHANGED Pango path (R3 — not transcript sites) ─────────
 
 class TestPhase4EventCards:
-    """Tests for render_event_card() — special event card rendering."""
+    """render_event_card stays Pango (ruling R2/R3 — cards are not chat
+    transcript sites and are not in the pango catalog)."""
 
     def setup_method(self):
         self.handler = ChatRenderHandler(GLib_module=None)
         self.fake_box = FakeChatBox()
 
-    def _run_all_idle(self):
-        # GLib_module=None means _dispatch() calls fn() immediately
-        pass
-
     def test_file_read_card(self):
-        """render_event_card(file_read) creates and appends a file card widget."""
         self.handler.render_event_card("file_read", self.fake_box,
                                       file_path="src/main.py",
                                       snippet="print('hello')",
                                       line_range="1-3")
-        self._run_all_idle()
         assert len(self.fake_box._children) == 1
-        card = self.fake_box._children[0]
-        assert card.get_halign() == Gtk.Align.START
+        assert self.fake_box._children[0].get_halign() == Gtk.Align.START
 
     def test_edit_proposal_card(self):
-        """render_event_card(edit_proposal) creates and appends an edit card."""
         self.handler.render_event_card("edit_proposal", self.fake_box,
                                       file_path="src/main.py",
                                       diff="- old\n+ new")
-        self._run_all_idle()
         assert len(self.fake_box._children) == 1
 
     def test_tool_call_card(self):
-        """render_event_card(tool_call) creates and appends a tool card."""
         self.handler.render_event_card("tool_call", self.fake_box,
                                       tool_name="ReadFile",
                                       detail="path=README.md")
-        self._run_all_idle()
         assert len(self.fake_box._children) == 1
 
     def test_error_bubble(self):
-        """render_event_card(error) creates and appends an error bubble."""
         self.handler.render_event_card("error", self.fake_box,
                                       error_msg="File not found")
-        self._run_all_idle()
         assert len(self.fake_box._children) == 1
 
     def test_unknown_event_type_silent(self):
-        """Unknown event_type is silently ignored (no exception, no widget added)."""
         self.handler.render_event_card("unknown_type", self.fake_box)
-        self._run_all_idle()
-        assert len(self.fake_box._children) == 0
+        assert self.fake_box._children == []
 
 
 class FakeChatBox:
-    """Minimal Gtk.Box stand-in for testing bubble append/remove."""
+    """Minimal Gtk.Box stand-in for testing card append/remove."""
+
     def __init__(self):
         self._children = []
 
@@ -411,126 +407,16 @@ class FakeChatBox:
         return widget in self._children
 
     def get_first_child(self):
-        """Return the first child, or None if empty (mirrors Gtk.Widget)."""
         return self._children[0] if self._children else None
 
-    def get_next_sibling(self):
-        """
-        FakeChatBox is a container stand-in, not a widget, so it has no
-        siblings. Returns None — mirrors Gtk.Widget.get_next_sibling() on a
-        root-level container. (The sibling walk in is_in_container calls
-        get_next_sibling on each CHILD widget, not on the container.)
-        """
-        return None
 
+# ── Legacy escape semantics (kept: escape util itself unchanged) ──────────
 
-class TestStreamingPerfGuard:
-    """AC3 Phase 1 Part B — render throttle + unchanged-skip guard.
+class TestEscapeUtil:
+    """The escape util's own semantics are unchanged by SP4 (the surface
+    pipeline uses render_document; this pins the util for remaining Pango
+    sites — event cards and unconverted surfaces)."""
 
-    Guards three perf behaviors on update_streaming():
-      1. _stream_throttle_sec bounds set_text frequency (0.5s window).
-      2. Identical consecutive delta text produces ZERO additional set_text
-         (plain_text still updates — invariant 2: completion reads it).
-      3. The [STREAM] skip diagnostic goes to _logger.debug, not stdout.
-    """
-
-    def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
-        self.fake_box = FakeChatBox()
-        self.set_text_calls = []
-
-    def _start_with_counting_label(self, session_key: str = "agent:1"):
-        """Start a streaming session whose label counts set_text calls.
-
-        Instance attribute assignment (not class patching) — the label and
-        wrapper die with the per-test handler, so nothing leaks.
-        """
-        self.handler.start_streaming(session_key, self.fake_box, "Agent")
-        sb = self.handler._streaming_bubbles[session_key]
-        sb.label.set_text = lambda t: self.set_text_calls.append(t)
-        return sb
-
-    def test_throttle_constant_is_500ms(self):
-        """Spec B1: throttle window widened 0.15s → 0.5s."""
-        assert self.handler._stream_throttle_sec == 0.5
-
-    def test_throttle_bounds_set_text_calls(self, monkeypatch):
-        """Spec B2: deltas inside the throttle window produce exactly one
-        set_text per window (monotonic clock stubbed, no sleeps, no FP-boundary
-        dependence — 0.05s spacing keeps every delta well inside one window)."""
-        self._start_with_counting_label()
-        clock = {"t": 100.0}
-        monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
-
-        # 6 deltas, one per 0.05s of fake time (0.3s total — one window)
-        for i in range(6):
-            clock["t"] += 0.05
-            self.handler.update_streaming("agent:1", f"delta {i}")
-        assert len(self.set_text_calls) == 1, (
-            f"all 6 deltas fall inside one 0.5s window — only the first may "
-            f"render, got {len(self.set_text_calls)}: {self.set_text_calls!r}"
-        )
-
-        # Window long expired → next delta renders
-        clock["t"] += 0.6
-        self.handler.update_streaming("agent:1", "delta 6")
-        assert len(self.set_text_calls) == 2
-
-    def test_identical_consecutive_text_zero_set_text(self):
-        """Spec B2: identical consecutive text → zero additional set_text.
-
-        The gateway's cumulative-delta protocol makes exact repeats rare in
-        production, but the skip guard must still short-circuit them (and
-        tests in test_agent_runtime.py replay cumulative text directly).
-        """
-        self._start_with_counting_label()
-        # First call renders (cold cache); second call is byte-identical.
-        self.handler.update_streaming("agent:1", "same text")
-        self.handler.update_streaming("agent:1", "same text")
-        self.handler.update_streaming("agent:1", "same text")
-
-        assert len(self.set_text_calls) == 1, (
-            f"identical consecutive text must skip set_text, got "
-            f"{len(self.set_text_calls)} calls: {self.set_text_calls!r}"
-        )
-
-    def test_plain_text_still_updates_when_set_text_skipped(self, monkeypatch):
-        """Invariant 2: sb.plain_text updates BEFORE any skip path — the
-        completion path reads plain_text even when the label was not redrawn."""
-        self._start_with_counting_label()
-        monkeypatch.setattr(time, "monotonic", lambda: 0.0)  # freeze clock → throttle-skipped
-        self.handler.update_streaming("agent:1", "stale visible")
-        self.handler.update_streaming("agent:1", "latest cumulative text")
-
-        sb = self.handler._streaming_bubbles["agent:1"]
-        assert sb.plain_text == "latest cumulative text"
-        # set_text fired at most once (first call, cold cache) — second was skipped
-        assert all(t != "latest cumulative text" for t in self.set_text_calls)
-
-    def test_end_streaming_clears_last_rendered_text(self):
-        """Spec B4: end_streaming clears the skip cache so a NEW streaming
-        session with identical text still renders (no stale skip inheritance)."""
-        self._start_with_counting_label()
-        self.handler.update_streaming("agent:1", "repeated across sessions")
-        calls_after_first_session = len(self.set_text_calls)
-        assert calls_after_first_session == 1
-
-        self.handler.end_streaming("agent:1")  # render=True default builds final bubble
-        # New session, same text
-        self._start_with_counting_label()
-        self.handler.update_streaming("agent:1", "repeated across sessions")
-
-        assert len(self.set_text_calls) == 2, (
-            "end_streaming must clear _last_rendered_text — second session's "
-            "first delta must render, not be skipped"
-        )
-
-    def test_skip_diagnostic_uses_logger_not_print(self, capsys):
-        """Spec B3: unknown-session diagnostic goes through _logger.debug,
-        not print (stdout must stay clean for the gateway protocol)."""
-        self.handler.update_streaming("agent:missing", "text")
-        captured = capsys.readouterr()
-        assert captured.out == "", (
-            f"update_streaming printed to stdout: {captured.out!r}"
-        )
-
+    def test_xss_prevention(self):
+        escaped = escape_for_pango("<script>evil()</script>")
+        assert "&lt;script&gt;" in escaped

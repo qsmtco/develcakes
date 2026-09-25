@@ -1,7 +1,16 @@
 # ui/handlers/chat_render_handler.py
-# Chat render handler — coordinates text processing and bubble widget creation.
+# Chat render handler — routes transcript append/stream paths to the
+# per-session HTML chat surface (SPEC-06 R2 Phase A, SP4 repoint).
 #
-# Ported from deadcode's formatters.py (Phase 1 of Chat Formatting Port).
+# SPEC-06 SP4 (R2A): the Pango bubble pipeline is RETIRED for the transcript
+# role. render_async/render_sync/streaming now route through
+# render/html.render_document (markdown → HTML → sanitize, ALWAYS in the
+# path) into a per-session ChatSurface (ui/views/chat_surface.py). Per
+# ruling R1 the surface owns the widget tree: on_bubble_ready fires with
+# None (all callers already tolerate None — `if bubble is not None` guards
+# verified at chat_handler :228/:532 and agent_runtime_handler :2101/:2116/
+# :2280/:2316/:2438).
+#
 # Security: No secrets, no file I/O, no network calls.
 #
 # Thread safety: all GTK calls dispatched via GLib.idle_add when GLib is set.
@@ -10,18 +19,24 @@
 #
 # Reentrancy guard: _ReentrancySet prevents concurrent renders for the same
 # session_key. If a render is already in-flight for a key, subsequent calls
-# are skipped silently. This avoids visual glitches when multiple events
-# arrive simultaneously for the same session.
+# are skipped silently.
 #
-# Public API:
-#   render(role, text, session_key, on_bubble_ready, on_error=None)
-#       Escape + markdown-convert text, build bubble, call on_bubble_ready(widget)
-#       on the main thread (via GLib.idle_add when available).
-#       session_key enables reentrancy guarding.
-#
-#   render_sync(role, text, session_key=None) -> Gtk.Widget
-#       Synchronous version — only call from the main thread.
+# Public API (unchanged signatures — out-of-scope callers, e.g.
+# agent_runtime_handler's streaming extraction, keep working):
+#   render_async / render(role, text, session_key, on_bubble_ready, ...)
+#       → surface.append_message; on_bubble_ready(None) on the main thread.
+#   render_sync(role, text, session_key=None, ...) -> None
+#       → surface.append_message; returns None (R1 contract).
+#   start_streaming / update_streaming / end_streaming / is_streaming /
+#   get_streaming_text / set_streaming_text
+#       → buffered streaming with a REPLACEABLE pending buffer (see
+#         _stream_text below — why surface.stream_delta is not used).
+#   close_session(session_key)
+#       → destroys that session's surface (SP3 destroy contract).
+#   render_event_card / render_task_card
+#       → UNCHANGED Pango cards (not transcript sites; R3 catalog untouched).
 
+import html as _html
 import logging
 from typing import TYPE_CHECKING, Callable
 
@@ -29,13 +44,10 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-from utils.escaping import escape_for_pango, xml_template
-from utils.gtk_containers import is_in_container
-from utils.markdown import format_markdown
-from utils.gtk_safe_link import make_safe_label  # HIGH-6: activate-link guard
+from render.html import render_document
+from ui.views.chat_surface import create_chat_surface
+from utils.escaping import xml_template
 from concurrent.futures import ThreadPoolExecutor
-
-from ui.views.chat_bubble import build_role_bubble, process_segments, _clear_crabcards_registry
 
 if TYPE_CHECKING:
     from models.feed_card import FeedCardData
@@ -49,8 +61,6 @@ class _ReentrancySet:
 
     Prevents concurrent renders for the same session — if a render is
     already in-flight for a key, subsequent calls for that key are skipped.
-
-    Mimics deadcode's _ReentrancySet (chat.py lines 19–33).
     """
 
     def __init__(self):
@@ -71,291 +81,181 @@ class _ReentrancySet:
         return key in self._keys
 
 
-def _assemble_from_processed(role: str, raw_text: str, processed: list[dict], on_forward_click=None, agent_name: str = None, agent_color: str = None) -> Gtk.Widget:
-    """
-    Assemble a GTK bubble widget from pre-processed segments.
-    Must be called on the main thread — creates GTK widgets.
-    """
-    from gi.repository import Pango
-    from datetime import datetime
-    from ui.views.chat_bubble import _build_segment_widget, _build_code_from_markup, _add_action_buttons
-    from models.colors import css_class_for_color
-
-    container = Gtk.Box()
-    container.set_halign(Gtk.Align.END if role == "You" else Gtk.Align.START)
-
-    if role == "You":
-        bubble_css = "chat-bubble-you"
-    elif agent_color:
-        bubble_css = css_class_for_color(agent_color, "agent-bg")
-    else:
-        bubble_css = "chat-bubble-agent"
-    bubble = Gtk.Box(
-        orientation=Gtk.Orientation.VERTICAL,
-        css_classes=[bubble_css],
-    )
-    bubble.set_margin_top(4)
-    bubble.set_margin_bottom(4)
-
-    # Header row
-    if agent_name or role == "You":
-        timestamp = datetime.now().strftime("%H:%M")
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        header.add_css_class("chat-bubble-header")
-        header.set_spacing(4)
-        header.set_margin_bottom(2)
-        header.set_hexpand(role == "You")
-        header.set_halign(Gtk.Align.END if role == "You" else Gtk.Align.START)
-
-        display_name = agent_name if agent_name else "You"
-        name_label = Gtk.Label(label=display_name)
-        name_label.add_css_class("chat-bubble-header-name")
-        name_label.set_halign(Gtk.Align.START)
-
-        dot = Gtk.Box()
-        dot.set_size_request(6, 6)
-        dot_css = css_class_for_color(agent_color, "agent-dot") if agent_color and role == "Agent" else "chat-bubble-header-dot"
-        dot.add_css_class(dot_css)
-        dot.set_valign(Gtk.Align.CENTER)
-
-        time_label = Gtk.Label(label=timestamp)
-        time_label.add_css_class("chat-bubble-header-time")
-        time_label.set_halign(Gtk.Align.START)
-
-        header.append(name_label)
-        header.append(dot)
-        header.append(time_label)
-        bubble.append(header)
-
-    # Assemble widgets from pre-processed segments
-    for pseg in processed:
-        seg_type = pseg.get("type", "text")
-        if seg_type == "text":
-            markup = pseg.get("markup", "")
-            if not markup.strip():
-                bubble.append(Gtk.Box())
-                continue
-            # HIGH-6: make_safe_label wires the activate-link scheme guard
-            label = make_safe_label(markup, css_class="chat-msg-label")
-            bubble.append(label)
-        elif seg_type == "code":
-            code_markup = pseg.get("code_markup", "")
-            lang = pseg.get("lang", "")
-            raw_content = pseg.get("raw_content", "")
-            block = _build_code_from_markup(lang, code_markup, raw_content)
-            if block is not None:
-                bubble.append(block)
-        else:
-            seg_dict = {"type": seg_type, "content": pseg.get("content", "")}
-            if "lang" in pseg:
-                seg_dict["lang"] = pseg["lang"]
-            if "level" in pseg:
-                seg_dict["level"] = pseg["level"]
-            widget = _build_segment_widget(seg_dict)
-            if widget is not None:
-                bubble.append(widget)
-
-    # Action buttons
-    _add_action_buttons(bubble, raw_text, on_forward_click)
-
-    container.append(bubble)
-    return container
+def _surface_role(role: str) -> str:
+    """Map handler roles ("You"/"Agent"/"System") to surface roles
+    ("user"/"agent"/"system") — unknown values fall back to system."""
+    return {"You": "user", "Agent": "agent"}.get(role, "system")
 
 
 class ChatRenderHandler:
     """
-    Orchestrates bubble widget creation for chat messages.
+    Routes chat transcript content to per-session HTML chat surfaces.
 
-    Pipeline (owned by build_role_bubble()):
-      1. extract_blocks(raw_text)          — split into typed segments
-      2. Per segment:
-         - text   → escape_for_pango() + format_markdown()
-         - code   → syntax_highlight() (HTML-escapes internally)
-         - quote  → escape_for_pango() + format_markdown()
-         - heading/task/terminal → escape_for_pango()
-      3. Wrap each segment in GTK widgets per CSS classes
+    SPEC-06 SP4 pipeline (replaces the Pango bubble pipeline):
+      text → render/html.render_document()   (markdown → HTML → nh3 sanitize,
+                                              fail-closed — ALWAYS in the path)
+           → ChatSurface.append_message()    (per-session, windowed deque)
 
-    Phase 3 addition: streaming bubbles — text updates live as the agent types.
-
-    Thread safety: render() dispatches GTK calls via GLib.idle_add.
-    Use render_sync() only when already on the GTK main thread.
-
-    Reentrancy guard: concurrent renders for the same session_key are skipped.
-    This prevents visual glitches when multiple events arrive simultaneously.
+    Feature parity (ruling R2 — dispositions):
+      DROPPED for Phase A (documented): forward buttons, copy buttons,
+        agent color tint, per-row timestamp header, tight grouping, and the
+        render-time crabcard registry (ARH's own extraction path is
+        untouched). FORWARD via the toolbar still works; the registry
+        retires with chat_bubble in SP5.
+      KEPT: reentrancy guard, error fallback (escaped raw text — still
+        sanitized), buffered streaming with a final atomic row, Pango
+        event/task/diff cards (render_event_card — not transcript sites).
 
     Args:
         GLib_module: gi.repository.GLib or None — for thread-safe GTK calls
     """
 
-    PLAIN_TEXT_THRESHOLD = 2000  # chars — skip fancy formatting above this
-
     def __init__(self, GLib_module=None):
         self._GLib = GLib_module
         self._reentrancy = _ReentrancySet()
-        # Phase 3: streaming bubbles — session_key → (container, label, role, plain_text)
-        self._streaming_bubbles: dict = {}
-        # Phase 5b: message grouping — tracks last role+session_key for tight spacing
-        self._last_message_key: str = None
+        # SPEC-06 SP4: per-session chat surfaces (ruling R1 — the surface
+        # owns the widget tree). Lazily created; destroy via close_session.
+        self._surfaces: dict = {}
         self._on_forward_message = None   # set via set_on_forward_message()
-        # Phase 5: MainContent reference for self-contained scroll operations
         self._main_content = None
-        # Phase 3: Crabcard extraction callback — set via set_on_crabcard_extracted()
-        # Called with (list[FeedCardData], session_key) when crabcards are found in a message.
-        self._on_crabcard_extracted = None
-        # Phase 3: Active project name for crabcard parsing (set via set_project_name())
-        self._project_name = ""
-        # Streaming throttle: avoid redundant set_text on every delta
-        self._last_stream_update: dict[str, float] = {}  # session_key → monotonic timestamp
-        self._stream_throttle_sec = 0.5  # min 500ms between UI updates
-        # AC3 Phase 1 Part B: last RENDERED text per session — identical
-        # consecutive delta text skips the set_text call entirely.
-        self._last_rendered_text: dict[str, str] = {}  # session_key → plain text
+        # SPEC-06 SP4: streaming pending buffers. Handler-side REPLACEMENT
+        # buffer (not surface.stream_delta) because set_streaming_text — a
+        # live agent_runtime_handler dependency, out of scope this round —
+        # must be able to OVERWRITE the pending text (crabcard cleaning),
+        # and the surface's stream buffer is append-only by contract.
+        self._streaming: set[str] = set()
+        self._stream_text: dict[str, str] = {}
 
     # ── Thread pool for off-main-thread processing ──────────────────
     _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crabcakes-render")
+
+    # ── Surface lifecycle (SPEC-06 SP4) ─────────────────────────────
+
+    def _surface_for(self, session_key: str):
+        """Lazy per-session surface (created on first use)."""
+        surface = self._surfaces.get(session_key)
+        if surface is None:
+            surface = create_chat_surface()
+            self._surfaces[session_key] = surface
+        return surface
+
+    def close_session(self, session_key: str) -> None:
+        """Destroy one session's surface (SP3 destroy contract: idempotent,
+        cancels pending renders, drops the webview)."""
+        surface = self._surfaces.pop(session_key, None)
+        if surface is not None:
+            surface.destroy()
+        self._streaming.discard(session_key)
+        self._stream_text.pop(session_key, None)
+
+    def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None):
+        """Compose (markdown → sanitized HTML) and append to the session
+        surface. Sanitize is ALWAYS in the path here — SP6's guard pins
+        this call site. Raw-HTML fallback only if composition itself
+        raises, and even that goes through html.escape (never raw)."""
+        try:
+            html_fragment = render_document(text)
+        except Exception:
+            _logger.exception("render_document failed — appending escaped raw text")
+            html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
+        surface = self._surface_for(session_key or "")
+        surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 
     def render_async(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None, agent_name: str = None, agent_color: str = None):
         """
-        Process text on a background thread, assemble GTK widgets on main thread.
+        Compose HTML off-thread, append to the session surface on main.
 
-        Heavy text processing (extract_blocks, escape, markdown, highlight) runs
-        on a worker thread. GTK widget assembly is dispatched to the main thread.
-        This keeps the UI responsive for large messages.
+        RULING R1: on_bubble_ready fires with None — the surface already
+        displayed the message. Callers' existing None-guards are verified.
+        on_forward_click/agent_color are accepted for signature compat and
+        ignored (dropped for Phase A, ruling R2).
 
         Args:
-            role:           "You" or "Agent"
+            role:           "You", "Agent" or "System"
             text:           Raw message text
-            session_key:    For reentrancy guarding — concurrent renders for same key are skipped
-            on_bubble_ready: callback(widget) — called on main thread with finished bubble
-            on_forward_click: optional callback for forward button
+            session_key:    For reentrancy guarding and surface selection
+            on_bubble_ready: callback(None) — called on main thread
             on_error:       optional callback(error_msg) — called on main thread
-            agent_name:     Optional display name for the agent header
-            agent_color:    Optional hex color for tinted bubble background
         """
         if not self._reentrancy.add(session_key):
             return  # render already in flight
 
-        # Resolve agent color for tinted bubble background (3-tier fallback)
-        agent_color = None
-        if role == "Agent" and agent_name:
-            agent_color = self._resolve_agent_color(agent_name)
-
-        # Fast path: skip fancy formatting for large messages
-        if len(text) > self.PLAIN_TEXT_THRESHOLD:
-            def _plain_on_main():
-                try:
-                    bubble = self._render_plain_text(
-                        role, text,
-                        on_forward_click=on_forward_click,
-                        agent_name=agent_name,
-                        agent_color=agent_color,
-                    )
-                    self._reentrancy.remove(session_key)
-                    on_bubble_ready(bubble)
-                except Exception as exc:
-                    self._reentrancy.remove(session_key)
-                    if on_error:
-                        on_error(str(exc))
-            self._dispatch(_plain_on_main)
-            return
-
-        def _process_off_thread():
+        def _compose_off_thread():
             try:
-                # Heavy pure-Python work — no GTK calls
-                processed = process_segments(text)
+                # Heavy pure-Python work — no GTK calls. sanitize runs here.
+                html_fragment = render_document(text)
 
-                def _assemble_on_main():
+                def _append_on_main():
                     try:
-                        bubble = _assemble_from_processed(
-                            role, text, processed,
-                            on_forward_click=on_forward_click,
-                            agent_name=agent_name,
-                            agent_color=agent_color,
+                        self._surface_for(session_key).append_message(
+                            _surface_role(role), html_fragment, agent_name=agent_name
                         )
+                    except Exception:
+                        _logger.exception("surface append failed — escaped raw text fallback")
+                        try:
+                            self._surface_for(session_key).append_message(
+                                _surface_role(role),
+                                _html.escape(text) + "<!-- fallback: escaped raw -->",
+                                agent_name=agent_name,
+                            )
+                        except Exception:
+                            _logger.exception("surface fallback append failed")
+                    finally:
                         self._reentrancy.remove(session_key)
-                        on_bubble_ready(bubble)
-                    except Exception as exc:
-                        self._reentrancy.remove(session_key)
-                        if on_error:
-                            on_error(str(exc))
+                        # R1: the surface owns the widget tree — no bubble.
+                        on_bubble_ready(None)
 
-                self._dispatch(_assemble_on_main)
+                self._dispatch(_append_on_main)
             except Exception as exc:
                 self._reentrancy.remove(session_key)
                 if on_error:
                     self._dispatch(lambda err=exc: on_error(str(err)))
 
-        self._pool.submit(_process_off_thread)
+        self._pool.submit(_compose_off_thread)
 
     def render(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None):
-        """
-        Process text and produce a bubble widget asynchronously.
-
-        Args:
-            role:           "You" or "Agent"
-            text:           Raw message text (no markup assumed)
-            session_key:    Session key for reentrancy guarding — if a render is
-                           already in-flight for this key, this call is skipped.
-            on_bubble_ready: callback(widget) — called on main thread with bubble
-            on_error:       optional callback(error_msg) — called on main thread
-                           if an exception occurs during processing
-        """
-        if not self._reentrancy.add(session_key):
-            return  # render already in flight for this session_key
-
-        def _build():
-            try:
-                # Pass raw text — build_role_bubble() owns the full pipeline.
-                bubble = build_role_bubble(role, text, on_forward_click=on_forward_click)
-
-                def _deliver():
-                    self._reentrancy.remove(session_key)
-                    on_bubble_ready(bubble)
-
-                self._dispatch(_deliver)
-            except Exception as exc:
-                self._reentrancy.remove(session_key)
-                if on_error:
-                    self._dispatch(lambda err=exc: on_error(str(err)))
-
-        self._dispatch(_build)
+        """Legacy async entry — same surface path as render_async (R1:
+        on_bubble_ready fires with None)."""
+        self.render_async(
+            role, text, session_key,
+            on_bubble_ready=on_bubble_ready,
+            on_forward_click=on_forward_click,
+            on_error=on_error,
+        )
 
     # ── Sync (main thread only) ──────────────────────────────────────────
 
     def set_on_forward_message(self, cb):
-        """Set callback for forward button: cb(text, anchor_widget)."""
+        """Set callback for forward button: cb(text, anchor_widget).
+
+        Kept: the FORWARD toolbar button still works in Phase A (ruling R2
+        disposition (b)) even though per-row forward buttons are dropped."""
         self._on_forward_message = cb
 
     def set_on_crabcard_extracted(self, cb: "Callable[[list[FeedCardData], str, str], None]") -> None:
-        """
-        Set callback for when crabcards are extracted from a message.
-        Callback: cb(cards: list[FeedCardData], session_key: str, tab_key: str)
-        - session_key: agent's gateway key (e.g. "agent:qaster:...")
-        - tab_key: key of the chat box where the bubble lives (e.g. "project:crabwatch")
-        Called on the same thread as render_sync() — caller should dispatch to main thread if needed.
-        """
+        """Set callback for when crabcards are extracted from a message.
+
+        SPEC-06 SP4: no longer invoked by THIS handler's render paths
+        (render-time registry dropped for Phase A — ruling R2). Kept for
+        signature compat; agent_runtime_handler owns extraction upstream."""
         self._on_crabcard_extracted = cb
 
     def set_project_name(self, name: str) -> None:
-        """Set the active project name for crabcard parsing."""
+        """Set the active project name (kept for caller compat)."""
         self._project_name = name
 
     def set_main_content(self, main_content) -> None:
-        """Set MainContent reference for self-contained scroll operations and agent name lookup."""
+        """Set MainContent reference for scroll operations and agent name lookup."""
         self._main_content = main_content
 
     def _resolve_agent_color(self, agent_name: str) -> str | None:
         """Resolve hex color for an agent name (3-tier fallback).
 
-        Mirrors AgentListHandler.get_agent_color:
-          1. Live agent registered in AgentManager (gateway path).
-          2. Special agent role lookup (Coder, Debugger, etc.).
-          3. Deterministic default "#6366f1".
-
-        Returns None only if agent_name is falsy.
-        """
+        SPEC-06 SP4: color tint is dropped for Phase A (ruling R2) — kept
+        only because set-signature callers may still probe it; no longer
+        used by the render paths."""
         if not agent_name:
             return None
         # Tier 1: live agent
@@ -376,326 +276,127 @@ class ChatRenderHandler:
 
     def render_sync(self, role: str, text: str, session_key: str = None, on_forward_click=None, forwarded_from: str = None, agent_name: str = None, tab_key: str = None):
         """
-        Process text and return a bubble widget synchronously.
+        Append to the session surface synchronously. Returns None (R1).
 
         WARNING: Only call this when already on the GTK main thread.
-        For use in signal handlers and idle callbacks.
 
         Args:
             role:  "You" or "Agent"
             text:  Raw message text
-            session_key: Optional session key for reentrancy guarding.
-                       If a render is in-flight for this key, returns None.
-            tab_key: Optional key for the chat box where the bubble lives.
-                     Used for crabcard snapshot lookup. Falls back to session_key.
-                     For project chats, this is "project:<name>" while session_key
-                     is the agent's gateway key (e.g. "agent:qaster:...").
+            session_key: Session key for surface selection.
             agent_name: Optional agent display name. If None and role is "Agent",
                         looked up from _main_content._agent_mgr using session_key.
 
         Returns:
-            Gtk.Widget (a bubble container box), or None if re-entrant.
+            None — ALWAYS (ruling R1: the surface owns the widget tree;
+            callers' `if bubble is not None` guards skip the append).
         """
-        if session_key is not None and session_key in self._reentrancy:
-            return None
-        # Auto-lookup agent name for Agent role if not provided
-        agent_color = None
+        _ = (on_forward_click, forwarded_from, tab_key)  # compat; dropped for Phase A
         if agent_name is None and role == "Agent" and session_key and self._main_content is not None:
             agent_mgr = getattr(self._main_content, '_agent_mgr', None)
             if agent_mgr is not None:
                 agent_name = agent_mgr.get_name(session_key)
-        # Resolve agent color for tinted bubble background (3-tier fallback
-        # mirrors AgentListHandler.get_agent_color: live agent → special role → default)
-        if role == "Agent" and agent_name:
-            agent_color = self._resolve_agent_color(agent_name)
-        current_key = f"{role}:{session_key}" if session_key else None
-        tight = (current_key == self._last_message_key) and self._last_message_key is not None
+        self._append_to_surface(role, text, session_key, agent_name=agent_name)
 
-        # Phase 3: Extract crabcard blocks before building bubble
-        if self._on_crabcard_extracted is not None and role == "Agent":
-            from utils.crabcard_parser import extract_crabcards
-            # Clear stale registry entries from previous renders.
-            _clear_crabcards_registry()
-            # agent_name already resolved above via _agent_mgr.get_name() — use it or default
-            agent_for_card = agent_name or "agent"
-            cleaned_text, cards = extract_crabcards(text, self._project_name, agent_for_card)
-            if cards:
-                self._on_crabcard_extracted(cards, session_key or "", tab_key or session_key or "")
-        else:
-            cleaned_text = text
+    # ── Streaming (SPEC-06 SP4) ────────────────────────────────────────
 
-        bubble = build_role_bubble(role, cleaned_text, on_forward_click=on_forward_click, tight=tight, session_key=session_key, forwarded_from=forwarded_from, agent_name=agent_name, agent_color=agent_color)
-        self._last_message_key = current_key
-        return bubble
-
-
-    # ── Streaming bubbles (Phase 3) ────────────────────────────────────
-
-    def start_streaming(self, session_key: str, container: Gtk.Box, role: str = "Agent"):
+    def start_streaming(self, session_key: str, container=None, role: str = "Agent"):
         """
-        Start a streaming response bubble in container.
+        Begin a streaming session: buffer deltas, render at end_streaming.
 
-        Creates a pending bubble with a cursor (▍) that text will be appended to.
-        If a streaming bubble already exists for session_key, clears it first.
-
-        Args:
-            session_key: Session key for this streaming bubble.
-            container:   The chat box Gtk.Box to append the bubble to.
-            role:        "Agent" or "You" — determines bubble alignment.
+        SPEC-06 SP4: no widget is created here — the surface shows nothing
+        until the final atomic row (SP3 stream contract: buffer now, one
+        row at end). Re-starting an active session finalizes it first.
         """
-        # Clear any existing streaming bubble for this session
-        if session_key in self._streaming_bubbles:
+        if session_key in self._streaming:
             self.end_streaming(session_key)
-
-        from ui.views.chat_bubble import build_streaming_bubble
-        bubble, label = build_streaming_bubble(role)
-
-        # Store synchronously so end_streaming can access bubble even before
-        # _show runs on the main thread (important when end_streaming is called
-        # immediately after start_streaming from the same dispatch chain).
-        from models import StreamingBubble
-        self._streaming_bubbles[session_key] = StreamingBubble(
-            container=container, label=label, role=role, bubble=bubble
-        )
-
-        def _show():
-            container.append(bubble)
-
-        self._dispatch(_show)
+        self._streaming.add(session_key)
+        self._stream_text[session_key] = ""
 
     def is_streaming(self, session_key: str) -> bool:
-        """Return True if a streaming bubble exists for session_key."""
-        return session_key in self._streaming_bubbles
+        """Return True if a streaming session is active for session_key."""
+        return session_key in self._streaming
 
     def get_streaming_text(self, session_key: str) -> str | None:
         """
         Get the current accumulated plain text for a streaming session.
 
         Used by AgentRuntimeHandler to extract crabcards from the accumulated
-        streaming text before end_streaming() finalizes the bubble.
-        Returns None if no streaming bubble exists for this session.
+        streaming text before end_streaming() finalizes the row.
+        Returns None if no streaming session exists for this session.
         """
-        sb = self._streaming_bubbles.get(session_key)
-        return sb.plain_text if sb is not None else None
+        if session_key not in self._streaming:
+            return None
+        return self._stream_text.get(session_key)
 
     def set_streaming_text(self, session_key: str, text: str) -> bool:
         """
         Overwrite the accumulated streaming text for a session.
 
         Used by AgentRuntimeHandler after extracting crabcards — sets the
-        cleaned text so end_streaming() renders the bubble without crabcard blocks.
-        Returns True if successful, False if no streaming bubble exists.
+        cleaned text so end_streaming() renders the row without crabcard
+        blocks. Returns True if successful, False if no streaming session.
         """
-        sb = self._streaming_bubbles.get(session_key)
-        if sb is None:
+        if session_key not in self._streaming:
             return False
-        sb.plain_text = text
+        self._stream_text[session_key] = text
         return True
 
     def update_streaming(self, session_key: str, delta_text: str):
         """
-        Update the streaming bubble label for session_key.
+        Buffer the streaming text for session_key (nothing renders yet).
 
-        The gateway sends FULL cumulative text in each delta (each delta contains
-        all text accumulated so far). Use delta_text directly — do NOT append
-        to the stored plain text, as that would double-accumulate.
+        The gateway sends FULL cumulative text in each delta — the buffer is
+        REPLACED, not appended (do not double-accumulate). Renders at
+        end_streaming as ONE atomic sanitized row (SP3 stream contract).
 
-        Throttled: UI updates are limited to every 500ms to avoid freezing the
-        main thread with set_text on every delta. The latest text is always
-        stored so the final update is never lost. Identical consecutive text
-        is skipped entirely (no set_text at all).
-
-        Safe to call from the GTK main thread only (caller is responsible for
-        dispatching via GLib.idle_add). After Fix 2, set_text is called directly
-        instead of through self._dispatch.
+        Safe to call from the GTK main thread (no GTK work is done here).
         """
-        if session_key not in self._streaming_bubbles:
+        if session_key not in self._streaming:
             _logger.debug(
-                "update_streaming: SKIP sk=%r not in _streaming_bubbles",
+                "update_streaming: SKIP sk=%r not in _streaming",
                 session_key,
             )
             return
-
-        sb = self._streaming_bubbles[session_key]
-
-        # Always store latest text (even if throttled) so final render is correct
-        sb.plain_text = delta_text
-
-        # Unchanged-skip: identical cumulative text means nothing new to draw.
-        # Compare STORED plain text (not the cursor'd display string) — the
-        # label shows text + " ▍". Skipping here also bypasses the throttle
-        # bookkeeping, which is correct: nothing was rendered, so the window
-        # should stay open for the next real change.
-        if delta_text == self._last_rendered_text.get(session_key):
-            return
-
-        # Throttle: skip UI update if less than 500ms since last one
-        import time
-        now = time.monotonic()
-        last = self._last_stream_update.get(session_key, 0)
-        if now - last < self._stream_throttle_sec:
-            return
-        self._last_stream_update[session_key] = now
-
-        # During streaming: use plain text to avoid expensive Pango layout
-        # recalculation. Full formatting (markdown, syntax highlighting) is
-        # applied in end_streaming → build_role_bubble. We are already on the
-        # main thread (caller dispatched via GLib.idle_add), so no _dispatch needed.
-        sb.label.set_text(sb.plain_text + " ▍")
-        self._last_rendered_text[session_key] = sb.plain_text
-
-    def _render_plain_text(self, role: str, text: str, on_forward_click=None, agent_name: str = None, agent_color: str = None):
-        """
-        Fast-path bubble for large messages: single Gtk.Label, no fancy formatting.
-        Creates the bubble on the main thread — call from _dispatch or directly.
-
-        Follows same container > bubble structure as _assemble_from_processed(),
-        but skips extract_blocks/process_segments entirely.
-        """
-        from gi.repository import Pango
-        from datetime import datetime
-        from ui.views.chat_bubble import _add_action_buttons
-        from models.colors import css_class_for_color
-
-        container = Gtk.Box()
-        container.set_halign(Gtk.Align.END if role == "You" else Gtk.Align.START)
-
-        if role == "You":
-            bubble_css = "chat-bubble-you"
-        elif agent_color:
-            bubble_css = css_class_for_color(agent_color, "agent-bg")
-        else:
-            bubble_css = "chat-bubble-agent"
-        bubble = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            css_classes=[bubble_css],
-        )
-        bubble.set_margin_top(4)
-        bubble.set_margin_bottom(4)
-
-        # Header (same as _assemble_from_processed)
-        if agent_name or role == "You":
-            timestamp = datetime.now().strftime("%H:%M")
-            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-            header.add_css_class("chat-bubble-header")
-            header.set_spacing(4)
-            header.set_margin_bottom(2)
-            header.set_hexpand(role == "You")
-            header.set_halign(Gtk.Align.END if role == "You" else Gtk.Align.START)
-
-            display_name = agent_name if agent_name else "You"
-            name_label = Gtk.Label(label=display_name)
-            name_label.add_css_class("chat-bubble-header-name")
-            name_label.set_halign(Gtk.Align.START)
-
-            dot = Gtk.Box()
-            dot.set_size_request(6, 6)
-            dot_css = css_class_for_color(agent_color, "agent-dot") if agent_color and role == "Agent" else "chat-bubble-header-dot"
-            dot.add_css_class(dot_css)
-            dot.set_valign(Gtk.Align.CENTER)
-
-            time_label = Gtk.Label(label=timestamp)
-            time_label.add_css_class("chat-bubble-header-time")
-            time_label.set_halign(Gtk.Align.START)
-
-            header.append(name_label)
-            header.append(dot)
-            header.append(time_label)
-            bubble.append(header)
-
-        # Single plain text label — the fast path
-        label = Gtk.Label(label=text)
-        label.set_xalign(0)
-        label.set_wrap(True)
-        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        label.set_max_width_chars(120)
-        label.set_can_focus(False)
-        label.set_selectable(True)
-        label.add_css_class("chat-msg-label")
-        bubble.append(label)
-
-        # Action buttons (forward, copy)
-        _add_action_buttons(bubble, text, on_forward_click)
-
-        container.append(bubble)
-        return container
+        self._stream_text[session_key] = delta_text
 
     def end_streaming(self, session_key: str, agent_name: str = None, render: bool = True):
         """
-        End streaming for session_key: remove cursor and replace with final bubble.
+        End streaming for session_key: append the final atomic row.
 
-        The streaming bubble is replaced with a proper rendered final bubble.
+        The buffered text is composed (markdown → sanitized HTML) and
+        appended as ONE row. With render=False the buffer is dropped and
+        nothing renders (caller renders the final text itself, e.g. via
+        render_sync after crabcard cleaning).
 
         Args:
-            session_key: The conversation key whose streaming bubble to finalize.
-            agent_name: Optional explicit display name (e.g. "Coder", "Debugger")
-                to bypass the agent_mgr.get_name() lookup. Pass this when the
-                caller (e.g. AgentRuntimeHandler for local special agents) knows
-                the display name from the agent registry and the agent is NOT
-                in AgentManager. When None, the existing agent_mgr fallback
-                runs (which works for gateway agents that ARE registered in
-                AgentManager via gateway_handler.on_connected).
+            session_key: The conversation key whose streaming buffer to finalize.
+            agent_name: Optional explicit display name (bypasses the
+                agent_mgr.get_name() lookup).
+            render: Append the final row (default True).
         """
-        if session_key not in self._streaming_bubbles:
+        if session_key not in self._streaming:
             return
 
-        # Clean up throttle state
-        self._last_stream_update.pop(session_key, None)
-        self._last_rendered_text.pop(session_key, None)
+        self._streaming.discard(session_key)
+        full_text = self._stream_text.pop(session_key, "")
 
-        sb = self._streaming_bubbles.pop(session_key)
+        if not render:
+            return
 
         def _finalize():
-            # Use tracked plain text directly (cursor already absent after pop)
-            full_text = sb.plain_text
-
-            # Remove streaming bubble widget
-            if is_in_container(sb.bubble, sb.container):
-                sb.container.remove(sb.bubble)
-
-            # Resolve display name for header. Priority:
-            #   1. Explicit agent_name arg (caller knows the name from a
-            #      registry AgentManager does not see — used for local
-            #      special agents that are NOT in AgentManager).
-            #   2. agent_mgr.get_name(session_key) — works for gateway
-            #      agents that are registered in AgentManager via
-            #      gateway_handler.on_connected().
-            #   3. None — build_role_bubble's header condition
-            #      `if agent_name or role == "You":` hides the header
-            #      when both are falsy. That is the original bug for local
-            #      agents; passing agent_name explicitly (priority 1)
-            #      prevents the header from being hidden.
-            resolved_name = agent_name
-            if resolved_name is None and sb.role == "Agent" and self._main_content is not None:
-                agent_mgr = getattr(self._main_content, '_agent_mgr', None)
-                if agent_mgr is not None:
-                    resolved_name = agent_mgr.get_name(session_key)
-
-            # Resolve agent color for tinted bubble background
-            resolved_color = None
-            if sb.role == "Agent" and resolved_name:
-                resolved_color = self._resolve_agent_color(resolved_name)
-
-            if render:
-                # Build and append final bubble
-                final_bubble = build_role_bubble(
-                    sb.role, full_text,
-                    on_forward_click=self._on_forward_message,
-                    session_key=session_key,
-                    agent_name=resolved_name,
-                    agent_color=resolved_color,
-                )
-                sb.container.append(final_bubble)
-                if self._main_content is not None:
-                    self._main_content.scroll_chat_to_bottom()
+            self._append_to_surface("Agent", full_text, session_key, agent_name=agent_name)
+            if self._main_content is not None:
+                self._main_content.scroll_chat_to_bottom()
 
         self._dispatch(_finalize)
-        # Reset message grouping key so next message starts fresh
-        self._last_message_key = None
 
     def render_event_card(self, event_type: str, container: Gtk.Box, session_key: str = None, **kwargs):
         """
         Render a special event card into container.
+
+        SPEC-06 SP4: UNCHANGED — Pango event cards are not transcript sites
+        (ruling R2/R3; architecture keeps cards Pango in Phase A).
 
         Args:
             event_type: "file_read" | "edit_proposal" | "tool_call" | "error" | "thinking"
@@ -709,6 +410,7 @@ class ChatRenderHandler:
                 thinking:    thought_text
         """
         from ui.views.chat_bubble import (
+            build_role_bubble,
             create_file_card,
             create_edit_card,
             create_tool_card,
