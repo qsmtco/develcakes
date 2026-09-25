@@ -147,37 +147,60 @@ class ChatRenderHandler:
         no window.py edits; SP5c's chat_bubble deletion cannot disturb it."""
         self._container_getter = getter
 
-    def _mount_surface(self, session_key: str, surface) -> None:
-        """Mount the surface into its session's chat box (ONCE).
+    def _mount_surface(self, session_key: str, surface, mount_key: str | None = None) -> None:
+        """Mount the surface into a chat box — IDEMPOTENT RETRY (FIX 1).
 
-        - mount-once guard: a surface with a parent is never repacked;
-        - scroll: the SP3 surface has NO internal ScrolledWindow (the
-          webview/textview are appended directly to the Box) — wrap it in
-          one HERE, at mount;
-        - TextViewFallback mounts identically (same Gtk.Box base);
-        - no chat box for the key (early render / headless) → skip, the
-          surface still works unmounted.
+        FIX 1 (SP5a audit BUG #1): the old one-shot skipped mounting forever
+        when the box didn't exist yet at surface creation (early render /
+        project-routing), leaving the surface permanently unmounted. Now
+        every _surface_for call retries until the surface HAS a parent:
+
+        - surface.get_parent() is not None → already mounted, return (the
+          retry is a cheap attribute read on the hot path);
+        - getter is None or no box for the key → still works unmounted, the
+          NEXT render retries;
+        - FIX 3 (single-scroll): the mount appends the surface DIRECTLY —
+          the surface owns its own ScrolledWindow (chat_surface.py), no
+          wrapper is created here (the old wrapper double-scrolled).
         """
         if surface.get_parent() is not None:
-            return  # mount-once guard
+            return  # already mounted — nothing to do
         getter = self._container_getter
         if getter is None:
             return
-        chat_box = getter(session_key)
+        # FIX 2: mount into the RESOLVED display key's box (project tabs);
+        # falls back to the render session key (personal tabs unchanged).
+        chat_box = getter(mount_key or session_key)
         if chat_box is None:
             return
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_child(surface)
-        chat_box.append(scroll)
+        chat_box.append(surface)
 
-    def _surface_for(self, session_key: str):
-        """Lazy per-session surface (created on first use)."""
+    def surface_for_box(self, chat_box):
+        """FIX 3 (SP5a audit) — the seam for the single-scroll ruling:
+        return the surface mounted in chat_box (identity check on the
+        mount parent), or None if the box holds no surface (e.g. a Pango
+        welcome bubble only). main_content.scroll_chat_to_bottom uses this
+        to drive the SURFACE's own vadjustment instead of a wrapper's."""
+        for surface in self._surfaces.values():
+            if surface.get_parent() is chat_box:
+                return surface
+        return None
+
+    def _surface_for(self, session_key: str, mount_key: str | None = None):
+        """Lazy per-session surface (created on first use).
+
+        FIX 1: _mount_surface runs on EVERY call — idempotent (parent guard)
+        until the box exists, so a None-getter at creation is recovered on
+        the next render (the SP5a blank-window case, incl. project routing).
+        FIX 2: mount_key — the display key whose box the surface mounts in
+        (project-routed replies); the surface CACHE stays keyed by
+        session_key (streaming continuity).
+        """
         surface = self._surfaces.get(session_key)
         if surface is None:
             surface = create_chat_surface()
             self._surfaces[session_key] = surface
-            self._mount_surface(session_key, surface)  # SP5a: close the blank window
+        self._mount_surface(session_key, surface, mount_key)  # SP5a FIX 1: retry
         return surface
 
     def close_session(self, session_key: str) -> None:
@@ -190,17 +213,21 @@ class ChatRenderHandler:
         self._stream_text.pop(session_key, None)
         self._stream_role.pop(session_key, None)
 
-    def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None):
+    def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None,
+                           mount_key: str | None = None):
         """Compose (markdown → sanitized HTML) and append to the session
         surface. Sanitize is ALWAYS in the path here — SP6's guard pins
         this call site. Raw-HTML fallback only if composition itself
-        raises, and even that goes through html.escape (never raw)."""
+        raises, and even that goes through html.escape (never raw).
+
+        FIX 2: mount_key threads through so a project-routed reply mounts
+        its surface in the project tab's box (see _surface_for)."""
         try:
             html_fragment = render_document(text)
         except Exception:
             _logger.exception("render_document failed — appending escaped raw text")
             html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
-        surface = self._surface_for(session_key or "")
+        surface = self._surface_for(session_key or "", mount_key=mount_key)
         surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
@@ -316,7 +343,7 @@ class ChatRenderHandler:
         # Tier 3: deterministic default
         return "#6366f1"
 
-    def render_sync(self, role: str, text: str, session_key: str = None, on_forward_click=None, forwarded_from: str = None, agent_name: str = None, tab_key: str = None):
+    def render_sync(self, role: str, text: str, session_key: str = None, on_forward_click=None, forwarded_from: str = None, agent_name: str = None, tab_key: str = None, mount_key: str | None = None):
         """
         Append to the session surface synchronously. Returns None (R1).
 
@@ -328,6 +355,10 @@ class ChatRenderHandler:
             session_key: Session key for surface selection.
             agent_name: Optional agent display name. If None and role is "Agent",
                         looked up from _main_content._agent_mgr using session_key.
+            mount_key: FIX 2 — key of the box the surface mounts in
+                       (project-routed replies pass the resolved box key;
+                       None → mounts/verifies under session_key). Surface
+                       CACHE stays session-keyed.
 
         Returns:
             None — ALWAYS (ruling R1: the surface owns the widget tree;
@@ -338,7 +369,8 @@ class ChatRenderHandler:
             agent_mgr = getattr(self._main_content, '_agent_mgr', None)
             if agent_mgr is not None:
                 agent_name = agent_mgr.get_name(session_key)
-        self._append_to_surface(role, text, session_key, agent_name=agent_name)
+        self._append_to_surface(role, text, session_key, agent_name=agent_name,
+                                mount_key=mount_key)
 
     # ── Streaming (SPEC-06 SP4) ────────────────────────────────────────
 

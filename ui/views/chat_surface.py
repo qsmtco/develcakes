@@ -122,6 +122,20 @@ def _cap_row_html(fragment: str) -> str:
     return fragment
 
 
+def _make_owned_scroll() -> Gtk.ScrolledWindow:
+    """FIX 3 (SP5a audit): the ONE ScrolledWindow a surface owns.
+
+    Single-scroll ruling: the surface wraps its content widget itself —
+    no mount-time wrapper in the render handler, no second scrollbar.
+    Both surface classes build it here (parity, one place).
+    """
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_hexpand(True)
+    return scroll
+
+
 class ChatSurface(Gtk.Box):
     """WebKit-hosted chat transcript. One per chat tab, lazy webview.
 
@@ -146,6 +160,12 @@ class ChatSurface(Gtk.Box):
         self._pill_css = "pill-idle"
         self._pill_label.add_css_class(self._pill_css)
         self.append(self._pill_label)
+        # FIX 3 (SP5a audit): the surface owns its scroll — when mounted
+        # (directly, no wrapper) it must fill the pane.
+        self._scroll = _make_owned_scroll()
+        self.set_vexpand(True)
+        self.set_hexpand(True)
+        self.append(self._scroll)
 
     # ── internals ──
     def _ensure_webview(self):
@@ -154,12 +174,18 @@ class ChatSurface(Gtk.Box):
             self._webview = WebKit.WebView()
             settings = self._webview.get_settings()
             settings.set_enable_javascript(False)  # JS OFF (ruling R2)
-            self.append(self._webview)
+            self._scroll.set_child(self._webview)
         return self._webview
 
     def _load_html(self, doc: str) -> None:
         """The single load path (monkeypatch target for tests)."""
         self._ensure_webview().load_html(doc, "about:blank")
+
+    def get_vadjustment(self) -> Gtk.Adjustment | None:
+        """FIX 3 (SP5a audit): the surface's own scroll adjustment — the
+        seam main_content.scroll_chat_to_bottom drives (single-scroll
+        ruling: one active scroll per pane, owned by the surface)."""
+        return self._scroll.get_vadjustment()
 
     def _do_render(self) -> bool:
         """Coalesced render — runs at most once per idle cycle."""
@@ -251,7 +277,7 @@ class ChatSurface(Gtk.Box):
         self._stream_buffers.clear()
         self._rows.clear()
         if self._webview is not None:
-            self.remove(self._webview)
+            self._scroll.set_child(None)
             self._webview = None
 
 
@@ -269,10 +295,20 @@ class TextViewFallback(Gtk.Box):
         self._pill_css = "pill-idle"
         self._pill_label.add_css_class(self._pill_css)
         self.append(self._pill_label)
+        # FIX 3 (SP5a audit): scroll parity with the WebKit class — the
+        # surface owns its ScrolledWindow; TextView goes inside it.
+        self._scroll = _make_owned_scroll()
+        self.set_vexpand(True)
+        self.set_hexpand(True)
+        self.append(self._scroll)
         self._view = Gtk.TextView()
         self._view.set_editable(False)
         self._view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self.append(self._view)
+        self._scroll.set_child(self._view)
+
+    def get_vadjustment(self) -> Gtk.Adjustment | None:
+        """FIX 3 (SP5a audit): scroll seam — see ChatSurface.get_vadjustment."""
+        return self._scroll.get_vadjustment()
 
     def _text(self) -> str:
         buf = self._view.get_buffer()

@@ -1019,13 +1019,32 @@ class MainContent(Gtk.Box):
             self._close_tab(page_idx)
 
     def scroll_chat_to_bottom(self, page_index=None):
-        """Scroll the chat ScrolledWindow to the bottom."""
+        """Scroll the active chat to the bottom.
+
+        SPEC-06 SP5a FIX 3 (single-scroll ruling): if the page's chat box
+        holds a mounted HTML chat surface, drive the SURFACE's own
+        vadjustment (the surface owns its ScrolledWindow — there is no
+        wrapper to drive, and the box-level chat_scroll is inert for
+        surface tabs). The old _tab_scrolls path stays for non-surface
+        children (plain Pango boxes).
+        """
         if page_index is None:
             page_index = self._chat_notebook.get_current_page()
         scroll = self._tab_scrolls.get(page_index)
         if scroll is None:
             return
-        vadj = scroll.get_vadjustment()
+        # FIX 3 (single-scroll): surface tabs drive the SURFACE's own
+        # vadjustment — the surface owns its ScrolledWindow, the box-level
+        # chat_scroll is inert for surface tabs (no wrapper exists to drive).
+        chat_box = self._tab_chat_boxes.get(page_index)
+        surface = None
+        crh = self._chat_render_handler
+        if chat_box is not None and crh is not None:
+            surface = crh.surface_for_box(chat_box)
+        if surface is not None:
+            vadj = surface.get_vadjustment()
+        else:
+            vadj = scroll.get_vadjustment()
         if vadj is None:
             return
         # Defer scroll to next frame — widget layout must recalculate first

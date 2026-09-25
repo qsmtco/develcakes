@@ -1361,6 +1361,24 @@ class AgentRuntimeHandler:
         logger.debug("[handler] _resolve_chat_box: sk=%s → None (no tab, no routing)", session_key)
         return None
 
+    def _resolve_mount_key(self, session_key: str) -> str | None:
+        """SPEC-06 SP5a FIX 2: the RESOLVED display key whose chat box
+        renders this session's transcript — the mount_key passed to
+        render_sync so the surface mounts in the VISIBLE box.
+
+        Mirrors _resolve_chat_box's lookup (direct tab first, then the
+        project group-chat key from AgentRoutingTable) but returns the KEY
+        instead of the widget: personal-tab sessions return their own key,
+        project-routed sessions return "project:<name>". None = no visible
+        box (handler retries the mount on the next render — FIX 1)."""
+        if self._mc.get_chat_box_for_session(session_key) is not None:
+            return session_key
+        if self._agent_to_project is not None:
+            project_name = self._agent_to_project.get_project(session_key)
+            if project_name is not None:
+                return f"project:{project_name}"
+        return None
+
     # ── AgentRuntime callbacks (dispatched to render pipeline) ───────────────
 
     def _on_turn_start(self, session_key: str, _turn_token: object = None) -> None:
@@ -2095,7 +2113,8 @@ class AgentRuntimeHandler:
             if chat_box is not None:
                 fallback_text = "⚠️ Agent returned no content. This may indicate a configuration error or an issue with the LLM provider."
                 bubble = self._crh.render_sync(
-                    "System", fallback_text, session_key, agent_name="System"
+                    "System", fallback_text, session_key, agent_name="System",
+                    mount_key=self._resolve_mount_key(session_key),
                 )
                 if bubble is not None:
                     chat_box.append(bubble)
@@ -2117,7 +2136,8 @@ class AgentRuntimeHandler:
             chat_box = self._resolve_chat_box(session_key)
             if chat_box is not None:
                 bubble = self._crh.render_sync(
-                    "Agent", text_for_bubble, session_key, agent_name=resolved_name or "Agent"
+                    "Agent", text_for_bubble, session_key, agent_name=resolved_name or "Agent",
+                    mount_key=self._resolve_mount_key(session_key),
                 )
                 if bubble is not None:
                     chat_box.append(bubble)
@@ -2273,7 +2293,8 @@ class AgentRuntimeHandler:
             f"\n   (Layer {layer}; trigger: {trigger})"
         )
         bubble = self._crh.render_sync(
-            "Agent", text, session_key, agent_name=None
+            "Agent", text, session_key, agent_name=None,
+            mount_key=self._resolve_mount_key(session_key),
         )
         if bubble is not None:
             chat_box.append(bubble)
@@ -2310,7 +2331,8 @@ class AgentRuntimeHandler:
                 session_key, agent_name=None, render=bool(streaming_text.strip()),
             )
             bubble = self._crh.render_sync(
-                "Agent", text, session_key, agent_name=None
+                "Agent", text, session_key, agent_name=None,
+                mount_key=self._resolve_mount_key(session_key),
             )
             if bubble is not None:
                 chat_box.append(bubble)
@@ -2432,7 +2454,8 @@ class AgentRuntimeHandler:
                 except Exception:
                     pass
                 bubble = self._crh.render_sync(
-                    "Agent", rendered, session_key, agent_name=resolved_name or "Agent"
+                    "Agent", rendered, session_key, agent_name=resolved_name or "Agent",
+                    mount_key=self._resolve_mount_key(session_key),
                 )
                 if bubble is not None:
                     chat_box.append(bubble)

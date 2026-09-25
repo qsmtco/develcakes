@@ -443,10 +443,12 @@ class TestEscapeUtil:
 # ── SPEC-06 SP5a: surface mount + session lifecycle ───────────────────────
 
 class TestSurfaceMountLifecycle:
-    """SP5a (R1a — handler owns mounting): on first surface create the
-    handler mounts the surface into the session's chat box (via the
-    injected container getter), wrapped in a ScrolledWindow (the SP3
-    surface has none of its own). Mount-once; TextViewFallback parity.
+    """SP5a FIX ROUND 1 (audit BUGs #1/#2/#3): handler owns mounting with
+    an IDEMPOTENT-RETRY contract — every _surface_for call retries the
+    mount until the surface has a parent, so a None-getter at creation is
+    recovered on the next render (P1). Project-routed replies mount by the
+    RESOLVED box key (mount_key, FIX 2). The surface owns its scroll; the
+    mount appends DIRECTLY — no wrapper (FIX 3).
     R2: main_content._close_tab / close_project_tab release the surface
     via close_session (SP3 destroy contract)."""
 
@@ -474,22 +476,14 @@ class TestSurfaceMountLifecycle:
         return out
 
     def _mounted_in(self, box, surface) -> bool:
-        """True if surface is mounted in box through the scroll wrapper.
-
-        GTK4 wraps non-Scrollable children in a Viewport inside the
-        ScrolledWindow, so the real chain is box ← ScrolledWindow ←
-        (Viewport) ← surface — the direct parent is NOT the scroll."""
-        children = self._children(box)
-        if len(children) != 1 or not isinstance(children[0], Gtk.ScrolledWindow):
-            return False
-        inner = children[0].get_child()
-        if isinstance(inner, Gtk.Viewport):
-            return inner.get_child() is surface
-        return inner is surface
+        """True if surface is mounted DIRECTLY in box (FIX 3: the surface
+        owns its ScrolledWindow — the mount appends the surface itself,
+        no wrapper; the surface's own scroll lives inside the surface)."""
+        return surface.get_parent() is box
 
     def test_render_mounts_surface_into_session_chat_box(self, monkeypatch):
-        """Test 1: render → surface IS in the session's chat box, wrapped
-        in a ScrolledWindow (parent chain box ← scroll ← surface)."""
+        """Test 1: render → surface IS in the session's chat box, mounted
+        DIRECTLY (no ScrolledWindow wrapper — the surface owns its scroll)."""
         boxes = {"sk": Gtk.Box()}
         handler, created = self._wired_handler(monkeypatch, boxes)
         handler.render_sync("Agent", "hello", "sk")
@@ -499,15 +493,74 @@ class TestSurfaceMountLifecycle:
         assert self._mounted_in(boxes["sk"], surface)
 
     def test_mount_once_second_render_does_not_repack(self, monkeypatch):
-        """Test 2: a second render for the session never repacks — the chat
-        box keeps exactly one child (the ScrolledWindow)."""
+        """Test 2: mount-once pin — CHILD IDENTITY, not count. A second
+        render never repacks: the box's child is the SAME widget after
+        further renders (a repack/rebuild would swap the child)."""
         boxes = {"sk": Gtk.Box()}
         handler, _created = self._wired_handler(monkeypatch, boxes)
         handler.render_sync("Agent", "one", "sk")
-        assert len(self._children(boxes["sk"])) == 1
+        first = boxes["sk"].get_first_child()
         handler.render_sync("Agent", "two", "sk")
         handler.render_sync("Agent", "three", "sk")
-        assert len(self._children(boxes["sk"])) == 1  # stable — mount-once
+        assert boxes["sk"].get_first_child() is first  # identity, not count
+
+    def test_late_box_recovery_after_none_at_create(self, monkeypatch):
+        """FIX 1 (BUG #1) — the P1 shape: render BEFORE the box exists →
+        surface works unmounted; then the box APPEARS (project tab opened)
+        → the NEXT render MOUNTS it (idempotent-retry). The old one-shot
+        skip left the surface permanently unmounted (blank window)."""
+        boxes: dict = {}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "early", "sk")
+        assert created[0].get_parent() is None  # no box yet — works unmounted
+        # Box appears (project tab opened / getter now resolves).
+        boxes["sk"] = Gtk.Box()
+        handler.render_sync("Agent", "late", "sk")
+        assert created[0].get_parent() is boxes["sk"]  # RECOVERED — mounted
+        assert self._mounted_in(boxes["sk"], created[0])
+
+    def test_project_routed_reply_mounts_in_project_box(self, monkeypatch):
+        """FIX 2 (BUG #2) — the headline-use-case pin: a project-routed
+        reply renders with session_key=<agent sk> but mount_key=<resolved
+        project box key> → the surface mounts in the project tab's box.
+        Personal-tab reply (no mount_key) still mounts under its own key."""
+        agent_box = Gtk.Box()   # no tab for the agent session itself
+        project_box = Gtk.Box()  # the visible project group-chat tab
+        boxes = {"project:alpha": project_box, "agent:sk": agent_box}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "to project", "agent:sk",
+                            mount_key="project:alpha")
+        assert created[0].get_parent() is project_box
+        assert agent_box.get_first_child() is None  # NOT in the agent box
+        # Personal-tab control: no mount_key → own session key.
+        handler.render_sync("Agent", "personal", "agent:other")
+        other = handler._surfaces["agent:other"]
+        assert other.get_parent() is None  # no box for that key — unmounted, fine
+        # And a direct-tab session with no mount_key mounts under its own key.
+        handler.render_sync("Agent", "direct", "agent:sk", mount_key=None)
+        second = handler._surfaces["agent:sk"]
+        assert second is created[0]   # same cached surface (cache stays session-keyed)
+        assert second.get_parent() is project_box  # mount-once: NOT remounted
+
+    def test_surface_cache_stays_session_keyed_with_mount_key(self, monkeypatch):
+        """FIX 2 — surface CACHE keyed by session_key (streaming continuity)
+        while MOUNT uses mount_key: two renders with different mount_keys
+        still hit ONE cached surface for the session."""
+        boxes = {"project:alpha": Gtk.Box(), "project:beta": Gtk.Box()}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "one", "agent:sk", mount_key="project:alpha")
+        handler.render_sync("Agent", "two", "agent:sk", mount_key="project:beta")
+        assert len(created) == 1  # one surface, session-keyed cache
+        assert handler._surfaces["agent:sk"] is created[0]
+
+    def test_surface_for_box_identity_lookup(self, monkeypatch):
+        """FIX 3 seam: surface_for_box resolves the surface mounted in a
+        given chat box (parent identity); None for boxes without one."""
+        boxes = {"sk": Gtk.Box()}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "hello", "sk")
+        assert handler.surface_for_box(boxes["sk"]) is created[0]
+        assert handler.surface_for_box(Gtk.Box()) is None
 
     def test_textview_fallback_mounts_identically(self, monkeypatch):
         """Test 3: WebKit=None → the TextViewFallback mounts through the
@@ -585,7 +638,10 @@ class TestSurfaceMountLifecycle:
     def test_end_to_end_transcript_reaches_mounted_surface(self, monkeypatch):
         """Test 6 — THE closes-the-window pin: render_async (real pool,
         real composition) → pump the main loop → the session's chat box
-        CONTAINS the surface, and the surface holds the sanitized row."""
+        CONTAINS the surface, and the surface's DISPLAY STATE holds the
+        sanitized row. Asserts the DOCUMENT (the rendered text buffer —
+        what the user actually sees), not the SpySurface.appended spy
+        (BUG #6 hardening: the spy can record while the display drops)."""
         boxes = {"sk": Gtk.Box()}
         handler, created = self._wired_handler(monkeypatch, boxes)
         results: list = []
@@ -603,8 +659,13 @@ class TestSurfaceMountLifecycle:
         assert len(created) == 1
         # The box physically holds the surface (mount happened at create).
         assert self._mounted_in(boxes["sk"], created[0])
-        # The surface holds the SANITIZED row (bold survived, script died).
-        html_arg = created[0].appended[0]["html"]
-        assert "<strong>world</strong>" in html_arg
-        assert "&lt;script&gt;" in html_arg
-        assert "<script" not in html_arg.lower()
+        # THE DOCUMENT: built from the surface's own row state (the real
+        # _rows → _document chain the WebView loads — not the append spy).
+        # Sanitized markdown survived (bold element); the script ELEMENT is
+        # gone — only its ESCAPED (inert) text form remains.
+        from ui.views.chat_surface import _document
+
+        doc = _document(list(created[0]._rows))
+        assert "hello" in doc and "<strong>world</strong>" in doc
+        assert "<script" not in doc.lower()      # element neutralized
+        assert "&lt;script&gt;" in doc           # inert escaped form only
