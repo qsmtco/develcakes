@@ -748,11 +748,19 @@ class MainContent(Gtk.Box):
 
     def _close_tab(self, page_idx):
         """Remove a tab by page index and clean up tracking dicts."""
+        session_key = self._tab_sessions.get(page_idx)  # SP5a: capture BEFORE pop
         self._chat_notebook.remove_page(page_idx)
         self._tab_sessions.pop(page_idx, None)
         self._tab_chat_boxes.pop(page_idx, None)
         self._tab_scrolls.pop(page_idx, None)
         self._tab_overlays.pop(page_idx, None)
+        # SPEC-06 SP5a (R2): release the session's chat surface — the SP3
+        # destroy contract (pending-render cancel + guards) handles the rest.
+        # Fires even during bulk close (stop-all spirit). Project tabs go
+        # through here too: close_project_tab resolves to _close_tab, so the
+        # wiring is single-point (no double-close).
+        if session_key is not None and self._chat_render_handler is not None:
+            self._chat_render_handler.close_session(session_key)
         # Hide tab bar when empty to prevent GtkGizmo min-height < 0 warning
         if self._chat_notebook.get_n_pages() == 0:
             self._chat_notebook.set_show_tabs(False)
@@ -965,8 +973,16 @@ class MainContent(Gtk.Box):
         return None
 
     def set_chat_render_handler(self, handler):
-        """Inject ChatRenderHandler instance. Called by window.py._build()."""
+        """Inject ChatRenderHandler instance. Called by window.py._build().
+
+        SPEC-06 SP5a (R1a): ALSO injects the session→chat-box getter so the
+        handler can mount surfaces at first create (the single wiring point
+        for the transcript-blank-window fix). Tolerates handlers without
+        the setter (test doubles)."""
         self._chat_render_handler = handler
+        setter = getattr(handler, "set_chat_container_getter", None)
+        if setter is not None:
+            setter(self.get_chat_box_for_session)
 
     def set_project_handler(self, handler):
         """Inject ProjectHandler instance. Called by window.py._build()."""

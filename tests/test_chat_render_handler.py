@@ -14,7 +14,9 @@ import time
 import gi
 
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk
+from unittest.mock import MagicMock
+
+from gi.repository import GLib, Gtk
 
 import ui.handlers.chat_render_handler as crh_module
 from ui.handlers.chat_render_handler import ChatRenderHandler
@@ -436,3 +438,173 @@ class TestEscapeUtil:
     def test_xss_prevention(self):
         escaped = escape_for_pango("<script>evil()</script>")
         assert "&lt;script&gt;" in escaped
+
+
+# ── SPEC-06 SP5a: surface mount + session lifecycle ───────────────────────
+
+class TestSurfaceMountLifecycle:
+    """SP5a (R1a — handler owns mounting): on first surface create the
+    handler mounts the surface into the session's chat box (via the
+    injected container getter), wrapped in a ScrolledWindow (the SP3
+    surface has none of its own). Mount-once; TextViewFallback parity.
+    R2: main_content._close_tab / close_project_tab release the surface
+    via close_session (SP3 destroy contract)."""
+
+    def _wired_handler(self, monkeypatch, boxes: dict):
+        """Handler whose factory yields SpySurfaces and whose getter reads
+        a dict of real Gtk.Boxes (mount targets)."""
+        created: list = []
+
+        def factory():
+            s = SpySurface()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        handler = ChatRenderHandler()
+        handler.set_chat_container_getter(lambda sk: boxes.get(sk))
+        return handler, created
+
+    def _children(self, box):
+        out = []
+        child = box.get_first_child()
+        while child is not None:
+            out.append(child)
+            child = child.get_next_sibling()
+        return out
+
+    def _mounted_in(self, box, surface) -> bool:
+        """True if surface is mounted in box through the scroll wrapper.
+
+        GTK4 wraps non-Scrollable children in a Viewport inside the
+        ScrolledWindow, so the real chain is box ← ScrolledWindow ←
+        (Viewport) ← surface — the direct parent is NOT the scroll."""
+        children = self._children(box)
+        if len(children) != 1 or not isinstance(children[0], Gtk.ScrolledWindow):
+            return False
+        inner = children[0].get_child()
+        if isinstance(inner, Gtk.Viewport):
+            return inner.get_child() is surface
+        return inner is surface
+
+    def test_render_mounts_surface_into_session_chat_box(self, monkeypatch):
+        """Test 1: render → surface IS in the session's chat box, wrapped
+        in a ScrolledWindow (parent chain box ← scroll ← surface)."""
+        boxes = {"sk": Gtk.Box()}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "hello", "sk")
+        assert len(created) == 1
+        surface = handler._surfaces["sk"]
+        assert surface.get_parent() is not None  # mount happened
+        assert self._mounted_in(boxes["sk"], surface)
+
+    def test_mount_once_second_render_does_not_repack(self, monkeypatch):
+        """Test 2: a second render for the session never repacks — the chat
+        box keeps exactly one child (the ScrolledWindow)."""
+        boxes = {"sk": Gtk.Box()}
+        handler, _created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "one", "sk")
+        assert len(self._children(boxes["sk"])) == 1
+        handler.render_sync("Agent", "two", "sk")
+        handler.render_sync("Agent", "three", "sk")
+        assert len(self._children(boxes["sk"])) == 1  # stable — mount-once
+
+    def test_textview_fallback_mounts_identically(self, monkeypatch):
+        """Test 3: WebKit=None → the TextViewFallback mounts through the
+        SAME path (Gtk.Box base — parity)."""
+        import ui.views.chat_surface as cs_module
+
+        monkeypatch.setattr(cs_module, "WebKit", None)
+        boxes = {"sk": Gtk.Box()}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        handler.render_sync("Agent", "hello", "sk")
+        assert len(created) == 1
+        assert isinstance(created[0], TextViewFallback)
+        assert self._mounted_in(boxes["sk"], created[0])
+
+    def test_close_tab_releases_session_surface(self, monkeypatch):
+        """Test 4 (R2): main_content._close_tab → close_session(sk) — the
+        surfaces dict drains and the surface's destroy contract ran."""
+        from ui.views.main_content import MainContent
+
+        handler, _created = self._wired_handler(monkeypatch, {})
+        mc = MainContent.__new__(MainContent)  # shell pattern: tab_switch tests
+        mc._chat_notebook = MagicMock(spec=Gtk.Notebook)
+        mc._chat_notebook.get_n_pages.return_value = 0
+        mc._tab_sessions = {0: "sk"}
+        mc._tab_chat_boxes = {0: Gtk.Box()}
+        mc._tab_scrolls = {}
+        mc._tab_overlays = {}
+        mc._bulk_closing = False
+        mc._chat_render_handler = handler
+
+        handler._surface_for("sk")
+        spy = handler._surfaces["sk"]
+        destroyed: list = []
+        spy.destroy = lambda: destroyed.append(True)
+
+        assert "sk" in handler._surfaces
+        mc._close_tab(0)
+        assert destroyed == [True]           # SP3 destroy contract ran
+        assert "sk" not in handler._surfaces  # session state released
+
+    def test_close_project_tab_fans_out_leaves_other_sessions(self, monkeypatch):
+        """Test 5 (R2): close_project_tab closes its session via the SAME
+        _close_tab path (single-point wiring) and does NOT touch other
+        sessions' surfaces."""
+        from ui.views.main_content import MainContent
+
+        handler, _created = self._wired_handler(monkeypatch, {})
+        mc = MainContent.__new__(MainContent)
+        mc._chat_notebook = MagicMock(spec=Gtk.Notebook)
+        mc._chat_notebook.get_n_pages.return_value = 0
+        mc._tab_sessions = {0: "project:alpha"}
+        mc._tab_chat_boxes = {0: Gtk.Box()}
+        mc._tab_scrolls = {}
+        mc._tab_overlays = {}
+        mc._bulk_closing = False
+        mc._chat_render_handler = handler
+        # Stub the notebook scan (MagicMock notebook has no real pages):
+        # close_project_tab resolves its session to page 0.
+        mc._find_page_by_session = (
+            lambda sk: 0 if sk == "project:alpha" else None
+        )
+
+        project_spy = handler._surface_for("project:alpha")
+        other_spy = handler._surface_for("agent:unrelated")
+        p_destroyed: list = []
+        o_destroyed: list = []
+        project_spy.destroy = lambda: p_destroyed.append(True)
+        other_spy.destroy = lambda: o_destroyed.append(True)
+
+        mc.close_project_tab("alpha")
+        assert p_destroyed == [True]
+        assert o_destroyed == []                 # other session untouched
+        assert set(handler._surfaces) == {"agent:unrelated"}
+
+    def test_end_to_end_transcript_reaches_mounted_surface(self, monkeypatch):
+        """Test 6 — THE closes-the-window pin: render_async (real pool,
+        real composition) → pump the main loop → the session's chat box
+        CONTAINS the surface, and the surface holds the sanitized row."""
+        boxes = {"sk": Gtk.Box()}
+        handler, created = self._wired_handler(monkeypatch, boxes)
+        results: list = []
+        handler.render_async(
+            "Agent", 'hello **world** <script>evil()</script>', "sk",
+            on_bubble_ready=results.append,
+        )
+        ctx = GLib.MainContext.default()
+        deadline = time.monotonic() + 5.0
+        while not results and time.monotonic() < deadline:
+            while ctx.pending():
+                ctx.iteration(False)
+            time.sleep(0.005)
+        assert results == [None]  # R1: callback fires with None
+        assert len(created) == 1
+        # The box physically holds the surface (mount happened at create).
+        assert self._mounted_in(boxes["sk"], created[0])
+        # The surface holds the SANITIZED row (bold survived, script died).
+        html_arg = created[0].appended[0]["html"]
+        assert "<strong>world</strong>" in html_arg
+        assert "&lt;script&gt;" in html_arg
+        assert "<script" not in html_arg.lower()

@@ -128,11 +128,48 @@ class ChatRenderHandler:
         # FIX 6 (SP4 audit): streaming role carried to the final row
         # (start_streaming(role=...) → end_streaming renders with it).
         self._stream_role: dict[str, str] = {}
+        # SPEC-06 SP5a (R1): session→chat-box callable, injected by
+        # main_content.set_chat_render_handler. On first surface create the
+        # handler mounts the surface into the session's chat box.
+        self._container_getter = None
 
     # ── Thread pool for off-main-thread processing ──────────────────
     _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crabcakes-render")
 
     # ── Surface lifecycle (SPEC-06 SP4) ─────────────────────────────
+
+    def set_chat_container_getter(self, getter) -> None:
+        """SPEC-06 SP5a (R1): inject the session→chat-box callable.
+
+        RULING R1, option (a): the HANDLER owns mounting — on first surface
+        create it asks the getter for the session's chat box and packs the
+        surface in. One wiring point (main_content.set_chat_render_handler);
+        no window.py edits; SP5c's chat_bubble deletion cannot disturb it."""
+        self._container_getter = getter
+
+    def _mount_surface(self, session_key: str, surface) -> None:
+        """Mount the surface into its session's chat box (ONCE).
+
+        - mount-once guard: a surface with a parent is never repacked;
+        - scroll: the SP3 surface has NO internal ScrolledWindow (the
+          webview/textview are appended directly to the Box) — wrap it in
+          one HERE, at mount;
+        - TextViewFallback mounts identically (same Gtk.Box base);
+        - no chat box for the key (early render / headless) → skip, the
+          surface still works unmounted.
+        """
+        if surface.get_parent() is not None:
+            return  # mount-once guard
+        getter = self._container_getter
+        if getter is None:
+            return
+        chat_box = getter(session_key)
+        if chat_box is None:
+            return
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_child(surface)
+        chat_box.append(scroll)
 
     def _surface_for(self, session_key: str):
         """Lazy per-session surface (created on first use)."""
@@ -140,6 +177,7 @@ class ChatRenderHandler:
         if surface is None:
             surface = create_chat_surface()
             self._surfaces[session_key] = surface
+            self._mount_surface(session_key, surface)  # SP5a: close the blank window
         return surface
 
     def close_session(self, session_key: str) -> None:
