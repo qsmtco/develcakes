@@ -69,7 +69,23 @@ def _attribute_filter(element: str, attribute: str, value: str) -> str | None:
     Class gate (SP3 ruling): class arrives as ONE space-separated string
     (probe-verified); each token is individually allowlisted, allowed tokens
     are re-joined, and the attribute is stripped if none survive.
+
+    FIX B (SP3 audit r2): the filter is SELF-FAIL-CLOSED. pyo3 does not
+    propagate filter exceptions as errors — it logs them and RETAINS the
+    attribute (probe-verified), so a raising filter would leak values past
+    every gate above. The wrapper converts ANY internal failure (Exception
+    or BaseException-derived) to None = strip. The outer catch in
+    sanitize_html covers the different shape: ammonia's Rust-side PANIC
+    (PanicException from nh3.clean itself, not from the filter).
     """
+    try:
+        return _attribute_filter_inner(element, attribute, value)
+    except BaseException:  # noqa: BLE001 — fail-closed: strip, never retain
+        return None
+
+
+def _attribute_filter_inner(element: str, attribute: str, value: str) -> str | None:
+    """The gate logic proper — wrapped by _attribute_filter (FIX B)."""
     if attribute == "class":
         toks = [t for t in value.split() if _CLASS_TOKEN_RE.fullmatch(t)]
         return " ".join(toks) if toks else None

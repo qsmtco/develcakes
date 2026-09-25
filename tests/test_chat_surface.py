@@ -5,6 +5,7 @@ import pytest
 
 gi = pytest.importorskip("gi")
 pytest.importorskip("gi.repository.Gtk")
+GLib = pytest.importorskip("gi.repository.GLib")
 
 
 from ui.views.chat_surface import (
@@ -115,10 +116,10 @@ class TestHugeMessage:
         big = "<p>" + "x" * (512 * 1024 + 1000) + "</p>"
         capped = _cap_row_html(big)
         assert capped.endswith("[truncated]")
-        assert len(capped) < 512 * 1024 + 100  # marker fits inside the budget
+        assert len(capped.encode("utf-8")) <= 512 * 1024  # FIX D: exact byte cap
 
     def test_normal_rows_uncapped(self):
-        assert _cap_row_html("<p>hi</p>") == "<p>hi</p>"
+        assert _cap_row_html("<p>pre-fix</p>") == "<p>pre-fix</p>"
 
 
 # ── WebKit path (skipif absent) ──────────────────────────────────────────
@@ -208,21 +209,100 @@ class TestSanitizePanicPin:
 
 
 class TestDestroyCancelsPendingRender:
-    def test_no_rebuild_after_destroy(self):
-        """FIX 2 (BUG #2): a queued idle render must NOT fire post-destroy
-        (probe: rebuild resurrected a webview after destroy)."""
+    """FIX A (SP3 audit r2): the destroy-race defense is FOUR layers, and
+    every single-layer revert must be KILLED by an assertion here:
+
+      R1 destroy skips _destroyed=True      → killed by the post-destroy
+        state assert (test 1) — and by test 2's contract (append must be
+        inert) — R1 lets a post-destroy append re-arm the pipeline.
+      R2 destroy skips source_remove        → killed by test 1's
+        find_source_by_id assert taken IMMEDIATELY post-destroy (before any
+        drain: a fired callback self-removes, so the drain alone is blind
+        to R2 — that was the old pin's blind spot).
+      R3 destroy skips the pending/dirty    → killed by test 1's state
+        resets                               asserts (_render_pending/
+                                              _dirty must be False).
+      R4 _do_render drops its guard         → killed by test 2: the flag is
+                                              set MANUALLY (destroy NOT
+                                              called), so _dirty is still
+                                              True from the append — the
+                                              guard is the only defense.
+
+    The main-loop drain in test 1 additionally proves the real loop delivers
+    no rebuild post-destroy (the original probe's resurrection path), and
+    test 2 is Debugger's already-dispatched simulation (callback fired
+    BEFORE destroy → only the guard remains).
+    """
+
+    def _loads_recorder(self, s) -> list:
+        loads: list = []
+        s._load_html = lambda doc: loads.append(doc)  # type: ignore[method-assign]
+        return loads
+
+    def test_destroy_cancels_queued_source_and_resets_state(self):
+        """Prong (i): real queued idle + destroy + main-loop drain. The
+        source must be GONE immediately post-destroy (R2), transient render
+        state must be reset (R3), _destroyed must be set (R1), and the drain
+        must deliver nothing (end state)."""
         from ui.views.chat_surface import ChatSurface
 
         if WebKit is None:
             pytest.skip("WebKit unavailable")
         s = ChatSurface()
-        loads: list[str] = []
-        s._load_html = lambda doc: loads.append(doc)  # type: ignore[method-assign]
+        loads = self._loads_recorder(s)
         s.append_message("agent", "<p>before</p>")
+        assert s._render_source is not None  # idle callback genuinely queued
+        ctx = GLib.MainContext.default()
+        sid = s._render_source  # capture BEFORE destroy (destroy nulls the field)
+        assert ctx.find_source_by_id(sid) is not None  # queued
         s.destroy()
-        s._drain_renders()  # what an already-queued idle callback would do
-        assert loads == []  # rebuild count UNCHANGED — nothing rendered
-        assert s._webview is None  # no resurrection
+        # R2: source_remove ran — the source is gone from the loop NOW.
+        assert ctx.find_source_by_id(sid) is None
+        # R1 + R3: destroy's state contract.
+        assert s._destroyed is True
+        assert s._render_pending is False
+        assert s._dirty is False
+        # Full drain: the real loop delivers no rebuild (no resurrection).
+        while ctx.pending():
+            ctx.iteration(False)
+        assert loads == []
+        assert s._webview is None
+        assert s._rebuild_count == 0
+
+    def test_already_dispatched_render_is_inert(self):
+        """Prong (ii): the callback fired BEFORE destroy (destroy found no
+        source to cancel). _destroyed is set MANUALLY — destroy() is NOT
+        called, so _dirty is still True from the append and _do_render's
+        guard is the ONLY remaining defense (kills R4)."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        loads = self._loads_recorder(s)
+        s.append_message("agent", "<p>before</p>")
+        s._render_source = None  # already fired — destroy's remove is a no-op
+        s._destroyed = True  # manual: destroy NOT called, _dirty stays True
+        assert s._dirty is True  # precondition: only the guard can stop it
+        s._do_render()  # direct dispatch simulation
+        assert loads == []
+        assert s._webview is None
+        assert s._rebuild_count == 0
+
+    def test_append_after_destroy_is_fully_inert(self):
+        """R1 companion: post-destroy append must neither row nor re-arm the
+        render source (kills an R1 revert that re-enables scheduling)."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        loads = self._loads_recorder(s)
+        s.destroy()
+        s.append_message("agent", "<p>after</p>")
+        assert len(s._rows) == 0
+        assert s._render_source is None
+        assert loads == []
 
 
 class TestWebKitlessBox:
@@ -244,7 +324,7 @@ class TestByteBudgetCap:
         sliced on bytes and re-decoded, never over budget."""
         row = "<p>" + "\u2603" * 200_000 + "</p>"  # snowman = 3 bytes UTF-8
         capped = _cap_row_html(row)
-        assert len(capped.encode("utf-8")) <= 512 * 1024 + len("[truncated]")
+        assert len(capped.encode("utf-8")) <= 512 * 1024
         assert capped.endswith("[truncated]")
 
 
@@ -276,8 +356,17 @@ class TestImportTimeAlias:
         # the alias must be the module-level ChatSurface binding for
         # WebKit-less imports (import-once semantics keep this untestable
         # at runtime; falsifier = delete either line).
-        assert "if WebKit is None:" in src
-        assert "    ChatSurface = TextViewFallback" in src
+        # FIX E: LINE-BOUNDARY match — a commented-out alias line is NOT a
+        # binding. Strip # comments first; match `ChatSurface = ` as a line's
+        # LEADING (non-indent) token — trailing comments on the live line OK.
+        code_lines = [
+            ln.split("#", 1)[0].rstrip() for ln in src.splitlines()
+        ]
+        alias_lines = [
+            ln for ln in code_lines if ln.lstrip().startswith("ChatSurface = ")
+        ]
+        assert len(alias_lines) == 1, f"alias must appear exactly once uncommented: {alias_lines!r}"
+        assert alias_lines[0].lstrip() == "ChatSurface = TextViewFallback"
         assert "def create_chat_surface" in src
         # And the factory (runtime path) resolves the fallback for real.
         monkey = __import__("unittest.mock", fromlist=["patch"])

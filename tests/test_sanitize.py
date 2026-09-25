@@ -207,3 +207,37 @@ class TestIdempotence:
             once = sanitize_html(raw)
             twice = sanitize_html(once)
             assert twice == once, f"not idempotent for {raw!r}: {once!r} vs {twice!r}"
+
+
+class TestFilterSelfFailClosed:
+    """FIX B (SP3 audit r2): pyo3 does not propagate filter exceptions — it
+    logs them and RETAINS the attribute (probe-verified). The filter must
+    therefore catch its own internals and strip (return None)."""
+
+    def test_raising_filter_yields_stripped_attribute(self, monkeypatch):
+        """End-to-end: a filter whose internals raise must yield a STRIPPED
+        attribute (with the bare filter, nh3 would retain it)."""
+        from render import sanitize as san
+
+        def boom(element, attribute, value):
+            raise RuntimeError("filter internal failure")
+
+        monkeypatch.setattr(san, "_attribute_filter_inner", boom)
+        out = san.sanitize_html('<a href="https://ok.example">click</a>')
+        assert "href" not in out.lower()
+
+    def test_direct_filter_call_strips_on_internal_raise(self):
+        """Unit pin: the wrapper converts ANY raise to None (strip)."""
+        from unittest.mock import patch
+
+        from render import sanitize as san
+
+        with patch.object(san, "_attribute_filter_inner", side_effect=ValueError("x")):
+            assert san._attribute_filter("a", "href", "https://ok.example") is None
+
+    def test_filter_still_admits_valid_values(self):
+        """Wrapping regression: the happy path is untouched by the wrapper."""
+        from render import sanitize as san
+
+        out = san.sanitize_html('<a href="https://ok.example">click</a>')
+        assert 'href="https://ok.example"' in out

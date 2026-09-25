@@ -111,10 +111,14 @@ def _cap_row_html(fragment: str) -> str:
     FIX 5 (SP3 audit BUG #5): slice BYTES, not chars — a char-slice of
     multi-byte content can exceed the budget ~4x; encode-slice-decode
     guarantees the cap (errors="ignore" drops a torn trailing codepoint).
+
+    FIX D (SP3 audit r2): the marker's bytes are RESERVED inside the budget —
+    slice + marker is ≤ _MAX_ROW_BYTES exactly, never the marker over it.
     """
     raw = fragment.encode("utf-8", errors="replace")
     if len(raw) > _MAX_ROW_BYTES:
-        return raw[:_MAX_ROW_BYTES].decode("utf-8", errors="ignore") + _TRUNCATION_MARKER
+        budget = _MAX_ROW_BYTES - len(_TRUNCATION_MARKER.encode("utf-8"))
+        return raw[:budget].decode("utf-8", errors="ignore") + _TRUNCATION_MARKER
     return fragment
 
 
@@ -199,7 +203,11 @@ class ChatSurface(Gtk.Box):
         self._schedule_render()
 
     def stream_delta(self, session_key: str, text: str, agent_name: str | None = None) -> None:
-        """Buffer a streaming delta — NOTHING renders until end_stream."""
+        """Buffer a streaming delta — NOTHING renders until end_stream.
+
+        REGISTER (SP3 audit r2, accepted class): pre-flush chunks accumulate
+        unbounded until end_stream (P11 register item).
+        """
         self._stream_buffers.setdefault(session_key, []).append(text)
 
     def end_stream(self, session_key: str, agent_name: str | None = None) -> None:
@@ -225,8 +233,11 @@ class ChatSurface(Gtk.Box):
 
         FIX 2 (SP3 audit BUG #2): cancel the pending idle render — a queued
         rebuild fired AFTER destroy() in probe (recreating a webview via
-        _ensure_webview inside the render path). Guarded source_remove: the
-        id may already have fired (GLib errors on stale ids).
+        _ensure_webview inside the render path).
+
+        FIX C (SP3 audit r2): source_remove is NON-RAISING on stale ids
+        (GLib logs a critical warning and returns — probe-verified); the
+        try/except below is belt-and-braces, not a RuntimeError shield.
         """
         self._destroyed = True
         if self._render_source is not None:
@@ -296,7 +307,7 @@ class TextViewFallback(Gtk.Box):
         self.append_message("agent", "".join(chunks), agent_name=agent_name)
 
     def set_activity_pill(self, state: str) -> None:
-        self._pill_label.set_text(_PILL_STATES.get(state, _PILL_STATES["idle"]))
+        self._pill_label.set_text(_PILL_STATES["idle"] if state not in _PILL_STATES else _PILL_STATES[state])
         new_css = f"pill-{state if state in _PILL_STATES else 'idle'}"
         if new_css != self._pill_css:
             self._pill_label.remove_css_class(self._pill_css)
@@ -318,7 +329,8 @@ if WebKit is None:
 def create_chat_surface(window_max: int = 500):
     """Call-site factory: resolves the surface class at CALL time (tests
     monkeypatch the module's WebKit binding; the import-time alias above
-    covers genuinely WebKit-less boxes)."""
+    covers genuinely WebKit-less boxes). REGISTER (SP3 audit r2): test
+    scaffolding today — no production caller yet."""
     if WebKit is None:
         return TextViewFallback(window_max)
     return ChatSurface(window_max)
