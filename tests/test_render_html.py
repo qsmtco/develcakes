@@ -1,7 +1,10 @@
 # tests/test_render_html.py — SPEC-06 SP2 battery for render/html.py +
 # render/syntax_html.py. Pure functions, zero UI.
 
+import re
 import time
+
+import pytest
 
 from render.html import markdown_to_html, render_document
 from render.syntax_html import highlight_html
@@ -59,6 +62,26 @@ class TestInline:
         out = markdown_to_html("![alt text](https://x.example/i.png)")
         assert "<img" not in out
         assert "[alt text]" in out
+
+    def test_code_span_in_link_label_escapes_once(self):
+        """FIX A (audit): a code span in a link label is escaped EXACTLY ONCE —
+        `` [`a & b`](…) `` → <code>a &amp; b</code>, never &amp;amp;.
+        (Falsifier A: pre-fix double-escape fails this.)"""
+        out = markdown_to_html("[`a & b`](https://x.example)")
+        assert "<code>a &amp; b</code>" in out
+        assert "&amp;amp;" not in out
+
+    def test_bare_url_with_query_ampersand(self):
+        """FIX C (audit): & stays in the scheme-URL class — full query strings
+        link. (Falsifier C: pre-fix & exclusion truncates at ?a=1.)"""
+        out = markdown_to_html("see https://a.example/?a=1&b=2. end")
+        assert "<a " in out
+        href = out.split('href="', 1)[1].split('"', 1)[0]
+        # Full URL captured — & arrives entity-encoded (&amp;) because the
+        # emitter escapes first and emits the captured text raw into href.
+        # HTML-correct: browsers decode the entity; the whole query survives.
+        # Trailing '.' stripped by the punct stripper; NOTHING leaks after.
+        assert href == "https://a.example/?a=1&amp;b=2"
 
     def test_bare_url_autolink(self):
         out = markdown_to_html("see https://example.com/page for more")
@@ -125,21 +148,67 @@ class TestBlocks:
 
 
 class TestRenderDocument:
-    def test_composition_equals_manual(self):
-        from render.html import markdown_to_html as m2h
-        from render.sanitize import sanitize_html
+    @pytest.mark.parametrize(
+        ("doc", "expected"),
+        [
+            # Inline
+            ("hello **world**", "<p>hello <strong>world</strong></p>"),
+            # Code block: CURRENT sanitizer truth — class= is stripped by the
+            # SP1 policy. REGISTERED: SP3's styling hook (lang-*/tok-*) is
+            # dead until the policy admits class=. Pinned consciously.
+            ("```python\nx = 1\n```", "<pre><code>"),
+            # Link: emitter emits NO rel; sanitizer injects it
+            (
+                "[text](https://x.example)",
+                '<a href="https://x.example" rel="noopener noreferrer nofollow">text</a>',
+            ),
+            # Table structure survives the sanitizer
+            ("| A | B |\n|---|---|\n| 1 | 2 |", "<table><thead>"),
+        ],
+    )
+    def test_render_document_expected_outputs(self, doc, expected):
+        """FIX B (audit): expected-output assertions replace the tautology —
+        the composition is pinned against real rendered strings, so a broken
+        stage (emitter OR sanitizer) shifts them and fails."""
+        assert expected in render_document(doc)
 
+    def test_render_document_safety_invariants(self):
+        """FIX B (audit): safety invariants over an adversarial corpus. TAG-ANCHORED
+        asserts (probe-verified): ammonia decodes text-node entities to raw
+        chars, so escaped-tag text can contain raw quotes — and even the literal
+        bytes `onerror=` — as visible CONTENT (safe by design). Substring asserts
+        on the whole document false-positive on that content; these target only
+        live tags/attributes. (Falsifier B target: identity-compose fires this.)"""
         corpus = [
-            "hello **world**",
             "<script>alert(1)</script>",
-            "```python\nimport os\n```",
-            "[l](https://x.example) and [j](javascript:alert(1))",
-            "| A |\n|---|\n| 1 |",
-            "- [ ] task",
-            "![img](https://x.example/i.png)",
+            '<iframe src="https://evil.example"></iframe>',
+            '<img src="https://x/i.png" onerror="alert(1)">',
+            "[l](javascript:alert(1))",
+            '[x](https://x.example/" onmouseover="alert(1))',
         ]
         for doc in corpus:
-            assert render_document(doc) == sanitize_html(m2h(doc))
+            out = render_document(doc)
+            # Live dangerous tags never survive.
+            assert "<script" not in out.lower(), f"live script for {doc!r}: {out!r}"
+            assert "<iframe" not in out.lower(), f"live iframe for {doc!r}"
+            assert "<img" not in out.lower(), f"live img for {doc!r}: {out!r}"
+            # No live javascript: href anywhere.
+            assert 'href="javascript' not in out.lower(), f"live js href: {out!r}"
+            # No event-handler attribute INSIDE a live anchor tag. Attribute
+            # VALUES are blanked first — URLs may legitimately contain the
+            # bytes `onmouseover=` (entity-encoded quotes can't break out of
+            # the href, ammonia strips real handler attrs; this checks the
+            # tag STRUCTURE, not its string content).
+            for anchor in re.findall(r"<a\s[^>]*>", out, flags=re.IGNORECASE):
+                stripped = re.sub(r'="[^"]*"', '=""', anchor)
+                assert "onmouseover" not in stripped.lower(), (
+                    f"live onmouseover attribute for {doc!r}: {anchor!r}"
+                )
+            # Every emitted href is an allowed scheme.
+            for href in re.findall(r'href="([^"]*)"', out):
+                assert href.lower().startswith(("http://", "https://")), (
+                    f"non-http(s) href {href!r} for {doc!r}"
+                )
 
     def test_render_document_link_gets_rel_from_sanitizer(self):
         """Emitter emits NO rel; sanitizer injects it (brief test 10)."""

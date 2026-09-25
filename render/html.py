@@ -32,9 +32,13 @@ _ZWSP = "\u200b"
 
 # Port of utils/markdown.py _AUTO_LINK_RE (two alternatives: scheme URLs,
 # bare hosts). Operates on ESCAPED text, same as the Pango path.
+# Bare-host alternative KEEPS the & exclusion (the invented-https rule must
+# not swallow "a & b" — see _AUTO_LINK_RE history in utils/markdown.py).
+# The scheme-URL alternative now ALLOWS & (FIX C, audit): query strings
+# (…?a=1&b=2) must link whole. Trailing-punct stripping still runs.
 _AUTO_LINK_RE = re.compile(
     r"(?<![a-zA-Z0-9/:=&;])"
-    r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>\"'`\[\]()&]+)"
+    r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>\"'`\[\]()]+)"
     r"|"
     r"(?<![a-zA-Z0-9/:=&;])"
     r"(?<![\"'])"
@@ -161,7 +165,10 @@ def _inline(text: str) -> str:
     def _resolve_code_in_label(m: re.Match) -> str:
         idx = int(m.group(1))
         if idx < len(code_spans):
-            return f"<code>{html.escape(code_spans[idx])}</code>"
+            # Spans were collected from ALREADY-ESCAPED text (escape-first
+            # contract) — emit as-is; re-escaping here produced &amp;amp;
+            # (FIX A, audit).
+            return f"<code>{code_spans[idx]}</code>"
         return m.group(0)
 
     def _link_replace(m: re.Match) -> str:
