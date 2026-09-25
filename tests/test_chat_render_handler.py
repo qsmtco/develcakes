@@ -246,6 +246,22 @@ class TestStreamingSurfaceLifecycle:
         assert self.handler.is_streaming("sk") is True  # new session live
         assert self.handler.get_streaming_text("sk") == ""
 
+    def test_stream_role_carried_to_final_row(self):
+        """FIX 6 (SP4 audit): start_streaming(role=...) is carried to the
+        final row's role — You streams land as user rows, not agent rows."""
+        self.handler.start_streaming("sk", role="You")
+        self.handler.update_streaming("sk", "hello")
+        self.handler.end_streaming("sk")
+        assert len(self.spy.appended) == 1
+        assert self.spy.appended[0]["role"] == "user"
+
+    def test_stream_role_defaults_to_agent(self):
+        """FIX 6: no role arg → the final row stays an agent row."""
+        self.handler.start_streaming("sk")
+        self.handler.update_streaming("sk", "hello")
+        self.handler.end_streaming("sk")
+        assert self.spy.appended[0]["role"] == "agent"
+
     def test_end_streaming_render_false_drops_buffer(self):
         """render=False (ARH non-streaming finalize path): buffer dropped,
         NO row — the caller renders final text via render_sync itself."""

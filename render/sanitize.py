@@ -81,6 +81,8 @@ def _attribute_filter(element: str, attribute: str, value: str) -> str | None:
     try:
         return _attribute_filter_inner(element, attribute, value)
     except BaseException:  # noqa: BLE001 — fail-closed: strip, never retain
+        # Sanitizing is not interrupt-critical: stripping on Ctrl-C is
+        # acceptable; retaining an unvetted attribute is not.
         return None
 
 

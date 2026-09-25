@@ -3262,23 +3262,25 @@ class TestLocalAgentHeaderNonStreaming:
 
 
 class TestEndStreamingExplicitNameTakesPriority:
-    """Test C: end_streaming honors an explicitly passed agent_name
-    over the agent_mgr lookup path (which returns '' for special: keys).
+    """Test C — REPOINTED for SPEC-06 SP4: end_streaming honors an
+    explicitly passed agent_name over the agent_mgr lookup path (which
+    returns '' for special: keys).
 
-    Patches build_role_bubble so the test does not need a working GTK
-    display. The real build_role_bubble (chat_bubble.py:240) is GTK-dependent
-    and segfaults in headless test environments.
+    Patches crh_module.render_document (the SP4 composition seam — the
+    Pango build_role_bubble is retired) and asserts on a SPY SURFACE:
+    surface.append_message must receive agent_name='Coder'. GTK-free.
+
+    (Old __streaming_bubbles seam deleted — seed _streaming/_stream_text.)
     """
 
-    def test_explicit_agent_name_reaches_build_role_bubble(self):
-        """Patch build_role_bubble and assert it received agent_name='Coder'.
-        This is the unit-level check that the priority logic is correct.
-        """
-        from ui.handlers.chat_render_handler import ChatRenderHandler
-        from models.streaming import StreamingBubble
+    def test_explicit_agent_name_reaches_surface_append(self):
+        """Seed the streaming buffers, end_streaming(agent_name='Coder'),
+        and assert the surface received agent_name='Coder'."""
+        import ui.handlers.chat_render_handler as crh_module
 
-        with patch("ui.handlers.chat_render_handler.Gtk"):
-            crh = ChatRenderHandler(GLib_module=None)
+        from ui.handlers.chat_render_handler import ChatRenderHandler
+
+        crh = ChatRenderHandler(GLib_module=None)
         # mock main_content with empty _agent_mgr (simulates AgentManager miss
         # for a special: key — the original bug condition)
         mc = MagicMock()
@@ -3287,71 +3289,83 @@ class TestEndStreamingExplicitNameTakesPriority:
         # dispatch is a no-op without GLib, so _finalize runs synchronously
         crh._dispatch = lambda fn: fn()
 
-        sb = StreamingBubble(container=MagicMock(), label=MagicMock(),
-                             role="Agent", bubble=MagicMock())
-        sb.plain_text = "hello"
-        sb.container.__contains__.return_value = False
-        crh._streaming_bubbles["special:coder"] = sb
+        # Spy surface: records append_message kwargs (GTK-free).
+        appended: list = []
 
-        with patch("ui.handlers.chat_render_handler.build_role_bubble") as brb:
-            brb.return_value = MagicMock(name="bubble")
+        class _Spy:
+            def append_message(self, role, html_fragment, agent_name=None):
+                appended.append(
+                    {"role": role, "html": html_fragment, "agent": agent_name}
+                )
+
+            def destroy(self):
+                pass
+
+        crh._surfaces["special:coder"] = _Spy()
+
+        # NEW seams (SP4): streaming state is _streaming/_stream_text.
+        crh._streaming.add("special:coder")
+        crh._stream_text["special:coder"] = "hello"
+
+        with patch.object(crh_module, "render_document",
+                          return_value="<p>hello</p>") as rd:
             crh.end_streaming("special:coder", agent_name="Coder")
 
-        # build_role_bubble was called once; agent_name is the 8th positional
-        # arg or the agent_name kwarg.
-        assert brb.call_count == 1
-        call_kwargs = brb.call_args.kwargs
-        call_args = brb.call_args.args
-        # Signature: build_role_bubble(role, text, on_forward_click=..., tight=...,
-        # forwarded_from=..., session_key=..., agent_name=...)
-        if "agent_name" in call_kwargs:
-            actual = call_kwargs["agent_name"]
-        else:
-            actual = call_args[7] if len(call_args) >= 8 else None
-        assert actual == "Coder", (
-            f"FAILURE-CASE REPRO: build_role_bubble received agent_name={actual!r}; "
-            "expected 'Coder' so the header (name+dot+timestamp) renders"
+        # Composition ran once with the buffered text.
+        assert rd.call_count == 1
+        assert rd.call_args.args[0] == "hello"
+        # The surface got the EXPLICIT name — header contract at the
+        # public boundary.
+        assert len(appended) == 1
+        assert appended[0]["agent"] == "Coder", (
+            f"FAILURE-CASE REPRO: surface append received agent_name="
+            f"{appended[0]['agent']!r}; expected 'Coder' so the header renders"
         )
 
 
 class TestEndStreamingFallbackForGatewayAgents:
-    """Test D: end_streaming with no agent_name arg falls back to agent_mgr
-    (gateway compatibility — gateway agents ARE in AgentManager).
+    """Test D — REPOINTED for SPEC-06 SP4: end_streaming with no agent_name
+    arg falls back to agent_mgr (gateway compatibility — gateway agents ARE
+    in AgentManager). Spy-surface assert at the new seam.
     """
 
     def test_no_agent_name_falls_back_to_agent_mgr(self):
-        from ui.handlers.chat_render_handler import ChatRenderHandler
-        from models.streaming import StreamingBubble
+        import ui.handlers.chat_render_handler as crh_module
 
-        with patch("ui.handlers.chat_render_handler.Gtk"):
-            crh = ChatRenderHandler(GLib_module=None)
+        from ui.handlers.chat_render_handler import ChatRenderHandler
+
+        crh = ChatRenderHandler(GLib_module=None)
         mc = MagicMock()
         mc._agent_mgr.get_name.return_value = "Qaster"  # gateway agent registered
         crh._main_content = mc
         crh._dispatch = lambda fn: fn()
 
-        sb = StreamingBubble(container=MagicMock(), label=MagicMock(),
-                             role="Agent", bubble=MagicMock())
-        sb.plain_text = "hello"
-        sb.container.__contains__.return_value = False
-        crh._streaming_bubbles["agent:qaster:main"] = sb
+        appended: list = []
 
-        with patch("ui.handlers.chat_render_handler.build_role_bubble") as brb:
-            brb.return_value = MagicMock(name="bubble")
+        class _Spy:
+            def append_message(self, role, html_fragment, agent_name=None):
+                appended.append(
+                    {"role": role, "html": html_fragment, "agent": agent_name}
+                )
+
+            def destroy(self):
+                pass
+
+        crh._surfaces["agent:qaster:main"] = _Spy()
+        crh._streaming.add("agent:qaster:main")
+        crh._stream_text["agent:qaster:main"] = "hello"
+
+        with patch.object(crh_module, "render_document",
+                          return_value="<p>hello</p>"):
             crh.end_streaming("agent:qaster:main")  # NO agent_name arg
 
         # agent_mgr.get_name was called for the session key
         mc._agent_mgr.get_name.assert_called_with("agent:qaster:main")
-        # build_role_bubble received "Qaster" (the gateway name)
-        call_kwargs = brb.call_args.kwargs
-        call_args = brb.call_args.args
-        if "agent_name" in call_kwargs:
-            actual = call_kwargs["agent_name"]
-        else:
-            actual = call_args[7] if len(call_args) >= 8 else None
-        assert actual == "Qaster", (
+        # The surface received "Qaster" (the gateway name)
+        assert len(appended) == 1
+        assert appended[0]["agent"] == "Qaster", (
             f"FAILURE-CASE REPRO: end_streaming fallback should have resolved "
-            f"'Qaster' via agent_mgr; got {actual!r}"
+            f"'Qaster' via agent_mgr; got {appended[0]['agent']!r}"
         )
 
 

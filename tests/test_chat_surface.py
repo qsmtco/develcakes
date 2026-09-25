@@ -356,17 +356,18 @@ class TestImportTimeAlias:
         # the alias must be the module-level ChatSurface binding for
         # WebKit-less imports (import-once semantics keep this untestable
         # at runtime; falsifier = delete either line).
-        # FIX E: LINE-BOUNDARY match — a commented-out alias line is NOT a
-        # binding. Strip # comments first; match `ChatSurface = ` as a line's
-        # LEADING (non-indent) token — trailing comments on the live line OK.
+        # FIX E / rider-a (SP3 audit r2): EXACT-INDENT match — the alias is
+        # a top-level statement and must match exactly 4 spaces. A dead-def
+        # 8-space binding or a commented-out line both FAIL this pin (no
+        # lstrip — stripping is what made the old pin evadable).
         code_lines = [
             ln.split("#", 1)[0].rstrip() for ln in src.splitlines()
         ]
         alias_lines = [
-            ln for ln in code_lines if ln.lstrip().startswith("ChatSurface = ")
+            ln for ln in code_lines
+            if ln == "    ChatSurface = TextViewFallback"
         ]
         assert len(alias_lines) == 1, f"alias must appear exactly once uncommented: {alias_lines!r}"
-        assert alias_lines[0].lstrip() == "ChatSurface = TextViewFallback"
         assert "def create_chat_surface" in src
         # And the factory (runtime path) resolves the fallback for real.
         monkey = __import__("unittest.mock", fromlist=["patch"])

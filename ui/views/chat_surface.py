@@ -307,7 +307,7 @@ class TextViewFallback(Gtk.Box):
         self.append_message("agent", "".join(chunks), agent_name=agent_name)
 
     def set_activity_pill(self, state: str) -> None:
-        self._pill_label.set_text(_PILL_STATES["idle"] if state not in _PILL_STATES else _PILL_STATES[state])
+        self._pill_label.set_text(_PILL_STATES.get(state, _PILL_STATES["idle"]))
         new_css = f"pill-{state if state in _PILL_STATES else 'idle'}"
         if new_css != self._pill_css:
             self._pill_label.remove_css_class(self._pill_css)

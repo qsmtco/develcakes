@@ -125,6 +125,9 @@ class ChatRenderHandler:
         # and the surface's stream buffer is append-only by contract.
         self._streaming: set[str] = set()
         self._stream_text: dict[str, str] = {}
+        # FIX 6 (SP4 audit): streaming role carried to the final row
+        # (start_streaming(role=...) → end_streaming renders with it).
+        self._stream_role: dict[str, str] = {}
 
     # ── Thread pool for off-main-thread processing ──────────────────
     _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crabcakes-render")
@@ -147,6 +150,7 @@ class ChatRenderHandler:
             surface.destroy()
         self._streaming.discard(session_key)
         self._stream_text.pop(session_key, None)
+        self._stream_role.pop(session_key, None)
 
     def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None):
         """Compose (markdown → sanitized HTML) and append to the session
@@ -312,6 +316,7 @@ class ChatRenderHandler:
             self.end_streaming(session_key)
         self._streaming.add(session_key)
         self._stream_text[session_key] = ""
+        self._stream_role[session_key] = role
 
     def is_streaming(self, session_key: str) -> bool:
         """Return True if a streaming session is active for session_key."""
@@ -380,12 +385,20 @@ class ChatRenderHandler:
 
         self._streaming.discard(session_key)
         full_text = self._stream_text.pop(session_key, "")
+        role = self._stream_role.pop(session_key, "Agent")  # FIX 6: carried role
 
         if not render:
             return
 
         def _finalize():
-            self._append_to_surface("Agent", full_text, session_key, agent_name=agent_name)
+            # Fallback name resolution on the main thread (v1 semantics):
+            # explicit arg > agent_mgr.get_name(session_key) > None.
+            resolved_name = agent_name
+            if resolved_name is None and role == "Agent" and self._main_content is not None:
+                agent_mgr = getattr(self._main_content, '_agent_mgr', None)
+                if agent_mgr is not None:
+                    resolved_name = agent_mgr.get_name(session_key)
+            self._append_to_surface(role, full_text, session_key, agent_name=resolved_name)
             if self._main_content is not None:
                 self._main_content.scroll_chat_to_bottom()
 
