@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main import CrabcakesApp, handle_cli_args
+from main import DevelcakesApp, handle_cli_args
 
 
 # ── Fakes for the window → AgentRuntimeHandler graph ─────────────────────────
@@ -82,7 +82,7 @@ def _raise_dispatch_error(session_key, text):
 
 
 class FakeApp:
-    """Stand-in for CrabcakesApp: what handle_cli_args may touch.
+    """Stand-in for DevelcakesApp: what handle_cli_args may touch.
 
     TRIPWIRE: ``get_is_remote`` defaults to False — the real value on the
     PRIMARY instance, which is the one that HANDLES a forwarded nudge. If the
@@ -299,7 +299,7 @@ def test_nudge_does_not_start_gui_when_not_remote():
 
 
 def test_on_command_line_sets_exit_status():
-    app = CrabcakesApp()
+    app = DevelcakesApp()
     handler = FakeHandler()
     app._main_window = FakeWindow(handler)  # pretend the GUI is built
 
@@ -314,7 +314,7 @@ def test_on_command_line_sets_exit_status():
     assert stub.exit_status == 3
 
     # Empty argv (normal GUI launch) must route to activate, exit 0
-    app2 = CrabcakesApp()
+    app2 = DevelcakesApp()
     app2.activate_calls = 0
     app2.activate = lambda: setattr(app2, "activate_calls", app2.activate_calls + 1)
     stub = StubCommandLine([])
@@ -334,7 +334,7 @@ def test_on_command_line_internal_failure_returns_defined_code():
     """
     import main as main_mod
 
-    app = CrabcakesApp()
+    app = DevelcakesApp()
     handler = FakeHandler()
     app._main_window = FakeWindow(handler)
     handler.send_to_special_agent = _raise_dispatch_error

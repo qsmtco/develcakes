@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # main.py
-# Application entry point — creates and runs the CrabcakesApp
+# Application entry point — creates and runs the DevelcakesApp
 
 import sys
 import os
@@ -55,7 +55,7 @@ _EXIT_INTERNAL = 7
 _TURN_BUSY_STATES = ("running", "streaming")
 
 
-class CrabcakesApp(Gtk.Application):
+class DevelcakesApp(Gtk.Application):
     """
     Main application class.
     Gtk.Application handles:
@@ -263,7 +263,7 @@ def main():
     be silently dropped). Verified empirically (GApplication probe +
     headless crash trace, 2026-09-13).
     """
-    app = CrabcakesApp()  # Create application instance
+    app = DevelcakesApp()  # Create application instance
     return app.run(sys.argv)  # Explicit argv — see docstring; run(None) lies.
 
 

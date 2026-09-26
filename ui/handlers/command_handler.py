@@ -210,7 +210,7 @@ class CommandHandler:
             else:
                 help_text = f"/{name} — {help_text}"
             return CommandResult(handled=True, response_text=help_text)
-        lines = [" CrabCakes Commands", ""]
+        lines = [" DevelCakes Commands", ""]
         for name in self._registry.list_commands():
             alias_list = [al for al, cn in self._registry.list_aliases().items() if cn == name]
             alias_str = f" (/{', /'.join(alias_list)})" if alias_list else ""

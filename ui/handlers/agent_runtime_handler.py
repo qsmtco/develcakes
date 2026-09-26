@@ -1,5 +1,5 @@
 # ui/handlers/agent_runtime_handler.py
-# Phase 1.4 — Wires AgentRuntime into CrabCakes UI as a special agent.
+# Phase 1.4 — Wires AgentRuntime into the develcakes UI as a special agent.
 #
 # Responsibility: Owns the AgentRuntime lifecycle + dispatches its callbacks
 #                 to the chat render pipeline.
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class AgentRuntimeHandler:
     """
-    Wires AgentRuntime into the CrabCakes UI.
+    Wires AgentRuntime into the develcakes UI.
 
     Provides add_special_agent() to register named agents that route through
     AgentRuntime instead of the gateway. Handles the callbacks from AgentRuntime

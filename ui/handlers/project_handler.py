@@ -197,7 +197,7 @@ class ProjectHandler:
         result = init_repo(path)
         if result.success:
             stage_all(path)
-            commit(path, f"project {name} created via CrabCakes")
+            commit(path, f"project {name} created via DevelCakes")
         else:
             _logger.warning("git init failed for %s: %s", path, result.error)
 
