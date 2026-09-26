@@ -777,6 +777,16 @@ class MainContent(Gtk.Box):
     def _close_tab(self, page_idx):
         """Remove a tab by page index and clean up tracking dicts."""
         session_key = self._tab_sessions.get(page_idx)  # SP5a: capture BEFORE pop
+        # SP5a-audit FIX (BUG #2): capture the tab's BOX before the pops too.
+        # close_session resolves the dying key's box via the injected getter
+        # (get_chat_box_for_session iterates _tab_sessions), which returns None
+        # once the key's entry is popped — so passing the key alone made the
+        # entire close fan-out dead. Handing the BOX ITSELF to close_session
+        # lets it resolve the fan-out by BOX IDENTITY (the widget actually
+        # being closed) instead of a session-key lookup. All entry points
+        # (direct close, close_project_tab, _bulk_closing) resolve here —
+        # they all funnel through _close_tab.
+        closing_box = self._tab_chat_boxes.get(page_idx)
         self._chat_notebook.remove_page(page_idx)
         self._tab_sessions.pop(page_idx, None)
         self._tab_chat_boxes.pop(page_idx, None)
@@ -788,7 +798,9 @@ class MainContent(Gtk.Box):
         # through here too: close_project_tab resolves to _close_tab, so the
         # wiring is single-point (no double-close).
         if session_key is not None and self._chat_render_handler is not None:
-            self._chat_render_handler.close_session(session_key)
+            self._chat_render_handler.close_session(
+                session_key, box=closing_box
+            )
         # Hide tab bar when empty to prevent GtkGizmo min-height < 0 warning
         if self._chat_notebook.get_n_pages() == 0:
             self._chat_notebook.set_show_tabs(False)

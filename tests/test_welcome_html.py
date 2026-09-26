@@ -79,19 +79,35 @@ class TestWelcomeHtmlPin:
         assert any('class="welcome-row"' in html for html in doc_rows)
 
     def test_pipeline_passes_sanitized_content_through(self):
-        """The composed welcome markdown goes through render_document, is
-        wrapped in the stable-class span, and the emitted row is EXACTLY
-        the sanitized form of that wrapper (no raw pass-through, no policy
-        weakening — the text survives nh3 untouched)."""
+        """The composed welcome markdown goes through render_document, the
+        stable class is stamped on the emitted block node, and the emitted
+        row is EXACTLY the sanitized form of that stamped fragment (no raw
+        pass-through, no policy weakening — the text survives nh3
+        untouched). Mirrors the production construction in render_welcome."""
         from render.html import markdown_to_html
         from render.sanitize import sanitize_html
 
         expected = sanitize_html(
-            f'<span class="welcome-row">{markdown_to_html(_WELCOME_MARKDOWN)}</span>'
+            markdown_to_html(_WELCOME_MARKDOWN).replace(
+                "<p>", f'<p class="{crh_module._WELCOME_CLASS}">', 1
+            )
         )
         h, spy = _handler_with_spy()
         h.render_welcome("sk")
         assert _welcome_rows(spy)[0]["html"] == expected
+
+    def test_class_lands_on_block_node_no_span_wrapper(self):
+        """BUG #4 falsifier (round 3): the class rides the emitted BLOCK
+        node and NO wrapper element nests it — the emitter hardcodes <p>
+        and has no inline mode, so any wrapper (span/div) is
+        blocks-invalid. Falsifier: reintroduce the span wrapper (or stamp
+        a non-block node) → this fails on the wrapper/nesting assert."""
+        h, spy = _handler_with_spy()
+        h.render_welcome("sk")
+        html_arg = _welcome_rows(spy)[0]["html"]
+        assert html_arg.startswith('<p class="welcome-row">')
+        assert "<span" not in html_arg  # no wrapper (content has no links)
+        assert html_arg.count("<p") == 1  # single block, class on it
 
     def test_no_img_emitted_logo_is_text_only(self):
         """Survey verdict pin: NO logo/no <img> — the http(s)-only src
@@ -118,24 +134,47 @@ class TestWelcomeReopenSemantics:
 
     def test_close_then_fresh_surface_rewelcomes(self):
         """Production close→reopen sequence: the closed key's welcome flag
-        dies with its surface; after the reopen signal (pop_tombstone —
-        what create_chat_tab drives) the fresh surface gets a fresh
-        welcome. Falsifier: drop the close_session discard → the old flag
-        survives → zero rows on the fresh surface."""
+        dies with its surface; after the reopen signal the fresh surface
+        gets a fresh welcome. Falsifier: drop the close_session discard →
+        the old flag survives → zero rows on the fresh surface.
+
+        SP5a-audit nit fix (provenance): production drives the PLURAL
+        pop_tombstones_for_box (main_content.create_chat_tab); this test
+        uses the singular pop_tombstone — a direct unit shim with NO
+        production caller — to exercise the same flag-discard contract
+        for one key in isolation. The production entry is pinned by
+        TestRound3Lifecycle (test_chat_render_handler)."""
         h, _ = _handler_with_spy()
         h.render_welcome("sk")
         h.close_session("sk")
-        h.pop_tombstone("sk")  # the reopen signal (create_chat_tab drives this)
+        h.pop_tombstone("sk")  # unit shim — see provenance note above
         spy2 = SpySurface()
         h._surfaces["sk"] = spy2
         h.render_welcome("sk")
         assert len(_welcome_rows(spy2)) == 1
 
-    def test_reopen_tombstone_pop_rewelcomes(self):
+    def test_reopen_tombstone_pop_rewelcomes(self, monkeypatch):
         """create_chat_tab's reopen signal (pop_tombstones_for_box) clears
         the welcome flag in lockstep with the tombstone fan-pop — a
         reopened project key re-welcomes. Falsifier: remove the discard
-        from pop_tombstones_for_box → the post-reopen call emits nothing."""
+        from pop_tombstones_for_box → the post-reopen call emits nothing.
+
+        SP5a-audit BUG #1: "agent:x" is ABSENT from _surfaces here, so
+        render_welcome lazily created a REAL WebKit ChatSurface whose
+        queued GLib idle (load_html) was never drained/destroyed — any
+        later context-draining test fired it → real WebKit load_html →
+        SIGTRAP (reproduced: welcome_html then chat_surface in one batch).
+        Surface creation is routed through the TextViewFallback factory
+        (same pattern as TestCreateChatTabEmitsWelcome._real_tab) — no
+        WebKit surface exists to leak."""
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
         h, _ = _handler_with_spy()
         h._mounted_box_keys["agent:x"] = "project:alpha"
         h.render_welcome("agent:x")
@@ -143,6 +182,8 @@ class TestWelcomeReopenSemantics:
         h.pop_tombstones_for_box("project:alpha")
         assert "agent:x" not in h._welcome_shown
         assert "project:alpha" not in h._welcome_shown
+        # No WebKit surface escaped: the lazily-created surface is a fallback.
+        assert created and isinstance(created[0], TextViewFallback)
 
     def test_closed_tombstoned_key_drops_welcome(self):
         """A tombstoned (closed) key's late welcome is DROPPED — same
@@ -206,6 +247,35 @@ class TestWelcomeSanitizerGuard:
         h.render_welcome("sk")
         assert h._surfaces.get("sk") is None  # evicted
         assert "sk" not in h._welcome_shown  # flag NOT consumed
+
+    def test_eviction_discards_stale_welcome_flag(self, monkeypatch):
+        """BUG #3 falsifier: eviction destroys the surface AND DISCARDS its
+        welcome flag (the crh._surface_for eviction branch) — the recreated
+        surface re-welcomes. Without the discard the stale flag suppresses
+        the fresh mount's welcome forever. Discriminates fix-present vs
+        fix-reverted (Debugger probe sp5c1-r2-bug3-probe.py): revert the
+        discard → the final assert sees 0 rows."""
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        h = ChatRenderHandler()
+        h._MOUNT_MISS_LIMIT = 0  # type: ignore[misc] # any miss evicts
+        h.set_chat_container_getter(lambda sk: None)  # dead getter → evict
+        h._welcome_shown.add("sk")  # stale flag from a prior (dead) mount
+        assert h._surface_for("sk") is None  # created → missed → evicted
+        assert h._surfaces.get("sk") is None
+        assert "sk" not in h._welcome_shown  # THE DISCARD under witness
+        # Fresh-mount leg: re-wire a live getter — the recreated surface
+        # must re-welcome (stale flag ⇒ 0 rows ⇒ mutant alive).
+        box = Gtk.Box()
+        h.set_chat_container_getter(lambda sk: box)
+        h.render_welcome("sk")
+        assert len(_welcome_rows_surface(created[-1])) == 1
 
 
 # ── Wiring: once-per-mount driven by create_chat_tab (main_content) ──────

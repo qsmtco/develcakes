@@ -67,8 +67,16 @@ _logger = logging.getLogger(__name__)
 # constraint 1 forbids. Text-only + CSS-class hook instead: the class rides
 # the sanitizer's existing class-token allowlist (added there), so SP-later
 # styling/themeing can target .welcome-row without another policy change.
+# SP5c-1-audit BUG #4 (round 3 ruling, option a): the markdown is a SINGLE
+# INLINE RUN and the welcome-row class rides the emitter's <p> DIRECTLY
+# (`class` is admitted for `p` in render/sanitize._ATTRIBUTES — additive).
+# No wrapper element exists anymore: the emitter hardcodes <p> and has NO
+# inline mode, so any wrapper (span/div) would nest blocks-invalidly.
+# "Project Development Environment" stays — the SP5c-1 identity pin asserts
+# it.
+_WELCOME_CLASS = "welcome-row"
 _WELCOME_MARKDOWN = (
-    "**DevelCakes** — Project Development Environment\n\n"
+    "**DevelCakes** — Project Development Environment. "
     "Development happens here, as a group chat."
 )
 
@@ -297,6 +305,12 @@ class ChatRenderHandler:
             surface.destroy()
             del self._surfaces[session_key]
             self._mount_misses.pop(session_key, None)
+            # SP5c-1-audit BUG #3: the eviction destroys the surface — the
+            # welcome flag must die with it (a recreated surface is a fresh
+            # mount and must re-welcome). Without the discard, the stale
+            # flag suppresses the recreated surface's welcome (same
+            # lockstep as close_session / pop_tombstones_for_box).
+            self._welcome_shown.discard(session_key)
             # FIX 7 (r3): this is a MESSAGE DROP, not silent cleanup — the
             # render that triggered eviction is lost. REGISTER: the
             # lost-message window is now exactly "dead getter at the 4th
@@ -313,7 +327,7 @@ class ChatRenderHandler:
             return None
         return surface
 
-    def close_session(self, session_key: str) -> None:
+    def close_session(self, session_key: str, box=None) -> None:
         """Destroy one session's surface (SP3 destroy contract: idempotent,
         cancels pending renders, drops the webview).
 
@@ -329,7 +343,17 @@ class ChatRenderHandler:
         multi-agent projects). Tombstones record each dying surface's BOX
         key so the reopen path (create_chat_tab → pop_tombstones_for_box)
         can clear exactly the right set per key (the r2 global clear() in
-        set_chat_container_getter is REMOVED — that was the latent trap)."""
+        set_chat_container_getter is REMOVED — that was the latent trap).
+
+        SP5a-audit FIX (BUG #2, pre-existing since 61de23cb0): `box` — the
+        production caller (_close_tab) passes the dying tab's chat box
+        object directly, captured BEFORE it is popped from the tracking
+        dicts. The getter fallback (resolving session_key → box by
+        iterating _tab_sessions) returns None on that path — the key is
+        already popped when close_session runs — which made the entire
+        fan-out dead in production (probe: sp5c1-fanout-probe.py). The box
+        argument wins when present; the getter remains the fallback for
+        direct close_session(key) calls (tests, non-tab callers)."""
         self._closed_sessions[session_key] = True
         surface = self._surfaces.pop(session_key, None)
         if surface is not None:
@@ -339,30 +363,33 @@ class ChatRenderHandler:
             if surface.get_parent() is not None:
                 surface.unparent()
             surface.destroy()
-        # (b) kill ALL surfaces MOUNTED to this key's box. Boxes of a key
-        # are tracked by main_content (id-boxed in the index) — the getter,
-        # when present, resolves the key's box; unmounted surfaces (getter
-        # None / no box) simply aren't mounted to it and are left for their
-        # own key. FIX 2 (r3): iterate+destroy ALL matches (was: first-only
-        # via surface_for_box + break). FIX 6 (r3): the box's index entries
-        # are popped here — dead ids must not linger in _surfaces_by_parent.
-        getter = self._container_getter
-        if getter is not None:
-            box = getter(session_key)
-            if box is not None:
-                box_id = id(box)
-                for sk, s in list(self._surfaces.items()):
-                    if s.get_parent() is box:
-                        self._closed_sessions[sk] = True
-                        self._mounted_box_keys[sk] = session_key
-                        del self._surfaces[sk]
-                        # SP5c-1: fan-out victims lose their welcome flags too
-                        # (the project box died — reopen = fresh mount).
-                        self._welcome_shown.discard(sk)
-                        if s.get_parent() is not None:
-                            s.unparent()
-                        s.destroy()
-                self._surfaces_by_parent.pop(box_id, None)
+        # (b) kill ALL surfaces MOUNTED to this key's box. BUG #2 FIX: the
+        # box comes from the caller when the dying tab passed it (production
+        # _close_tab); the getter is the fallback (resolves by iterating
+        # _tab_sessions — None for an already-popped key). Unmounted
+        # surfaces (no box) simply aren't mounted to it and are left for
+        # their own key. FIX 2 (r3): iterate+destroy ALL matches (was:
+        # first-only via surface_for_box + break). FIX 6 (r3): the box's
+        # index entries are popped here — dead ids must not linger in
+        # _surfaces_by_parent.
+        resolved_box = box
+        if resolved_box is None:
+            getter = self._container_getter
+            resolved_box = getter(session_key) if getter is not None else None
+        if resolved_box is not None:
+            box_id = id(resolved_box)
+            for sk, s in list(self._surfaces.items()):
+                if s.get_parent() is resolved_box:
+                    self._closed_sessions[sk] = True
+                    self._mounted_box_keys[sk] = session_key
+                    del self._surfaces[sk]
+                    # SP5c-1: fan-out victims lose their welcome flags too
+                    # (the project box died — reopen = fresh mount).
+                    self._welcome_shown.discard(sk)
+                    if s.get_parent() is not None:
+                        s.unparent()
+                    s.destroy()
+            self._surfaces_by_parent.pop(box_id, None)
         self._streaming.discard(session_key)
         self._stream_text.pop(session_key, None)
         self._stream_role.pop(session_key, None)
@@ -377,7 +404,7 @@ class ChatRenderHandler:
         (project reopen: the agent surfaces killed by the close are wanted
         again — per-key fan-pop, NOT the removed global clear())."""
         self._closed_sessions.pop(box_key, None)
-        # SP5c-3 re-welcome pin: the reopened BOX key re-welcomes too —
+        # SP5c-1 re-welcome pin: the reopened BOX key re-welcomes too —
         # project-tab reopen must not stay suppressed (the box's welcome
         # rode the box key).
         self._welcome_shown.discard(box_key)
@@ -472,17 +499,29 @@ class ChatRenderHandler:
             return
         # Composition — the SAME pipeline as agent content, then re-sanitize
         # (constraint 2: never raw HTML into the surface). The stable CSS
-        # hook (constraint 1) is a wrapper span: render/html's escape-first
-        # contract means the class CANNOT ride the markdown text (it would
-        # be escaped); it is emitted around the composed fragment and must
-        # survive the sanitizer's class-token allowlist (welcome-row token,
-        # added there deliberately — additive vocabulary, not a weakening).
+        # hook (constraint 1) cannot ride the markdown TEXT (render/html is
+        # escape-first — it would be escaped); it is stamped onto the emitted
+        # BLOCK node and must survive the sanitizer (welcome-row token is in
+        # the class-token allowlist; `class` is admitted for `p` — additive
+        # entries, no policy weakening).
+        # SP5c-1-audit BUG #4 (round 3 ruling, option a): the class rides the
+        # <p> DIRECTLY — no wrapper element at all. History: the span wrapper
+        # produced invalid nesting (span around the emitter's block <p> — the
+        # emitter hardcodes <p> and has NO inline mode, so the round-2
+        # single-run restructure could not remove it). A wrapper is not used
+        # because span is inline (invalid around a block) and div is not in
+        # the sanitizer's tag allowlist — not because div-around-p nesting
+        # would be invalid. The re-sanitize below is the correctness gate: if
+        # the class does not survive (no block tag / policy regression) the
+        # welcome is emitted UNSTYLED; the re-sanitize guarantees it is never
+        # RAW. (No class-survival fallback branch exists — it was removed
+        # with the round-2 machinery.)
         try:
             inner = render_document(_WELCOME_MARKDOWN)
             if not inner:
-                # Fail-closed composition returned "" — no empty wrapper.
+                # Fail-closed composition returned "" — no empty row.
                 return
-            html_fragment = sanitize_html(f'<span class="welcome-row">{inner}</span>')
+            html_fragment = sanitize_html(inner.replace("<p>", f'<p class="{_WELCOME_CLASS}">', 1))
         except Exception:  # fail-closed: drop the welcome, never raw HTML
             _logger.exception("welcome compose failed — welcome dropped")
             return

@@ -993,3 +993,72 @@ class TestRound3Lifecycle:
         # the project key's surface (welcome + first-life + second-life).
         assert len(created) == 3                   # fresh surface — not resurrected orphan
         win.destroy()
+
+
+class TestCloseFanOutProductionPath:
+    """SP5a-audit BUG #2 (PRE-EXISTING since 61de23cb0) — the REAL
+    production close path. NO injected getters anywhere: main_content
+    wires its own get_chat_box_for_session in set_chat_render_handler,
+    and _close_tab now hands the captured closing box to close_session.
+    The old pins lied via `lambda sk: boxes.get(sk)` — a getter that can
+    resolve a key AFTER its _tab_sessions entry is popped; production
+    cannot."""
+
+    def _production_stack(self, monkeypatch):
+        """Real MainContent + real handler + real tabs — WebKit-free."""
+        created: list = []
+
+        def factory():
+            s = TextViewFallback()
+            created.append(s)
+            return s
+
+        monkeypatch.setattr(crh_module, "create_chat_surface", factory)
+        from ui.views.main_content import MainContent
+
+        handler = ChatRenderHandler()
+        mc = MainContent()
+        win = Gtk.Window()
+        win.set_child(mc)
+        mc.set_chat_render_handler(handler)   # real getter wiring happens here
+        return mc, win, handler, created
+
+    def test_project_close_fans_out_and_reopen_remounts(self, monkeypatch):
+        """THE pin: real create_chat_tab → agent render into the project box
+        → real _close_tab(project) → reopen. The BUG #2 defect (dead
+        fan-out) leaves the agent surface in the DETACHED old box (blank
+        pane); the fix must tombstone+destroy it at close and remount a
+        fresh surface in the NEW box on reopen. Falsifier contract: revert
+        `box=closing_box` at main_content._close_tab → this pin turns red
+        (the agent surface survives close in the detached box)."""
+        mc, win, handler, created = self._production_stack(monkeypatch)
+        try:
+            mc.create_chat_tab("project:alpha", "Alpha")
+            old_box = mc.get_chat_box_for_session("project:alpha")
+            agent_before = len(created)
+            handler.render_sync("Agent", "hello", "agent:x", mount_key="project:alpha")
+            assert created[agent_before].get_parent() is old_box
+
+            page = mc._find_page_by_session("project:alpha")
+            assert page is not None
+            mc._close_tab(page)               # THE REAL production close path
+            assert mc.get_chat_box_for_session("project:alpha") is None
+
+            # The fan-out MUST have fired: agent surface destroyed +
+            # tombstoned (BUG #2 defect = both skipped, blank-pane class).
+            assert "agent:x" not in handler._surfaces
+            assert handler._closed_sessions.get("agent:x") is True
+            assert created[agent_before].get_parent() is None
+
+            # Reopen: tombstones pop, and a fresh agent render mounts in the
+            # NEW box (the blank-pane defect = render lands in the old box).
+            mc.create_chat_tab("project:alpha", "Alpha")
+            assert "agent:x" not in handler._closed_sessions
+            new_box = mc.get_chat_box_for_session("project:alpha")
+            assert new_box is not old_box
+            agent_before = len(created)
+            handler.render_sync("Agent", "back", "agent:x", mount_key="project:alpha")
+            assert created[agent_before].get_parent() is new_box
+        finally:
+            win.destroy()
+

@@ -48,6 +48,11 @@ _ATTRIBUTES: dict[str, set[str]] = {
     "span": {"class"},
     "ul": {"class"},
     "li": {"class"},
+    # SP5c-1-audit round 3 (BUG #4 ruling, option a): block-level class hook
+    # — the welcome row carries `welcome-row` on its emitted <p> (no span
+    # wrapper). Additive, same precedent as span/pre/code/ul/li above; the
+    # VALUE stays gated by the class-token allowlist (no policy weakening).
+    "p": {"class"},
 }
 
 # Class-token allowlist (chat-surface styling vocabulary, SP2/SP3 contract).
