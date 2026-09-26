@@ -758,9 +758,12 @@ class TestStreamingMountLifecycle:
         win.set_child(mc)
         mc.set_chat_render_handler(handler)
         mc.create_chat_tab("project:alpha", "Alpha")
+        # SP5c-1: tab creation emits the welcome — the project key's surface
+        # is created EAGERLY here (+1), and agent:sk's fresh surface lands
+        # on the render below (total 3: first-life + welcome + second-life).
         handler.render_sync("Agent", "second life", "agent:sk",
                             mount_key="project:alpha")
-        assert len(created) == 2  # fresh surface — not the old orphan
+        assert len(created) == 3  # fresh agent surface — not the old orphan
         win.destroy()
 
     def test_late_render_after_close_does_not_resurrect(self, monkeypatch):
@@ -986,5 +989,7 @@ class TestRound3Lifecycle:
         handler.set_chat_container_getter(lambda sk: new_box if sk == "project:alpha" else None)
         handler.render_sync("Agent", "second life", "agent:sk",
                             mount_key="project:alpha")
-        assert len(created) == 2                   # fresh surface — not resurrected orphan
+        # SP5c-1: +1 — create_chat_tab's welcome emission eagerly created
+        # the project key's surface (welcome + first-life + second-life).
+        assert len(created) == 3                   # fresh surface — not resurrected orphan
         win.destroy()

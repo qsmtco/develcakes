@@ -628,24 +628,25 @@ class MainContent(Gtk.Box):
             vadj.connect("value-changed", self._on_vadjustment_changed, page_idx)
         self._chat_notebook.set_show_tabs(True)
         self._chat_notebook.set_current_page(page_idx)
-        # Welcome bubble — RETIRED for handler-wired tabs (SP5a FIX 9 round
-        # 2): built for the Pango bubble layout ("scrolled away naturally as
-        # messages arrive") — the surface era has no scroll-away, so it
-        # permanently ate ~196px of the viewport above the mounted surface
-        # (probe-verified: surface 81px → 317px with the bubble removed).
-        # Kept only when no render handler is wired (legacy/test paths).
-        if self._chat_render_handler is None:
-            from ui.views.chat_bubble import build_welcome_bubble
-            welcome = build_welcome_bubble()
-            if welcome is not None:
-                chat_box.append(welcome)
-        # SP5a r3 FIX 3: the reopen signal at the REAL entry point — a tab
-        # creation means the session's surfaces are wanted again. Tombstones
-        # (incl. fan-out victims mounted in this key's box) clear BEFORE the
-        # next render; getattr-tolerant for test doubles.
-        pop_box = getattr(self._chat_render_handler, "pop_tombstones_for_box", None)
+        # SPEC-06 SP5c-1 — the welcome is now the FIRST HTML-native surface
+        # content: emitted through the render handler (SP5a ruling (a) —
+        # handler owns mounting/emission), one row into the session's
+        # surface, once per surface mount. Chosen reopen semantics (brief
+        # constraint 4): re-emit IDEMPOTENTLY on a genuinely fresh surface
+        # — v1 parity (the Pango bubble was part of tab creation); the
+        # handler's flag mirrors surface lifetime (close clears it; a
+        # live surface's reopen re-entry is suppressed by the flag, and
+        # the early-return above stops duplicate tabs before this point).
+        # The tombstone pop MUST precede emission (SP5a r3 FIX 3, moved
+        # here): pop runs first, so the reopened key is un-tombstoned when
+        # render_welcome checks it — otherwise the reopen welcome would
+        # drop onto a blank surface. getattr-tolerant for test doubles.
+        handler = self._chat_render_handler
+        pop_box = getattr(handler, "pop_tombstones_for_box", None) if handler is not None else None
         if callable(pop_box):
             pop_box(session_key)
+        if handler is not None and hasattr(handler, "render_welcome"):
+            handler.render_welcome(session_key)
         return page_idx
 
     def _on_notebook_switch_page(self, notebook, _page, page_num):

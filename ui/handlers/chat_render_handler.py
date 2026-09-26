@@ -48,6 +48,7 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
 from render.html import render_document
+from render.sanitize import sanitize_html
 from ui.views.chat_surface import create_chat_surface
 from utils.escaping import xml_template
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,20 @@ if TYPE_CHECKING:
     from models.feed_card import FeedCardData
 
 _logger = logging.getLogger(__name__)
+
+# SPEC-06 SP5c-1 — the welcome content, carried through the SAME fail-closed
+# pipeline as agent text (render_document at emission; constraint 2). The
+# Pango bubble's logo is NOT rebuilt: survey verdict (2026-09-25) —
+# render/html emits no <img> at all (markdown images → "[alt]" text, register
+# ruling), and the sanitizer's src filter admits http(s) only, so a logo
+# (file path / data: URI) cannot pass without WEAKENING the policy, which
+# constraint 1 forbids. Text-only + CSS-class hook instead: the class rides
+# the sanitizer's existing class-token allowlist (added there), so SP-later
+# styling/themeing can target .welcome-row without another policy change.
+_WELCOME_MARKDOWN = (
+    "**DevelCakes** — Project Development Environment\n\n"
+    "Development happens here, as a group chat."
+)
 
 
 class _ReentrancySet:
@@ -135,6 +150,13 @@ class ChatRenderHandler:
         # main_content.set_chat_render_handler. On first surface create the
         # handler mounts the surface into the session's chat box.
         self._container_getter = None
+        # SPEC-06 SP5c-1: welcome already shown for these keys. Once per
+        # MOUNT: close_session removes the key (fresh tab = fresh welcome);
+        # SP5a's tombstone-pop path (pop_tombstones_for_box) also clears it
+        # so a project reopen re-welcomes exactly like a fresh mount. Bounded
+        # by the surface lifecycle — entries live only while their surface
+        # does.
+        self._welcome_shown: set[str] = set()
         # SP5a FIX 10/#4 (round 2): mount-relationship lifecycle.
         #   _closed_sessions — tombstones: a closed key's LATE renders are
         #     dropped instead of resurrecting an unmounted orphan surface.
@@ -334,6 +356,9 @@ class ChatRenderHandler:
                         self._closed_sessions[sk] = True
                         self._mounted_box_keys[sk] = session_key
                         del self._surfaces[sk]
+                        # SP5c-1: fan-out victims lose their welcome flags too
+                        # (the project box died — reopen = fresh mount).
+                        self._welcome_shown.discard(sk)
                         if s.get_parent() is not None:
                             s.unparent()
                         s.destroy()
@@ -341,6 +366,9 @@ class ChatRenderHandler:
         self._streaming.discard(session_key)
         self._stream_text.pop(session_key, None)
         self._stream_role.pop(session_key, None)
+        # SP5c-1: a closed key's surface is gone — its welcome flag goes
+        # with it (a fresh surface is a fresh mount = fresh welcome).
+        self._welcome_shown.discard(session_key)
 
     def pop_tombstones_for_box(self, box_key: str) -> None:
         """SP5a r3 FIX 3 — the reopen signal AT THE REAL ENTRY POINT: called
@@ -349,9 +377,16 @@ class ChatRenderHandler:
         (project reopen: the agent surfaces killed by the close are wanted
         again — per-key fan-pop, NOT the removed global clear())."""
         self._closed_sessions.pop(box_key, None)
+        # SP5c-3 re-welcome pin: the reopened BOX key re-welcomes too —
+        # project-tab reopen must not stay suppressed (the box's welcome
+        # rode the box key).
+        self._welcome_shown.discard(box_key)
         for sk in [k for k, v in self._mounted_box_keys.items() if v == box_key]:
             self._closed_sessions.pop(sk, None)
             self._mounted_box_keys.pop(sk, None)
+            # SP5c-1: reopen resets the welcome (fresh mount semantics) —
+            # kept in lockstep with the tombstone fan-pop above.
+            self._welcome_shown.discard(sk)
 
     def pop_tombstone(self, session_key: str) -> None:
         """SP5a FIX 10: clear one tombstone — the reopen signal. The next
@@ -392,6 +427,71 @@ class ChatRenderHandler:
         # REMOVED — the _mount_surface bool contract (read inside
         # _surface_for) is now the SOLE miss-reset mechanism, per the audit's
         # either/or. Two reset paths made the return contract untestable.
+
+    def render_welcome(self, session_key: str) -> None:
+        """SP5c-1 — emit the HTML-native welcome row for this session's
+        surface, ONCE per surface mount.
+
+        Brief constraint 3: the HANDLER owns emission (SP5a ruling (a) —
+        the handler owns mounting); main_content stays dumb (it just calls
+        render_welcome at tab creation, same line count as the retired
+        Pango call). No render_sync role-magic: the welcome is NOT a
+        transcript row, so it bypasses the reentrancy guard (it composes
+        synchronously on the main thread — no off-thread pool involved).
+
+        Sanitizer guard (constraint 3/gate 3): the content is composed with
+        render_document and PASSES THE RESULT THROUGH sanitize_html AGAIN —
+        belt-and-braces so this site independently witnesses the fail-closed
+        path. If the pipeline ever returns "" (fail-closed), nothing is
+        emitted (no empty row). Brief fallback: text-only content (the
+        logo cannot pass the http(s)-only src policy — survey verdict, see
+        the module-top comment on _WELCOME_MARKDOWN).
+
+        Semantics (constraint 4): once per surface mount — a per-key flag
+        (self._welcome_shown) suppresses re-emission on tab reopen (the
+        surface and its document state survive reopen; the flag mirrors the
+        surface's lifetime exactly — cleared at close/fan-out/tombstone-pop).
+        """
+        key = session_key or ""
+        if key in self._welcome_shown:
+            return
+        # Tombstone drop (mirrors _append_to_surface's guard order): a
+        # closed key's late welcome is DROPPED — _surface_for does NOT know
+        # about tombstones (the check lives in the append path), so it must
+        # be explicit here or the welcome leaks onto the orphan surface.
+        if self._closed_sessions.get(key):
+            return
+        # Guard order (mirrors _append_to_surface): surface FIRST — if the
+        # unmountable surface was just evicted (FIX 11, lazy recreation),
+        # this emission drops with the render; the flag is NOT consumed so
+        # the recreated surface still gets its welcome.
+        surface = self._surface_for(key)
+        if surface is None:
+            return
+        if key in self._welcome_shown:
+            return
+        # Composition — the SAME pipeline as agent content, then re-sanitize
+        # (constraint 2: never raw HTML into the surface). The stable CSS
+        # hook (constraint 1) is a wrapper span: render/html's escape-first
+        # contract means the class CANNOT ride the markdown text (it would
+        # be escaped); it is emitted around the composed fragment and must
+        # survive the sanitizer's class-token allowlist (welcome-row token,
+        # added there deliberately — additive vocabulary, not a weakening).
+        try:
+            inner = render_document(_WELCOME_MARKDOWN)
+            if not inner:
+                # Fail-closed composition returned "" — no empty wrapper.
+                return
+            html_fragment = sanitize_html(f'<span class="welcome-row">{inner}</span>')
+        except Exception:  # fail-closed: drop the welcome, never raw HTML
+            _logger.exception("welcome compose failed — welcome dropped")
+            return
+        if not html_fragment:
+            return  # fail-closed returned "" — no empty welcome row
+        if key in self._welcome_shown:
+            return
+        surface.append_message("system", html_fragment)
+        self._welcome_shown.add(key)
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 

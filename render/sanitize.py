@@ -28,6 +28,11 @@ _ALLOWED_TAGS = frozenset({
 # "class" is admitted ONLY for the tags the chat surface styles; the filter
 # below owns the class VALUE gate.
 #
+# SP5c-1: `welcome-row` joins the vocabulary — the welcome row's stable
+# CSS hook (SPEC-06 SP5c-1 constraint 1: text-only welcome + class hook
+# for later styling). Additive allowlist entry; NO policy weakening (src
+# stays http(s)-only, no new tags/attrs).
+#
 # NEVER add "rel" for "a" here while link_rel is set — ammonia raises
 # ValueError ("rel" managed by link_rel; the filter still sees the injected
 # value, which is how SP1's rel gate works).
@@ -47,7 +52,7 @@ _ATTRIBUTES: dict[str, set[str]] = {
 
 # Class-token allowlist (chat-surface styling vocabulary, SP2/SP3 contract).
 # Whole class attribute is split on whitespace; each token must match.
-_CLASS_TOKEN_RE = re.compile(r"^(?:terminal|task-list|task-checked|(?:tok|lang)-[a-z0-9+#_-]*)$")
+_CLASS_TOKEN_RE = re.compile(r"^(?:terminal|task-list|task-checked|welcome-row|(?:tok|lang)-[a-z0-9+#_-]*)$")
 
 _SAFE_ATTRS = frozenset({"href", "title", "alt", "src"})
 
