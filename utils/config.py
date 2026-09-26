@@ -12,7 +12,7 @@ import os
 
 
 def get_config_dir() -> str:
-    """Return the CrabCakes config directory.
+    """Return the develcakes config directory.
 
     Respects $XDG_CONFIG_HOME if set, otherwise ~/.config/crabcakes.
     Does NOT create the directory.
@@ -31,7 +31,7 @@ def get_config_file() -> str:
 def get_projects_config_dir() -> str:
     """Return path to projects config directory (members.json files live here).
 
-    Located inside the CrabCakes config dir, NOT inside the browsable projects root.
+    Located inside the develcakes config dir, NOT inside the browsable projects root.
     """
     return os.path.join(get_config_dir(), "projects")
 
@@ -49,7 +49,7 @@ def get_projects_dir() -> str:
 
 
 def get_project_root() -> str:
-    """Return the CrabCakes repository root (the directory containing main.py).
+    """Return the develcakes repository root (the directory containing main.py).
 
     Derived from this file's location (utils/config.py -> parent of utils/), so
     it is correct regardless of the current working directory and regardless of

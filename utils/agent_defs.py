@@ -47,7 +47,7 @@ def _normalize_fallback_fields(data: dict) -> None:
 
 def _get_default_agents_src() -> str:
     """Return the source directory for built-in default agent YAML files."""
-    # prompts/default_agents/ ships with CrabCakes
+    # prompts/default_agents/ ships with develcakes
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "default_agents")
 
 

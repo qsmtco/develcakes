@@ -199,7 +199,7 @@ def compose_system_prompt(
     if collab:
         parts.append(collab)
 
-    # 1c. CrabCakes platform context (all agents — applies regardless of project/role)
+    # 1c. develcakes platform context (all agents — applies regardless of project/role)
     cc_ctx = load_prompt_template("crabcakes-context")
     if cc_ctx:
         parts.append(cc_ctx)
@@ -210,7 +210,7 @@ def compose_system_prompt(
         if pa:
             parts.append(pa)
 
-    # 3. CrabCakes commands reference (when project active)
+    # 3. develcakes commands reference (when project active)
     if project_path:
         cmds = load_prompt_template("crabcakes-commands")
         if cmds:
@@ -298,7 +298,7 @@ def compose_system_prompt(
     if tools:
         tool_list_str = "## Tools\n" + "\n".join(f"  - {t}" for t in tools)
     else:
-        tool_list_str = ""  # Gateway agents — tool info controlled by gateway, not CrabCakes
+        tool_list_str = ""  # Gateway agents — tool info controlled by gateway, not develcakes
 
     # Agent type identity — derived from role so each agent knows what it is
     if agent_role:

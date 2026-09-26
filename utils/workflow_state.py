@@ -1,5 +1,5 @@
 """
-Workflow state tracker for CrabCakes projects.
+Workflow state tracker for develcakes projects.
 
 Manages .crabcakes/workflow.md — tracks which workflow phases are done,
 which is current, and timestamps.

@@ -453,7 +453,7 @@ class LeftPanel(Gtk.Box):
 
         Layout: [avatar] [name + tags column] [+/−] [Chat]
         Avatar uses render_agent_icon via the agent_list_handler (if set).
-        Tags show source (Openclaw/Crabcakes) and session count.
+        Tags show source (Openclaw/DevelCakes) and session count.
         """
         row = Gtk.ListBoxRow()
         row._session_key = session_key
@@ -496,7 +496,7 @@ class LeftPanel(Gtk.Box):
 
         # Tag line: source + session count
         is_special = session_key.startswith("special:")
-        source_tag = "Crabcakes" if is_special else "Openclaw"
+        source_tag = "DevelCakes" if is_special else "Openclaw"
         session_word = "Session" if session_count == 1 else "Sessions"
         tag_text = f"{source_tag}: {session_count} {session_word}"
         tag_lbl = Gtk.Label(label=tag_text)

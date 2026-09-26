@@ -5,7 +5,7 @@
 # Integrates with GLib main loop — no threading, no IPC, no external deps.
 #
 # Design (per docs/PROJECT_FEED.md and docs/PHASE5_SPEC.md):
-#   - CrabWatch is NOT a separate process — internal handler within CrabCakes
+#   - CrabWatch is NOT a separate process — internal handler within develcakes
 #   - Uses Gio.FileMonitor (GTK4 native, no external dependencies)
 #   - Monitors active project directory for file create/modify/delete events
 #   - On event → constructs FeedCardData(source="crabwatch") → calls on_event callback

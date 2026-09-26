@@ -260,7 +260,11 @@ def _create_default_config(path: str) -> None:
     first-run wizard.
     """
     example = {
-        "_comment": "CrabCakes agent configuration. Providers are managed in providers.yaml.",
+        # Prose casing per the app-identity taxonomy (display=DevelCakes,
+        # prose=develcakes). Note: this comment is persisted into the config
+        # file on first run only — existing user configs keep the old inert
+        # comment string, which is acceptable (no code reads _comment).
+        "_comment": "develcakes agent configuration. Providers are managed in providers.yaml.",
         "_security": "chmod 600 agent.json — this file may contain API keys",
         "default_provider": "",
         "default_model": "",

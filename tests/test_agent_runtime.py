@@ -5988,3 +5988,112 @@ class TestCrabcardTabStamping:
         card = fh.add_cards_batch.call_args.args[0][0]
         assert card.metadata["session_key"] == "special:sync"
         assert card.metadata["tab_key"] == "project:alpha"
+
+    # ── SP5b retro-audit fix round: unwitnessed branches ─────────────────────
+    # Debugger probe (.debug/audit-scratch/sp5b_probe.py): the two construction
+    # pins above force get_chat_box_for_session → None for the target session,
+    # so only the routing branch and the `or session_key` fallback of
+    # _resolve_mount_key (agent_runtime_handler.py:1364) are witnessed.
+
+    def test_streaming_direct_tab_branch_takes_precedence(self):
+        """Branch witness 1: a REAL chat box exists for the session's own key
+        (personal tab). _resolve_mount_key must return the session_key itself —
+        direct-tab precedence — so tab_key == session_key, NOT project:<name>.
+        Falsifier: drop the direct-tab branch of _resolve_mount_key → this
+        test fails (tab_key would become 'project:alpha')."""
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        mc.get_chat_box_for_session = lambda sk: (
+            object() if sk == "special:coder" else None)
+        # Routing ALSO points at a project: precedence, not absence, is the pin.
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+        handler._active_project = ["alpha"]
+        fh = unittest.mock.MagicMock()
+        handler.set_feed_handler(fh)
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = (
+            "before\n\n```crabcard\ntype: diff\n"
+            "title: Direct tab card\nfile: x.py\n---\n+body\n```\n"
+        )
+
+        handler._do_response_complete("special:coder", "unused when streaming")
+
+        fh.add_cards_batch.assert_called_once()
+        card = fh.add_cards_batch.call_args.args[0][0]
+        assert card.metadata["session_key"] == "special:coder"
+        assert card.metadata["tab_key"] == "special:coder", (
+            "direct-tab precedence: a mounted personal tab must stamp its OWN "
+            "session_key, not the routed project key"
+        )
+
+    def test_streaming_fallback_branch_no_tab_no_routing(self):
+        """Branch witness 2: neither a direct tab nor a routing entry exists —
+        _resolve_mount_key returns None and the `or session_key` fallback is
+        the documented contract (bug #5 fix: linkage never lost).
+        Falsifier: remove the `or session_key` fallback → tab_key becomes
+        None and this test fails."""
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        mc.get_chat_box_for_session = lambda sk: None
+        handler._agent_to_project = None
+        handler._active_project = ["alpha"]
+        fh = unittest.mock.MagicMock()
+        handler.set_feed_handler(fh)
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = (
+            "before\n\n```crabcard\ntype: diff\n"
+            "title: Fallback card\nfile: x.py\n---\n+body\n```\n"
+        )
+
+        handler._do_response_complete("special:coder", "unused when streaming")
+
+        fh.add_cards_batch.assert_called_once()
+        card = fh.add_cards_batch.call_args.args[0][0]
+        assert card.metadata["session_key"] == "special:coder"
+        assert card.metadata["tab_key"] == "special:coder", (
+            "`or session_key` fallback: with no tab and no routing the stamp "
+            "must degrade to the emitting session_key, never None"
+        )
+
+    def test_multiproject_divergence_is_deliberate(self):
+        """DESIGN PIN — Supervisor OVERRIDE ruling (retro-audit loop §3.2):
+        project_name and tab_key come from DIFFERENT sources BY DESIGN.
+        project_name stamps the ACTIVE project (card feeds to the project the
+        PM is looking at); tab_key resolves the emitting agent's own mounted
+        tab (where the turn actually rendered). With the agent routed to
+        project A while project B is active, the divergence project_name="B"
+        and tab_key="project:A" is deliberate semantics — do NOT unify the
+        sources. Falsifier: unify either source (drive both from one lookup)
+        → the tab_key/project_name assertions here diverge-fail, and the
+        direct-tab precedence test above fails with them."""
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        # Agent routed to project A (its transcript renders in project A's box)
+        mc.get_chat_box_for_session = lambda sk: (
+            object() if sk == "project:A" else None)
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "A"
+        # ...but project B is the active project the card feeds to
+        handler._active_project = ["B"]
+        fh = unittest.mock.MagicMock()
+        handler.set_feed_handler(fh)
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = (
+            "before\n\n```crabcard\ntype: diff\n"
+            "title: B sees it, A renders it\nfile: x.py\n---\n+body\n```\n"
+        )
+
+        handler._do_response_complete("special:coder", "unused when streaming")
+
+        fh.add_cards_batch.assert_called_once()
+        card = fh.add_cards_batch.call_args.args[0][0]
+        assert card.project_name == "B", (
+            "project_name must stay the ACTIVE project (card feeds where the "
+            "PM is looking)"
+        )
+        assert card.metadata["tab_key"] == "project:A", (
+            "tab_key must stay the agent's ROUTED tab (where the turn "
+            "rendered) — divergence is the pinned design, not a bug"
+        )
+        assert card.metadata["session_key"] == "special:coder"

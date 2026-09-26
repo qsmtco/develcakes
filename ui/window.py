@@ -55,7 +55,7 @@ from utils.config import COMMAND_PREFIX
 
 
 class MainWindow(Gtk.ApplicationWindow):
-    """Main window for the Develcakes application."""
+    """Main window for the develcakes application."""
 
     def __init__(self, application):
         super().__init__(application=application, title="DevelCakes")

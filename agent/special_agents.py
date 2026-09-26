@@ -27,7 +27,7 @@ __all__ = ["SPECIAL_AGENTS", "SpecialAgentDef", "get_special_agents", "get_speci
 
 @dataclass
 class SpecialAgentDef:
-    """Definition of a Crabcakes Special Agent.
+    """Definition of a develcakes Special Agent.
 
     Can be loaded from YAML/JSON config files or created programmatically.
     Fields llm_name and self_improvement are optional overrides —
@@ -43,7 +43,7 @@ class SpecialAgentDef:
     fallback_provider: str | None = None   # plain provider fallback (user-set, e.g. "openrouter")
     fallback_model: str | None = None      # plain provider fallback model (e.g. "openrouter/owl-alpha")
     api_key: str | None = None    # per-agent API key override (None → provider config)
-    app_title: str | None = None   # OpenRouter X-Title header (e.g. "Coder:Crabcakes")
+    app_title: str | None = None   # OpenRouter X-Title header (e.g. "Coder:develcakes")
     self_improvement: dict = field(default_factory=dict)  # SI layer toggles
     mcp_servers: list[str] = field(default_factory=list)  # MCP servers for Phase B
     auto_open: bool = False           # open tab automatically on every app launch

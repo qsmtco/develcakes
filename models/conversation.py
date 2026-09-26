@@ -170,7 +170,7 @@ class Conversation:
     provider: str | None = None           # provider name for api_key re-resolution (HIGH-3)
     api_key: str | None = None           # per-agent API key override (from agent def)
     si_enforcement: bool | None = None     # per-agent enforcement override (None → use global)
-    app_title: str = ""                   # OpenRouter X-Title header value (e.g. "Coder:Crabcakes")
+    app_title: str = ""                   # OpenRouter X-Title header value (e.g. "Coder:develcakes")
     fallback_provider: str | None = None   # plain provider fallback (user-set)
     fallback_model: str | None = None      # plain provider fallback model
     created_at: datetime = field(default_factory=datetime.now)

@@ -289,3 +289,43 @@ class TestPromptRowRightClick:
             "button=Gdk.BUTTON_SECONDARY (right-click). If this test fails, the "
             "right-click gesture wiring was removed from _build_prompt_row."
         )
+
+
+class TestAgentRowSourceTag:
+    """Retro-audit fix round, Part B (rename slice R4): the Agents-panel
+    agent-row tag line shows the emitting app's source as 'DevelCakes' for
+    special (local) agents. Located via the stable agent-tag-label CSS
+    class, never by position. Falsifier: revert source_tag to 'Crabcakes'
+    (left_panel.py) → the identity assert fails."""
+
+    def test_special_agent_tag_says_develcakes(self):
+        panel = LeftPanel()
+        panel._agent_list_handler = None  # exercise the built-in initials path
+
+        row = panel._build_agent_row("special:coder", "Coder", in_project=False,
+                                     session_count=1)
+
+        from gi.repository import Gtk as _Gtk
+        labels = []
+
+        def _walk(w):
+            labels.append(w)
+            child = w.get_first_child()
+            while child is not None:
+                _walk(child)
+                child = child.get_next_sibling()
+
+        _walk(row)
+        tag_labels = [w for w in labels
+                      if isinstance(w, _Gtk.Label)
+                      and w.has_css_class("agent-tag-label")]
+        assert len(tag_labels) == 1, (
+            "exactly one agent-tag-label per agent row (locator discipline)"
+        )
+        text = tag_labels[0].get_text()
+        assert "DevelCakes" in text, (
+            f"agent-row source tag must say 'DevelCakes', got {text!r} — "
+            "the rename was reverted or the label was restructured"
+        )
+        assert "Crabcakes" not in text
+        assert text.endswith("1 Session")

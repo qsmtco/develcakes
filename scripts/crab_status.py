@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""crab_status.py — command-line shim for the CrabCakes status reporter.
+"""crab_status.py — command-line shim for the DevelCakes status reporter.
 
 AGENTCTRL1 Phase 1b (SPEC-AGENT-CONTROL-1 §2.2 CLI, §2.3 invariants, §2.4 alert
 path). Pure Python over `utils.status_report`: no GTK, no network, no import of
@@ -102,7 +102,7 @@ def build_parser():
     """The §2.2 argv surface. Nothing else is accepted (no `--nudge` here)."""
     parser = _ArgumentParser(
         prog="crab_status.py",
-        description="Read-only CrabCakes status report (AGENTCTRL1 Phase 1).",
+        description="Read-only DevelCakes status report (AGENTCTRL1 Phase 1).",
         epilog=USAGE_EPILOG,
     )
     parser.add_argument("--project", default=".", metavar="PATH",
