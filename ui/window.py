@@ -55,7 +55,7 @@ from utils.config import COMMAND_PREFIX
 
 
 class MainWindow(Gtk.ApplicationWindow):
-    """Main window for the Crabcakes application."""
+    """Main window for the Develcakes application."""
 
     def __init__(self, application):
         super().__init__(application=application, title="Crabcakes")
@@ -886,7 +886,7 @@ class MainWindow(Gtk.ApplicationWindow):
         chat_box = self._main_content.get_chat_box()
         if chat_box is None:
             return
-        bubble = self._chat_render_handler.render_sync("CrabCakes", text, session_key)
+        bubble = self._chat_render_handler.render_sync("DevelCakes", text, session_key)
         if bubble is not None:
             chat_box.append(bubble)
             self._main_content.scroll_chat_to_bottom()

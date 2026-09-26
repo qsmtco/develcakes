@@ -1,5 +1,5 @@
 # utils/status_report.py
-# CrabCakes status reporter — read-only observability over the files the app
+# develcakes status reporter — read-only observability over the files the app
 # already writes. AGENTCTRL1 Phase 1a (SPEC-AGENT-CONTROL-1 §2.1–§2.4, §4.4).
 #
 # Architecture: pure Python, headless, NO GTK, NO imports from ui/. Read-only

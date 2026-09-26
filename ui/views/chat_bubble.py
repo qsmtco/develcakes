@@ -1073,7 +1073,7 @@ def _copy_to_clipboard(text: str):
 def build_welcome_bubble() -> Gtk.Widget | None:
     """Build a centered logo bubble shown at the bottom of new chat tabs.
 
-    Shows the CrabCakes logo with rounded corners. Scrolled away naturally
+    Shows the DevelCakes logo with rounded corners. Scrolled away naturally
     as messages arrive. Returns None if the logo file is not found.
     """
     logo_path = os.path.join(get_project_root(), "icons", "logo-rounded.png")
