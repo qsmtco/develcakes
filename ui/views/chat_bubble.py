@@ -1095,7 +1095,7 @@ def build_welcome_bubble() -> Gtk.Widget | None:
         icon.add_css_class("welcome-logo")
         icon.set_margin_bottom(6)
 
-        title = Gtk.Label(label="Crabcakes")
+        title = Gtk.Label(label="DevelCakes")
         title.add_css_class("welcome-bubble-title")
         title.set_halign(Gtk.Align.CENTER)
 

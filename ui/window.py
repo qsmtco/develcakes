@@ -58,7 +58,7 @@ class MainWindow(Gtk.ApplicationWindow):
     """Main window for the Develcakes application."""
 
     def __init__(self, application):
-        super().__init__(application=application, title="Crabcakes")
+        super().__init__(application=application, title="DevelCakes")
         self.set_default_size(800, 600)
 
         # Connect realize signal — set_icon_list requires a valid surface
