@@ -5932,3 +5932,59 @@ class TestDeltaCoalescing:
         # delta concatenation (set_streaming_text is the authoritative write)
         crh.set_streaming_text.assert_called_with("special:coder", expected)
 
+
+
+class TestCrabcardTabStamping:
+    """SPEC-06 SP5b bug #5: crabcard metadata stamps the tab linkage at
+    CONSTRUCTION — cards must resolve to the emitting session's tab after
+    the window's old linkage callback died. Falsifier: remove the
+    metadata["session_key"]/["tab_key"] stamps → both pins fail."""
+
+    def test_streaming_crabcards_carry_tab_metadata(self):
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else unittest.mock.MagicMock()
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+        handler._active_project = ["alpha"]
+        fh = unittest.mock.MagicMock()
+        handler.set_feed_handler(fh)
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = (
+            "before\n\n```crabcard\ntype: diff\n"
+            "title: Added auth middleware\nfile: src/main.py\n---\n"
+            "+from auth import middleware\n```\n"
+        )
+
+        handler._do_response_complete("special:coder", "unused when streaming")
+
+        fh.add_cards_batch.assert_called_once()
+        cards = fh.add_cards_batch.call_args.args[0]
+        assert len(cards) == 1
+        card = cards[0]
+        assert card.project_name == "alpha"          # pre-existing stamp, kept
+        assert card.metadata["session_key"] == "special:coder"
+        assert card.metadata["tab_key"] == "project:alpha"
+
+    def test_nonstreaming_crabcards_carry_tab_metadata(self):
+        handler, crh, mc = _make_handler()
+        _register_coder(handler)
+        mc.get_chat_box_for_session = lambda sk: None if sk == "special:sync" else unittest.mock.MagicMock()
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+        handler._active_project = ["ActiveProject"]
+        fh = unittest.mock.MagicMock()
+        handler.set_feed_handler(fh)
+        crh.is_streaming.return_value = False
+        handler._resolve_chat_box = unittest.mock.MagicMock(return_value=MagicMock())
+
+        handler._do_response_complete(
+            "special:sync",
+            "before\n\n```crabcard\ntype: diff\n"
+            "title: Nonstream card\nfile: x.py\n---\n+body\n```\n",
+        )
+
+        fh.add_cards_batch.assert_called_once()
+        card = fh.add_cards_batch.call_args.args[0][0]
+        assert card.metadata["session_key"] == "special:sync"
+        assert card.metadata["tab_key"] == "project:alpha"

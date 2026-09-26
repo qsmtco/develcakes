@@ -2087,6 +2087,12 @@ class AgentRuntimeHandler:
                     # pass — avoids N idle callbacks racing the vadjustment.
                     for card_data in cards:
                         card_data.project_name = project_name
+                        card_data.metadata["session_key"] = session_key
+                        card_data.metadata["tab_key"] = (
+                            self._resolve_mount_key(session_key) or session_key)
+                        # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
+                        # crabcards must resolve to the emitting session's tab
+                        # after the window's old linkage callback died.
                     self._fh.add_cards_batch(cards)
                     # Overwrite streaming text with cleaned version so
                     # end_streaming._finalize renders the bubble without crabcard blocks
@@ -2133,6 +2139,11 @@ class AgentRuntimeHandler:
                     # Batch: single idle callback, single smart scroll
                     for card_data in cards:
                         card_data.project_name = project_name
+                        card_data.metadata["session_key"] = session_key
+                        card_data.metadata["tab_key"] = (
+                            self._resolve_mount_key(session_key) or session_key)
+                        # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
+                        # same contract as the streaming block above.
                     self._fh.add_cards_batch(cards)
                 text_for_bubble = cleaned if cards else text
             else:
