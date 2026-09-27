@@ -417,12 +417,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def _on_send_to_agent(session_key: str, text: str):
             """Send a message to an agent tab (used for rejection notifications)."""
-            # SPEC-05 R1: local runtime path; receiver no-ops for unknown keys.
+            # SPEC-05 R1: live — FeedHandler's on_send_to_agent ctor arg.
             self._agent_runtime_handler.send_to_special_agent(session_key, text)
 
-        def _on_show_feed_subtab():
-            """Switch Projects notebook to the Feed sub-tab."""
-            self._left_panel.switch_to_feed_tab()
+        # NOTE: the former _on_show_feed_subtab closure was deleted with the
+        # B.2 crabcard-interception block — feeding the registry's tab-switch
+        # callback was its only consumer (dead since SP4).
 
         # FeedHandler created before FeedTab — set_feed_tab() called after FeedTab exists
         self._feed_handler = FeedHandler(
@@ -500,16 +500,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Inject FeedTab into LeftPanel's Projects notebook "Feed" sub-tab
         self._left_panel.set_feed_tab(self._feed_tab)
 
-        # Wire ChatRenderHandler → FeedHandler (crabcard interception)
-        def _on_crabcards_extracted(cards: list, session_key: str, tab_key: str = ""):
-            from ui.views.chat_bubble import _set_crabcards_registry
-            _set_crabcards_registry(cards, _on_show_feed_subtab)
-            for card in cards:
-                card.metadata["session_key"] = session_key  # agent session key
-                card.metadata["tab_key"] = tab_key or session_key  # chat box key (project:xxx or agent:xxx)
-                self._feed_handler.add_card(card)
-
-        self._chat_render_handler.set_on_crabcard_extracted(_on_crabcards_extracted)
+        # SPEC-06 SP5c-2 B.2: the ChatRenderHandler → FeedHandler crabcard
+        # interception wiring was deleted here (dead since SP4 — CRH stored
+        # the callback but never invoked it; ARH owns extraction upstream).
         self._chat_render_handler.set_project_name("")  # set per-project when project opens
 
         # ── Wire project lifecycle → FeedHandler + CrabWatch ──────────────────────────
@@ -537,7 +530,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._activity_drawer.clear_events(),
                 self._on_feed_bar_update(n, len(self._project_handler.get_project_members(n)) if n else 0),
                 # LOW-7 wiring: publish the active project path so the image viewer
-                # in chat_bubble.py can scope _open_in_viewer to the project root
+                # in event_cards.py can scope _open_in_viewer to the project root
                 # (in addition to the home + /tmp fallbacks). Helper lives in
                 # ui/wiring.py so it's testable in isolation.
                 set_active_project_path(p),

@@ -4363,7 +4363,8 @@ class TestLocalAgentDrawerEmissions:
 
     # ── BUG #22: tool-only turn must not render empty chat bubble ───────
 
-    def test_tool_only_turn_no_empty_chat_bubble(self):
+    def test_tool_only_turn_no_empty_bubble(self):
+        # Historical name: test_tool_only_turn_no_empty_chat_bubble (renamed SP5c-2 C).
         """Regression for BUG #22: a tool-only turn (empty streaming text) must
         not render an empty header bubble in the chat.
 

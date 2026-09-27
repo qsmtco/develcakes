@@ -46,7 +46,7 @@ class TestEventCardEscaping:
     def test_error_bubble_escapes_bold(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import create_error_bubble
+        from ui.views.event_cards import create_error_bubble
         widget = create_error_bubble("<b>not bold</b>")
 
         def find_label_with(w, needle):
@@ -67,7 +67,7 @@ class TestEventCardEscaping:
     def test_file_card_path_escapes_bold(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import create_file_card
+        from ui.views.event_cards import create_file_card
         widget = create_file_card("<b>fake</b>")
 
         # Recursive walk to find any label containing the escaped text

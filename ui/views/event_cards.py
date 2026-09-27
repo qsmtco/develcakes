@@ -1,32 +1,29 @@
-# ui/views/chat_bubble.py
-# Chat bubble widget factories — Phase 1 (inline) + Phase 2 (block-level).
+# ui/views/event_cards.py
+# Event-card widget factories — relocated VERBATIM from the retired Pango
+# bubble module (donor deleted in SP5c-2 B.2; see git history for lineage).
+# It is the Pango event-card pipeline's home (ChatRenderHandler.render_event_card
+# — the five builders' only consumer).
+#
+# Relocated verbatim: build_role_bubble, create_file_card, create_edit_card,
+# create_tool_card, create_error_bubble, build_streaming_bubble (test-only
+# consumer), and their transitive private helpers (process_segments,
+# _process_text_chunk, _add_action_buttons, _build_code_from_markup,
+# _build_image_block, _build_segment_widget, _build_table_segment,
+# _make_table_cell, _build_text_segment, _make_block_header,
+# _build_quote_segment, _build_terminal_segment, _build_heading_segment,
+# _build_task_segment, _build_crabcard_placeholder_segment, LOW-7 viewer
+# helpers, _copy_to_clipboard).
+#
+# SP5c-2 B.0 (supervisor ruling): the _crabcards_registry machinery was
+# DELETED here rather than relocated — crabcard interception wiring died with
+# SP4, the registry had zero live consumers (grep-verified), and
+# _set/_clear_crabcards_registry died with the donor file. The placeholder
+# segment always renders its static fallback label (identical behavior).
 #
 # Security: No secrets, no network calls.
 # Pure GTK widget construction; no GTK calls until after app activation.
-# Image blocks use os.path.isfile() for validation and subprocess for click-to-open.
-#
-# Public API:
-#   build_role_bubble(role, text) -> Gtk.Widget
-#       Creates a styled bubble widget for the given role + formatted text.
-#       role: "You" (user, right-aligned) or "Agent" (agent, left-aligned)
-#       text: Raw message text (may contain markdown, code blocks, quotes, etc.)
-#             The bubble internally: 1) extracts blocks, 2) renders each segment.
-#
-# Phase 1 scope (inline):
-#   - Text segments → bold, italic, code, links via format_markdown()
-#   - Role label ("You:" / "Agent:") shown above message
-#
-# Phase 2 scope (block-level):
-#   - Code blocks → syntax-highlighted, header bar with lang + copy button
-#   - Blockquotes → left border, italic, muted
-#   - Terminal blocks → amber left border, monospace, $ prefix
-#   - Headings → scaled font size
-#   - Task lists → checkbox character (☑/☐)
-#
-# Architecture:
-#   Each bubble is a vertical Gtk.Box (content wrapper) inside a
-#   container Gtk.Box that sets alignment via halign.
-#   CSS classes: .chat-bubble-you  /  .chat-bubble-agent
+# Image blocks use os.path.isfile() for validation and subprocess for
+# click-to-open (LOW-7 root-scoping preserved verbatim).
 
 import os
 
@@ -42,12 +39,11 @@ from utils.block_parser import extract_blocks
 from utils.crabcard_parser import is_crabcards_placeholder, get_placeholder_index as _get_placeholder_index
 from utils.gtk_safe_link import make_safe_label, on_activate_link  # HIGH-6: activate-link guard
 
-# Module-level registry for placeholder card lookup in chat bubbles.
-# Populated by ChatRenderHandler when crabcards are extracted.
-# Maps card_index → (FeedCardData, on_tab_switch callback)
-_crabcards_registry: dict[int, tuple] = {}
+# SP5c-2 B.0 (supervisor ruling): the crabcard placeholder registry is GONE.
+# Crabcard interception wiring died with SP4; the placeholder segment below
+# always renders its static fallback label (the registry was never populated
+# in production — zero consumers, grep-verified; donor module deleted B.2).
 from utils.syntax_highlight import highlight
-
 
 import shutil
 import subprocess
@@ -483,7 +479,10 @@ def _add_action_buttons(bubble: Gtk.Box, raw_text: str, on_forward_click, sessio
     if on_forward_click:
         fwd_btn.connect("clicked", lambda btn, t=raw_text, sk=session_key: on_forward_click(t, btn, sk))
     else:
-        fwd_btn.connect("clicked", lambda _: print("[chat_bubble] forward (no handler)"))
+        # REACHABLE (SP5c-2 audit BUG #2 correction): CRH:851's thinking branch
+        # builds role bubbles with no forward handler. The [event_cards]
+        # constant rename from Phase A was grep hygiene, not dead-code cleanup.
+        fwd_btn.connect("clicked", lambda _: print("[event_cards] forward (no handler)"))
     fwd_motion = Gtk.EventControllerMotion()
     fwd_motion.connect("enter", lambda _c, _x, _y: fwd_btn.set_opacity(1.0))
     fwd_motion.connect("leave", lambda _c: fwd_btn.set_opacity(0.3))
@@ -500,54 +499,22 @@ def _add_action_buttons(bubble: Gtk.Box, raw_text: str, on_forward_click, sessio
 
 def _build_crabcard_placeholder_segment(seg: dict) -> Gtk.Widget | None:
     """
-    Render a crabcard placeholder as a small feed-reference chip.
-    The chip shows a feed icon + "Added to feed" label and is clickable.
-    Click → calls on_tab_switch callback to switch to the Project Feed tab.
+    Render a crabcard placeholder as a small static feed-reference chip:
+    "📋 [card added to feed]" — non-interactive (no click handling).
 
-    Cards and on_tab_switch callback are stored in module-level _crabcards_registry
-    by ChatRenderHandler before rendering.
+    SP5c-2 B.0 (supervisor ruling): this ALWAYS renders the static fallback
+    label. The crabcard interception wiring (module-level card registry +
+    ChatRenderHandler's render-time extraction) died with SP4; the registry
+    was never populated in production, so the static label is identical to
+    the pre-deletion behavior.
     """
-    from ui.views.feed_card import build_feed_reference_widget
-
-    card_index = seg.get("index")
-    if card_index not in _crabcards_registry:
-        # No card registered — render a plain text placeholder
-        label = Gtk.Label()
-        label.set_text("📋 [card added to feed]")
-        label.add_css_class("chat-msg-label")
-        return label
-
-    card_data, on_tab_switch = _crabcards_registry[card_index]
-
-    def _on_click():
-        if on_tab_switch:
-            on_tab_switch()
-
-    try:
-        widget = build_feed_reference_widget(card_data, on_click=_on_click)
-        widget.add_css_class("crabcard-ref-chip")
-        return widget
-    except Exception:
-        label = Gtk.Label()
-        label.set_text("📋 [card added to feed]")
-        label.add_css_class("chat-msg-label")
-        return label
-
-
-def _set_crabcards_registry(cards: list, on_tab_switch) -> None:
-    """
-    Store card + tab-switch callback in the module-level registry so
-    chat bubble rendering can look up cards by index.
-
-    Called by ChatRenderHandler when crabcards are extracted from an agent message.
-    """
-    for i, card in enumerate(cards):
-        _crabcards_registry[i] = (card, on_tab_switch)
-
-
-def _clear_crabcards_registry() -> None:
-    """Clear the registry (called between renders to avoid stale state)."""
-    _crabcards_registry.clear()
+    card_index = seg.get("index")  # kept for segment-shape compatibility
+    _ = card_index
+    # Static fallback — no card lookup (registry deleted, B.0 ruling).
+    label = Gtk.Label()
+    label.set_text("📋 [card added to feed]")
+    label.add_css_class("chat-msg-label")
+    return label
 
 
 def _build_segment_widget(seg: dict) -> Gtk.Widget | None:
@@ -1060,7 +1027,6 @@ def create_error_bubble(error_msg: str) -> Gtk.Widget:
     container.append(bubble)
     return container
 
-
 def _copy_to_clipboard(text: str):
     """Copy text to the system clipboard using GTK4 clipboard API."""
     display = Gdk.Display.get_default()
@@ -1068,45 +1034,3 @@ def _copy_to_clipboard(text: str):
         return
     clipboard = display.get_clipboard()
     clipboard.set(text)
-
-
-def build_welcome_bubble() -> Gtk.Widget | None:
-    """Build a centered logo bubble shown at the bottom of new chat tabs.
-
-    Shows the DevelCakes logo with rounded corners. Scrolled away naturally
-    as messages arrive. Returns None if the logo file is not found.
-    """
-    logo_path = os.path.join(get_project_root(), "icons", "logo-rounded.png")
-    if not os.path.isfile(logo_path):
-        return None
-    try:
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.set_halign(Gtk.Align.CENTER)
-        outer.set_valign(Gtk.Align.END)
-        outer.set_hexpand(False)
-        outer.add_css_class("welcome-bubble")
-        outer.set_margin_top(20)
-        outer.set_margin_bottom(20)
-        outer.set_spacing(4)
-
-        # Logo with rounded corners applied directly to the image widget
-        icon = Gtk.Image.new_from_file(logo_path)
-        icon.set_pixel_size(144)
-        icon.add_css_class("welcome-logo")
-        icon.set_margin_bottom(6)
-
-        title = Gtk.Label(label="DevelCakes")
-        title.add_css_class("welcome-bubble-title")
-        title.set_halign(Gtk.Align.CENTER)
-
-        tagline = Gtk.Label(label="Project Development Environment")
-        tagline.add_css_class("welcome-tagline")
-        tagline.set_halign(Gtk.Align.CENTER)
-
-        outer.append(icon)
-        outer.append(title)
-        outer.append(tagline)
-        return outer
-    except Exception:
-        return None
-

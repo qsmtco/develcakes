@@ -307,10 +307,9 @@ class LeftPanel(Gtk.Box):
 
         self._is_project_view_open = False
 
-    def switch_to_feed_tab(self) -> None:
-        """Switch the nested Notebook to the Feed sub-tab. Safe to call even if no project open."""
-        if self._projects_nested_notebook is not None:
-            self._projects_nested_notebook.set_current_page(1)
+    # SP5c-2 B.2: switch_to_feed_tab() was deleted with its sole caller
+    # (window._on_crabcards_extracted, the SP4-dead crabcard interception
+    # wiring). Re-add if feed-tab switching returns.
 
     def switch_to_file_tree_tab(self) -> None:
         """Switch the nested Notebook to the File Tree sub-tab. Safe to call even if no project open."""

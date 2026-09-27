@@ -344,7 +344,7 @@ class TestSpanAttributeValidation:
         """Name-valid tags with malformed values are preserved by the escaper
         because it validates attribute NAMES, not VALUE shapes.
 
-        The downstream Pango.parse_markup guard (feed_card.py, chat_bubble.py)
+        The downstream Pango.parse_markup guard (feed_card.py, event_cards.py)
         handles the resulting parse failure. For composite markup (diff lines)
         the per-line fallback isolates the failure; for single text blocks
         set_text() is an acceptable last-resort fallback.

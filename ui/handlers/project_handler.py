@@ -177,7 +177,7 @@ class ProjectHandler:
         if self._awareness:
             self._awareness.init_project_config(path, name, pm_name, pm_id)
 
-        # Auto-add onboarding agents (Crabcakes 🦀) to new project team
+        # Auto-add onboarding agents to new project team
         self._auto_add_onboarding_agents(path)
 
         # Initialize workflow.md (idempotent — creates with onboarding as current)

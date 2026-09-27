@@ -21,7 +21,7 @@ class TestTerminalSegment:
         """Terminal content with **bold** must render as <b>bold</b>, not literal **."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_terminal_segment
+        from ui.views.event_cards import _build_terminal_segment
         widget = _build_terminal_segment({"content": "error with **bold** message"})
         # Walk widget tree to find the content label (nested in row > make_safe_label)
         def find_label_with(w, needle):
@@ -45,7 +45,7 @@ class TestTerminalSegment:
         """
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_terminal_segment
+        from ui.views.event_cards import _build_terminal_segment
         widget = _build_terminal_segment({"content": "see [docs](https://example.com)"})
         def find_label_with(w, needle):
             if hasattr(w, "get_label"):
@@ -71,7 +71,7 @@ class TestTerminalSegment:
         """
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_terminal_segment
+        from ui.views.event_cards import _build_terminal_segment
         widget = _build_terminal_segment({"content": "see [x](javascript:alert(1))"})
         # Find the label carrying the needle (returns the widget, not a bool).
         def find_label_with(w, needle):
@@ -97,7 +97,7 @@ class TestTerminalSegment:
         """Regression: plain terminal text must render without Pango conversion."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_terminal_segment
+        from ui.views.event_cards import _build_terminal_segment
         widget = _build_terminal_segment({"content": "plain text"})
         def find_label_with(w, needle):
             if hasattr(w, "get_label"):
@@ -118,7 +118,7 @@ class TestTerminalSegment:
         """BUG #7: empty terminal content must return an empty spacer, not a full block."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_terminal_segment
+        from ui.views.event_cards import _build_terminal_segment
         import gi
         gi.require_version("Gtk", "4.0")
         from gi.repository import Gtk

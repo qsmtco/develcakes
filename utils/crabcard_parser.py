@@ -17,7 +17,7 @@
 #     ```
 #
 # Files that import this:
-#   - ui/views/chat_bubble.py (process_segments / build_role_bubble integration)
+#   - ui/views/event_cards.py (placeholder-segment rendering path)
 
 import re
 from datetime import datetime, timezone

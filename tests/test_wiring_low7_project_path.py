@@ -3,7 +3,7 @@
 # in ui/wiring.py. These cover the setter/clearer that ui/window.py invokes
 # from the project open/close callbacks.
 #
-# This closes the gap QTR flagged in the Phase 5 audit: chat_bubble.py reads
+# This closes the gap QTR flagged in the Phase 5 audit: event_cards.py reads
 # CRABCAKES_ACTIVE_PROJECT_PATH, but no handler was setting it. Now window.py
 # sets it on project open and clears it on close.
 
@@ -49,7 +49,7 @@ class TestSetActiveProjectPath:
     def test_tilde_is_expanded(self, clean_env):
         """A path starting with ~ is expanded to the user's home.
 
-        Required for chat_bubble.py's _is_path_in_allowed_roots to work,
+        Required for event_cards.py's _is_path_in_allowed_roots to work,
         since os.path.realpath does NOT expand ~. Without this, the env
         var would store '~/foo' literally and no realpath comparison
         would match.

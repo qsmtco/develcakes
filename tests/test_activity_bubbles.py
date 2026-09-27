@@ -1044,20 +1044,20 @@ class TestSystemBubbleCSS:
         return classes
 
     def test_system_role_uses_system_css_class(self):
-        from ui.views.chat_bubble import build_role_bubble
+        from ui.views.event_cards import build_role_bubble
         widget = build_role_bubble("System", "test activity bubble")
         classes = self._walk_css_classes(widget)
         assert "chat-bubble-System" in classes
 
     def test_agent_role_uses_agent_css_class(self):
-        from ui.views.chat_bubble import build_role_bubble
+        from ui.views.event_cards import build_role_bubble
         widget = build_role_bubble("Agent", "hello")
         classes = self._walk_css_classes(widget)
         assert "chat-bubble-agent" in classes
         assert "chat-bubble-System" not in classes
 
     def test_you_role_uses_you_css_class(self):
-        from ui.views.chat_bubble import build_role_bubble
+        from ui.views.event_cards import build_role_bubble
         widget = build_role_bubble("You", "hello")
         classes = self._walk_css_classes(widget)
         assert "chat-bubble-you" in classes

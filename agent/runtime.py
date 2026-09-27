@@ -793,7 +793,7 @@ class AgentRuntime:
         agent_role: str = "",
         si_enforcement: bool | None = None,      # per-agent enforcement override
         api_key: str | None = None,             # per-agent API key override
-        app_title: str = "",                    # app identifier (e.g. "crabcakes")
+        app_title: str = "",                    # app identifier (e.g. "Coder:develcakes")
         fallback_provider: str | None = None,
         fallback_model: str | None = None,
         defer_prompt_build: bool = False,        # NEW: build system prompt on background thread

@@ -127,7 +127,7 @@ def _build_diff_line(line_widget_box: Gtk.Box, line: DiffLine, lang: str | None)
 
     # Content
     # BUG #12: highlight raw content FIRST, then escape the highlighted output
-    # (matching chat_bubble.py:218 pattern — highlight(raw, lang))
+    # (matching the event_cards code-segment pattern — highlight(raw, lang))
     if lang and line.type != "context":
         try:
             highlighted = highlight(line.content, lang)

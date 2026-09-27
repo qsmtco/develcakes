@@ -2022,7 +2022,7 @@ class AgentRuntimeHandler:
         agents are — see gateway_handler.on_connected). Their display name
         comes from self._agents, populated by add_special_agent(). We resolve
         it once here and thread it into both end_streaming and render_sync so
-        build_role_bubble's header condition (chat_bubble.py:284) is satisfied.
+        build_role_bubble's header condition (event_cards.py:288) is satisfied.
         Without this, local agent bubbles render the body but no name/dot/timestamp.
         """
         # RACE-FIX v4: Reject stale completions from a previous turn.

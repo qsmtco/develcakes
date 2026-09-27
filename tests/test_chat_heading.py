@@ -21,7 +21,7 @@ class TestHeadingSegmentMarkdown:
     def test_plain_heading(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "plain"}
         label = _build_heading_segment(seg)
         assert label.get_label() == "plain"
@@ -29,7 +29,7 @@ class TestHeadingSegmentMarkdown:
     def test_bold_heading(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 3, "content": "**Important** conference"}
         label = _build_heading_segment(seg)
         markup = label.get_label()
@@ -39,7 +39,7 @@ class TestHeadingSegmentMarkdown:
     def test_italic_heading(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "and *italic* here"}
         label = _build_heading_segment(seg)
         markup = label.get_label()
@@ -48,7 +48,7 @@ class TestHeadingSegmentMarkdown:
     def test_code_span_heading(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "using `var` here"}
         label = _build_heading_segment(seg)
         markup = label.get_label()
@@ -57,7 +57,7 @@ class TestHeadingSegmentMarkdown:
     def test_link_heading(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "[click](https://example.com)"}
         label = _build_heading_segment(seg)
         markup = label.get_label()
@@ -73,7 +73,7 @@ class TestHeadingSegmentMarkdown:
         """HIGH-6: javascript: links in headings must be blocked by activate-link."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "[click](javascript:alert(1))"}
         label = _build_heading_segment(seg)
         retval = label.emit("activate-link", "javascript:alert(1)")
@@ -83,7 +83,7 @@ class TestHeadingSegmentMarkdown:
         """HIGH-6: https links in headings must NOT be blocked."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "[click](https://example.com)"}
         label = _build_heading_segment(seg)
         retval = label.emit("activate-link", "https://example.com")
@@ -92,7 +92,7 @@ class TestHeadingSegmentMarkdown:
     def test_empty_content_returns_box(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         import gi
         gi.require_version("Gtk", "4.0")
         from gi.repository import Gtk
@@ -103,7 +103,7 @@ class TestHeadingSegmentMarkdown:
     def test_whitespace_only_returns_box(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         import gi
         gi.require_version("Gtk", "4.0")
         from gi.repository import Gtk
@@ -114,7 +114,7 @@ class TestHeadingSegmentMarkdown:
     def test_ampersand_escaped(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "a & b"}
         label = _build_heading_segment(seg)
         markup = label.get_label()
@@ -127,7 +127,7 @@ class TestHeadingSegmentCssClasses:
     def test_level2_two_classes(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 2, "content": "test"}
         label = _build_heading_segment(seg)
         classes = label.get_css_classes()
@@ -140,7 +140,7 @@ class TestHeadingSegmentCssClasses:
     def test_level1_two_classes(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 1, "content": "test"}
         label = _build_heading_segment(seg)
         classes = label.get_css_classes()
@@ -150,7 +150,7 @@ class TestHeadingSegmentCssClasses:
     def test_level_capped_at_4(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         seg = {"level": 99, "content": "x"}
         label = _build_heading_segment(seg)
         classes = label.get_css_classes()
@@ -164,21 +164,21 @@ class TestHeadingSegmentLevelGuard:
     def test_level_none_falls_back_to_default(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         w = _build_heading_segment({"level": None, "content": "hi"})
         assert "chat-heading" in w.get_css_classes()
 
     def test_level_string_falls_back_to_default(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         w = _build_heading_segment({"level": "high", "content": "hi"})
         assert "chat-heading" in w.get_css_classes()
 
     def test_level_negative_clamped_to_1(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         w = _build_heading_segment({"level": -1, "content": "hi"})
         classes = w.get_css_classes()
         assert "chat-heading-1" in classes, f"negative not clamped: {classes}"
@@ -186,7 +186,7 @@ class TestHeadingSegmentLevelGuard:
     def test_level_zero_clamped_to_1(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         w = _build_heading_segment({"level": 0, "content": "hi"})
         classes = w.get_css_classes()
         assert "chat-heading-1" in classes, f"zero not clamped: {classes}"
@@ -194,7 +194,7 @@ class TestHeadingSegmentLevelGuard:
     def test_level_float_truncated(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_heading_segment
+        from ui.views.event_cards import _build_heading_segment
         w = _build_heading_segment({"level": 2.7, "content": "hi"})
         classes = w.get_css_classes()
         assert "chat-heading-2" in classes, f"float not truncated: {classes}"

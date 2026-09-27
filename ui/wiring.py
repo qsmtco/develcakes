@@ -14,7 +14,7 @@ from utils.providers_store import has_any_verified_provider, load_providers
 
 logger = logging.getLogger(__name__)
 
-# LOW-7: process-global env var that the image viewer in chat_bubble.py reads
+# LOW-7: process-global env var that the image viewer in event_cards.py reads
 # to determine the active project root. Set by set_active_project_path() on
 # project open, cleared by clear_active_project_path() on project close.
 # Without this wiring, the viewer only ever has the home + /tmp fallback
@@ -30,7 +30,7 @@ def set_active_project_path(project_path: str) -> None:
     is in scope. The viewer falls back to home + /tmp if the env var is empty.
 
     Normalizes the path: expands ~ and resolves to an absolute path. This is
-    required so chat_bubble.py's _is_path_in_allowed_roots (which calls
+    required so event_cards.py's _is_path_in_allowed_roots (which calls
     os.path.realpath, which does NOT expand ~) can correctly check whether
     a file lives under this root.
     """

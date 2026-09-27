@@ -88,7 +88,7 @@ class TestOnActivateLink:
 class TestBlockquoteLinkGuard:
     """HIGH-6 Phase 6.1 regression: blockquote path must use make_safe_label.
 
-    The blockquote segment renderer (_build_quote_segment in chat_bubble.py)
+    The blockquote segment renderer (_build_quote_segment in event_cards.py)
     was missed in Phase 6 commit 593391e. It used raw Gtk.Label() + set_markup()
     with no activate-link guard, allowing javascript: links to be clicked.
     """
@@ -110,7 +110,7 @@ class TestBlockquoteLinkGuard:
         except (ImportError, ValueError):
             pytest.skip("GTK not available in test environment")
 
-        from ui.views.chat_bubble import _build_quote_segment
+        from ui.views.event_cards import _build_quote_segment
         from utils.gtk_safe_link import on_activate_link
 
         seg = {"type": "blockquote", "content": "[click](javascript:alert(1))"}
@@ -161,7 +161,7 @@ class TestBlockquoteLinkGuard:
         except (ImportError, ValueError):
             pytest.skip("GTK not available in test environment")
 
-        from ui.views.chat_bubble import _build_quote_segment
+        from ui.views.event_cards import _build_quote_segment
 
         seg = {"type": "blockquote", "content": "normal text"}
         widget = _build_quote_segment(seg)

@@ -127,7 +127,7 @@ class ChatRenderHandler:
         agent color tint, per-row timestamp header, tight grouping, and the
         render-time crabcard registry (ARH's own extraction path is
         untouched). FORWARD via the toolbar still works; the registry
-        retires with chat_bubble in SP5.
+        retires with the bubble pipeline in SP5.
       KEPT: reentrancy guard, error fallback (escaped raw text — still
         sanitized), buffered streaming with a final atomic row, Pango
         event/task/diff cards (render_event_card — not transcript sites).
@@ -199,7 +199,9 @@ class ChatRenderHandler:
         RULING R1, option (a): the HANDLER owns mounting — on first surface
         create it asks the getter for the session's chat box and packs the
         surface in. One wiring point (main_content.set_chat_render_handler);
-        no window.py edits; SP5c's chat_bubble deletion cannot disturb it.
+        no window.py edits; SP5c's bubble-pipeline deletion cannot disturb it.
+        (SP5c-2 Phase A note: the bubble pipeline's builders now live in
+        ui/views/event_cards.py; this handler imports from there.)
 
         FIX 10 (round 2): a NEW getter is the wiring signal of a reopened
         tab/project — r3 FIX 3 REMOVES the global tombstone clear() that
@@ -817,7 +819,7 @@ class ChatRenderHandler:
                 error:       error_msg
                 thinking:    thought_text
         """
-        from ui.views.chat_bubble import (
+        from ui.views.event_cards import (
             build_role_bubble,
             create_file_card,
             create_edit_card,

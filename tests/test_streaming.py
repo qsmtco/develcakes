@@ -59,7 +59,7 @@ class TestStreamingBubbleHigh6:
         except (ImportError, ValueError):
             pytest.skip("GTK not available in test environment")
 
-        from ui.views.chat_bubble import build_streaming_bubble
+        from ui.views.event_cards import build_streaming_bubble
         _container, label = build_streaming_bubble("Agent")
         retval = label.emit("activate-link", "javascript:alert(1)")
         assert retval is True, "javascript: link not blocked in streaming label"
@@ -73,7 +73,7 @@ class TestStreamingBubbleHigh6:
         except (ImportError, ValueError):
             pytest.skip("GTK not available in test environment")
 
-        from ui.views.chat_bubble import build_streaming_bubble
+        from ui.views.event_cards import build_streaming_bubble
         _container, label = build_streaming_bubble("Agent")
         retval = label.emit("activate-link", "https://example.com/")
         assert retval is False, "https: link blocked in streaming label"
@@ -99,7 +99,7 @@ class TestStreamingBubbleHigh6:
         except (ImportError, ValueError):
             pytest.skip("GTK not available in test environment")
 
-        from ui.views.chat_bubble import build_streaming_bubble
+        from ui.views.event_cards import build_streaming_bubble
         from utils.gtk_safe_link import on_activate_link
         _container, label = build_streaming_bubble("Agent")
 

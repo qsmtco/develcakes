@@ -20,7 +20,7 @@ class TestTaskSegmentMarkdown:
     def test_bold_task(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] **bold** task"}
         label = _build_task_segment(seg)
         markup = label.get_label()
@@ -30,7 +30,7 @@ class TestTaskSegmentMarkdown:
     def test_unchecked_box(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[ ] plain task"}
         label = _build_task_segment(seg)
         markup = label.get_label()
@@ -40,7 +40,7 @@ class TestTaskSegmentMarkdown:
     def test_checked_box(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] done"}
         label = _build_task_segment(seg)
         markup = label.get_label()
@@ -50,7 +50,7 @@ class TestTaskSegmentMarkdown:
         """HIGH-6: javascript: links in tasks must be blocked."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] [click](javascript:alert(1))"}
         label = _build_task_segment(seg)
         retval = label.emit("activate-link", "javascript:alert(1)")
@@ -60,7 +60,7 @@ class TestTaskSegmentMarkdown:
         """HIGH-6: https links in tasks must NOT be blocked."""
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] [safe](https://example.com)"}
         label = _build_task_segment(seg)
         retval = label.emit("activate-link", "https://example.com")
@@ -69,7 +69,7 @@ class TestTaskSegmentMarkdown:
     def test_italic_and_code(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] *italic* and `code`"}
         label = _build_task_segment(seg)
         markup = label.get_label()
@@ -79,7 +79,7 @@ class TestTaskSegmentMarkdown:
     def test_empty_content_returns_box(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         import gi
         gi.require_version("Gtk", "4.0")
         from gi.repository import Gtk
@@ -90,7 +90,7 @@ class TestTaskSegmentMarkdown:
     def test_task_item_css_class(self):
         if _gtk_skip():
             pytest.skip("GTK not available in test environment")
-        from ui.views.chat_bubble import _build_task_segment
+        from ui.views.event_cards import _build_task_segment
         seg = {"content": "[x] task"}
         label = _build_task_segment(seg)
         classes = label.get_css_classes()

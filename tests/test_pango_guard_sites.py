@@ -1,6 +1,6 @@
 # tests/test_pango_guard_sites.py
-# Phase 2 regression tests: verify the three unguarded set_markup sites
-# (chat_bubble.py:391, file_tree.py:217, file_tree.py:1092) now have the
+# Phase 2 regression tests: verify the unguarded set_markup sites
+# (file_tree.py:217, file_tree.py:1092) now have the
 # Pango.parse_markup pre-validation guard with set_text fallback.
 #
 # The sandbox segfaults on Gtk.Label construction at process exit, so these
@@ -19,7 +19,7 @@ from gi.repository import Pango
 
 class TestPangoParseMarkupGuardLogic:
     """Validate that Pango.parse_markup distinguishes ok / fail markup
-    exactly as the three guard sites rely on."""
+    exactly as the guard sites rely on."""
 
     def test_valid_bold_markup_parses(self):
         Pango.parse_markup("<b>safe</b>", -1, "\x00")
@@ -56,23 +56,33 @@ class TestPangoParseMarkupGuardLogic:
 
 # ── Source-code guard presence ───────────────────────────────────────────────
 
-class TestChatBubbleCodeLabelGuard:
-    """chat_bubble.py _build_code_from_markup must guard code_label.set_markup."""
+# SP5c-2 Phase C: the donor-module source-guard class was REPOINTED here
+# (not removed) — its guarded code moved verbatim to ui/views/event_cards.py
+# in Phase A; file_tree guards below remain in place.
+
+
+class TestEventCardsCodeLabelGuard:
+    """event_cards.py _build_code_from_markup must guard code_label.set_markup.
+
+    SP5c-2 Phase C fix round (BUG#1): REPOINTED from the deleted donor
+    module's guard class — the guarded code (builder + its verbatim
+    relocation) lives in ui/views/event_cards.py since Phase A.
+    """
 
     def test_parse_markup_guard_present(self):
-        from ui.views import chat_bubble
-        src = inspect.getsource(chat_bubble)
+        from ui.views import event_cards
+        src = inspect.getsource(event_cards)
         assert "Pango.parse_markup(code_markup" in src, (
-            "Guard pattern missing in chat_bubble.py source"
+            "Guard pattern missing in event_cards.py source"
         )
         assert "code_label.set_text(raw_content)" in src, (
-            "Fallback to set_text missing in chat_bubble.py source"
+            "Fallback to set_text missing in event_cards.py source"
         )
 
     def test_set_markup_inside_try_block(self):
         """code_label.set_markup must appear inside a try block after parse_markup."""
-        from ui.views import chat_bubble
-        src_lines = inspect.getsource(chat_bubble).splitlines()
+        from ui.views import event_cards
+        src_lines = inspect.getsource(event_cards).splitlines()
         for i, line in enumerate(src_lines):
             if line.strip() == "code_label.set_markup(code_markup)":
                 # Walk back to confirm we are in a try: block
@@ -89,8 +99,8 @@ class TestChatBubbleCodeLabelGuard:
 
     def test_preserves_label_properties(self):
         """xalign, selectable, wrap, wrap_mode, max_width_chars must remain."""
-        from ui.views import chat_bubble
-        src = inspect.getsource(chat_bubble)
+        from ui.views import event_cards
+        src = inspect.getsource(event_cards)
         for attr in (
             "code_label.set_xalign(0)",
             "code_label.set_selectable(True)",

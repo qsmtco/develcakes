@@ -1,6 +1,6 @@
 # tests/test_low7_image_viewer.py
 # Phase 5: LOW-7 image viewer path hardening.
-# Tests _open_in_viewer and _is_path_in_allowed_roots in ui/views/chat_bubble.py.
+# Tests _open_in_viewer and _is_path_in_allowed_roots in ui/views/event_cards.py.
 
 import os
 import tempfile
@@ -16,20 +16,20 @@ class TestIsPathInAllowedRoots:
         """When no project path is set, /tmp is allowed."""
         # Ensure the env var is not set
         os.environ.pop("CRABCAKES_ACTIVE_PROJECT_PATH", None)
-        from ui.views.chat_bubble import _is_path_in_allowed_roots
+        from ui.views.event_cards import _is_path_in_allowed_roots
         assert _is_path_in_allowed_roots("/tmp/somefile.png") is True
 
     def test_low7_rejects_etc_passwd_without_env_var(self):
         """When no project path is set, /etc/passwd is rejected."""
         os.environ.pop("CRABCAKES_ACTIVE_PROJECT_PATH", None)
-        from ui.views.chat_bubble import _is_path_in_allowed_roots
+        from ui.views.event_cards import _is_path_in_allowed_roots
         assert _is_path_in_allowed_roots("/etc/passwd") is False
 
     def test_low7_allows_project_path_when_set(self):
         """When CRABCAKES_ACTIVE_PROJECT_PATH is set, that path is allowed."""
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["CRABCAKES_ACTIVE_PROJECT_PATH"] = tmp
-            from ui.views.chat_bubble import _is_path_in_allowed_roots
+            from ui.views.event_cards import _is_path_in_allowed_roots
             file_path = os.path.join(tmp, "image.png")
             # Create the file so isfile passes in _open_in_viewer
             open(file_path, "w").close()
@@ -40,7 +40,7 @@ class TestIsPathInAllowedRoots:
         """A path outside the allowed roots is rejected."""
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["CRABCAKES_ACTIVE_PROJECT_PATH"] = tmp
-            from ui.views.chat_bubble import _is_path_in_allowed_roots
+            from ui.views.event_cards import _is_path_in_allowed_roots
             assert _is_path_in_allowed_roots("/etc/passwd") is False
             os.environ.pop("CRABCAKES_ACTIVE_PROJECT_PATH", None)
 
@@ -48,7 +48,7 @@ class TestIsPathInAllowedRoots:
         """A symlink inside allowed root that points outside is rejected (realpath resolves it)."""
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["CRABCAKES_ACTIVE_PROJECT_PATH"] = tmp
-            from ui.views.chat_bubble import _is_path_in_allowed_roots
+            from ui.views.event_cards import _is_path_in_allowed_roots
             # Create a symlink inside tmp pointing to /etc/passwd
             symlink_path = os.path.join(tmp, "malicious.png")
             try:
@@ -65,14 +65,14 @@ class TestOpenInViewer:
 
     def test_low7_open_rejects_etc_passwd(self):
         """_open_in_viewer(/etc/passwd) must NOT call subprocess.Popen."""
-        from ui.views.chat_bubble import _open_in_viewer
+        from ui.views.event_cards import _open_in_viewer
         with patch("subprocess.Popen") as mock_popen:
             _open_in_viewer("/etc/passwd")
             mock_popen.assert_not_called()
 
     def test_low7_open_rejects_nonexistent(self):
         """_open_in_viewer with nonexistent path must NOT call subprocess.Popen."""
-        from ui.views.chat_bubble import _open_in_viewer
+        from ui.views.event_cards import _open_in_viewer
         with patch("subprocess.Popen") as mock_popen:
             _open_in_viewer("/tmp/does-not-exist-xyz.png")
             mock_popen.assert_not_called()
@@ -84,7 +84,7 @@ class TestOpenInViewer:
             file_path = os.path.join(tmp, "image.png")
             open(file_path, "w").close()
 
-            from ui.views.chat_bubble import _open_in_viewer
+            from ui.views.event_cards import _open_in_viewer
             with patch("subprocess.Popen") as mock_popen:
                 mock_popen.return_value = MagicMock()
                 _open_in_viewer(file_path)
@@ -100,7 +100,7 @@ class TestOpenInViewer:
             f.write(b"fake image")
             file_path = f.name
         try:
-            from ui.views.chat_bubble import _open_in_viewer
+            from ui.views.event_cards import _open_in_viewer
             with patch("subprocess.Popen") as mock_popen:
                 mock_popen.return_value = MagicMock()
                 _open_in_viewer(file_path)
@@ -120,7 +120,7 @@ class TestOpenInViewer:
             except OSError:
                 os.environ.pop("CRABCAKES_ACTIVE_PROJECT_PATH", None)
                 pytest.skip("symlink creation not allowed on this system")
-            from ui.views.chat_bubble import _open_in_viewer
+            from ui.views.event_cards import _open_in_viewer
             with patch("subprocess.Popen") as mock_popen:
                 _open_in_viewer(symlink_path)
                 mock_popen.assert_not_called()
@@ -131,7 +131,7 @@ class TestOpenInViewer:
         home_file = os.path.join(os.path.expanduser("~"), ".crabcakes-test-image.png")
         open(home_file, "w").close()
         try:
-            from ui.views.chat_bubble import _open_in_viewer
+            from ui.views.event_cards import _open_in_viewer
             with patch("subprocess.Popen") as mock_popen:
                 mock_popen.return_value = MagicMock()
                 _open_in_viewer(home_file)
