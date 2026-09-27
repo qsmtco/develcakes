@@ -269,6 +269,16 @@ class ChatRenderHandler:
                 return surface
         return None
 
+    def surface_for_key(self, session_key: str):
+        """SPEC-07 SP1: READ-ONLY surface lookup by session key (or None).
+
+        Deliberately NOT _surface_for() — that method creates and mounts on
+        a miss; status resolution runs on a 250ms tick and must be
+        side-effect free. A miss here simply means "no surface yet" →
+        caller renders nothing.
+        """
+        return self._surfaces.get(session_key)
+
     def _surface_for(self, session_key: str, mount_key: str | None = None):
         """Lazy per-session surface (created on first use).
 

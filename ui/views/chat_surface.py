@@ -18,9 +18,10 @@
 # class when WebKit is present.
 #
 # CSS: token/color styling lives in _BASE_CSS classes (tok-*/lang-*/terminal/
-# task-*/message-row/pill-*) — no inline styles (SP2 contract). The classes
+# task-*/message-row) — no inline styles (SP2 contract). The classes
 # survive because the sanitizer's class policy (render/sanitize.py, SP3
-# ruling) allowlists exactly this vocabulary.
+# ruling) allowlists exactly this vocabulary. Pill styling is GTK-side:
+# .pill-* rules live in APP_CSS (ui/styles.py) — SPEC-07 SP1 fix round.
 
 import html
 import logging
@@ -70,6 +71,18 @@ _PILL_STATES = {
     "error": "Error",
 }
 
+# SPEC-07 SP1: activity-machine state → pill CSS class (6 handler states +
+# error → the 4-class pill vocabulary, extended with streaming/done).
+_ACTIVITY_STATE_TO_CSS = {
+    "idle": "pill-idle",
+    "sending": "pill-thinking",
+    "reasoning": "pill-thinking",
+    "streaming": "pill-streaming",
+    "tool_use": "pill-tool",
+    "done": "pill-done",
+    "error": "pill-error",
+}
+
 _BASE_CSS = """
 body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
        font-size: 14px; margin: 8px; }
@@ -86,10 +99,6 @@ pre.terminal { color: #c0caf5; }
 .tok-op { color: #89ddff; }
 .tok-fn { color: #82aaff; }
 .tok-type { color: #ffcb6b; }
-.pill-idle { color: #6b6b7a; }
-.pill-thinking { color: #e0af68; }
-.pill-tool { color: #7aa2f7; }
-.pill-error { color: #f7768e; }
 """
 
 _TAG_STRIP_RE = re.compile(r"<[^>]*>")
@@ -265,6 +274,23 @@ class ChatSurface(Gtk.Box):
             self._pill_label.add_css_class(new_css)
             self._pill_css = new_css
 
+    def set_activity_status(self, text: str, state: str | None = None) -> None:
+        """SPEC-07 SP1: activity-machine status → pill text + CSS class.
+
+        text always lands on the pill label (plain text — callers must NOT
+        send Pango markup; feedbar markup dies with feedbar). state (one of
+        the ActivityHandler 6 + error) drives the CSS class; None keeps the
+        current class. Unknown state → keep current class (fail-quiet, not
+        crash).
+        """
+        self._pill_label.set_text(text)
+        if state is not None and state in _ACTIVITY_STATE_TO_CSS:
+            new_css = _ACTIVITY_STATE_TO_CSS[state]
+            if new_css != self._pill_css:
+                self._pill_label.remove_css_class(self._pill_css)
+                self._pill_label.add_css_class(new_css)
+                self._pill_css = new_css
+
     def destroy(self) -> None:
         """Drop the webview (idempotent — twice-safe).
 
@@ -361,9 +387,83 @@ class TextViewFallback(Gtk.Box):
             self._pill_label.add_css_class(new_css)
             self._pill_css = new_css
 
+    def set_activity_status(self, text: str, state: str | None = None) -> None:
+        """SPEC-07 SP1: activity-machine status → pill text + CSS class.
+
+        Mirror of ChatSurface.set_activity_status — both classes stay
+        API-identical (the module-level alias depends on it). Contract:
+        text always lands; state None/unknown keeps the current class.
+        """
+        self._pill_label.set_text(text)
+        if state is not None and state in _ACTIVITY_STATE_TO_CSS:
+            new_css = _ACTIVITY_STATE_TO_CSS[state]
+            if new_css != self._pill_css:
+                self._pill_label.remove_css_class(self._pill_css)
+                self._pill_label.add_css_class(new_css)
+                self._pill_css = new_css
+
     def destroy(self) -> None:
         self._stream_buffers.clear()
         self._rows.clear()
+
+
+class ActivityPillAdapter:
+    """SPEC-07 SP1: FeedBar duck-type → the ACTIVE chat surface's pill.
+
+    The ActivityHandler calls five methods today (verified at HEAD 3972ac9e:
+    activity_handler.py:683-871): set_status_text, set_progress_fraction,
+    set_progress_hidden, set_progress_pulse, pulse_progress. The pill has no
+    progress element, so the progress quartet are documented no-ops.
+    set_status_text carries (text, state); the adapter re-applies the last
+    status when the resolver returns a NEW surface (tab switch / lazy-create
+    catch-up).
+
+    The resolver is our own lambda in window.py (SP2 wiring) and MUST NOT
+    throw — exceptions propagate deliberately (no catch-and-None: a swallowed
+    resolver bug would silently strand the pill on stale status).
+    """
+
+    def __init__(self, resolver) -> None:
+        self._resolver = resolver
+        self._last_surface = None
+        self._last_text: str | None = None
+        self._last_state: str | None = None
+
+    def set_status_text(self, text: str, state: str | None = None) -> None:
+        """Status → the resolved surface's pill, with catch-up on identity
+        change. None surface → cache-and-noop (the pill catches up when a
+        surface appears — SP2's resolver returns the active tab's surface)."""
+        surface = self._resolver()
+        if surface is None:
+            self._last_text = text
+            self._last_state = None if state is None else state
+            self._last_surface = None
+            return
+        if surface is not self._last_surface and self._last_text is not None:
+            # Fresh surface starts "Idle" — apply the CACHED status first
+            # (catch-up), then the new one. Net effect: it shows the new
+            # status.
+            surface.set_activity_status(self._last_text, self._last_state)
+        surface.set_activity_status(text, state)
+        self._last_surface = surface
+        self._last_text = text
+        self._last_state = None if state is None else state
+
+    def set_progress_fraction(self, f: float) -> None:
+        # no-op: pill has no progress element (SPEC-07 §2 AMENDED)
+        pass
+
+    def set_progress_hidden(self, b: bool) -> None:
+        # no-op: pill has no progress element (SPEC-07 §2 AMENDED)
+        pass
+
+    def set_progress_pulse(self, e: bool) -> None:
+        # no-op: pill has no progress element (SPEC-07 §2 AMENDED)
+        pass
+
+    def pulse_progress(self) -> None:
+        # no-op: pill has no progress element (SPEC-07 §2 AMENDED)
+        pass
 
 
 # FIX 4 (SP3 audit BUG #4): on a WebKit-less box the real ChatSurface would

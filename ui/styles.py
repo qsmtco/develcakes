@@ -1647,6 +1647,14 @@ button.settings-remove-btn:hover {
 .file-icon-folder { color: #f0c674; }
 .file-icon-default { color: #6b6b7a; }
 .file-tree-sort-dropdown { min-width: 140px; margin-left: 8px; }
+/* ── Chat surface activity pill (SPEC-07 SP1 — the pill Gtk.Label lives in
+   the GTK widget tree, NOT the webview document, so its rules belong here) ── */
+.pill-idle { color: #6b6b7a; }
+.pill-thinking { color: #e0af68; }
+.pill-tool { color: #7aa2f7; }
+.pill-error { color: #f7768e; }
+.pill-streaming { color: #7dcfff; }
+.pill-done { color: #9ece6a; }
 """
 
 
