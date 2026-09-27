@@ -1,6 +1,10 @@
 # FeedBar + ActivityHandler State Machine — Deep Investigation
 
-> **Status: REFERENCE** — Read-only investigation document. FeedBar (`ui/views/feedbar.py`) and ActivityHandler still use this state machine. Accurate as of 2026-05-09.
+> **Status: SUPERSEDED** — FeedBar (`ui/views/feedbar.py`) was deleted in SPEC-07 (R4,
+> 2026-09-27). The 6-state machine survives in ActivityHandler but now renders plain
+> text + state to the chat surface's activity pill via the status_target duck-type
+> (`ActivityPillAdapter`) — no Pango markup, no progress bar. Accurate as of 2026-05-09
+> for the deleted widget; the state-transition table below remains valid history.
 
 **Date:** 2026-04-23
 **Scope:** Read-only investigation of the feed bar and activity state machine, with focus on pre-flight behavior.

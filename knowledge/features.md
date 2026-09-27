@@ -87,9 +87,13 @@ Agents can emit structured feed cards by including ` ```crabcard ` code blocks i
 
 ## Activity Indicators and Drawer
 
-### FeedBar (Response Status Bar)
+### Activity Pill (formerly FeedBar / Response Status Bar)
 
-The `FeedBar` widget (in `ui/views/feedbar.py`) sits below the chat input and shows real-time activity status — streaming indicators, tool call progress, and more. It is powered by `ActivityHandler`.
+Activity status renders as a per-tab **activity pill** on each chat surface
+(`ui/views/chat_surface.py` — `set_activity_status(text, state)` + CSS class swap).
+The old `FeedBar` widget (`ui/views/feedbar.py`) was deleted in SPEC-07 (R4);
+`ActivityHandler` now renders through the `status_target` duck-type
+(`ActivityPillAdapter`), which resolves the active tab's surface.
 
 ### Activity Handler
 

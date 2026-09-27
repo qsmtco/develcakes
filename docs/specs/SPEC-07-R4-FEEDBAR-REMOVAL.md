@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** IMPLEMENTED (2026-09-27; SP1 7103640f, SP2 cba48c85, SP3 aedff869)
 **Implements:** docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md §5 R4
 **Depends on:** SPEC-06 (activity state needs the HTML chat surface to land in)
 **Target branch:** main
