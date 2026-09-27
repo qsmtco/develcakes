@@ -1187,7 +1187,11 @@ class TestApproval:
         approved = [False]
         rt = AgentRuntime(
             _make_cfg(),
-            on_tool_call_approval_needed=lambda sk, tn, args: (approved.__setitem__(0, True) or True),
+            # SP5c-3: resolve via approve_exec — the only live setter since SP4
+            # (26c3e770); sync-return values are discarded by _dispatch_approval.
+            on_tool_call_approval_needed=lambda sk, tn, args: (
+                approved.__setitem__(0, True) or rt.approve_exec(sk, tn, args, True)
+            ),
         )
         rt.start()
         sk = _uniq()
@@ -1207,7 +1211,12 @@ class TestApproval:
         rt.stop()
 
     def test_exec_with_approval_deny(self):
-        rt = AgentRuntime(_make_cfg(), on_tool_call_approval_needed=lambda sk, tn, args: False)
+        # SP5c-3: resolve via approve_exec (see allow test) — the pre-SP4
+        # sync-return contract fell through to the 60s timeout→deny fallback.
+        rt = AgentRuntime(
+            _make_cfg(),
+            on_tool_call_approval_needed=lambda sk, tn, args: rt.approve_exec(sk, tn, args, False),
+        )
         rt.start()
         sk = _uniq()
         rt.create_conversation("Coder", sk, "/tmp")
@@ -3344,6 +3353,9 @@ class TestEndStreamingExplicitNameTakesPriority:
                     {"role": role, "html": html_fragment, "agent": agent_name}
                 )
 
+            def get_parent(self):
+                return None  # unmounted — mirror a fresh surface (mount path taken)
+
             def destroy(self):
                 pass
 
@@ -3393,6 +3405,9 @@ class TestEndStreamingFallbackForGatewayAgents:
                 appended.append(
                     {"role": role, "html": html_fragment, "agent": agent_name}
                 )
+
+            def get_parent(self):
+                return None  # unmounted — mirror a fresh surface (mount path taken)
 
             def destroy(self):
                 pass

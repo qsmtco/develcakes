@@ -36,7 +36,6 @@ from utils.escaping import escape_for_pango, xml_escape_text, xml_template
 from utils.config import get_project_root
 from utils.markdown import format_markdown
 from utils.block_parser import extract_blocks
-from utils.crabcard_parser import is_crabcards_placeholder, get_placeholder_index as _get_placeholder_index
 from utils.gtk_safe_link import make_safe_label, on_activate_link  # HIGH-6: activate-link guard
 
 # SP5c-2 B.0 (supervisor ruling): the crabcard placeholder registry is GONE.

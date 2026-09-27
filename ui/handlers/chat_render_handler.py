@@ -41,7 +41,6 @@
 
 import html as _html
 import logging
-from typing import TYPE_CHECKING, Callable
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -52,9 +51,6 @@ from render.sanitize import sanitize_html
 from ui.views.chat_surface import create_chat_surface
 from utils.escaping import xml_template
 from concurrent.futures import ThreadPoolExecutor
-
-if TYPE_CHECKING:
-    from models.feed_card import FeedCardData
 
 _logger = logging.getLogger(__name__)
 
@@ -617,13 +613,9 @@ class ChatRenderHandler:
         disposition (b)) even though per-row forward buttons are dropped."""
         self._on_forward_message = cb
 
-    def set_on_crabcard_extracted(self, cb: "Callable[[list[FeedCardData], str, str], None]") -> None:
-        """Set callback for when crabcards are extracted from a message.
-
-        SPEC-06 SP4: no longer invoked by THIS handler's render paths
-        (render-time registry dropped for Phase A — ruling R2). Kept for
-        signature compat; agent_runtime_handler owns extraction upstream."""
-        self._on_crabcard_extracted = cb
+    # set_on_crabcard_extracted deleted (SP5c-3): storage-only setter, zero
+    # callers — lineage: extraction wiring died with SP5c-2 B.2's window
+    # callback removal; agent_runtime_handler owns extraction upstream.
 
     def set_project_name(self, name: str) -> None:
         """Set the active project name (kept for caller compat)."""
