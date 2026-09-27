@@ -985,7 +985,7 @@ class TestActivityHandlerLifecycleCallback:
         """stream=lifecycle phase=start → cb(sk, agent_name, "start")."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
         )
         cb = MagicMock()
         handler.set_on_agent_lifecycle(cb)
@@ -1005,7 +1005,7 @@ class TestActivityHandlerLifecycleCallback:
         """stream=lifecycle phase=end → cb(sk, agent_name, "end")."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
         )
         cb = MagicMock()
         handler.set_on_agent_lifecycle(cb)
@@ -1025,7 +1025,7 @@ class TestActivityHandlerLifecycleCallback:
         """When payload has no agentName, cb is called with empty string for agent_name."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
         )
         cb = MagicMock()
         handler.set_on_agent_lifecycle(cb)
@@ -1046,7 +1046,7 @@ class TestActivityHandlerLifecycleCallback:
         """stream=lifecycle phase=error → cb(sk, agent_name, "end") (error reuses end path)."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
         )
         cb = MagicMock()
         handler.set_on_agent_lifecycle(cb)
@@ -1066,7 +1066,7 @@ class TestActivityHandlerLifecycleCallback:
         """If set_on_agent_lifecycle was never called, lifecycle events must not raise."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
         )
         # No set_on_agent_lifecycle call
         try:

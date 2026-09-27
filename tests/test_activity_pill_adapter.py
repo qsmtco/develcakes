@@ -14,7 +14,11 @@
 
 import inspect
 import re
+from unittest.mock import MagicMock
 
+import pytest
+
+from ui.handlers.activity_handler import ActivityHandler
 from ui.handlers.chat_render_handler import ChatRenderHandler
 from ui.styles import APP_CSS
 from ui.views.chat_surface import (
@@ -321,3 +325,139 @@ def test_adapter_satisfies_handler_call_surface():
     sig = inspect.signature(ActivityPillAdapter.set_status_text)
     assert list(sig.parameters) == ["self", "text", "state"]
     assert sig.parameters["state"].default is None
+
+
+# ── SPEC-07 SP2 Edit 4: project-tab resolver ruling pin ───────────────────
+
+
+class FakeChatBox:
+    """Minimal append-only box — the mount target for the pin test."""
+
+    def __init__(self):
+        self.children = []
+
+    def append(self, widget):
+        self.children.append(widget)
+
+
+def test_project_tab_resolver_picks_per_key(monkeypatch):
+    """SP2 Edit 4 ruling: on a project tab, surface_for_key('project:<name>')
+    returns the project's PRIMARY (welcome) surface, while the agent key
+    returns the agent's own surface — two keys, two distinct surfaces. The
+    window resolver (surface_for_key(get_current_session_key())) must pick
+    per-key: the project pill renders project-tab activity; agent surfaces'
+    pills stay untouched. Multi-surface display (N pills on a project tab)
+    is the SP3/SP4 REGISTER item — this pin fixes the RESOLVER contract, not
+    the display question."""
+    import ui.handlers.chat_render_handler as crh
+
+    handler = crh.ChatRenderHandler()
+    project_box = FakeChatBox()
+
+    def getter(key):
+        return project_box if key == "project:alpha" else None
+
+    handler.set_chat_container_getter(getter)
+
+    created: list = []
+
+    def factory():
+        s = RegisteredFakeSurface()
+        created.append(s)
+        return s
+
+    monkeypatch.setattr(crh, "create_chat_surface", factory)
+
+    # Project tab opens → welcome renders → PRIMARY surface keyed project:alpha.
+    handler.render_welcome("project:alpha")
+    # An agent reply routes into the project tab (mount_key) but its surface
+    # is cached under the AGENT key.
+    handler.render_sync("Agent", "working the task", "agent:coder",
+                        mount_key="project:alpha")
+
+    assert len(created) == 2  # one surface per key — no cross-key reuse
+    project_surface = handler.surface_for_key("project:alpha")
+    agent_surface = handler.surface_for_key("agent:coder")
+    assert project_surface is created[0]
+    assert agent_surface is created[1]
+    assert project_surface is not agent_surface  # per-key resolution
+
+
+# ── SPEC-07 SP2 fix round BUG #1: the (text, state) mapping pin ───────────
+
+
+class RecordingTarget:
+    """Records (text, state) pairs — the args-level fake BUG #1 demands."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str | None]] = []
+
+    def set_status_text(self, text, state=None):
+        self.calls.append((text, state))
+
+    # Progress quartet: no-ops — the handler may or may not call them;
+    # neither is an error (the adapter keeps the 5-method duck-type).
+    def set_progress_fraction(self, f):
+        pass
+
+    def set_progress_hidden(self, b):
+        pass
+
+    def set_progress_pulse(self, e):
+        pass
+
+    def pulse_progress(self):
+        pass
+
+
+_STREAMING_TEXT_RE = r"^⬇ Generating… · \d+ tokens · \d+ tok/s · \d+\.\d+s$"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_text"),
+    [
+        ("idle", "● Idle"),
+        ("sending", "⬡ Pre Flight Check"),
+        ("reasoning", "◉ Reasoning…"),
+        ("tool_use", "⚙ read_file"),
+        ("done", "✓ Done"),
+        ("streaming", _STREAMING_TEXT_RE),  # matched via re.match
+    ],
+)
+def test_update_status_pins_text_and_state(state, expected_text, fake_glib):
+    """BUG #1: the SP2 deliverable — the 6-state (text, state) map — pinned
+    at the ARGS level. Drives the REAL handler through _set_state (the render
+    trigger); the LAST recorded call must be exactly (expected_text, state):
+    text from the verbatim body, state the EXACT state string (MUT A drops
+    the arg → None; MUT C pins 'idle' — both must go red here)."""
+    target = RecordingTarget()
+    h = ActivityHandler(
+        status_target=target, main_content=MagicMock(), GLib_module=fake_glib
+    )
+
+    if state == "tool_use":
+        h._current_tool_name = "read_file"  # read at render time
+    if state == "streaming":
+        h._streaming_token_count = 800
+
+    # _set_state is THE render trigger. From the initial 'idle' any other
+    # state is a real transition → renders. For 'idle' itself the same-state
+    # early-return does NOT render, so enter via a real transition
+    # (reasoning → idle) — the _enter_idle pattern from test_uirsp3_phase2.
+    if state == "idle":
+        h._set_state("reasoning", None)
+    h._set_state(state, None)
+
+    assert target.calls, f"{state}: _set_state must render via set_status_text"
+    last_text, last_state = target.calls[-1]
+    if state == "streaming":
+        assert re.match(_STREAMING_TEXT_RE, last_text), (
+            f"streaming label shape drifted: {last_text!r}"
+        )
+    else:
+        assert last_text == expected_text, (
+            f"{state}: text drifted: {last_text!r} != {expected_text!r}"
+        )
+    assert last_state == state, (
+        f"{state}: state arg must be the exact state string, got {last_state!r}"
+    )

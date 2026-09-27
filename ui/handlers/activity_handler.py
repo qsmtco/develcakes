@@ -1,5 +1,6 @@
 """
-ActivityHandler — 6-state activity machine driving the Response Status bar (FeedBar).
+ActivityHandler — 6-state activity machine driving the per-tab activity pill
+(status_target duck-type — the SP1 ActivityPillAdapter, SPEC-07 R4).
 
 States: idle | sending | reasoning | streaming | tool_use | done
 
@@ -12,7 +13,7 @@ Transitions triggered by gateway events wired from window._on_ws_event():
   agent message      → sending (pre-flight)
 
 Owns all state machine state (timers, counters, timestamps).
-Does NOT own FeedBar or MainContent — received as constructor dependencies.
+Does NOT own the status target or MainContent — received as constructor dependencies.
 Thread safety: all GTK calls via GLib.idle_add().
 """
 
@@ -36,8 +37,8 @@ class ActivityHandler:
     _STATES = ("idle", "sending", "reasoning", "streaming", "tool_use", "done")
     PREFlight_TIMEOUT_SEC = 30
 
-    def __init__(self, feedbar, main_content, GLib_module=None):
-        self._feedbar = feedbar
+    def __init__(self, status_target, main_content, GLib_module=None):
+        self._status_target = status_target
         self._mc = main_content
         self._GLib = GLib_module or __import__("gi.repository.GLib", fromlist=["GLib"]).GLib
 
@@ -68,7 +69,6 @@ class ActivityHandler:
         self._agent_start_time: dict[str, float] = {}
 
         # Per-session progress tracking (two-phase: time-driven → event-driven)
-        self._progress_start_time: dict[str, float] = {}  # session_key → send-initiated timestamp
         self._phase: dict[str, int] = {}  # session_key → 1 (time-driven) or 2 (event-driven)
         self._event_hop_count: dict[str, int] = {}  # session_key → number of gateway events received
 
@@ -348,11 +348,11 @@ class ActivityHandler:
             self._event_hop_count[sk] = self._event_hop_count.get(sk, 0) + 1
             # TEMPORARILY DISABLED 2026-04-22: Investigating UI freeze on large pastes.
             # Hypothesis: 100+ gateway events during agent response each call
-            # _update_feedbar(), queuing too many GLib.idle_add callbacks and
+            # _update_status(), queuing too many GLib.idle_add callbacks and
             # starving GTK's render/input loop. If disabling this fixes the freeze,
-            # the fix is to throttle _update_feedbar() to e.g. max once per 200ms.
+            # the fix is to throttle _update_status() to e.g. max once per 200ms.
             # TODO: Uncomment the line below once throttling is implemented.
-            # self._update_feedbar()
+            # self._update_status()
 
         # ── Bug fix: buffer assistant text for fallback rendering ──────────
         if event == "agent":
@@ -566,13 +566,11 @@ class ActivityHandler:
 
     def _reset_progress(self, sk: str):
         """Reset progress state for a session — called on send_initiated."""
-        self._progress_start_time[sk] = time.monotonic()
         self._phase[sk] = 1
         self._event_hop_count[sk] = 0
 
     def _reset_session_state(self, sk: str):
         """Clean up all progress state for a session (on idle/error)."""
-        self._progress_start_time.pop(sk, None)
         self._phase.pop(sk, None)
         self._event_hop_count.pop(sk, None)
         self._agent_start_time.pop(sk, None)
@@ -618,10 +616,10 @@ class ActivityHandler:
             return
 
         if state == self._state:
-            # Even if already in this state, still update the feedbar for live counters
+            # Even if already in this state, still update the pill for live counters
             if state in ("reasoning", "streaming", "tool_use"):
                 self._last_tick_signature = None  # manual render invalidates the tick cache
-                self._update_feedbar()
+                self._update_status()
             elif state == "idle":
                 # Audit BUG #1: a same-state idle re-entry (e.g. a delayed
                 # on_agent_error for a session that already finished) must
@@ -661,8 +659,8 @@ class ActivityHandler:
             self._stop_done_flash()
             self._stop_send_initiated_timer()
 
-        # Apply state to FeedBar
-        self._update_feedbar()
+        # Apply state to the status target (activity pill)
+        self._update_status()
 
         # Start the single 250ms status ticker for the new state (AC3 Phase 1
         # Part C). The tick branches on self._state: active states run the
@@ -673,40 +671,25 @@ class ActivityHandler:
         self._idle_pulse_timer = self._status_ticker_id
         # done: flash timer started by caller
 
-    def _update_feedbar(self):
-        """Update FeedBar label + progress bar to reflect current state."""
+    def _update_status(self):
+        """Update the activity pill (plain text + state) to reflect current state."""
         state = self._state
-
-        # Build status label markup
         if state == "idle":
-            text = '<span foreground="#4ade80">● Idle</span>'
-            self._feedbar.set_progress_hidden(True)
-
+            text = "● Idle"
         elif state == "sending":
-            text = '<span foreground="#f59e0b">⬡ Pre Flight Check</span>'
-            self._feedbar.set_progress_fraction(self._compute_progress_fraction())
-
+            text = "⬡ Pre Flight Check"
         elif state == "reasoning":
-            text = '<span foreground="#f59e0b">◉ Reasoning…</span>'
-            self._feedbar.set_progress_fraction(self._compute_progress_fraction())
-
+            text = "◉ Reasoning…"
         elif state == "streaming":
             text = self._streaming_label()
-            self._feedbar.set_progress_fraction(self._compute_progress_fraction())
-
         elif state == "tool_use":
-            tool = self._escape_markup(self._current_tool_name)
-            text = f'<span foreground="#a855f7">⚙ {tool}</span>'
-            self._feedbar.set_progress_fraction(self._compute_progress_fraction())
-
-        elif state == "done":
-            text = '<span foreground="#4ade80">✓ Done</span>'
-            self._feedbar.set_progress_fraction(1.0)
-
-        self._feedbar.set_status_text(text)
+            text = f"⚙ {self._current_tool_name}"
+        else:  # done
+            text = "✓ Done"
+        self._status_target.set_status_text(text, state)
 
     def _streaming_label(self) -> str:
-        """Build live counter label for streaming state."""
+        """Build live counter label for streaming state (plain text)."""
         sk = self._active_session()
         token_est = self._streaming_token_count // 4
         start = self._agent_start_time.get(sk) if sk else None
@@ -714,42 +697,7 @@ class ActivityHandler:
         elapsed_str = f"{elapsed:.1f}s"
         velocity = token_est / elapsed if elapsed > 0.1 else 0
         vel_str = f"{velocity:.0f} tok/s"
-        return (
-            f'<span foreground="#3b82f6">⬇ Generating…</span>'
-            f' <span foreground="#6b6b7a" font_desc="Sans 9">{token_est} tokens</span>'
-            f' <span foreground="#4a4a5a" font_desc="Sans 9">·</span>'
-            f' <span foreground="#6b6b7a" font_desc="Sans 9">{vel_str}</span>'
-            f' <span foreground="#4a4a5a" font_desc="Sans 9">·</span>'
-            f' <span foreground="#6b6b7a" font_desc="Sans 9">{elapsed_str}</span>'
-        )
-
-    @staticmethod
-    def _escape_markup(text: str) -> str:
-        """Escape text for Pango markup."""
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    def _compute_progress_fraction(self) -> float:
-        """Two-phase progress: phase 1 time-driven (0→85%), phase 2 event-driven (hops→85%).
-
-        Phase 1 (pre-flight, no res yet):
-          bar crawls from 0 toward 85% over 60 seconds based on elapsed time.
-        Phase 2 (res confirmed, gateway responding):
-          every gateway event adds ~2%, capped at 85%.
-        """
-        sk = self._get_progress_session(None)
-        phase = self._phase.get(sk, 1)
-
-        if phase == 1:
-            # Time-driven: 0 → 85% over 60 seconds
-            start = self._progress_start_time.get(sk)
-            if start is None:
-                return 0.0
-            elapsed = time.monotonic() - start
-            return min(elapsed / 60.0, 0.85)
-        else:
-            # Event-driven: 5% + 2% per hop, capped at 85%
-            hops = self._event_hop_count.get(sk, 0)
-            return min(0.05 + hops * 0.02, 0.85)
+        return f"⬇ Generating… · {token_est} tokens · {vel_str} · {elapsed_str}"
 
     # ── Timer callbacks ────────────────────────────────────────────────────
 
@@ -758,7 +706,7 @@ class ActivityHandler:
 
         Branches on self._state:
           reasoning/streaming/tool_use → live-update branch (counters).
-          idle                         → idle-pulse branch (progress pulse).
+          idle                         → idle-pulse branch (keep-alive; no render).
         Returns GLib's keep-alive contract: True while the current state needs
         ticking, False when the state no longer matches (timer dies).
         """
@@ -767,14 +715,12 @@ class ActivityHandler:
             return True
         if self._state == "idle":
             self._idle_pulse()
-            # UIRESP3 Phase 2: bounded keep-alive — ~5 s of pulse at 250 ms,
-            # then the source dies. On the final tick the bar is left in a
-            # clean hidden/idle state, never stranded mid-pulse.
+            # UIRESP3 Phase 2: bounded keep-alive — ~5 s at 250 ms, then the
+            # idle budget is exhausted and the source dies cleanly (no render
+            # calls fire — the pill keeps its last state).
             self._idle_ticks += 1
             if self._idle_ticks < 20:
                 return True
-            self._feedbar.set_progress_pulse(False)
-            self._feedbar.set_progress_hidden(True)
             # Clear our own bookkeeping before the source dies — GLib drops the
             # callback on a False return, so these ids are stale from here on.
             # Without this a later same-state-idle re-entry would call
@@ -799,8 +745,8 @@ class ActivityHandler:
         """Live-update branch — update counters during reasoning/streaming/tool_use.
 
         Skip-when-unchanged: if (state, phase, hop bucket, elapsed bucket) is
-        identical to the last rendered tick, skip both the _update_feedbar
-        markup rebuild and the _streaming_label() construction.
+        identical to the last rendered tick, skip both the status rebuild
+        (plain text) and the _streaming_label() construction.
         """
         if self._state not in ("reasoning", "streaming", "tool_use"):
             return False
@@ -817,19 +763,20 @@ class ActivityHandler:
             return True  # nothing changed since the last rendered tick
 
         self._last_tick_signature = signature
-        self._update_feedbar()
+        self._update_status()
         return True
 
     def _idle_pulse(self):
-        """Idle-pulse branch — pulse the progress bar.
+        """Idle keep-alive decision for the 250ms ticker (AC3 Phase 1 Part C).
 
-        ANIMATION: never skip-gated. The pulse must advance on every tick even
-        when state/phase/hops are unchanged (a skipped pulse is a frozen bar).
+        The pulse RENDER died with the progress bar (SPEC-07 R4, SP2) — what
+        remains is the ticker's branch decision: True while idle keeps the
+        source alive (the UIRESP3 Phase 2 budget in _status_tick still bounds
+        it); False kills it. Kept as a method because _status_tick's branch
+        structure (and its skip-gating asymmetry) is pinned by test rows that
+        predate the bar's removal.
         """
-        if self._state != "idle":
-            return False
-        self._feedbar.pulse_progress()
-        return True
+        return self._state == "idle"
 
     def _start_done_flash(self, session_key: str | None):
         """Start 5-second done→idle flash timer for the given session."""
@@ -868,7 +815,6 @@ class ActivityHandler:
         if self._idle_pulse_timer is not None:
             self._GLib.source_remove(self._idle_pulse_timer)
             self._idle_pulse_timer = None
-        self._feedbar.set_progress_pulse(False)
 
     def _stop_done_flash(self, session_key: str | None = None):
         """Stop the done flash timer for a specific session (or all if None)."""

@@ -35,6 +35,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib
 from ui.toolbar import Toolbar
 from ui.views.feedbar import FeedBar
 from ui.views.left_panel import LeftPanel
+from ui.views.chat_surface import ActivityPillAdapter
 from ui.views.main_content import MainContent
 from ui.views.activity_drawer import ActivityDrawer
 from ui.handlers.chat_handler import ChatHandler
@@ -255,9 +256,17 @@ class MainWindow(Gtk.ApplicationWindow):
         # # Response Status bar (right side)
         self._response_status = FeedBar()
 
-        # Activity handler — owns the Response Status state machine (Phase 6)
+        # Activity handler — owns the activity-pill state machine (Phase 6)
         self._activity_handler = ActivityHandler(
-            feedbar=self._response_status,
+            status_target=ActivityPillAdapter(
+                lambda: (
+                    self._chat_render_handler.surface_for_key(
+                        self._main_content.get_current_session_key()
+                    )
+                    if self._chat_render_handler is not None
+                    else None
+                )
+            ),
             main_content=self._main_content,
             GLib_module=GLib,
         )

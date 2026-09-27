@@ -79,7 +79,7 @@ class TestActivityHandlerActivityBubbles:
     def test_lifecycle_start_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -100,7 +100,7 @@ class TestActivityHandlerActivityBubbles:
     def test_tool_start_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -121,7 +121,7 @@ class TestActivityHandlerActivityBubbles:
     def test_tool_end_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -142,7 +142,7 @@ class TestActivityHandlerActivityBubbles:
     def test_tool_end_error_detected(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -160,7 +160,7 @@ class TestActivityHandlerActivityBubbles:
     def test_plan_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -184,7 +184,7 @@ class TestActivityHandlerActivityBubbles:
     def test_approval_requested_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -205,7 +205,7 @@ class TestActivityHandlerActivityBubbles:
     def test_patch_end_fires_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -228,7 +228,7 @@ class TestActivityHandlerActivityBubbles:
         """stream=command_output phase=end fires a command_output ActivityBubble."""
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -263,7 +263,7 @@ class TestActivityHandlerActivityBubbles:
         """stream=command_output phase=end with non-zero exit_code fires error bubble."""
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ActivityBubble, ToolStatus
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -294,7 +294,7 @@ class TestActivityHandlerActivityBubbles:
         """
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ToolStatus
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -319,7 +319,7 @@ class TestActivityHandlerActivityBubbles:
         """BUGFIX-1 audit BUG A: string "1" exitCode must be treated as error."""
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ToolStatus
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -347,7 +347,7 @@ class TestActivityHandlerActivityBubbles:
         """
         from ui.handlers.activity_handler import ActivityHandler
         from models.activity import ToolStatus
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -370,7 +370,7 @@ class TestActivityHandlerActivityBubbles:
     def test_command_output_delta_does_not_fire(self, fake_glib):
         """stream=command_output phase=delta should NOT fire a bubble (ignored, same as spec)."""
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -390,7 +390,7 @@ class TestActivityHandlerActivityBubbles:
 
     def test_no_crash_when_callback_not_set(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         # Don't call set_on_activity_bubble — should not crash
         handler.on_gateway_event("agent", {
             "stream": "item",
@@ -402,7 +402,7 @@ class TestActivityHandlerActivityBubbles:
     def test_lifecycle_end_still_fires_lifecycle_callback(self, fake_glib):
         """lifecycle phase=end must still fire the lifecycle-completed callback."""
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         lc_cb = MagicMock()
         handler.set_on_lifecycle_completed(lc_cb)
 
@@ -433,7 +433,7 @@ class TestActivityHandlerActivityBubbles:
         of the actual agent name.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
         handler.on_gateway_event("agent", {
@@ -452,7 +452,7 @@ class TestActivityHandlerActivityBubbles:
         ActivityBubble construction site (tool_end/tool_error) added in PHASE 4.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
         handler.on_gateway_event("agent", {
@@ -478,7 +478,7 @@ class TestActivityHandlerActivityBubbles:
         agents, which is acceptable.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
         handler.on_gateway_event("agent", {
@@ -494,7 +494,7 @@ class TestActivityHandlerActivityBubbles:
     def test_tool_bubble_falls_back_to_agent_manager(self, fake_glib):
         """When data.agentName is empty, fall back to AgentManager.get_name(session_key)."""
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -523,7 +523,7 @@ class TestActivityHandlerActivityBubbles:
         lifecycle branch — both extraction sites use the same helper.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         lifecycle_cb = MagicMock()
         handler.set_on_agent_lifecycle(lifecycle_cb)
 
@@ -548,7 +548,7 @@ class TestActivityHandlerActivityBubbles:
         will show "[Agent]" for the unknown agent.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -573,7 +573,7 @@ class TestActivityHandlerActivityBubbles:
         (e.g., the agent hasn't been registered yet). agent_name stays "".
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -599,7 +599,7 @@ class TestActivityHandlerActivityBubbles:
         _safe_data() helper coerces any non-dict to {} so all call sites are safe.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -622,7 +622,7 @@ class TestActivityHandlerActivityBubbles:
         case where upstream omits the 'data' key entirely.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -643,7 +643,7 @@ class TestActivityHandlerActivityBubbles:
         Defensive — _safe_data() coerces any non-dict value to {}.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
         cb = MagicMock()
         handler.set_on_activity_bubble(cb)
 
@@ -688,7 +688,7 @@ class TestActivityHandlerActivityBubbles:
         the dispatcher read payload['text'] (which is not in the payload shape).
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         handler.on_gateway_event("chat", {
             "state": "delta",
@@ -712,7 +712,7 @@ class TestActivityHandlerActivityBubbles:
         focused on the field-name fix.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         handler.on_gateway_event("chat", {"state": "delta", "sessionKey": "agent:test:1", "message": {"content": "Hello"}})
         handler.on_gateway_event("chat", {"state": "delta", "sessionKey": "agent:test:1", "message": {"content": " world"}})
@@ -729,7 +729,7 @@ class TestActivityHandlerActivityBubbles:
         the concatenated text length. Two 'abc'/'def' blocks → 'abcdef' → 6.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         handler.on_gateway_event("chat", {
             "state": "delta",
@@ -752,7 +752,7 @@ class TestActivityHandlerActivityBubbles:
         trailing text block contributes its length. Image contributes 0.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         handler.on_gateway_event("chat", {
             "state": "delta",
@@ -775,7 +775,7 @@ class TestActivityHandlerActivityBubbles:
         increment the counter. The helper safely returns ''.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         # Should not raise
         handler.on_gateway_event("chat", {
@@ -794,7 +794,7 @@ class TestActivityHandlerActivityBubbles:
         is treated as the content directly and contributes its length.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         handler.on_gateway_event("chat", {
             "state": "delta",
@@ -813,7 +813,7 @@ class TestActivityHandlerActivityBubbles:
         call it with an empty dict.
         """
         from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
+        handler = ActivityHandler(status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib)
 
         assert handler._extract_chat_text({}) == ""
 
@@ -843,7 +843,7 @@ class TestActivityHandlerStateMachineGuard:
         mc = MagicMock()
         mc.get_current_session_key.return_value = "sk-1"
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib,
+            status_target=MagicMock(), main_content=mc, GLib_module=fake_glib,
         )
         return handler
 
@@ -998,7 +998,7 @@ class TestChatHandlerActivityBubbleRender:
         mc = MagicMock()
         mc.get_current_session_key = MagicMock(return_value="project:crabwatch")
 
-        ah = ActivityHandler(feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib)
+        ah = ActivityHandler(status_target=MagicMock(), main_content=mc, GLib_module=fake_glib)
         ah.set_agent_routing(routing)
 
         # Agent key belongs to active project tab → considered active
@@ -1017,7 +1017,7 @@ class TestChatHandlerActivityBubbleRender:
         mc = MagicMock()
         mc.get_current_session_key = MagicMock(return_value="project:crabwatch")
 
-        ah = ActivityHandler(feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib)
+        ah = ActivityHandler(status_target=MagicMock(), main_content=mc, GLib_module=fake_glib)
         # No routing table set
         ah._agent_to_project = None
 
@@ -1070,7 +1070,7 @@ class TestActivityPerfGuard:
       1. One GLib timer drives both live-update and idle-pulse production
          (250ms), not two 200ms timers.
       2. Consecutive ticks with unchanged state/phase/hops/elapsed-bucket skip
-         the _update_feedbar markup rebuild AND _streaming_label construction.
+         the _update_status_target markup rebuild AND _streaming_label construction.
       3. _resolve_agent_name fires at most ONCE per event, resolved
          lazily — per-delta assistant events must pay zero resolution cost.
 
@@ -1087,7 +1087,7 @@ class TestActivityPerfGuard:
         mc = MagicMock()
         mc.get_current_session_key.return_value = "sk-1"  # _is_ui_active guard
         h = ActivityHandler(
-            feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib
+            status_target=MagicMock(), main_content=mc, GLib_module=fake_glib
         )
         # _is_ui_active reads _agent_to_project.get_project(sk); a bare MagicMock
         # would auto-return a truthy mock and fail the project-tab comparison.
@@ -1143,7 +1143,8 @@ class TestActivityPerfGuard:
 
     def test_stop_idle_pulse_stops_single_ticker_and_pulse(self, fake_glib):
         """Spec C4: _stop_idle_pulse keeps its public behavior — stops the
-        single ticker AND clears the feedbar pulse flag."""
+        single ticker. (The pulse-flag clear died with the progress bar in
+        SPEC-07 SP2 Edit 3 — the adapter's no-op quartet is never called.)"""
         h = self._make_handler(fake_glib)
         h._set_state("streaming", "sk-1")  # leave initial idle first
         h._set_state("idle", "sk-1")       # arm the idle branch of the ticker
@@ -1153,7 +1154,6 @@ class TestActivityPerfGuard:
         h._stop_idle_pulse()
         assert source_id not in fake_glib.armed_ids  # source_remove was called
         assert h._idle_pulse_timer is None
-        h._feedbar.set_progress_pulse.assert_called_with(False)
 
     def test_live_update_tick_returns_true_when_active(self, fake_glib):
         """The tick callable keeps the GLib contract: True = keep ticking while
@@ -1167,21 +1167,21 @@ class TestActivityPerfGuard:
 
     # ── Skip-when-unchanged (live-update branch) ───────────────────────
 
-    def test_two_unchanged_ticks_skip_feedbar_rebuild(self, fake_glib, monkeypatch):
+    def test_two_unchanged_ticks_skip_status_target_rebuild(self, fake_glib, monkeypatch):
         """Spec C2: two consecutive ticks with unchanged state/phase/hops/
-        elapsed-bucket → no _update_feedbar markup rebuild, no
+        elapsed-bucket → no _update_status_target markup rebuild, no
         _streaming_label construction."""
         h = self._make_handler(fake_glib)
         monkeypatch.setattr(time, "monotonic", lambda: 1000.0)  # frozen clock
         h._set_state("streaming", "sk-1")  # tick 0: transition itself renders
-        h._feedbar.set_status_text.reset_mock()
+        h._status_target.set_status_text.reset_mock()
         tick = fake_glib.armed[0][2]
 
         tick()  # first tick: renders (cold skip-cache)
-        assert h._feedbar.set_status_text.call_count == 1
+        assert h._status_target.set_status_text.call_count == 1
         tick()  # second tick: nothing changed → must skip
-        assert h._feedbar.set_status_text.call_count == 1, (
-            "unchanged second tick must not rebuild feedbar markup"
+        assert h._status_target.set_status_text.call_count == 1, (
+            "unchanged second tick must not rebuild status_target markup"
         )
 
     def test_tick_with_changed_hops_rebuilds(self, fake_glib, monkeypatch):
@@ -1189,14 +1189,14 @@ class TestActivityPerfGuard:
         h = self._make_handler(fake_glib)
         monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
         h._set_state("reasoning", "sk-1")
-        h._feedbar.set_status_text.reset_mock()
+        h._status_target.set_status_text.reset_mock()
         tick = fake_glib.armed[0][2]
         tick()
-        assert h._feedbar.set_status_text.call_count == 1
+        assert h._status_target.set_status_text.call_count == 1
         h._event_hop_count["sk-1"] = 5  # progress moved
         tick()
-        assert h._feedbar.set_status_text.call_count == 2, (
-            "changed hop count must rebuild the feedbar markup"
+        assert h._status_target.set_status_text.call_count == 2, (
+            "changed hop count must rebuild the status_target markup"
         )
 
     def test_streaming_label_not_constructed_on_unchanged_tick(self, fake_glib, monkeypatch):
@@ -1217,17 +1217,11 @@ class TestActivityPerfGuard:
             "unchanged tick must not construct the streaming label"
         )
 
-    def test_idle_pulse_still_fires_every_tick(self, fake_glib):
-        """The idle-pulse branch is an ANIMATION — it must keep pulsing on
-        every tick even when nothing else changed (never skip-gated)."""
-        h = self._make_handler(fake_glib)
-        h._set_state("streaming", "sk-1")  # leave initial idle first
-        h._set_state("idle", "sk-1")
-        tick = fake_glib.armed[-1][2]
-        tick()
-        tick()
-        tick()
-        assert h._feedbar.pulse_progress.call_count == 3
+    # test_idle_pulse_still_fires_every_tick DELETED (SPEC-07 SP2): its
+    # subject was pulse_progress firing per idle tick — the render call Edit 3
+    # deleted. The ticker's keep-alive/budget contract (the surviving half of
+    # what this test also touched) is pinned by uirsp3 rows 1-3 and
+    # test_live_update_tick_returns_true_when_active above.
 
     # ── Hoisted agent-name resolution ──────────────────────────────────
 

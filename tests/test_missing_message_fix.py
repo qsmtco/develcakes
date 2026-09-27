@@ -24,7 +24,7 @@ class TestActivityHandlerAssistantBuffer:
         """Multiple assistant events — buffer keeps the last one."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -46,7 +46,7 @@ class TestActivityHandlerAssistantBuffer:
         """set_on_assistant_buffer callback is called with session key and text."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
         cb = MagicMock()
         handler.set_on_assistant_buffer(cb)
@@ -62,7 +62,7 @@ class TestActivityHandlerAssistantBuffer:
         """Different sessions have independent buffers."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -81,7 +81,7 @@ class TestActivityHandlerAssistantBuffer:
         """Empty text does not overwrite existing buffer."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -103,7 +103,7 @@ class TestLifecycleCompletedCallback:
         """lifecycle phase=end fires the lifecycle-completed callback."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         # Pre-buffer some assistant text
@@ -128,7 +128,7 @@ class TestLifecycleCompletedCallback:
         """lifecycle phase=error also fires the lifecycle-completed callback."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -152,7 +152,7 @@ class TestLifecycleCompletedCallback:
         """Callback fires even when there is no buffered text (empty response)."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         cb = MagicMock()
@@ -171,7 +171,7 @@ class TestLifecycleCompletedCallback:
         """Buffer is cleared after lifecycle end."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -189,7 +189,7 @@ class TestLifecycleCompletedCallback:
         """Buffer is also cleared on lifecycle error (memory leak fix)."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
 
         handler.on_gateway_event("agent", {
@@ -276,7 +276,7 @@ class TestSetOnAssistantBuffer:
     def test_setter_stores_callback(self, fake_glib):
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
         cb = MagicMock()
         handler.set_on_assistant_buffer(cb)
@@ -286,7 +286,7 @@ class TestSetOnAssistantBuffer:
         """No crash when on_assistant_buffer is None."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
         # Don't set callback — should not crash
         handler.on_gateway_event("agent", {
@@ -298,7 +298,7 @@ class TestSetOnAssistantBuffer:
         """No crash when lifecycle_completed_callback is None."""
         from ui.handlers.activity_handler import ActivityHandler
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
+            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib
         )
         # Don't set lifecycle callback — should not crash on lifecycle end
         handler.on_gateway_event("agent", {
@@ -331,7 +331,7 @@ class TestRenderGuardClearsOnNewRound:
         mc = MagicMock()
         mc.get_current_session_key = MagicMock(return_value=None)
         handler = ActivityHandler(
-            feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib
+            status_target=MagicMock(), main_content=mc, GLib_module=fake_glib
         )
         cleared = []
         handler.set_on_agent_start(lambda sk: cleared.append(sk))
@@ -352,7 +352,7 @@ class TestRenderGuardClearsOnNewRound:
         mc.get_current_session_key = MagicMock(return_value=None)
         mc.get_chat_box_for_session.return_value = MagicMock()
 
-        ah = ActivityHandler(feedbar=MagicMock(), main_content=mc, GLib_module=fake_glib)
+        ah = ActivityHandler(status_target=MagicMock(), main_content=mc, GLib_module=fake_glib)
         ch = ChatHandler(
             main_content=mc,
             agent_to_project=MagicMock(),

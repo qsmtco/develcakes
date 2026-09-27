@@ -30,15 +30,15 @@ from ui.views.feedbar import FeedBar
 
 @pytest.fixture
 def handler(fake_glib):
-    """ActivityHandler whose feedbar is a Mock (state machine in isolation).
+    """ActivityHandler whose status_target is a Mock (state machine in isolation).
 
     _active_session() reads main_content.get_current_session_key() — None
     here, so every _is_ui_active() gate passes and transitions land.
     """
-    feedbar = MagicMock()
-    h = ActivityHandler(feedbar=feedbar, main_content=MagicMock(),
+    status_target = MagicMock()
+    h = ActivityHandler(status_target=status_target, main_content=MagicMock(),
                         GLib_module=fake_glib)
-    return h, feedbar, fake_glib
+    return h, status_target, fake_glib
 
 
 def _enter_idle(h, fake_glib):
@@ -60,7 +60,7 @@ def _enter_idle(h, fake_glib):
 
 
 def test_idle_tick_terminates(handler):
-    h, feedbar, fake_glib = handler
+    h, _status_target, fake_glib = handler  # render asserts deleted (SP2 Edit 5)
     tick_cb = _enter_idle(h, fake_glib)
 
     seen = []
@@ -72,13 +72,11 @@ def test_idle_tick_terminates(handler):
     assert seen[19] is False, "the 20th tick must return False (source dies)"
     assert not any(seen[20:]), "a dead source must not be re-armed by ticks"
     assert h._idle_ticks >= 20
-    # Clean-exit requirement: the bar is left hidden/idle, not mid-pulse.
-    feedbar.set_progress_pulse.assert_any_call(False)
 
 
 def test_idle_tick_budget_is_about_five_seconds(handler):
     """20 ticks × 250 ms ≈ 5 s — the documented budget."""
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     tick_cb = _enter_idle(h, fake_glib)
     ticks_alive = 0
     while tick_cb() is True:
@@ -91,7 +89,7 @@ def test_idle_tick_budget_is_about_five_seconds(handler):
 
 
 def test_idle_ticks_reset_on_state_change(handler):
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     tick_cb = _enter_idle(h, fake_glib)
 
     for _ in range(25):  # exhaust the budget
@@ -112,7 +110,7 @@ def test_idle_ticks_reset_on_state_change(handler):
 
 
 def test_active_states_unaffected(handler):
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     for state in ("reasoning", "streaming", "tool_use"):
         h._set_state(state, None)
         source_id, delay_ms, tick_cb = fake_glib.armed[-1]
@@ -122,11 +120,11 @@ def test_active_states_unaffected(handler):
             f"{state}: live-update branch must keep ticking"
         )
         # _live_update's skip-gating is the behavior that must NOT change —
-        # with an unchanged signature it skips the feedbar rebuild.
-        # (Mock feedbar: rebuild count stays bounded by signature changes.)
+        # with an unchanged signature it skips the status_target rebuild.
+        # (Mock status_target: rebuild count stays bounded by signature changes.)
 
     # Pulse is never touched by the active branch.
-    feedbar.pulse_progress.assert_not_called()
+    status_target.pulse_progress.assert_not_called()
 
 
 # ── Row 4: hidden bar is OUT of traversal (not visible-but-transparent) ─────
@@ -182,7 +180,7 @@ def test_same_state_idle_does_not_double_arm_when_ticker_alive(handler):
     cost, the exact class this phase exists to bound. The fix guards on
     liveness (_status_ticker_id is None).
     """
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     tick_cb = _enter_idle(h, fake_glib)  # arms the ticker; budget NOT exhausted
     tick_cb()  # consume one tick so the budget is visibly mid-flight
     assert h._idle_ticks == 1, "fixture precondition: one tick consumed"
@@ -216,7 +214,7 @@ def test_same_state_idle_restarts_pulse_budget(handler):
     'idle' hits the same-state early return. Pre-fix that left _idle_ticks at
     its exhausted value with a dead ticker, so the pulse never returned.
     """
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     tick_cb = _enter_idle(h, fake_glib)
 
     # Exhaust the budget — the source dies.
@@ -243,7 +241,7 @@ def test_dead_tick_clears_its_own_source_ids(handler):
     moment. Leaving them set would make a later same-state re-entry call
     source_remove() on a dead id (GLib critical warning).
     """
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     tick_cb = _enter_idle(h, fake_glib)
 
     for _ in range(20):
@@ -265,7 +263,7 @@ def test_sending_and_done_ticks_clear_their_own_source_ids(handler):
     attempting to remove it').
     """
     for state in ("sending", "done"):
-        h, feedbar, fake_glib = handler
+        h, status_target, fake_glib = handler
         h._set_state(state, None)
         assert fake_glib.armed, f"{state} must arm the ticker"
         tick_cb = fake_glib.armed[-1][2]
@@ -378,7 +376,7 @@ def test_live_update_elapsed_bucket_is_one_second(handler, monkeypatch):
     Pre-P9 the divisor was 0.5, so the 0.75 s tick below landed in bucket 1 and
     rebuilt — this test is RED on that code.
     """
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     h._mc.get_current_session_key.return_value = "sk-1"   # deterministic sk
     clock = {"t": 1000.0}
     monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
@@ -386,26 +384,26 @@ def test_live_update_elapsed_bucket_is_one_second(handler, monkeypatch):
     h._set_state("streaming", "sk-1")
     h._agent_start_time["sk-1"] = 1000.0      # elapsed 0.0s
     tick = fake_glib.armed[0][2]
-    feedbar.set_status_text.reset_mock()
+    status_target.set_status_text.reset_mock()
 
     tick()                                    # elapsed 0.0 → bucket 0 → renders
-    assert feedbar.set_status_text.call_count == 1
+    assert status_target.set_status_text.call_count == 1
 
     clock["t"] = 1000.75                      # same bucket under 1.0 (was bucket 1 at 0.5)
     tick()
-    assert feedbar.set_status_text.call_count == 1, (
+    assert status_target.set_status_text.call_count == 1, (
         "two ticks inside the same 1.0s bucket must rebuild at most once"
     )
 
     clock["t"] = 1001.0                       # crosses into bucket 1 → re-render
     tick()
-    assert feedbar.set_status_text.call_count == 2, (
+    assert status_target.set_status_text.call_count == 2, (
         "crossing the 1.0s bucket boundary must re-render"
     )
 
     clock["t"] = 1001.9                       # still bucket 1 → skipped again
     tick()
-    assert feedbar.set_status_text.call_count == 2, (
+    assert status_target.set_status_text.call_count == 2, (
         "the new bucket must itself dedupe until it advances"
     )
 
@@ -413,7 +411,7 @@ def test_live_update_elapsed_bucket_is_one_second(handler, monkeypatch):
 def test_live_update_bucket_holds_hop_change_still_renders(handler, monkeypatch):
     """Control: the bucket widening must not suppress a real progress change —
     a hop-count change rebuilds inside the same bucket."""
-    h, feedbar, fake_glib = handler
+    h, status_target, fake_glib = handler
     h._mc.get_current_session_key.return_value = "sk-1"
     clock = {"t": 1000.0}
     monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
@@ -421,15 +419,15 @@ def test_live_update_bucket_holds_hop_change_still_renders(handler, monkeypatch)
     h._set_state("reasoning", "sk-1")
     h._agent_start_time["sk-1"] = 1000.0
     tick = fake_glib.armed[0][2]
-    feedbar.set_status_text.reset_mock()
+    status_target.set_status_text.reset_mock()
 
     tick()
-    assert feedbar.set_status_text.call_count == 1
+    assert status_target.set_status_text.call_count == 1
 
     clock["t"] = 1000.4                       # same bucket
     h._event_hop_count["sk-1"] = 7            # progress moved
     tick()
-    assert feedbar.set_status_text.call_count == 2, (
+    assert status_target.set_status_text.call_count == 2, (
         "a hop change must rebuild the markup even inside the same bucket"
     )
 
