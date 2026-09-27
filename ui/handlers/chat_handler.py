@@ -417,7 +417,7 @@ class ChatHandler:
         self._dispatch(_show_and_send)
         buf.set_text("")
 
-        # Trigger Pre Flight state in ActivityHandler (FeedBar status bar)
+        # Trigger Pre Flight state in ActivityHandler (activity pill, SPEC-07 R4)
         if self._on_send_initiated:
             self._on_send_initiated(session_key)
 

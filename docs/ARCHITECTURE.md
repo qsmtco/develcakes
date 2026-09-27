@@ -152,7 +152,7 @@ crabcakes/
 │   │   ├── gateway_handler.py # GatewayHandler — connect, agents, lifecycle
 │   │   ├── media_handler.py   # MediaHandler — STT + improve
 │   │   ├── project_handler.py  # ProjectHandler — active project + agent-to-project routing
-│   │   ├── activity_handler.py  # ActivityHandler — 6-state activity machine (Phase 6)
+│   │   ├── activity_handler.py  # ActivityHandler — 6-state activity machine rendering to the status_target duck-type (Phase 6; repointed to the activity pill in SPEC-07 R4)
 │   │   ├── activity_wiring_handler.py  # ActivityDrawer event wiring — gateway + local, online + offline (SPEC-activity-drawer)
 │   │   ├── command_handler.py   # CommandHandler — slash-prefix command parser (Phase 7)
 │   │   ├── review_handler.py    # ReviewHandler — review session lifecycle (Phase 7)
@@ -176,7 +176,7 @@ crabcakes/
 │       ├── __init__.py
 │       ├── activity_drawer.py  # NEW (SPEC-activity-drawer) — collapsible activity event panel
 │       ├── chat_bubble.py      # build_role_bubble() — chat bubble widget factories (Phase 1)
-│       ├── feedbar.py          # FeedBar — Response Status Bar + progress bar + ActivityHandler public API (Phase 6)
+│       ├── chat_surface.py     # ChatSurface/TextViewFallback — WebKit chat surface + activity pill (SPEC-06/07; FeedBar deleted in R4)
 │       ├── feed_card.py        # ~581 lines — feed_card widget factory (Phase 5)
 │       ├── diff_card.py         # Diff card widget factories — build_file_diff_card, build_diff_summary_card (Phase 7)
 │       ├── review_bar.py        # ReviewBar widget — review mode dropdown + action buttons (Phase 7)
@@ -2791,9 +2791,13 @@ class ActivityWiringHandler:
 
 **Offline name resolution:** `_resolve_local_agent_name()` uses `AgentRuntimeHandler.get_agent_name_for_session()` (the local registry), not the gateway `AgentManager`, so agent names resolve correctly without a connection.
 
-### 3.22 `ui/views/feedbar.py` — Response Status Bar (Phase 6)
+### 3.22 `ui/views/feedbar.py` — RETIRED (deleted in SPEC-07 R4)
 
-**Responsibility:** Horizontal bar between toolbar and main content. Pure view — no business logic.
+**Responsibility (historical):** Horizontal bar between toolbar and main content. Pure
+view — no business logic. **Deleted in SPEC-07 (R4):** the 6-state activity machine now
+renders to the chat surface's activity pill via the `status_target` duck-type
+(`ActivityPillAdapter`, `ui/views/chat_surface.py`). This section is retained for
+history only; no code lives at this path.
 
 **Owns:** Status label + progress bar GTK widgets.
 
@@ -2970,14 +2974,16 @@ class FeedHandler:
 
 ## 3.23 `ui/handlers/activity_handler.py` — Activity State Machine (Phase 6)
 
-**Responsibility:** The 6-state activity machine that drives the Response Status bar (FeedBar). Manages state transitions, live timers, and FeedBar updates.
+**Responsibility:** The 6-state activity machine that drives the activity pill (the
+chat surface's status element — SPEC-07 R4; formerly the Response Status bar/FeedBar).
+Manages state transitions, live timers, and status renders via the status_target.
 
-**Owns:** All state machine state (timers, counters, timestamps). Does NOT own any GTK widgets — manipulates FeedBar only through its public API.
+**Owns:** All state machine state (timers, counters, timestamps). Does NOT own any GTK widgets — renders through the status_target duck-type's public API.
 
-**Does NOT own:** FeedBar or MainContent — received as constructor dependencies.
+**Does NOT own:** The status target or MainContent — received as constructor dependencies.
 
 **Constructor dependencies:**
-- `feedbar`: FeedBar instance — updated via public API
+- `status_target`: duck-type implementing `set_status_text(text, state=None)` (+ no-op progress quartet) — in production, `ActivityPillAdapter` over the active chat surface
 - `main_content`: MainContent instance — used via `main_content.get_review_bar()` to read current ReviewBar state
 - `GLib_module`: optional GLib reference for thread dispatch
 
@@ -3757,17 +3763,12 @@ Item-level events (`payload.stream == "item"`) — phase at `payload.phase`:
 - First chat delta → `streaming`
 - Agent message in history → `sending` (pre-flight)
 
-**ActivityHandler → FeedBar public API:**
-  set_status_text(markup)              → updates state label
-  set_progress_fraction(fraction)       → 0.0..1.0 bar fill (stops pulse)
-  set_progress_hidden(hidden)          → show/hide bar
-  set_progress_pulse(enable)          → start/stop GTK pulse animation
-  pulse_progress()                     → advance pulse by one step
-  set_progress_opacity(opacity)        → 0.0..1.0 (for subtle idle pulse)
+**ActivityHandler → status_target duck-type (SPEC-07 R4; production impl: ActivityPillAdapter):**
+  set_status_text(text, state)         → pill label text + CSS class (plain text; no markup)
 
-FeedBar → GTK widgets:
-  _status_label (Gtk.Label)            → state text
-  _progress_bar (Gtk.ProgressBar)       → animated fill / pulse
+status_target → chat surface:
+  set_activity_status(text, state)     → Gtk.Label set_text + pill-<state> CSS class swap
+                                        (progress quartet retained as no-ops for duck-type parity)
 ```
 
 ### 4.11 Agent-to-Agent (A2A) Consultation — Command-Based (Phase 6.1)
@@ -4497,7 +4498,6 @@ crabcakes/
 │       ├── diff_card.py          # ~356 lines — diff card factories (Phase 7)
 │       ├── feed_card.py          # ~616 lines — feed_card widget factory (Phase 5)
 │       ├── feed_tab.py           # ~387 lines — FeedTab (view only)
-│       ├── feedbar.py            # ~124 lines — FeedBar + progress bar (Phase 6)
 │       ├── file_tree.py          # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
 │       ├── left_panel.py         # ~1004 lines — LeftPanel (Prompts/Agents/Projects notebook)
 │       ├── main_content.py       # ~942 lines — MainContent (tabs + input + review bar)

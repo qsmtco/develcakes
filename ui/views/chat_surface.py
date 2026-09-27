@@ -278,7 +278,7 @@ class ChatSurface(Gtk.Box):
         """SPEC-07 SP1: activity-machine status → pill text + CSS class.
 
         text always lands on the pill label (plain text — callers must NOT
-        send Pango markup; feedbar markup dies with feedbar). state (one of
+        send Pango markup; the old status bar's markup is gone). state (one of
         the ActivityHandler 6 + error) drives the CSS class; None keeps the
         current class. Unknown state → keep current class (fail-quiet, not
         crash).
@@ -408,7 +408,7 @@ class TextViewFallback(Gtk.Box):
 
 
 class ActivityPillAdapter:
-    """SPEC-07 SP1: FeedBar duck-type → the ACTIVE chat surface's pill.
+    """SPEC-07 SP1: old status-bar duck-type → the ACTIVE chat surface's pill.
 
     The ActivityHandler calls five methods today (verified at HEAD 3972ac9e:
     activity_handler.py:683-871): set_status_text, set_progress_fraction,

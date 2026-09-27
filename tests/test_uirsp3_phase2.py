@@ -1,31 +1,28 @@
 # tests/test_uirsp3_phase2.py
 # UIRESP3 Phase 2 — bound the idle pulse (Edit A) and drop the hidden
-# progress bar from traversal (Edit B). Spec §5 Phase-2 test rows.
+# progress bar from traversal (Edit B; the bar itself retired with the old
+# status bar in SPEC-07 SP3 — ActivityHandler now renders to the activity
+# pill via a status_target mock). Spec §5 Phase-2 test rows.
 #
 # The state machine runs in-process with the conftest fake_glib fixture
 # (armed timers never fire; tests invoke the recorded 250ms callback
-# directly, so no real event loop and no sleeps). FeedBar row uses a real
-# Gtk.ProgressBar under xvfb. The 60 s budget row is marked slow/manual:
-# it needs the live app plus a real minute — the suite stays fast and
-# hermetic; the measurement is executed and reported by hand.
+# directly, so no real event loop and no sleeps). The 60 s budget row is
+# marked slow/manual: it needs the live app plus a real minute — the suite
+# stays fast and hermetic; the measurement is executed and reported by hand.
 #
-# HEADLESS: Gtk.ProgressBar needs xvfb (marked per the suite's convention).
+# BARE-SAFE since SPEC-07 SP3: no gi import, no widgets — runs without a
+# display (env -u DISPLAY).
 
 import os
 import sys
 import time
 from unittest.mock import MagicMock
 
-import gi
-gi.require_version('Gtk', '4.0')  # noqa: F401 — must precede any gi.repository import
-from gi.repository import Gtk
-
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.handlers.activity_handler import ActivityHandler
-from ui.views.feedbar import FeedBar
 
 
 @pytest.fixture
@@ -125,46 +122,6 @@ def test_active_states_unaffected(handler):
 
     # Pulse is never touched by the active branch.
     status_target.pulse_progress.assert_not_called()
-
-
-# ── Row 4: hidden bar is OUT of traversal (not visible-but-transparent) ─────
-
-
-def test_hidden_progress_bar_not_visible():
-    """set_progress_hidden(True) must remove the bar from layout/render:
-    visible False (traversal) AND opacity 0 (the fade), per UIRESP3 Edit B."""
-    bar = FeedBar()
-    bar._progress_bar.set_visible(True)  # start from a visible state
-
-    bar.set_progress_hidden(True)
-    assert bar._progress_bar.get_visible() is False, (
-        "hidden bar must be invisible — opacity alone leaves it in traversal"
-    )
-    assert bar._progress_bar.get_opacity() == 0.0, "fade (opacity) kept"
-
-    bar.set_progress_hidden(False)
-    assert bar._progress_bar.get_visible() is True, (
-        "unhiding must restore visibility as well as opacity"
-    )
-    assert bar._progress_bar.get_opacity() == 1.0
-
-    # The show paths must also restore visibility (bar can be hidden when
-    # they fire — e.g. idle → sending).
-    bar.set_progress_hidden(True)
-    bar.set_progress_fraction(0.5)
-    assert bar._progress_bar.get_visible() is True, (
-        "set_progress_fraction must restore visibility"
-    )
-    bar.set_progress_hidden(True)
-    bar.set_progress_pulse(True)
-    assert bar._progress_bar.get_visible() is True, (
-        "set_progress_pulse(True) must restore visibility"
-    )
-    bar.set_progress_hidden(True)
-    bar.set_progress_opacity(0.5)
-    assert bar._progress_bar.get_visible() is True, (
-        "set_progress_opacity(>0) must restore visibility"
-    )
 
 
 # ── Audit follow-ups: same-state idle, and opacity=0 symmetry ───────────────
@@ -274,99 +231,6 @@ def test_sending_and_done_ticks_clear_their_own_source_ids(handler):
         )
         assert h._live_update_timer is None
         assert h._idle_pulse_timer is None
-
-
-def test_set_progress_opacity_zero_hides_bar():
-    """Audit BUG #2: opacity=0 must ALSO leave the widget tree.
-
-    The spec (Edit B) required auditing opacity-without-visibility. The first
-    fix covered opacity>0 (show) only; opacity=0 on a previously-visible bar
-    would restore the exact defect this phase removes — visible-but-
-    transparent is still traversed on every layout/render pass.
-    """
-    checkout = FeedBar.__new__(FeedBar)
-    checkout._progress_bar = Gtk.ProgressBar()
-
-    checkout.set_progress_hidden(True)      # hidden
-    checkout.set_progress_pulse(True)       # shown again
-    assert checkout._progress_bar.get_visible() is True, "fixture precondition"
-
-    checkout.set_progress_opacity(0)        # fade out
-    assert checkout._progress_bar.get_opacity() == 0, "opacity must be 0"
-    assert checkout._progress_bar.get_visible() is False, (
-        "opacity=0 must remove the bar from traversal (set_visible(False))"
-    )
-
-
-# ── MEMRATCHET P9 (§2.4, F12): ticker markup de-dup + 1.0s elapsed bucket ────
-
-
-def test_set_status_text_identical_markup_renders_once():
-    """F12: the FIRST write renders; an identical REPEAT is skipped.
-
-    Pre-P9 `set_status_text` called `set_markup` unconditionally, so a ticker
-    that keeps rebuilding the same string re-laid-out the label every tick.
-    """
-    bar = FeedBar()
-    calls = []
-    real_set_markup = bar._status_label.set_markup
-
-    def _record(markup):
-        calls.append(markup)
-        return real_set_markup(markup)
-
-    bar._status_label.set_markup = _record
-
-    same = '<span foreground="#f59e0b">◉ Reasoning…</span>'
-    bar.set_status_text(same)          # first write → must render
-    assert calls == [same], (
-        "the first write must reach set_markup (the cache starts at None)"
-    )
-    bar.set_status_text(same)          # identical repeat → skipped
-    bar.set_status_text(same)
-    assert calls == [same], (
-        f"identical markup must render exactly once, got {len(calls)} renders"
-    )
-
-
-def test_set_status_text_changed_markup_renders_again():
-    """A different string always renders — dedupe is value-based on the exact
-    string, so a new status family is not suppressed."""
-    bar = FeedBar()
-    calls = []
-    real_set_markup = bar._status_label.set_markup
-
-    def _record(markup):
-        calls.append(markup)
-        return real_set_markup(markup)
-
-    bar._status_label.set_markup = _record
-
-    first = '<span foreground="#f59e0b">◉ Reasoning…</span>'
-    second = '<span foreground="#3b82f6">⬇ Generating…</span>'
-    bar.set_status_text(first)
-    bar.set_status_text(second)
-    bar.set_status_text(first)         # back to the first: different from last
-    assert calls == [first, second, first], (
-        f"every change must render (value-based dedupe only), got {calls}"
-    )
-
-
-def test_set_status_text_dedupe_is_exact_string_not_prefix():
-    """Near-miss strings must NOT be treated as repeats."""
-    bar = FeedBar()
-    calls = []
-    real_set_markup = bar._status_label.set_markup
-
-    def _record(markup):
-        calls.append(markup)
-        return real_set_markup(markup)
-
-    bar._status_label.set_markup = _record
-
-    bar.set_status_text('<span foreground="#4ade80">✓ Done</span>')
-    bar.set_status_text('<span foreground="#4ade80">✓ Done </span>')   # trailing space
-    assert len(calls) == 2, "a trailing-space difference is a different string"
 
 
 def test_live_update_elapsed_bucket_is_one_second(handler, monkeypatch):

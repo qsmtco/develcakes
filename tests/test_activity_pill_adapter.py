@@ -1,4 +1,4 @@
-# tests/test_activity_pill_adapter.py — SPEC-07 SP1 (R4 feedbar removal).
+# tests/test_activity_pill_adapter.py — SPEC-07 SP1 (R4 status-bar removal).
 #
 # This file runs BARE — no display, no xvfb (proven: env -u DISPLAY green).
 # Every surface is a pure fake; test 7 drives the real set_activity_status

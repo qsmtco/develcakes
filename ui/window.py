@@ -33,7 +33,6 @@ from gi.repository import Gtk, Gdk, Gio, GLib
 
 # Import UI components
 from ui.toolbar import Toolbar
-from ui.views.feedbar import FeedBar
 from ui.views.left_panel import LeftPanel
 from ui.views.chat_surface import ActivityPillAdapter
 from ui.views.main_content import MainContent
@@ -252,9 +251,6 @@ class MainWindow(Gtk.ApplicationWindow):
             on_prompt_loaded=lambda fp, name, content: self._on_prompt_selected(content),
         )
         self._left_panel.set_prompts_handler(self._prompts_handler)
-
-        # # Response Status bar (right side)
-        self._response_status = FeedBar()
 
         # Activity handler — owns the activity-pill state machine (Phase 6)
         self._activity_handler = ActivityHandler(
@@ -777,9 +773,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._main_content.set_on_stt_click(self._media_handler.on_stt_click)
         self._main_content.set_on_improve_click(self._media_handler.on_improve_click)
 
-        # Right-side vertical stack: feedbar above main content
+        # Right-side vertical stack: main content fills the pane
         right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        right_box.append(self._response_status)
         right_box.append(self._main_content)
 
         # Horizontal paned split: left panel | right content
