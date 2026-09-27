@@ -141,7 +141,7 @@ class TestIsInContainer:
         assert is_in_container(w, box) is False
 
 
-# ── Group C: Static regression checks (5 tests) ──────────────────────
+# ── Group C: Static regression checks (4 tests) ──────────────────────
 
 
 class TestStaticRegression:
@@ -165,10 +165,10 @@ class TestStaticRegression:
             assert pattern not in src, \
                 f"Old pattern '{pattern}' still present in {self.FEED_TAB_PATH}"
 
-    def test_is_in_container_imported_in_chat_render(self):
-        """is_in_container is imported in chat_render_handler.py."""
-        src = self._read(self.CHAT_RENDER_PATH)
-        assert "from utils.gtk_containers import is_in_container" in src
+    # Lineage: test_is_in_container_imported_in_chat_render RETIRED — its
+    # subject DIED (not moved): chat_render_handler.py lost the
+    # is_in_container import with the Pango bubble path in SP4 (2a057adc,
+    # render-handler repoint). The feed_tab twin below stays live.
 
     def test_is_in_container_imported_in_feed_tab(self):
         """is_in_container is imported in feed_tab.py."""

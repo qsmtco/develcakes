@@ -13,6 +13,9 @@ dependencies = [
     "httpx>=0.27",        # web_fetch + Brave search (agent/tools.py)
     "PyYAML>=6.0",        # providers.yaml + agent.yaml (utils/providers_store.py, agent/config.py)
     "faster-whisper>=1.0", # STT (utils/stt.py)
+    # SPEC-06 SP6 Phase 1: render-pipeline deps referenced by imported code
+    "nh3>=0.3.7",         # fail-closed HTML sanitizer (render/sanitize.py)
+    "pygments>=2.17.2",   # syntax highlighting (render/syntax_html.py)
 ]
 
 [project.scripts]

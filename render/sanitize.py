@@ -57,7 +57,11 @@ _ATTRIBUTES: dict[str, set[str]] = {
 
 # Class-token allowlist (chat-surface styling vocabulary, SP2/SP3 contract).
 # Whole class attribute is split on whitespace; each token must match.
-_CLASS_TOKEN_RE = re.compile(r"^(?:terminal|task-list|task-checked|welcome-row|(?:tok|lang)-[a-z0-9+#_-]*)$")
+# SP6 Phase 1 (supervisor tighten, audit finding): the suffix quantifier is `+`
+# — bare "tok-"/"lang-" (empty suffix) are stripped. All real emitters produce
+# non-empty suffixes (render/html.py lang-{lang} only when truthy; syntax_html
+# tokens are hardcoded like tok-kw), so nothing legitimate is affected.
+_CLASS_TOKEN_RE = re.compile(r"^(?:terminal|task-list|task-checked|welcome-row|(?:tok|lang)-[a-z0-9+#_-]+)$")
 
 _SAFE_ATTRS = frozenset({"href", "title", "alt", "src"})
 

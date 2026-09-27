@@ -2,5 +2,7 @@
   "include": ["gateway", "models", "utils"],
   "exclude": ["**/__pycache__", "**/.venv", "ui"],
   "pythonVersion": "3.12",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv"
 }
