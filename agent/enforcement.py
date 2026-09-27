@@ -18,6 +18,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,6 +50,18 @@ _ALLOWED_BINARIES: frozenset[str] = frozenset({
 _ALLOWED_ENV_VARS: frozenset[str] = frozenset({
     "PATH", "HOME", "LANG", "LC_ALL", "LANGUAGES", "TZ", "TMPDIR", "PWD",
 })
+
+# SP6 Phase 2 fix round: app identity anchor for the tests-tier interpreter
+# fallback (Debugger BUG #1, env-bleed). The sys.executable fallback in
+# _resolve_tests_python() is safe ONLY when the checked project IS the
+# running app — otherwise develcakes' venv deps leak into a foreign
+# project's tier (probe: a foreign project importing nh3 false-PASSED).
+# Derived like utils/config.py:64 locates the app root (dirname of the
+# package dir above this module), never a hardcoded path. realpath'd so the
+# identity comparison below (:554) is symmetric — an abspath-built root with
+# a symlink component (checkout reached via symlink) would self-deny
+# (Phase 2 re-audit BUG #1).
+_APP_ROOT: str = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _get_scrubbed_env() -> dict[str, str]:
@@ -516,6 +529,41 @@ def _substitute_venv_python(argv: list[str], venv_python: str | None) -> list[st
     return result
 
 
+def _resolve_tests_python(project_path: str, venv_python: str | None) -> str | None:
+    """Resolve the tests-tier interpreter when the venv probe missed.
+
+    SP6 Phase 2 (cluster A): a project without ``.venv`` (tmp_path test
+    projects; PEP 668 hosts) left argv at bare ``python3``, and the system
+    interpreter has no pytest — the tier false-FAILED with
+    "No module named pytest". Resolution order:
+
+    1. the project venv python (unchanged — a project's venv always wins);
+    2. the RUNNING interpreter (``sys.executable``), ONLY when BOTH hold:
+       the checked project IS the running app (``_APP_ROOT`` — identity
+       gate, fix round for Debugger BUG #1: substituting develcakes' venv
+       python for a FOREIGN project runs that project's tests against
+       develcakes' dependency set — probe: foreign project importing nh3
+       false-PASSED), and pytest is importable there (fail-closed: a
+       pytest-less interpreter returns None so the argv keeps the
+       historical bare-``python3`` shape and the tier fails exactly as
+       before Phase 2).
+
+    The probe is process-local (``find_spec``, no import executed);
+    subprocesses still run through _run_timed_command with the scrubbed env
+    (CRIT-2 unchanged).
+    """
+    if venv_python is not None:
+        return venv_python
+    if os.path.realpath(project_path) != _APP_ROOT:
+        return None
+    from importlib.util import find_spec
+
+    if find_spec("pytest") is None:
+        return None
+    exe = sys.executable
+    return exe if exe and os.path.isfile(exe) else None
+
+
 def _check_tests(
     file_path: str,
     project_path: str,
@@ -568,8 +616,13 @@ def _check_tests(
     # Load per-project test configuration
     test_config = _load_test_config(project_path) or TestConfig()
 
-    # Detect venv python path (CRIT-2 fix: no shell-sourcing)
-    venv_python = _detect_venv_prefix(project_path, test_config.venv_path)
+    # Detect venv python path (CRIT-2 fix: no shell-sourcing). SP6 Phase 2:
+    # a venv probe miss falls back to the running interpreter (only when it
+    # can import pytest) — bare `python3` on a PEP 668 host has no pytest
+    # and false-FAILED the tier ("No module named pytest").
+    venv_python = _resolve_tests_python(
+        project_path, _detect_venv_prefix(project_path, test_config.venv_path)
+    )
 
     # Determine test timeout (project override or config default)
     test_timeout = test_config.timeout_seconds if test_config.timeout_seconds is not None else config.test_timeout_seconds

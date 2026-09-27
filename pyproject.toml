@@ -16,6 +16,11 @@ dependencies = [
     # SPEC-06 SP6 Phase 1: render-pipeline deps referenced by imported code
     "nh3>=0.3.7",         # fail-closed HTML sanitizer (render/sanitize.py)
     "pygments>=2.17.2",   # syntax highlighting (render/syntax_html.py)
+    # SPEC-06 SP6 Phase 2: MCP client SDK — live production feature
+    # (agent/runtime.py:818,1345; agent/tools.py:1205-1215;
+    # ui/handlers/agent_runtime_handler.py:1264,1295; ui/views/agent_builder.py:637).
+    # NOT the removed R5 KB stack. Floor = venv-probed version.
+    "mcp>=2.2.0",         # utils/mcp_config.py + utils/mcp_client.py
 ]
 
 [project.scripts]

@@ -14,7 +14,9 @@
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 import time
 
 import pytest
@@ -25,6 +27,7 @@ from agent.enforcement import (
     _find_related_test,
     _load_test_config,
     _check_tests,
+    _resolve_tests_python,
     check,
     _TEST_CONFIG_CACHE,
     _ENFORCEMENT_CONFIG_CACHE,
@@ -82,6 +85,32 @@ def _create_venv(project_path: str, venv_path: str = ".venv") -> str:
     python = os.path.join(venv_bin, "python")
     with open(python, "w") as f:
         f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(python, 0o755)
+    return venv_bin
+
+
+def _create_real_venv(project_path: str, venv_path: str = ".venv") -> str:
+    """Create a venv whose python execs the RUNNING interpreter.
+
+    Unlike _create_venv's exit-0 shim, this python actually executes pytest:
+    the shim `exec`s sys.executable directly, so the real interpreter (with
+    develcakes' site-packages) runs the tier command for real. A bare
+    symlink is NOT enough — getpath finds no pyvenv.cfg beside the symlink
+    and falls back to the system prefix, which has no pytest (observed:
+    "No module named pytest" via symlink, 2026-09-25).
+
+    Used by tier tests that assert on REAL test outcomes (pass/fail/
+    timeout) so a passing tier comes from the tests passing — not from
+    the shim. SP6 Phase 2 fix round: with the app-identity gate active,
+    foreign (tmp_path) projects no longer fall back to the host
+    interpreter, so venv-backed setups are the honest way to exercise
+    the running tier (venv-first is the sanctioned contract).
+    """
+    venv_bin = os.path.join(project_path, venv_path, "bin")
+    os.makedirs(venv_bin, exist_ok=True)
+    python = os.path.join(venv_bin, "python")
+    with open(python, "w") as f:
+        f.write(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
     os.chmod(python, 0o755)
     return venv_bin
 
@@ -204,6 +233,79 @@ class TestVenvDetection:
         venv.mkdir(parents=True)
         # No python file
         result = _detect_venv_prefix(str(tmp_path), ".venv")
+        assert result is None
+
+
+class TestResolveTestsPython:
+    """SP6 Phase 2 cluster A — tests-tier interpreter fallback.
+
+    Bare `python3` on a PEP 668 host has no pytest; when the project-venv
+    probe misses, _resolve_tests_python() falls back to the RUNNING
+    interpreter — but ONLY when BOTH hold (fix round, Debugger BUG #1):
+    the checked project IS the running app (identity gate against env
+    bleed into foreign projects), and pytest is importable there
+    (fail-closed: otherwise None and the tier behaves as before).
+    The production code does `from importlib.util import find_spec` at
+    call time, so patching importlib.util.find_spec controls the probe.
+    """
+
+    def test_venv_python_wins_unconditionally(self, tmp_path, monkeypatch):
+        """The project venv takes precedence — even for a FOREIGN project
+        with a pytest-less running interpreter (venv-first is unconditional;
+        covers the has-pytest branch too via M6/M7 kill round 2)."""
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("# python placeholder")
+        # Running interpreter: pytest NOT importable (find_spec → None).
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        result = _resolve_tests_python(str(tmp_path), str(venv / "python"))
+        assert result == str(venv / "python")
+
+    def test_venv_python_wins_even_with_pytest_available(self, tmp_path):
+        """Foreign project WITH venv + running interpreter HAS pytest:
+        the venv path still wins (no identity consultation on branch 1).
+        M6-kill: mutant consulting identity before the venv branch fails here."""
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("# python placeholder")
+        result = _resolve_tests_python(str(tmp_path), str(venv / "python"))
+        assert result == str(venv / "python")
+
+    def test_app_project_falls_back_to_running_interpreter(self, tmp_path, monkeypatch):
+        """The running app's own project, no venv, pytest importable in the
+        running interpreter → sys.executable (the self-host case)."""
+        from agent import enforcement
+        monkeypatch.setattr(enforcement, "_APP_ROOT", str(tmp_path))
+        result = _resolve_tests_python(str(tmp_path), None)
+        assert result == sys.executable
+
+    def test_foreign_project_returns_none(self, tmp_path):
+        """Debugger BUG #1 regression — foreign project (not the running
+        app's root), no venv, running interpreter HAS pytest → None.
+        The tier must SKIP, not substitute develcakes' interpreter (his
+        probe: foreign test importing nh3 false-PASSED against the host
+        venv's dependency set)."""
+        from agent import enforcement
+        assert os.path.realpath(str(tmp_path)) != enforcement._APP_ROOT
+        result = _resolve_tests_python(str(tmp_path), None)
+        assert result is None
+
+    def test_pytestless_interpreter_returns_none(self, tmp_path, monkeypatch):
+        """The app's own project, no venv, running interpreter lacks
+        pytest → None (argv keeps the historical bare-python3 shape)."""
+        from agent import enforcement
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        monkeypatch.setattr(enforcement, "_APP_ROOT", str(tmp_path))
+        result = _resolve_tests_python(str(tmp_path), None)
+        assert result is None
+
+    def test_running_exe_missing_on_disk_returns_none(self, tmp_path, monkeypatch):
+        """sys.executable path no longer exists (defensive) → None."""
+        from agent import enforcement
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr(enforcement, "_APP_ROOT", str(tmp_path))
+        monkeypatch.setattr(sys, "executable", "/nonexistent/python3")
+        result = _resolve_tests_python(str(tmp_path), None)
         assert result is None
 
 
@@ -393,8 +495,12 @@ class TestCheckTests:
 
     def test_custom_command_passing(self, tmp_path):
         """Custom command from enforcement.json runs and passes."""
+        _create_real_venv(str(tmp_path))
         _write_enforcement_json(str(tmp_path), {
-            "test": {"command": "python3 -m pytest {test_file} -v --tb=short"}
+            "test": {
+                "command": "python3 -m pytest {test_file} -v --tb=short",
+                "venv_path": ".venv",
+            }
         })
         _create_test_file(str(tmp_path), "test_demo.py", "def test_ok(): assert True\n")
         # Write the source file
@@ -409,8 +515,12 @@ class TestCheckTests:
 
     def test_custom_command_failing(self, tmp_path):
         """Custom command from enforcement.json runs and detects failure."""
+        _create_real_venv(str(tmp_path))
         _write_enforcement_json(str(tmp_path), {
-            "test": {"command": "python3 -m pytest {test_file} -v --tb=short"}
+            "test": {
+                "command": "python3 -m pytest {test_file} -v --tb=short",
+                "venv_path": ".venv",
+            }
         })
         _create_test_file(str(tmp_path), "test_broken.py", "def test_fail(): assert False\n")
         with open(os.path.join(str(tmp_path), "broken.py"), "w") as f:
@@ -420,6 +530,36 @@ class TestCheckTests:
         result = _check_tests("broken.py", str(tmp_path), config, syntax_passed=True)
         assert result is not None
         assert result.passed is False
+        assert "FAILED" in result.detail
+
+    def test_foreign_project_env_bleed_regression(self, tmp_path):
+        """Debugger BUG #1, tier-level — foreign project + host-only dep.
+
+        A project that is NOT the running app, with no venv, whose test
+        imports a dependency that exists only in the HOST venv (nh3): the
+        tier must NOT substitute sys.executable. It runs bare `python3 -m
+        pytest` (identity gate → None), which on this PEP 668 host has no
+        pytest → tier FAILED — never a false PASS from develcakes'
+        dependency set. Pre-fix, this setup false-PASSED via the venv
+        fallback (the mutant Debugger killed by probe).
+        """
+        _create_test_file(
+            str(tmp_path), "test_demo.py",
+            "import nh3\n\ndef test_uses_host_dep():\n    assert nh3 is not None\n",
+        )
+        with open(os.path.join(str(tmp_path), "demo.py"), "w") as f:
+            f.write("x = 1\n")
+        # pytest.ini routes _detect_test_framework to the auto-detect path
+        # (no enforcement.json command), the exact shape of Debugger's probe.
+        with open(os.path.join(str(tmp_path), "pytest.ini"), "w") as f:
+            f.write("[pytest]\n")
+
+        config = _make_config()
+        result = _check_tests("demo.py", str(tmp_path), config, syntax_passed=True)
+        assert result is not None
+        assert result.passed is False, (
+            f"foreign project ran with host deps — env bleed: {result.detail}"
+        )
         assert "FAILED" in result.detail
 
     def test_no_related_test_skips(self, tmp_path):
@@ -451,9 +591,11 @@ class TestCheckTests:
 
     def test_configurable_timeout(self, tmp_path):
         """Per-project timeout override is used."""
+        _create_real_venv(str(tmp_path))
         _write_enforcement_json(str(tmp_path), {
             "test": {
                 "command": "python3 -m pytest {test_file} -v",
+                "venv_path": ".venv",
                 "timeout_seconds": 1,
             }
         })
@@ -481,12 +623,14 @@ class TestCheckEndToEnd:
 
     def test_check_with_custom_test_command(self, tmp_path):
         """check() loads per-project test config and runs tests."""
+        _create_real_venv(str(tmp_path))
         _write_enforcement_json(str(tmp_path), {
             "syntax_check": True,
             "test_run": True,
             "lint_check": False,
             "test": {
                 "command": "python3 -m pytest {test_file} -v --tb=short",
+                "venv_path": ".venv",
                 "test_dir": "tests",
                 "timeout_seconds": 10,
             }
