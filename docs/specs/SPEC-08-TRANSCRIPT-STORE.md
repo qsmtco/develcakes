@@ -1,8 +1,17 @@
 # SPEC-08: Transcript Store (SQLite + WAL)
 
-**Date:** 2026-09-20
+**Date:** 2026-09-20 (amended 2026-09-27 after pre-flight + PM ruling)
 **Author:** Supervisor (develcakes v2)
 **Status:** Draft — for implementation
+
+> **AMENDED 2026-09-27.** Pre-flight verification (HEAD 3515a17e; full analysis:
+> `docs/specs/phases/SPEC-08-PREFLIGHT-DECISIONS.md`) corrected spec-vs-code drift and
+> the PM ruled the store location: **D1=(c) global per install** at
+> `<config_dir>/transcript.db` — conversations are global-by-session-key (3,491 files,
+> 124 MB live today) and sessions migrate across projects; per-project would split
+> histories. ARCHITECTURE.md amended accordingly (one line + evolution path). Riding
+> rulings: D2 `delete_session()` added; D3 dual-write for one release (JSON stays
+> fallback); D4 sessions metadata table holds watermark + epoch.
 **Implements:** .crabcakes/architecture.md §Modules/Transcript store
 **Depends on:** SPEC-07 (lands on the post-R4 surface stack)
 **Target branch:** main
@@ -20,10 +29,15 @@ last-writer-wins = silently dropped turns. Group chat (post-MVP) makes this a da
 event; even today, Coder+Debugger running simultaneously race on their own files'
 read-modify-write cycles via auto-save.
 
-**Solution.** `utils/transcript_store.py` — SQLite per project
-(`<project>/.crabcakes/transcript.db`), WAL mode, append-only turn rows, single-writer
-discipline behind the module interface. `agent/persistence.py` becomes a thin wrapper
-delegating to the store (same public functions — callers unchanged).
+**Solution.** `utils/transcript_store.py` — SQLite, **global per install** at
+`<config_dir>/transcript.db` (via `get_config_dir()` — SPEC-11's rename then moves it
+with the config dir), WAL mode, append-only turn rows, single-writer discipline behind
+the module interface. `agent/persistence.py` becomes a thin wrapper delegating to the
+store — preserving its full public contract (all six functions, not just save/load:
+`conversations_dir`, `save_conversation_to_disk`, `load_conversation_from_disk`,
+`resolve_api_key_for_conversation`, `migrate_conversation_files`,
+`resolve_session_workspace`) and their security invariants (HIGH-3: api_key never
+serialized, re-resolved on load; LOW-2: workspace path-escape guard). Callers unchanged.
 
 **Scope**
 
@@ -60,8 +74,10 @@ CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_key, seq);
 """
 
 class TranscriptStore:
-    def __init__(self, project_path: str):
-        self._db_path = os.path.join(project_path, ".crabcakes", "transcript.db")
+    def __init__(self, db_path: str | None = None):
+        # D1=(c): global per install — default <config_dir>/transcript.db
+        from utils.config import get_config_dir
+        self._db_path = db_path or os.path.join(get_config_dir(), "transcript.db")
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         self._lock = threading.Lock()          # single-writer discipline
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -123,7 +139,9 @@ delegates to `load_all`. Public function signatures unchanged — verified calle
 
 On first store open: if legacy `<config_dir>/conversations/<sk>.json` exists and the
 sessions table lacks the key → `migrate_from_json` → rename file to `<sk>.json.migrated`.
-Banner feed card reports what moved (SPEC-02 card pattern).
+Banner feed card reports what moved (SPEC-02 card pattern). **Scale note (verified):**
+3,491 files / 124 MB live today — migration must batch commits (not one-per-file) and
+run off the UI thread; banner reports count + duration.
 
 ## 3. Data Flow
 
@@ -153,7 +171,10 @@ object → runtime. Render hydration → `tail(sk, 200)`.
 - [ ] Two-concurrent-writers test passes with **zero lost turns** (1,000/1,000)
 - [ ] WAL mode on; `busy_timeout` honored under lock contention test
 - [ ] JSON migration moves history; `.migrated` suffix; banner card
-- [ ] persistence.py public API unchanged; all existing tests pass unmodified
+- [ ] persistence.py public API unchanged (all 6 functions); existing tests pass,
+      with test_agent_persistence's file-existence assertions RECONCILED to the
+      dual-write contract (JSON file still written per D3 — assertions stay valid);
+      any test that must change is listed in the phase report with rationale
 - [ ] Full pytest green, ruff clean, pyright clean
 
 ## 7. Edge Cases
@@ -162,7 +183,7 @@ object → runtime. Render hydration → `tail(sk, 200)`.
 |---|---|
 | DB file corrupt | Store refuses to open → runtime falls back to JSON path (wrapper keeps legacy code path for one release) + feed card |
 | Very long content (>1 MB message) | Stored fine (SQLite TEXT); render truncates (SPEC-06 cap) |
-| Session cleared (/clear) | Store keeps rows (audit trail); wrapper watermark resets via sessions table flag — cleared sessions start a new seq epoch |
+| Session cleared (/clear) | **Post-MVP** (pre-flight: no runtime clear/delete API exists today — no production trigger). Store keeps rows (audit trail); `delete_session()` (D2) is the manual surface; seq-epoch reset rides group chat |
 | Project moved (path change) | DB is per-project relative — moves with the repo |
 | Concurrent append + tail from render thread | Lock-serialized; tail sees committed state only |
 
