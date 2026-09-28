@@ -2,7 +2,7 @@
 
 | SP | Scope | Files | Status | Commit |
 |----|-------|-------|--------|--------|
-| SP1 | Store core: schema, `append_turn`, `tail`, `load_all`, `delete_session`, `close`, WAL/busy_timeout verification + unit tests (tmp dirs, red-first) | utils/transcript_store.py (new), tests/test_transcript_store.py (new) | pending | — |
+| SP1 | Store core: schema, `append_turn`, `tail`, `load_all`, `delete_session`, `close`, WAL/busy_timeout verification + unit tests (tmp dirs, red-first) | utils/transcript_store.py (new), tests/test_transcript_store.py (new) | ✅ done — audit-cleared (BUG#1 HIGH + #4 + teeth fixed; 21/21 mutations) — **COMMIT PENDING (approval gate)** | — |
 | SP2 | Persistence wrapper: 6-function contract preserved, dual-write (D3), watermark + sessions table (D4) + repointed tests | agent/persistence.py, tests/test_agent_persistence.py | pending | — |
 | SP3 | Migration (JSON→DB batched, .migrated suffix, banner card, off-UI-thread) + two-writer concurrency test (2×500 → 1,000/1,000 zero lost) + corrupt-DB fallback test | agent/persistence.py, ui/ (banner card site), tests | pending | — |
 | SP4 | Close-out: full suite + ruff + pyright, 11-section post-mortem, push | post-mortem | pending (supervisor-owned) | — |
