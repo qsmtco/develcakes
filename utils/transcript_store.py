@@ -31,6 +31,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     provider TEXT,
     watermark INTEGER NOT NULL DEFAULT -1,
     epoch INTEGER  NOT NULL DEFAULT 0,
+    diverged INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
 );
 """
@@ -97,10 +99,78 @@ class TranscriptStore:
         # their seq SELECT before either held the write lock (the audit's
         # BUG #1 lost-turn race). BEGIN IMMEDIATE below closes that window.
         self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(_SCHEMA)
         self._closed = False
+        self._perms_set = False
+        # BUG#5 (SP2 fix round): a failed constructor must not orphan the
+        # connection — close it before re-raising, or every failed init leaks
+        # one fd + one sqlite handle for the life of the process.
+        try:
+            # BUG #5 (SP1 audit register): busy_timeout does NOT gate the
+            # journal_mode=WAL transition — the pragma returns SQLITE_BUSY on a
+            # concurrent first open (4/60 threads, 14/40 processes measured).
+            # Bounded retry: 5 attempts x 10 ms cleared every failure in testing
+            # (0/160) while keeping the wait far below any UI-visible threshold.
+            self._wal_retry(5, 0.010)
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.executescript(_SCHEMA)
+        except BaseException:
+            self._conn.close()
+            raise
+        # BUG#6 (SP2 fix round): transcript data is as sensitive as the JSON
+        # conversation files (HIGH-3 parity) — 0600 on the db, 0700 on the
+        # config dir, and 0600 on the WAL sidecars once they exist (sidecars
+        # appear on first WRITE and inherit the umask; see
+        # _ensure_sidecar_perms for the one-shot post-first-append chmod).
+        self._apply_perms()
+
+    def _wal_retry(self, attempts: int, delay: float) -> None:
+        """Set journal_mode=WAL with bounded retry (BUG #5 first-open race)."""
+        for attempt in range(attempts):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
+
+    def _apply_perms(self) -> None:
+        """BUG#6: 0600 on the db + any EXISTING sidecars, 0700 on the parent
+        config dir. Best-effort: OSError is swallowed (non-POSIX filesystems,
+        read-only dirs) — a perms failure must never break construction.
+        """
+        for path in (self._db_path, self._db_path + "-wal", self._db_path + "-shm"):
+            try:
+                if os.path.exists(path):
+                    os.chmod(path, 0o600)
+            except OSError:
+                pass
+        parent = os.path.dirname(self._db_path)
+        if parent:
+            try:
+                os.chmod(parent, 0o700)
+            except OSError:
+                pass
+
+    def _ensure_sidecar_perms(self) -> None:
+        """BUG#6 one-shot: chmod -wal/-shm to 0600 after the first append.
+
+        WAL sidecars are created by the first write and inherit the process
+        umask, so init-time perms cannot cover them. Guarded by a flag — this
+        runs exactly once per instance (a live instance never loses its
+        sidecars: sqlite deletes them only when the LAST connection closes
+        cleanly, and per-instance close() is terminal).
+        """
+        if self._perms_set:
+            return
+        self._perms_set = True
+        for suffix in ("-wal", "-shm"):
+            try:
+                path = self._db_path + suffix
+                if os.path.exists(path):
+                    os.chmod(path, 0o600)
+            except OSError:
+                pass
 
     # ── write path ──────────────────────────────────────────────────────────
 
@@ -117,6 +187,7 @@ class TranscriptStore:
         tool_calls: list | None = None,
         tool_call_id: str | None = None,
         tokens_used: int = 0,
+        seq: int | None = None,
     ) -> int:
         """Append one turn in the session's CURRENT epoch. Returns its seq.
 
@@ -125,6 +196,13 @@ class TranscriptStore:
         SELECT+INSERT, so concurrent writers (same instance, or across
         instances/processes on the same DB file) serialize instead of racing.
         Also upserts the sessions row (watermark, updated_at). Thread-safe.
+
+        Explicit ``seq`` (SP2 dual-write): writes the row at that exact seq —
+        UNIQUE(session_key, epoch, seq) turns a duplicate into IntegrityError,
+        never silent duplication — and the sessions watermark is still upserted
+        to it, so the next delta-append starts past it automatically. Do not
+        mix explicit-seq and auto-seq appends within one epoch, or seq order
+        diverges from JSON index order.
         """
         with self._lock:
             self._ensure_open()
@@ -133,11 +211,12 @@ class TranscriptStore:
                 epoch = self._conn.execute(
                     f"SELECT {_CUR_EPOCH}", (session_key,)
                 ).fetchone()[0]
-                seq = self._conn.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM turns"
-                    " WHERE session_key = ? AND epoch = ?",
-                    (session_key, epoch),
-                ).fetchone()[0]
+                if seq is None:
+                    seq = self._conn.execute(
+                        "SELECT COALESCE(MAX(seq), -1) + 1 FROM turns"
+                        " WHERE session_key = ? AND epoch = ?",
+                        (session_key, epoch),
+                    ).fetchone()[0]
                 self._conn.execute(
                     "INSERT INTO turns (session_key, seq, epoch, role, content,"
                     " tool_calls, tool_call_id, tokens_used, timestamp)"
@@ -167,6 +246,13 @@ class TranscriptStore:
                 # writers for the full busy_timeout.
                 self._rollback_quietly()
                 raise
+            self._ensure_sidecar_perms()
+            # Narrow for the return type: the tx guarantees seq is set by
+            # here (auto path derives it inside the lock; the explicit path
+            # was canonicalized above). An assert, not int() — int(None)
+            # would be a silent type lie; the assert makes the invariant
+            # explicit and lets pyright narrow int | None -> int.
+            assert seq is not None
             return seq
 
     def delete_session(self, session_key: str) -> int:
@@ -215,6 +301,92 @@ class TranscriptStore:
                 "SELECT epoch FROM sessions WHERE session_key = ?", (session_key,)
             ).fetchone()[0]
 
+    def append_delta(self, session_key: str, base_idx: int, rows: list[dict]) -> int:
+        """Atomically append an index-aligned run of turns past the watermark.
+
+        One lock acquisition + one BEGIN IMMEDIATE: reads wm INSIDE the tx,
+        starts at max(wm + 1, base_idx), and writes rows[i] at seq =
+        base_idx + i for every index >= start — indexes the tx finds already
+        committed (a racing writer's rows) are SKIPPED, never re-written.
+        Upserts watermark to the last seq it actually wrote and commits. Two
+        racing savers serialize here; the second re-derives from the first's
+        COMMITTED wm — the union of both deltas survives.
+
+        rows: list of dicts with keys role, content, tool_calls, tool_call_id,
+        tokens_used (the persistence shape; NO api_key — HIGH-3). rows[0] sits
+        at JSON index ``base_idx`` — callers must trim accordingly.
+        Returns the last seq written, or -1 if nothing to append.
+
+        Committing per the watermark ruling: append_delta upserts wm ONLY to a
+        seq it actually wrote this tx — wm never moves ahead of the rows that
+        back it.
+        """
+        with self._lock:
+            self._ensure_open()
+            if not rows:
+                return -1
+            try:
+                self._conn.execute(self._BEGIN)
+                epoch = self._conn.execute(
+                    f"SELECT {_CUR_EPOCH}", (session_key,)
+                ).fetchone()[0]
+                # In-tx wm read: a racing writer's COMMITTED watermark wins —
+                # this tx starts past it, so both deltas land (union).
+                committed_wm = self._conn.execute(
+                    "SELECT watermark FROM sessions WHERE session_key = ?",
+                    (session_key,),
+                ).fetchone()
+                committed_wm = committed_wm[0] if committed_wm else -1
+                start = max(committed_wm + 1, base_idx)
+                # rows[i] sits at JSON index base_idx + i (wrapper contract:
+                # rows is trimmed so rows[0] == messages[base_idx]). Indexes
+                # below `start` were committed by a racing writer — SKIP them
+                # (never re-write the prefix at shifted seqs).
+                last_seq: int | None = None
+                for i, row in enumerate(rows):
+                    seq = base_idx + i
+                    if seq < start:
+                        continue
+                    self._conn.execute(
+                        "INSERT INTO turns (session_key, seq, epoch, role,"
+                        " content, tool_calls, tool_call_id, tokens_used,"
+                        f" timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {_TS_NOW})",
+                        (
+                            session_key,
+                            seq,
+                            epoch,
+                            str(row.get("role", "")),
+                            str(row.get("content", "")),
+                            json.dumps(row["tool_calls"])
+                            if row.get("tool_calls")
+                            else None,
+                            row.get("tool_call_id"),
+                            row.get("tokens_used") or 0,
+                        ),
+                    )
+                    last_seq = seq
+                if last_seq is not None:
+                    self._conn.execute(
+                        "INSERT INTO sessions (session_key, watermark, epoch,"
+                        f" updated_at) VALUES (?, ?, ?, {_TS_NOW})"
+                        " ON CONFLICT(session_key) DO UPDATE SET"
+                        " watermark = excluded.watermark,"
+                        " updated_at = excluded.updated_at",
+                        (session_key, last_seq, epoch),
+                    )
+                self._conn.execute("COMMIT")
+            except sqlite3.IntegrityError:
+                self._rollback_quietly()
+                raise
+            except Exception:
+                self._rollback_quietly()
+                raise
+            self._ensure_sidecar_perms()
+            # -1 sentinel (not None) on full-skip: the return type is int —
+            # this tx wrote nothing because a racing writer already committed
+            # every index in range.
+            return last_seq if last_seq is not None else -1
+
     def close(self) -> None:
         """Commit + close. Idempotent — a second call is a no-op.
 
@@ -261,7 +433,64 @@ class TranscriptStore:
             ).fetchone()
             return row[0] if row else -1
 
+    # DELETED in the SP2 fix round (BUG#2/#3) — sync_watermark had no
+    # replacement, and none is allowed by the ruling: the sessions watermark
+    # is a DERIVED fact ("appended through", never "acknowledged through").
+    # It is written only alongside the rows that back it (append_turn /
+    # append_delta inside BEGIN IMMEDIATE). The JSON-only-restart case needs
+    # no sync: the next save's append_delta backfills from wm=-1, which IS
+    # D3's gradual self-migration.
+
     # ── internals ───────────────────────────────────────────────────────────
+
+    def row_at(self, session_key: str, seq: int) -> dict | None:
+        """The row at (session_key, seq) in the CURRENT epoch — the guard's
+        anchor probe. Read-only; _row_to_dict shape or None if absent.
+
+        Params bind session_key TWICE: the embedded _CUR_EPOCH subquery
+        carries its own ? placeholder (same pattern as tail()).
+        """
+        with self._lock:
+            self._ensure_open()
+            row = self._conn.execute(
+                f"SELECT {_TURN_COLS} FROM turns WHERE session_key = ?"
+                f" AND epoch = {_CUR_EPOCH} AND seq = ?",
+                (session_key, session_key, seq),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def mark_diverged(self, session_key: str) -> None:
+        """Set diverged=1 (creates the sessions row if absent). Idempotent.
+
+        The append-only guard's flag: once set, the wrapper suspends the store
+        delta entirely (early return; JSON stays authoritative and the store's
+        existing rows are kept as the append-only audit ledger — NEVER deleted
+        or rebuilt, per the trim ruling).
+        """
+        with self._lock:
+            self._ensure_open()
+            try:
+                self._conn.execute(self._BEGIN)
+                self._conn.execute(
+                    "INSERT INTO sessions (session_key, diverged, updated_at)"
+                    f" VALUES (?, 1, {_TS_NOW})"
+                    " ON CONFLICT(session_key) DO UPDATE SET"
+                    " diverged = 1, updated_at = excluded.updated_at",
+                    (session_key,),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback_quietly()
+                raise
+
+    def is_diverged(self, session_key: str) -> bool:
+        """Whether the append-only guard has flagged this session."""
+        with self._lock:
+            self._ensure_open()
+            row = self._conn.execute(
+                "SELECT diverged FROM sessions WHERE session_key = ?", (session_key,)
+            ).fetchone()
+            return bool(row[0]) if row else False
 
     def _rollback_quietly(self) -> None:
         """Roll back a failed transaction without masking the real error.

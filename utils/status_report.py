@@ -160,7 +160,9 @@ def _head_metadata(path, max_bytes=None):
 
     `save_conversation_to_disk` writes both keys *before* `messages` (measured:
     byte ~64 in every live session file), so the head carries them even when the
-    body is far past `CONVERSATION_MAX_BYTES`. Only the oversize path uses this
+    body is far past `CONVERSATION_MAX_BYTES`. (SPEC-08 SP2 dual-write does not
+    change this: the JSON write order is unchanged; the store append happens
+    after, and delta-based.) Only the oversize path uses this
     (audit BUG #5): without it an over-cap session loses its project attribution
     and silently drops out of stall detection.
     """
@@ -1101,7 +1103,9 @@ def _collect_agents(project_path, config_dir, body_cap, now):
                  "unreadable": False, "oversize": False, "error": None}
         # Reader-side cap, not a writer-side tear (audit BUG #5): anything past
         # CONVERSATION_MAX_BYTES is truncated by US, so the parse failure would
-        # otherwise be blamed on save_conversation_to_disk's non-atomic write.
+        # otherwise be blamed on save_conversation_to_disk's write. (SPEC-08 SP2:
+        # still true under dual-write — the JSON body is written exactly as
+        # before; the store append is delta-based and touches no JSON file.)
         try:
             size = os.path.getsize(path)
         except OSError:
@@ -1128,8 +1132,10 @@ def _collect_agents(project_path, config_dir, body_cap, now):
         try:
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            # save_conversation_to_disk is non-atomic (agent/persistence.py:92):
-            # a torn tail is expected, not exceptional.
+            # save_conversation_to_disk writes the JSON non-atomically
+            # (agent/persistence.py:126) — a torn tail is expected, not
+            # exceptional. SPEC-08 SP2: unchanged by dual-write; the store
+            # append happens after the JSON write and touches no JSON file.
             entry.update(unreadable=True, error="invalid JSON (writer active)")
             degraded = True
             section["sessions"].append(entry)

@@ -8,6 +8,7 @@ HIGH-3 guard (test_schema_has_no_secret_columns): the schema is pinned to an
 exact column set so a future api_key/secret column cannot silently ship.
 """
 
+import os
 import sqlite3
 import threading
 
@@ -36,6 +37,7 @@ SESSION_COLUMNS = {
     "provider",
     "watermark",
     "epoch",
+    "diverged",
     "updated_at",
 }
 
@@ -222,6 +224,12 @@ def test_schema_has_no_secret_columns(tmp_path):
     schema itself carries session_key. The teeth here are the exact-set
     assertion (any added column fails), plus: no 'api' substring anywhere,
     and 'key' is only tolerated in session_key.
+
+    SP2 fix-round-2 sanctioned exception: sessions gained `diverged` (8
+    columns now) — a non-secret metadata flag for the append-only guard
+    (front-trimmed sessions go JSON-only; the store rows stay as audit
+    ledger). The pin was NOT weakened: the set is still exact, and the
+    secret-substring sweeps below still run over it.
     """
     store = _store(tmp_path)
     turn_cols = {
@@ -316,8 +324,14 @@ def test_two_instances_serialize_zero_lost(tmp_path):
 
 
 def test_two_instances_interleave_distinct_sessions(tmp_path):
-    """BUG #1 companion: two instances, distinct sessions — each session's
-    seq space stays contiguous under cross-instance contention."""
+    """SP1-audit rescope: two instances on one DB file with distinct sessions —
+    each session's seq space stays CONTIGUOUS under cross-instance contention.
+
+    This pins per-session seq isolation, NOT the BUG#1 lost-turn race (pre-fix
+    detection here measured 0/5 — distinct sessions never contend for seq
+    allocation). The BUG#1 race pin is the SAME-session test above
+    (test_two_instances_serialize_zero_lost).
+    """
     db_path = str(tmp_path / "t.db")
     s1 = TranscriptStore(db_path=db_path)
     s2 = TranscriptStore(db_path=db_path)
@@ -366,6 +380,9 @@ def test_use_after_close_raises(tmp_path):
         store.session_watermark("sk")
     with pytest.raises(RuntimeError):
         store.bump_epoch("sk")
+    with pytest.raises(RuntimeError):
+        # SP2: the atomic delta path is inside the same closed-connection guard.
+        store.append_delta("sk", 0, [{"role": "user", "content": "m1"}])
     store.close()  # close-exempt: idempotent, must NOT raise
 
 
@@ -417,3 +434,259 @@ def test_failed_commit_leaves_no_trace(tmp_path):
     rows = store.load_all("sk")
     assert [t["content"] for t in rows] == ["before", "after"]
     assert [t["seq"] for t in rows] == [0, 1]
+
+
+def test_concurrent_first_open_wal_race(tmp_path):
+    """BUG #5 (SP1 register): journal_mode=WAL is NOT gated by busy_timeout —
+    concurrent first opens can race the journal-mode transition. With the
+    bounded retry (5 x 10ms), 4 threads racing TranscriptStore() on ONE db
+    file must ALL succeed (pre-fix failure rate: 4/60 threads, 14/40 runs).
+    """
+    db_path = str(tmp_path / "t.db")
+    n_threads = 4
+    barrier = threading.Barrier(n_threads)
+    errors: list[str] = []
+    stores: list[TranscriptStore] = []
+
+    def opener():
+        try:
+            barrier.wait()
+            stores.append(TranscriptStore(db_path=db_path))
+        except (sqlite3.Error, OSError) as exc:
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=opener) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"first-open failures: {errors}"
+    assert len(stores) == n_threads
+    # Every surviving store is usable AND in WAL mode — the pragma landed.
+    for s in stores:
+        mode = s._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal", f"journal_mode={mode!r} (retry abandoned the transition)"
+        s.append_turn("sk", "user", "post-race")
+        s.close()
+    fresh = TranscriptStore(db_path=db_path)
+    assert len(fresh.load_all("sk")) == n_threads
+    fresh.close()
+
+
+def _flaky_conn(real_conn, fail_sqls: set[str], max_failures: int = 1):
+    """Delegating connection that raises OperationalError on the FIRST N
+    executions of any statement whose normalized SQL is in fail_sqls — the
+    same execute-seam injection as test_failed_commit_leaves_no_trace."""
+
+    class FlakyConn:
+        def __init__(self):
+            self._fail_budget = dict.fromkeys(fail_sqls, max_failures)
+
+        def execute(self, sql, *args):
+            key = sql.strip().upper()
+            for pattern, budget in self._fail_budget.items():
+                if budget > 0 and pattern in key:
+                    self._fail_budget[pattern] = budget - 1
+                    raise sqlite3.OperationalError(f"injected: {pattern}")
+            return real_conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+    return FlakyConn()
+
+
+def test_delete_and_bump_epoch_rollback_injection(tmp_path):
+    """MF4 (SP1 register): failure injection on BOTH remaining write paths —
+    delete_session and bump_epoch must (a) propagate the error, (b) leave NO
+    dangling transaction (a half-applied tx would flush on a later statement
+    and block other writers for the full busy_timeout), and (c) leave the
+    connection usable (clean next write, consistent state).
+    """
+    store = _store(tmp_path)
+    store.append_turn("sk", "user", "keep-0")
+    store.append_turn("sk", "user", "keep-1")
+    real_conn = store._conn
+
+    # ── delete_session: DELETE FROM TURNS fails mid-tx ──
+    store._conn = _flaky_conn(real_conn, {"DELETE FROM TURNS"})
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            store.delete_session("sk")
+    finally:
+        store._conn = real_conn
+
+    # (b) no dangling tx + (c) data intact: everything the failed tx touched
+    # is still committed-prior state — the turn rows survived, watermark too.
+    rows = store.load_all("sk")
+    assert [t["content"] for t in rows] == ["keep-0", "keep-1"]
+    assert store.session_watermark("sk") == 1
+
+    # (c) connection recovered: a REAL delete now succeeds atomically.
+    assert store.delete_session("sk") == 2
+    assert store.load_all("sk") == []
+    assert store.session_watermark("sk") == -1
+
+    # Re-seed, then ── bump_epoch: the epoch upsert fails mid-tx ──
+    store.append_turn("sk", "user", "reseed")
+    store._conn = _flaky_conn(real_conn, {"INSERT INTO SESSIONS"})
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            store.bump_epoch("sk")
+    finally:
+        store._conn = real_conn
+
+    # (b) no dangling tx: watermark must NOT have reset to -1 (the sessions
+    # upsert rolled back), and the reseed turn must still be there.
+    assert store.session_watermark("sk") == 0
+    assert [t["content"] for t in store.load_all("sk")] == ["reseed"]
+
+    # (c) connection recovered: a REAL bump lands and the next append opens
+    # the new epoch cleanly.
+    assert store.bump_epoch("sk") == 1
+    seq = store.append_turn("sk", "user", "new-epoch")
+    assert seq == 0
+    assert store.session_watermark("sk") == 0
+    turns = store.load_all("sk")
+    assert [(t["epoch"], t["seq"], t["content"]) for t in turns] == [
+        (0, 0, "reseed"),
+        (1, 0, "new-epoch"),
+    ]
+
+
+def test_watermark_equals_max_row_seq(tmp_path):
+    """BUG#2/#3 invariant pin (SP2 fix round): the watermark is a DERIVED
+    fact — it equals max(seq) of the CURRENT epoch's rows, or -1 when there
+    are none. Checked after EVERY wrapper-style operation sequence (append
+    xk, delete, append again, plus delta + bump interleave), via a fresh raw
+    SQL query that bypasses the store's own accounting.
+
+    Must be able to fail: any future API that lets wm drift ahead of the rows
+    (the deleted sync_watermark's sin) dies here.
+    """
+    store = _store(tmp_path)
+
+    def assert_invariant(session_key: str) -> None:
+        row = store._conn.execute(
+            "SELECT MAX(seq) FROM turns WHERE session_key = ? AND epoch = 0",
+            (session_key,),
+        ).fetchone()
+        max_seq = row[0] if row and row[0] is not None else -1
+        assert store.session_watermark(session_key) == max_seq, (
+            f"watermark {store.session_watermark(session_key)} != max(seq) "
+            f"{max_seq} for {session_key!r} — wm drifted ahead of the rows"
+        )
+
+    sk = "sk"
+    assert_invariant(sk)  # empty store: -1 == -1
+    for i in range(3):
+        store.append_turn(sk, "user", f"m{i}")
+        assert_invariant(sk)
+    last = store.append_delta(
+        sk, 3, [{"role": "user", "content": "d3"}, {"role": "user", "content": "d4"}]
+    )
+    assert last == 4
+    assert_invariant(sk)
+    store.delete_session(sk)
+    assert_invariant(sk)  # no rows again: wm must be -1, not 4
+    store.append_turn(sk, "user", "fresh")
+    assert_invariant(sk)  # re-appended at seq 0, not 5
+    store.bump_epoch(sk)
+    # Post-bump the CURRENT epoch has no rows — wm must reset with them.
+    assert store.session_watermark(sk) == -1
+
+
+def test_db_files_0600(tmp_path):
+    """BUG#6: db + WAL sidecars are 0600 after init + first append; the
+    config dir is 0700. Sidecars are asserted only if present (platform
+    tolerance); the db is asserted unconditionally."""
+    import stat
+
+    db_path = tmp_path / "t.db"
+    store = TranscriptStore(db_path=str(db_path))
+    store.append_turn("sk", "user", "m0")  # creates the sidecars
+
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = tmp_path / f"t.db{suffix}"
+        if sidecar.exists():  # absent on some platforms/instants — tolerated
+            assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600, suffix
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    store.close()
+
+
+def test_failed_init_closes_connection(tmp_path):
+    """BUG#5 (SP2): a constructor that fails AFTER connect must close the
+    connection before re-raising — 50 attempts leak ZERO fds (gc disabled
+    during the loop so no finalizer masks the leak)."""
+    import gc
+
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"this is not a sqlite database at all" * 32)
+
+    def _open_fds() -> int:
+        return len(os.listdir("/proc/self/fd"))
+
+    before = _open_fds()
+    gc.disable()
+    try:
+        for _ in range(50):
+            with pytest.raises(sqlite3.DatabaseError):
+                TranscriptStore(db_path=str(garbage))
+    finally:
+        gc.enable()
+    after = _open_fds()
+    assert after <= before, f"fd leak across 50 failed inits: {before} -> {after}"
+
+
+def test_append_delta_full_skip_returns_neg_one(tmp_path):
+    """BUG#1 (round-2): an append_delta whose EVERY index was already
+    committed by a racing writer returns the -1 sentinel — never None (the
+    declared return type is int; None leaked through the full-skip path)."""
+    store = _store(tmp_path)
+    rows = [{"role": "user", "content": f"m{i}"} for i in range(3)]
+    assert store.append_delta("sk", 0, rows) == 2
+    # Same range again: everything already committed -> full skip.
+    assert store.append_delta("sk", 0, rows) == -1
+    # Rows and watermark untouched by the skipped tx.
+    turns = store.load_all("sk")
+    assert [t["content"] for t in turns] == ["m0", "m1", "m2"]
+    assert store.session_watermark("sk") == 2
+
+
+def test_mark_diverged_flag_lifecycle(tmp_path):
+    """diverged flag: False before any mark, True after (idempotent), and
+    cleared by delete_session — a deleted session starts fresh."""
+    store = _store(tmp_path)
+    assert store.is_diverged("sk") is False  # unknown session
+    store.append_turn("sk", "user", "m0")
+    assert store.is_diverged("sk") is False  # appends do NOT flag
+    store.mark_diverged("sk")
+    assert store.is_diverged("sk") is True
+    store.mark_diverged("sk")  # idempotent
+    assert store.is_diverged("sk") is True
+    # Marking a never-appended session also works (creates the row).
+    store.mark_diverged("fresh")
+    assert store.is_diverged("fresh") is True
+    # delete_session clears the flag with the rest of the session state.
+    store.delete_session("sk")
+    assert store.is_diverged("sk") is False
+
+
+def test_row_at_anchor_probe(tmp_path):
+    """row_at: the guard's anchor read — (role, content, ...) at a seq in the
+    CURRENT epoch, _row_to_dict shape, None when absent."""
+    store = _store(tmp_path)
+    store.append_turn("sk", "user", "m0")
+    store.append_turn("sk", "assistant", "m1", tool_call_id="c9")
+
+    anchor = store.row_at("sk", 0)
+    assert anchor is not None
+    assert anchor["role"] == "user"
+    assert anchor["content"] == "m0"
+    mid = store.row_at("sk", 1)
+    assert mid is not None
+    assert mid["tool_call_id"] == "c9"
+    assert store.row_at("sk", 99) is None
+    assert store.row_at("never-appended", 0) is None

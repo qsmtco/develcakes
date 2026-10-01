@@ -19,6 +19,29 @@ elif not os.environ.get('DISPLAY') and not os.environ.get('GDK_BACKEND'):
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@pytest.fixture(autouse=True)
+def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
+    """Point the persistence wrapper's store seam at a per-test tmp DB.
+
+    SPEC-08 SP2: save_conversation_to_disk now dual-writes to a transcript
+    store. Without this fixture, any test that saves a conversation without
+    patching get_config_dir (e.g. tests/test_conversation.py patches only
+    conversations_dir) would create/append the REAL user DB under the real
+    config dir — test writes leaking into live user state.
+    """
+    from agent import persistence
+    from utils.transcript_store import TranscriptStore
+
+    # DB lives OUTSIDE tmp_path (shared base-temp sibling dir): the store
+    # constructor creates the file eagerly, and scan_directory()-style tests
+    # assert on their own tmp_path contents — a DB file there breaks them.
+    db_dir = tmp_path_factory.mktemp("store-db")  # numbered -> unique per test
+    store = TranscriptStore(db_path=str(db_dir / "transcript-test.db"))
+    monkeypatch.setattr(persistence, "_store_override", store)
+    yield
+    store.close()
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path, monkeypatch):
     """
