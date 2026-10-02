@@ -3,6 +3,15 @@
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
 **Status:** Draft — for implementation
+
+> **AMENDED 2026-10-02 (PM approved (b) + all riders).** D1=(b): stop-all reaches
+> running subprocesses via Popen + start_new_session + process-GROUP kill
+> (SIGTERM → 2s → SIGKILL) — the pre-flight found the spec's "Popen registry"
+> assumption false (executor uses blocking subprocess.run; nothing is killable).
+> SP0 (enforcement hardening) precedes all: PATH-bleed (scrubbed env forwards
+> user PATH — shim shadowing), fake-venv-via-symlink (realpath gap), and the
+> worktree-aware identity gate SP2 builds on. Phasing: SP0 → SP1 leases → SP2
+> worktrees → SP3 stop-all + Popen + halt test → SP4 close-out.
 **Implements:** .crabcakes/architecture.md §Modules (Worktrees, Work claiming, Stop-all)
 **Depends on:** SPEC-08 (transcript store lands before roster safety)
 **Target branch:** main
