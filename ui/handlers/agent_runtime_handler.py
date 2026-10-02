@@ -926,6 +926,15 @@ class AgentRuntimeHandler:
             on_error=self._on_error,
             on_enforcement_status=self._on_enforcement_status,
         )
+        # SPEC-08 SP4A (Ruling 2: handler-owned card): the runtime ships a
+        # logged fallback banner receiver; this handler owns project_name +
+        # the feed seam, so it builds the FeedCardData itself. Registered on
+        # every runtime (the process-latch makes the sweep once-only; later
+        # registrations are inert overrides of an already-fired window).
+        rt.set_on_store_migration(
+            on_complete=self._on_store_migration_complete,
+            on_progress=self._on_store_migration_progress,
+        )
         rt.start()
         self._runtimes[name] = rt
         logger.info("Created AgentRuntime for special agent: %s", name)
@@ -1378,6 +1387,93 @@ class AgentRuntimeHandler:
             if project_name is not None:
                 return f"project:{project_name}"
         return None
+
+    # ── SPEC-08 SP4A: store-migration banner card + progress ─────────────────
+
+    def _on_store_migration_complete(self, stats: dict) -> None:
+        """SP4A banner receiver: build the FeedCardData from sweep stats.
+
+        Runs in the runtime's dispatch context — on the main loop when GLib
+        is wired (idle_add), inline in tests. Three card shapes (spec Edit 2):
+
+        - success: migrated > 0 — "Transcript migration complete"
+        - aborted: stats['aborted'] — "Transcript migration failed" (JSON
+          untouched; the sweep retries next launch)
+        - all-errors: migrated == 0, errors non-empty — "Transcript
+          migration: N sessions need retry"
+
+        Fires once per completed sweep: run_store_migration_once's
+        process latch bounds the completions (the aborted-retry path may
+        legitimately produce a second card when an in-process retry
+        sweep runs — that card is informative, not a duplicate).
+        """
+        migrated = int(stats.get("migrated", 0) or 0)
+        turns = int(stats.get("turns", 0) or 0)
+        skipped = int(stats.get("skipped", 0) or 0)
+        seconds = float(stats.get("seconds", 0.0) or 0.0)
+        errors = stats.get("errors") or []
+        kept = stats.get("kept_on_json") or []
+        aborted = bool(stats.get("aborted", False))
+
+        if aborted:
+            title = "Transcript migration failed"
+        elif migrated > 0:
+            title = "Transcript migration complete"
+        elif errors:
+            title = f"Transcript migration: {len(errors)} sessions need retry"
+        else:
+            # Unreachable through the spec gate (migrated>0 / aborted /
+            # errors); defensive no-card rather than an empty-stat card.
+            return
+
+        lines = [
+            f"Migrated: {migrated} session(s), {turns} turn(s) in {seconds:.1f}s",
+            f"Already current: {skipped}",
+            f"Kept on JSON (diverged): {len(kept)}",
+        ]
+        if kept:
+            shown = ", ".join(kept[:5]) + ("…" if len(kept) > 5 else "")
+            lines.append(f"  (diverged: {shown})")
+        lines.append(f"Errors: {len(errors)}")
+        for sk, err in errors[:5]:
+            lines.append(f"  {sk}: {err}")
+        if len(errors) > 5:
+            lines.append(f"  … and {len(errors) - 5} more")
+        if aborted:
+            lines.append(
+                "JSON files untouched — migration will retry on next launch."
+            )
+
+        project_name = self._active_project[0] if self._active_project else "(none)"
+        from models.feed_card import FeedCardData
+        card = FeedCardData(
+            card_type="system",
+            source="system",
+            title=title,
+            body="\n".join(lines),
+            author="Runtime",
+            timestamp=datetime.now(timezone.utc),  # noqa: UP017 — module idiom (:545)
+            project_name=project_name,
+            metadata={"kind": "store_migration", "stats": stats},
+        )
+        if self._fh is None:
+            logger.warning(
+                "store-migration card skipped: no feed handler wired (headless)"
+            )
+            return
+        try:
+            self._fh.add_card(card)
+        except Exception:
+            logger.exception("store-migration card emission failed (non-fatal)")
+
+    def _on_store_migration_progress(self, done: int, total: int) -> None:
+        """SP4A progress heartbeat (≤ every 10 sessions). Logger-only: the
+        drawer/UI surface for progress is post-MVP; the card reports the
+        total sweep once. Logs at info — cheap, greppable, never spammy at
+        the ≤-every-10 cadence."""
+        logger.info(
+            "[store-migration] progress: %d/%d sessions", done, total
+        )
 
     # ── AgentRuntime callbacks (dispatched to render pipeline) ───────────────
 

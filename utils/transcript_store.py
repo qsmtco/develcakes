@@ -437,6 +437,69 @@ class TranscriptStore:
             ).fetchone()
             return row[0] if row else -1
 
+    def set_session_meta(
+        self,
+        session_key: str,
+        agent_name: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+    ) -> None:
+        """Upsert sessions-table metadata (SPEC-08 §2 wrapper contract, SP4A).
+
+        Spec §2 assigned conversation metadata (agent_name/model/provider) to
+        the sessions table, but neither SP2's dual-write nor SP3's sweep
+        populated it — SP4A's store-mode load reads this table for the
+        HIGH-3 api_key re-resolution, so the columns needed writers. None
+        means "leave the existing value"; '' writes '' (callers pass None
+        for unknown fields, never ''). HIGH-3: agent_name/model/provider
+        carry no secrets. Committing; creates the sessions row when absent.
+        """
+        with self._lock:
+            self._ensure_open()
+            try:
+                self._conn.execute(self._BEGIN)
+                self._conn.execute(
+                    "INSERT INTO sessions (session_key, agent_name, model,"
+                    " provider, updated_at)"
+                    f" VALUES (?, COALESCE(?, ''), COALESCE(?, ''), ?, {_TS_NOW})"
+                    " ON CONFLICT(session_key) DO UPDATE SET"
+                    " agent_name = COALESCE(?, agent_name),"
+                    " model = COALESCE(?, model),"
+                    " provider = COALESCE(?, provider),"
+                    " updated_at = excluded.updated_at",
+                    (
+                        session_key,
+                        agent_name,
+                        model,
+                        provider,
+                        agent_name,
+                        model,
+                        provider,
+                    ),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._rollback_quietly()
+                raise
+
+    def session_meta(self, session_key: str) -> dict:
+        """Sessions-table metadata for ``session_key``; {} when unknown.
+
+        Returns the JSON-shape keys the store-mode loader feeds to
+        resolve_api_key_for_conversation: agent_name/model (possibly ''
+        when never written) and provider (str | None).
+        """
+        with self._lock:
+            self._ensure_open()
+            row = self._conn.execute(
+                "SELECT agent_name, model, provider FROM sessions"
+                " WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {"agent_name": row[0] or "", "model": row[1] or "", "provider": row[2]}
+
     def covers(self, session_key: str, upto: int) -> bool:
         """True iff the CURRENT epoch holds a row at every seq in [0..upto].
 

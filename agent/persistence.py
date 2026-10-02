@@ -17,12 +17,13 @@ import os
 import re
 import time
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from models.conversation import Conversation
+    from models.conversation import Conversation, Message
     from utils.transcript_store import TranscriptStore
 
 
@@ -132,6 +133,24 @@ def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
         os.chmod(path, 0o600)
     except OSError:
         pass  # non-POSIX filesystem
+    # SP4A: sessions-table metadata upsert — the store-mode loader reads
+    # agent_name/model/provider back for the HIGH-3 api_key re-resolution
+    # (and Conversation reconstruction) once the JSON file is renamed away.
+    # Best-effort like every other store touch: JSON is already on disk.
+    try:
+        _get_store().set_session_meta(
+            session_key,
+            agent_name=conv.agent_name,
+            model=conv.model,
+            provider=getattr(conv, "provider", None),
+        )
+    except Exception:
+        logger.warning(
+            "[persistence] sessions-meta upsert failed for %s — store-mode "
+            "load would rebuild with empty metadata (JSON fallback intact)",
+            session_key,
+            exc_info=True,
+        )
     # D3 dual-write (SPEC-08 SP2): the JSON file above stays authoritative for
     # one release; the store gets the DELTA of new messages. The delta compare
     # is INDEX/watermark-based ONLY — never value-based (an audit register
@@ -282,6 +301,180 @@ def _append_conversation_delta(conv: "Conversation", session_key: str) -> None:
     store.append_delta(session_key, base_idx, shaped_tail)
 
 
+def _naive_now() -> "datetime":
+    """Naive datetime.now() — Message.timestamp's storage convention.
+
+    DTZ005-anchored: the JSON body persists naive isoformat() strings
+    (Message's default_factory is naive) — an aware now() would mix tz
+    states within one conversation and skew isoformat round-trips. Parity
+    with models/conversation.py's own baseline wins over local tz-correctness.
+    """
+    return datetime.now()  # noqa: DTZ005 — see docstring (baseline parity)
+
+
+def _message_from_data(mdata: dict) -> "Message":
+    """Saved message dict -> Message — THE deserialization shape (SP4A).
+
+    Single definition shared by the JSON loader and the store fallback so
+    the two paths cannot drift (the shape-equivalence test pins it): role,
+    content, tool_calls (call_id/tool_name/arguments), tool_call_id,
+    tokens_used, timestamp (fromisoformat when parseable, else now —
+    the store's strftime('%f') format and the JSON isoformat both parse).
+    """
+    from models.conversation import Message, MessageRole, ToolCall
+    tool_calls = []
+    for tcdata in mdata.get("tool_calls") or []:
+        tool_calls.append(
+            ToolCall(
+                call_id=tcdata["call_id"],
+                tool_name=tcdata["tool_name"],
+                arguments=tcdata.get("arguments", {}),
+            )
+        )
+    raw_ts = mdata.get("timestamp")
+    try:
+        ts = (
+            datetime.fromisoformat(raw_ts)
+            if isinstance(raw_ts, str)
+            else _naive_now()
+        )
+    except ValueError:
+        ts = _naive_now()
+    if ts.tzinfo is not None:
+        # BUG#2 (SP4A fix round): the store's _TS_NOW ends in 'Z' →
+        # fromisoformat yields tz-AWARE, but Message.timestamp's convention
+        # is NAIVE (models/conversation.py default_factory; the JSON path's
+        # isoformat strings carry no offset). An aware row mixing into a
+        # naive conversation breaks sort/arithmetic (TypeError) and the
+        # aware form would leak into the JSON body on the next save.
+        # Parse-side normalization: strip tzinfo, keep the wall-clock value
+        # (covers legacy rows with no DB migration).
+        ts = ts.replace(tzinfo=None)
+    return Message(
+        role=MessageRole(mdata["role"]),
+        content=mdata.get("content", ""),
+        tool_calls=tool_calls,
+        tool_call_id=mdata.get("tool_call_id"),
+        timestamp=ts,
+        tokens_used=mdata.get("tokens_used", 0) or 0,
+    )
+
+
+def _conversation_from_data(data: dict) -> "Conversation":
+    """Saved conversation dict -> Conversation — the JSON body's shape.
+
+    Extracted verbatim from load_conversation_from_disk (SP4A) so the store
+    fallback rebuilds the EXACT same object shape: project_path/system_prompt
+    forced stale-unsafe (Option C+: runtime rebuilds them), allowed_tools
+    left None here — the live-def fallback below stays load-path-owned.
+    """
+    from models.conversation import Conversation
+    messages = [_message_from_data(m) for m in data.get("messages", [])]
+    return Conversation(
+        agent_name=data["agent_name"],
+        # Option C+: project_path and system_prompt are NOT loaded from disk.
+        # The persisted values may be stale (from a previous project the user
+        # had open). They are re-applied by _rebuild_conversation_context
+        # on first send, against the currently-active project. The persisted
+        # values are still written on save so a manual audit can read them
+        # back, but the runtime never trusts them.
+        project_path=None,
+        model=data.get("model", ""),
+        provider=data.get("provider"),  # HIGH-3: stored so we can re-resolve api_key
+        system_prompt="",
+        messages=messages,
+        total_tokens=data.get("total_tokens", 0),
+        total_cost=data.get("total_cost", 0.0),
+        step_count=data.get("step_count", 0),
+        allowed_tools=data.get("allowed_tools"),
+        app_title=data.get("app_title", ""),
+        mcp_servers=data.get("mcp_servers", []),
+        si_enforcement=data.get("si_enforcement"),
+        agent_role=data.get("agent_role", ""),
+        fallback_provider=data.get("fallback_provider"),
+        fallback_model=data.get("fallback_model"),
+    )
+
+
+def _load_conversation_from_store(
+    session_key: str, store: "TranscriptStore"
+) -> "tuple[Conversation, dict] | None":
+    """Store fallback for load_conversation_from_disk (SP4A load-gap ruling).
+
+    SPEC-08 §2: load delegates to load_all once the JSON file is gone (the
+    SP3 sweep renames it .migrated). Rebuilds the Conversation from rows
+    through _conversation_from_data — the EXACT JSON deserialization shape —
+    plus the sessions-table metadata (written by the dual-write save and the
+    sweep). Store failure (corrupt DB) -> log + None: absence of JSON is not
+    an error condition, and a broken store must never crash a send prep.
+
+    HIGH-3: api_key is NEVER read from rows (the store schema has no such
+    column, test-pinned) — it is re-resolved from providers.yaml exactly as
+    the JSON path does, keyed by the metadata dict.
+
+    D3 divergence note: store-hydrated sessions hold rows == messages by
+    construction (the wrapper appends one row per message, explicit seq ==
+    JSON index), so wm == len-1 and the SP2 dual-anchor guard passes
+    naturally — the trap this ruling closes was a migrated session loading
+    as None, fresh-converting, and its first save diverged-flagging the
+    store permanently. Divergence can still arise only where compaction
+    genuinely diverged — and those sessions stay JSON-backed (kept_on_json)
+    and never take this path.
+    """
+    try:
+        rows = store.load_all(session_key)
+    except Exception:
+        logger.warning(
+            "[persistence] store-mode load failed for %s — returning None "
+            "(JSON absent; fix or remove transcript.db to recover history)",
+            session_key,
+            exc_info=True,
+        )
+        return None
+    if not rows:
+        return None  # nothing in either place — today's None behavior
+    data: dict = dict(store.session_meta(session_key))
+    data.setdefault("session_key", session_key)
+    data["agent_name"] = data.get("agent_name") or ""
+    data["messages"] = [
+        {
+            "role": row.get("role", ""),
+            "content": row.get("content", ""),
+            "tool_calls": row.get("tool_calls") or [],
+            "tool_call_id": row.get("tool_call_id"),
+            "tokens_used": row.get("tokens_used") or 0,
+            "timestamp": row.get("timestamp"),
+        }
+        for row in rows
+    ]
+    conv = _conversation_from_data(data)
+    _apply_loaded_fallbacks(conv, session_key, data)
+    return conv, data
+
+
+def _apply_loaded_fallbacks(
+    conv: "Conversation", session_key: str, data: dict
+) -> None:
+    """api_key re-resolution + allowed_tools live-def fallback (SP4A).
+
+    The load-path tail both paths share — the HIGH-3 re-resolution keyed by
+    the metadata dict (JSON body or sessions meta; the rows NEVER carry a
+    key) and the allowed_tools fallback to the live agent definition. The
+    except-pass here is the pre-existing best-effort contract (gate skips
+    when lookup fails) — untouched.
+    """
+    api_key = resolve_api_key_for_conversation(data)
+    conv.api_key = api_key  # HIGH-3: re-resolved from providers.yaml
+    if conv.allowed_tools is None:
+        try:
+            from agent.special_agents import get_special_agent
+            agent_def = get_special_agent(session_key)
+            if agent_def is not None and agent_def.tools:
+                conv.allowed_tools = list(agent_def.tools)
+        except Exception:
+            pass  # Best-effort: leave None if lookup fails (gate skips)
+
+
 def resolve_api_key_for_conversation(data: dict) -> str | None:
     """Resolve the api_key for a loaded conversation from providers.yaml.
 
@@ -320,91 +513,50 @@ def resolve_api_key_for_conversation(data: dict) -> str | None:
 def load_conversation_from_disk(session_key: str) -> tuple["Conversation", dict] | None:
     """Load a conversation from disk. Returns (Conversation, metadata) or None.
 
+    SP4A (load-gap ruling, SPEC-08 §2): JSON present -> the JSON path
+    (unchanged D3 fallback contract). JSON ABSENT -> the store fallback
+    (_load_conversation_from_store) — a SP3-migrated session (file renamed
+    .migrated) hydrates from store rows instead of loading as None.
+
     HIGH-3: api_key is re-resolved from providers.yaml (atomic+0600) keyed
     by conv.model. Saved api_key in old files is ignored (and stripped
-    on next save by the one-time migration).
+    on next save by the one-time migration). The store path NEVER reads a
+    key from rows (schema has no such column, test-pinned).
     """
     path = os.path.join(conversations_dir(), f"{session_key}.json")
     if not os.path.isfile(path):
-        return None
+        # SP4A store fallback: the JSON file's absence is not an error —
+        # post-SP3 it usually means the sweep migrated this session. The
+        # store ACQUISITION itself is guarded: a corrupt transcript.db
+        # raises at construction (inside _get_store), and a broken store
+        # must never crash a send prep — None reads as "no history".
+        try:
+            store = _get_store()
+        except Exception:
+            logger.warning(
+                "[persistence] transcript store unavailable for load of %s "
+                "— returning None (JSON absent; fix or remove transcript.db "
+                "to recover history)",
+                session_key,
+                exc_info=True,
+            )
+            return None
+        return _load_conversation_from_store(session_key, store)
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
 
-    from models.conversation import Conversation, Message, MessageRole
-
-    messages = []
-    for mdata in data.get("messages", []):
-        from models.conversation import ToolCall
-        tool_calls = []
-        for tcdata in mdata.get("tool_calls", []):
-            tool_calls.append(
-                ToolCall(
-                    call_id=tcdata["call_id"],
-                    tool_name=tcdata["tool_name"],
-                    arguments=tcdata.get("arguments", {}),
-                )
-            )
-        msg = Message(
-            role=MessageRole(mdata["role"]),
-            content=mdata.get("content", ""),
-            tool_calls=tool_calls,
-            tool_call_id=mdata.get("tool_call_id"),
-            tokens_used=mdata.get("tokens_used", 0),
-        )
-        messages.append(msg)
-
-    # HIGH-3: re-resolve api_key from providers.yaml, NOT from saved data
-    api_key = resolve_api_key_for_conversation(data)
-
-    conv = Conversation(
-        agent_name=data["agent_name"],
-        # Option C+: project_path and system_prompt are NOT loaded from disk.
-        # The persisted values may be stale (from a previous project the user
-        # had open). They are re-applied by _rebuild_conversation_context
-        # on first send, against the currently-active project. The persisted
-        # values are still written on save so a manual audit can read them
-        # back, but the runtime never trusts them.
-        project_path=None,
-        model=data.get("model", ""),
-        provider=data.get("provider"),  # HIGH-3: stored so we can re-resolve api_key
-        system_prompt="",
-        messages=messages,
-        total_tokens=data.get("total_tokens", 0),
-        total_cost=data.get("total_cost", 0.0),
-        step_count=data.get("step_count", 0),
-        allowed_tools=data.get("allowed_tools"),
-        api_key=api_key,  # HIGH-3: re-resolved from providers.yaml
-        app_title=data.get("app_title", ""),
-        mcp_servers=data.get("mcp_servers", []),
-        si_enforcement=data.get("si_enforcement"),
-        agent_role=data.get("agent_role", ""),
-        fallback_provider=data.get("fallback_provider"),
-        fallback_model=data.get("fallback_model"),
-    )
-    # allowed_tools fallback: if the persisted conversation has no
-    # allowed_tools (pre-fix conversations or post-YAML-edit), fall back
-    # to the live agent definition's tools list. Mirrors the HIGH-3
-    # api_key re-resolution pattern: do not trust persisted state when
-    # live config is available. Without this, the execute_tool gate is
-    # a no-op for any conversation created before the gate shipped.
-    if conv.allowed_tools is None:
-        try:
-            from agent.special_agents import get_special_agent
-            agent_def = get_special_agent(session_key)
-            if agent_def is not None and agent_def.tools:
-                conv.allowed_tools = list(agent_def.tools)
-        except Exception:
-            pass  # Best-effort: leave None if lookup fails (gate skips)
+    conv = _conversation_from_data(data)
+    _apply_loaded_fallbacks(conv, session_key, data)
 
     # D3 dual-write hydration DELETED (SP2 fix round, BUG#2/#3): the old sync
     # of the store watermark UP to len(messages)-1 violated the ruling — the
     # watermark is "appended through", never "acknowledged through". No store
-    # interaction on load: load is pure JSON this release. The restart case
-    # self-heals on the next save: with wm=-1, append_delta backfills ALL
-    # JSON messages (D3's gradual self-migration).
+    # interaction on the JSON path: the restart case self-heals on the next
+    # save: with wm=-1, append_delta backfills ALL JSON messages (D3's
+    # gradual self-migration).
 
     return conv, data
 
@@ -638,6 +790,28 @@ def migrate_conversations_to_store(
                     else:
                         # Rename ONLY now: the current epoch PROVABLY holds
                         # every seq the file holds.
+                        # SP4A: metadata BEFORE the rename — once the file is
+                        # gone, the sessions table is the only agent_name/
+                        # model/provider source for store-mode load. A meta
+                        # failure does NOT block the rename (the sweep's
+                        # verdict is coverage-based): the loader rebuilds
+                        # with empty metadata and HIGH-3 resolves None —
+                        # logged, never silent.
+                        try:
+                            store.set_session_meta(
+                                sk,
+                                agent_name=str(data.get("agent_name", "")),
+                                model=str(data.get("model", "")),
+                                provider=data.get("provider"),
+                            )
+                        except Exception:  # meta is advisory, never blocks rename
+                            logger.warning(
+                                "[persistence] %s: sessions-meta upsert failed "
+                                "during migration — store-mode load will use "
+                                "empty metadata (api_key resolves None)",
+                                sk,
+                                exc_info=True,
+                            )
                         os.rename(path, path + ".migrated")
                         result["migrated"] += 1
                         # BUG#4: rows actually written, not file size (a

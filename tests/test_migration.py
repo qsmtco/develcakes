@@ -551,11 +551,24 @@ class TestCorruptDbFallback:
 
 class TestLaunchWiring:
     def test_flag_default_off(self):
-        """CRABCAKES_MIGRATE_STORE defaults OFF: the test suite constructs
-        runtimes against the REAL config dir — an unconditional sweep would
-        rename users' live files under pytest."""
+        """SP4A: production defaults the flag ON (main.py setdefault=1) and
+        the suite pins it OFF — tests/conftest.py sets
+        CRABCAKES_MIGRATE_STORE=0 at MODULE level, BEFORE any test module is
+        collected (collection-time `import main` in test_cli_nudge latches
+        agent.runtime's _MIGRATE_STORE_ON_INIT; a fixture-time pin would be
+        too late). Both halves are pinned: the suite's latch is False here,
+        and main.py still carries the setdefault (source-level pin — losing
+        it would silently disable migration in production)."""
         from agent.runtime import _MIGRATE_STORE_ON_INIT
         assert _MIGRATE_STORE_ON_INIT is False
+
+        import os
+        assert os.environ["CRABCAKES_MIGRATE_STORE"] == "0"
+        from pathlib import Path
+        main_src = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'os.environ.setdefault("CRABCAKES_MIGRATE_STORE", "1")' in main_src
 
     def test_init_without_flag_touches_nothing(self):
         """AgentRuntime __init__ with the flag unset performs NO migration
@@ -641,7 +654,7 @@ class TestLaunchWiring:
         # Capture the guarded closure through the SAME seam production uses.
         captured: dict = {}
 
-        def fake_async(on_complete):
+        def fake_async(on_complete, on_progress=None):
             captured["cb"] = on_complete
             # Real thread machinery, no sweep: the closure under test is what
             # matters; the sweep itself is irrelevant to this guard test.
@@ -769,7 +782,7 @@ class TestInitOrderGuard:
 
         monkeypatch.setattr(runtime_mod, "_log_store_migration_banner", recording_banner)
 
-        def sync_async(on_complete):
+        def sync_async(on_complete, on_progress=None):
             # Invoke completion SYNCHRONOUSLY — mid-__init__, before the
             # constructor proceeds; self._GLib is still None at this moment,
             # so _dispatch runs the receiver inline (no main loop exists).
@@ -823,7 +836,7 @@ class TestRestartClearsStopped:
         # Invoke the guarded closure via the same seam as the stop-drop test.
         captured: dict = {}
 
-        def fake_async(on_complete):
+        def fake_async(on_complete, on_progress=None):
             captured["cb"] = on_complete
             t = threading.Thread(target=lambda: None, daemon=True)
             t.start()
@@ -862,7 +875,7 @@ class TestDuringInitIdleAddPin:
             runtime_mod, "_log_store_migration_banner", lambda s: None
         )
 
-        def sync_async(on_complete):
+        def sync_async(on_complete, on_progress=None):
             if on_complete is not None:
                 on_complete({"migrated": 1, "turns": 2, "skipped": 0,
                              "seconds": 0.0, "errors": [], "kept_on_json": [],
@@ -879,3 +892,226 @@ class TestDuringInitIdleAddPin:
 
         assert len(idle_calls) >= 1  # the real idle_add path fired
         assert rt._stopped is False
+
+
+class TestBannerCardReceiver:
+    """SP4A Edit 2 — the handler-owned FeedCardData banner (Ruling 2) +
+    on_progress consumption, asserted at the ARH receiver."""
+
+    @staticmethod
+    def _stats(**overrides) -> dict:
+        base = {
+            "migrated": 0, "turns": 0, "skipped": 0, "seconds": 0.0,
+            "errors": [], "kept_on_json": [], "aborted": False,
+        }
+        base.update(overrides)
+        return base
+
+    def _receiver(self):
+        from unittest.mock import MagicMock
+
+        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+        return AgentRuntimeHandler(MagicMock(), MagicMock(), GLib_module=None)
+
+    def _build_card(self, handler, stats) -> list:
+        """Drive the receiver's card-construction path with a stub feed
+        handler capturing add_card (headless: no GLib → inline dispatch)."""
+        cards: list = []
+        handler._fh = type(
+            "FH", (), {"add_card": staticmethod(lambda c: cards.append(c) or len(cards))}
+        )()
+        handler._on_store_migration_complete(stats)
+        return cards
+
+    def test_banner_card_built_from_stats(self):
+        """Three shapes → three titles: success (migrated>0), aborted
+        (store unavailable), all-errors (migrated 0 + errors) — bodies carry
+        migrated/turns/skipped/seconds/kept-on-JSON/errors counts."""
+        handler = self._receiver()
+
+        ok_cards = self._build_card(handler, self._stats(
+            migrated=2, turns=7, skipped=1, seconds=0.4,
+            kept_on_json=["special:diverged"],
+        ))
+        assert len(ok_cards) == 1
+        assert ok_cards[0].title == "Transcript migration complete"
+        assert ok_cards[0].project_name == "(none)"  # no active project
+        assert ok_cards[0].metadata["kind"] == "store_migration"
+        for token in ("2 session(s)", "7 turn(s)", "0.4s",
+                      "special:diverged", "Errors: 0"):
+            assert token in ok_cards[0].body
+
+        abort_cards = self._build_card(handler, self._stats(
+            aborted=True, errors=[("<store>", "DatabaseError(...)")]
+        ))
+        assert abort_cards[0].title == "Transcript migration failed"
+        assert "retry on next launch" in abort_cards[0].body
+
+        err_cards = self._build_card(handler, self._stats(
+            seconds=0.2, errors=[("sk-a", "e1"), ("sk-b", "e2")]
+        ))
+        assert err_cards[0].title == "Transcript migration: 2 sessions need retry"
+        assert "sk-a" in err_cards[0].body and "sk-b" in err_cards[0].body
+
+    def test_banner_emits_through_feed_seam(self):
+        """The card flows through self._fh.add_card (the SPEC-02 seam) as a
+        system card; no hidden receiver-side dedupe — suppression belongs to
+        the sweep's process latch (an aborted→retry second card is
+        informative, so the receiver never silently drops it)."""
+        handler = self._receiver()
+        cards = self._build_card(handler, self._stats(migrated=1))
+        assert len(cards) == 1 and cards[0].card_type == "system"
+        cards2 = self._build_card(handler, self._stats(aborted=True))
+        assert len(cards2) == 1  # retry-after-abort still renders
+
+    def test_registration_at_runtime_construction(self, monkeypatch):
+        """Ruling 2 wiring pin: _get_runtime registers the handler-owned
+        receivers on every AgentRuntime it constructs — the banner card is
+        handler-built, not runtime-built."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import agent.config as agent_config_mod
+        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+        handler = AgentRuntimeHandler(MagicMock(), MagicMock(), GLib_module=None)
+        fake_config = SimpleNamespace(
+            default_provider="testprov",
+            providers={"testprov": SimpleNamespace(
+                name="testprov", api_key="sk-test", default_model="m/x",
+            )},
+        )
+        monkeypatch.setattr(agent_config_mod, "load_agent_config",
+                            lambda: fake_config)
+        agent_def = SimpleNamespace(llm_name="testprov", tools=None,
+                                    mcp_servers=None, role="tester",
+                                    api_key=None, app_title="",
+                                    fallback_provider=None)
+        try:
+            rt = handler._get_runtime("Tester", agent_def=agent_def)
+            # Bound methods are recreated on every attribute access —
+            # compare __func__ (the registration holds one bound instance).
+            assert rt._on_store_migration_callback.__func__ is (
+                handler._on_store_migration_complete.__func__
+            )
+            assert rt._on_store_migration_callback.__self__ is handler
+            assert rt._on_store_migration_progress.__func__ is (
+                handler._on_store_migration_progress.__func__
+            )
+        finally:
+            for rt in handler._runtimes.values():
+                rt.stop()
+
+    def test_production_order_banner_fires(self, monkeypatch):
+        """BUG#1 (SP4A fix round): the construct→wire→fire order production
+        actually runs — __init__ starts the sweep BEFORE the handler wires
+        set_on_store_migration, so the completion dispatch must read the
+        receiver AT DISPATCH TIME. A launch-time closure snapshot captures
+        the pre-wire None and the banner silently falls to the log fallback
+        (the suite stayed green because no test exercised this order — this
+        test is that gap, patched to fail if the fallback wins)."""
+        import agent.runtime as runtime_mod
+        from agent.config import AgentConfig
+        from agent.runtime import AgentRuntime
+
+        # The fallback is patched to RAISE: if the dispatch ever lands on
+        # the log fallback, this test fails loudly instead of silently
+        # passing on a fallback-only path.
+        def _fallback_must_not_fire(stats: dict) -> None:
+            raise AssertionError(
+                "log fallback fired — the handler-wired receiver was dropped"
+            )
+
+        monkeypatch.setattr(
+            runtime_mod, "_log_store_migration_banner", _fallback_must_not_fire
+        )
+
+        captured: dict = {}
+
+        def fake_async(on_complete, on_progress=None):
+            captured["cb"] = on_complete
+            t = threading.Thread(target=lambda: None, daemon=True)
+            t.start()
+            return t
+
+        monkeypatch.setattr(runtime_mod, "_migrate_store_async", fake_async)
+        monkeypatch.setattr(runtime_mod, "_MIGRATE_STORE_ON_INIT", True)
+        persistence._STORE_MIGRATION_DONE = False
+        try:
+            rt = AgentRuntime(AgentConfig())  # __init__ starts the sweep
+            # ... and the handler wires AFTER construction (production order).
+            received: list[dict] = []
+            rt.set_on_store_migration(on_complete=received.append)
+            assert rt._store_migration_thread is not None
+            rt._store_migration_thread.join(timeout=10)
+
+            stats = {"migrated": 1, "turns": 2, "skipped": 0, "seconds": 0.0,
+                     "errors": [], "kept_on_json": [], "aborted": False}
+            captured["cb"](stats)  # the sweep's completion, post-wire
+        finally:
+            persistence._STORE_MIGRATION_DONE = False
+
+        assert received == [stats], (
+            "receiver never fired — dispatch used the launch-time snapshot"
+        )
+        assert rt._stopped is False
+
+    def test_progress_consumed(self, monkeypatch):
+        """on_progress wired through the runtime setter reaches the ARH
+        receiver at the SP3 heartbeat cadence (10/20/total), via idle_add;
+        post-stop heartbeats are dropped (BUG#6's window)."""
+        import agent.runtime as runtime_mod
+        from agent.config import AgentConfig
+        from agent.runtime import AgentRuntime
+
+        rt = AgentRuntime(AgentConfig())
+        received: list[tuple[int, int]] = []
+        rt.set_on_store_migration(
+            on_complete=lambda stats: None,
+            on_progress=lambda done, total: received.append((done, total)),
+        )
+        assert rt._on_store_migration_progress is not None
+
+        # Drive the guarded progress closure via the production seam.
+        idle_calls: list = []
+
+        class RecordingGLib:
+            @staticmethod
+            def idle_add(fn, *args, **kwargs):
+                idle_calls.append(fn)
+                return 1
+
+        rt._GLib = RecordingGLib
+        captured: dict = {}
+
+        def fake_async(on_complete, on_progress=None):
+            captured["progress"] = on_progress
+            t = threading.Thread(target=lambda: None, daemon=True)
+            t.start()
+            return t
+
+        monkeypatch.setattr(runtime_mod, "_migrate_store_async", fake_async)
+        persistence._STORE_MIGRATION_DONE = True  # belt: no real sweep
+        try:
+            rt._start_store_migration()
+            thread = rt._store_migration_thread
+            assert thread is not None
+            thread.join(timeout=10)
+            captured["progress"](10, 25)
+            captured["progress"](20, 25)
+            captured["progress"](25, 25)
+        finally:
+            persistence._STORE_MIGRATION_DONE = False
+
+        # Each heartbeat scheduled the receiver through idle_add (the GLib
+        # main-loop hop), not dropped.
+        assert len(idle_calls) == 3
+        for fn in idle_calls:
+            fn()  # run the dispatched main-loop body
+        assert received == [(10, 25), (20, 25), (25, 25)]
+
+        # Post-stop the same heartbeats are DROPPED (BUG#6's window).
+        rt.stop()
+        idle_calls.clear()
+        captured["progress"](5, 25)
+        assert idle_calls == [] and received == [(10, 25), (20, 25), (25, 25)]

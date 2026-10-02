@@ -17,6 +17,18 @@ logging.basicConfig(
     format="%(name)s %(levelname)s %(message)s",
     stream=sys.stderr,
 )
+
+# SPEC-08 SP4A: store-mode load (agent/persistence.py) hydrates migrated
+# sessions from transcript.db, so renaming the legacy JSON away no longer
+# orphans a conversation — the one-time JSON→store migration sweep is safe
+# to DEFAULT ON. setdefault: an explicit CRABCAKES_MIGRATE_STORE=0 by the
+# operator still skips the sweep. This MUST sit before the ui.window import
+# below: agent.runtime reads the flag at MODULE-IMPORT time (its
+# settings_handler importer pulls agent.runtime in at top level), so
+# setting it inside main() would latch too late. Tests are isolated:
+# tests/conftest.py pins =0 process-wide before any agent.runtime import.
+os.environ.setdefault("CRABCAKES_MIGRATE_STORE", "1")
+
 # Require GTK 4.0 — must be called before importing Gtk
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, Gtk
@@ -263,13 +275,15 @@ def main():
     be silently dropped). Verified empirically (GApplication probe +
     headless crash trace, 2026-09-13).
     """
-    # SPEC-08 SP3: the launch-time JSON→store migration is wired end-to-end
-    # (agent/runtime.py) but DISABLED by default pending a cross-phase ruling:
-    # SP2 made conversation load pure-JSON, so a migrated (renamed) session
-    # loads as None → fresh conversation → its first save diverged-flags the
-    # store and suspends the delta permanently. Do NOT set
-    # CRABCAKES_MIGRATE_STORE=1 until the load-path ruling lands (see
-    # .crabcakes/context.md 2026-10-01 and the SP3 phase report).
+    # SPEC-08 SP3→SP4: the launch-time JSON→store migration is wired
+    # end-to-end (agent/runtime.py) and ENABLED by default since SP4 —
+    # main.py sets CRABCAKES_MIGRATE_STORE=1 (setdefault) above the window
+    # import. SP4's store-mode load closed the rename-safety gap: a
+    # migrated (renamed) session hydrates from transcript.db rows with the
+    # exact JSON shape, so its first save passes the dual-anchor guard
+    # instead of diverged-flagging the store. Operator override: launch
+    # with CRABCAKES_MIGRATE_STORE=0 to skip the sweep (JSON files stay
+    # authoritative; the banner card simply never fires).
     app = DevelcakesApp()  # Create application instance
     return app.run(sys.argv)  # Explicit argv — see docstring; run(None) lies.
 

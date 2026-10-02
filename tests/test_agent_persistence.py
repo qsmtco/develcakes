@@ -5,7 +5,9 @@ WITHOUT instantiating AgentRuntime — pure module-level function tests.
 """
 
 import json
+import logging
 import os
+import sqlite3
 import threading
 
 import pytest
@@ -576,6 +578,279 @@ class TestSaveLoadRoundtrip:
         with open(path) as f:
             data = json.load(f)
         assert "api_key" not in data  # HIGH-3
+
+
+class TestStoreModeLoad:
+    """SP4A Edit 1 — the load-gap ruling: JSON absent → store fallback.
+
+    SPEC-08 §2: 'load_conversation_from_disk delegates to load_all'. A
+    SP3-migrated session (file renamed .migrated) must hydrate from
+    transcript.db rows with the EXACT JSON deserialization shape —
+    otherwise it loads as None, fresh-converts, and its first save
+    diverged-flags the store (the trap this ruling closes).
+    """
+
+    def _make_conv(self, **overrides) -> Conversation:
+        defaults = {
+            "agent_name": "Coder",
+            "model": "minimax/MiniMax-M2.7",
+            "provider": "minimax",
+            "messages": [
+                Message(role=MessageRole.USER, content="m0-user"),
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content="m1-assistant",
+                    tool_calls=[
+                        ToolCall(call_id="c1", tool_name="read_file", arguments={"path": "a.py"})
+                    ],
+                ),
+                Message(role=MessageRole.TOOL_RESULT, content="m2-tool", tool_call_id="c1"),
+            ],
+        }
+        defaults.update(overrides)
+        return Conversation(**defaults)
+
+    def test_store_mode_load_hydrates_when_json_absent(self, tmp_path, monkeypatch):
+        """save 3 (wrapper dual-write) → rename JSON away (simulate the SP3
+        sweep) → load hydrates from the store: 3 messages with roles/
+        contents/tool_calls round-tripped, metadata carries model/provider/
+        agent_name (from the sessions table), api_key resolved from
+        providers — NEVER from rows."""
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        store = TranscriptStore(db_path=str(tmp_path / "t.db"))
+        monkeypatch.setattr(persistence, "_store_override", store)
+
+        conv = self._make_conv(api_key="sk-never-persisted")
+        save_conversation_to_disk(conv, "special:coder")
+        json_path = os.path.join(str(tmp_path), "conversations", "special:coder.json")
+        assert os.path.isfile(json_path)
+        os.rename(json_path, json_path + ".migrated")  # the SP3 sweep's rename
+
+        result = load_conversation_from_disk("special:coder")
+        assert result is not None, "store fallback failed — the load-gap trap"
+        loaded, meta = result
+        assert [m.role for m in loaded.messages] == [
+            MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL_RESULT
+        ]
+        assert [m.content for m in loaded.messages] == ["m0-user", "m1-assistant", "m2-tool"]
+        assert loaded.messages[1].tool_calls is not None
+        assert loaded.messages[1].tool_calls[0].call_id == "c1"
+        assert loaded.messages[1].tool_calls[0].tool_name == "read_file"
+        assert loaded.messages[1].tool_calls[0].arguments == {"path": "a.py"}
+        assert loaded.messages[2].tool_call_id == "c1"
+        # Metadata dict: sessions-table keys, provider/model/agent_name intact.
+        assert meta["model"] == "minimax/MiniMax-M2.7"
+        assert meta["provider"] == "minimax"
+        assert meta["agent_name"] == "Coder"
+        # HIGH-3: api_key re-resolution runs on the store path exactly as on
+        # the JSON path — keyed by the metadata dict against providers.yaml.
+        # (The saved conversation carried sk-never-persisted; it must not
+        # leak through rows OR metadata — resolution is providers-only.)
+        assert loaded.api_key is None  # no providers.yaml in the tmp dir yet
+        with open(os.path.join(str(tmp_path), "providers.yaml"), "w") as f:
+            f.write("- name: minimax\n  api_key: sk-from-providers\n"
+                    "  default_model: MiniMax-M2.7\n")
+        reloaded = load_conversation_from_disk("special:coder")
+        assert reloaded is not None
+        assert reloaded[0].api_key == "sk-from-providers"
+
+    def test_store_path_timestamps_are_naive(self, tmp_path, monkeypatch):
+        """BUG#2 (SP4A fix round): the store's _TS_NOW ends in 'Z' →
+        fromisoformat yields tz-AWARE — but Message.timestamp's convention
+        is NAIVE (JSON path; models/conversation.py default). Parse-side
+        normalization strips tzinfo: every hydrated timestamp is naive,
+        including a hand-planted aware-form row (legacy-DB shape)."""
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        store = TranscriptStore(db_path=str(tmp_path / "t.db"))
+        monkeypatch.setattr(persistence, "_store_override", store)
+
+        # Row 1: the store's own writer (strftime %fZ — the production form).
+        save_conversation_to_disk(self._make_conv(), "special:coder")
+        # Row 2: hand-planted AWARE-form row with an explicit offset (the
+        # legacy/manual-edit shape — +02:00, not just Z).
+        store.append_turn(
+            "special:coder", "user", "aware-row",
+            seq=3,  # past the wm (2) — append_delta would skip it
+        )
+        store._conn.execute(
+            "UPDATE turns SET timestamp = ? WHERE session_key = ? AND seq = 3",
+            ("2026-06-01T12:30:45.123+02:00", "special:coder"),
+        )
+        store._conn.commit()
+
+        json_path = os.path.join(str(tmp_path), "conversations", "special:coder.json")
+        os.rename(json_path, json_path + ".migrated")
+        result = load_conversation_from_disk("special:coder")
+        assert result is not None
+        loaded, _ = result
+        assert len(loaded.messages) == 4  # 3 wrapper rows + the planted aware row
+        for i, msg in enumerate(loaded.messages):
+            assert msg.timestamp.tzinfo is None, (
+                f"messages[{i}].timestamp is tz-aware: {msg.timestamp!r} — "
+                "would mix into the naive JSON convention"
+            )
+        # The planted aware row kept its wall-clock value (tzinfo stripped,
+        # not converted): 12:30:45 stays 12:30:45.
+        aware_row = loaded.messages[3]
+        assert (aware_row.timestamp.hour, aware_row.timestamp.minute) == (12, 30)
+
+    def test_store_mode_load_matches_json_shape(self, tmp_path, monkeypatch):
+        """Shape equivalence (spec pin): load-from-JSON vs load-from-store
+        for the same session produce identical message tuples (role, content,
+        tool_calls, tool_call_id, tokens_used)."""
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        store = TranscriptStore(db_path=str(tmp_path / "t.db"))
+        monkeypatch.setattr(persistence, "_store_override", store)
+
+        conv = self._make_conv()
+        save_conversation_to_disk(conv, "special:coder")
+        json_path = os.path.join(str(tmp_path), "conversations", "special:coder.json")
+
+        json_result = load_conversation_from_disk("special:coder")
+        assert json_result is not None
+        json_conv, _ = json_result
+        json_tuples = [
+            (
+                m.role,
+                m.content,
+                [
+                    (tc.call_id, tc.tool_name, tc.arguments)
+                    for tc in (m.tool_calls or [])
+                ],
+                m.tool_call_id,
+                m.tokens_used,
+            )
+            for m in json_conv.messages
+        ]
+
+        # Now the store path: rename JSON away, reload.
+        os.rename(json_path, json_path + ".migrated")
+        store_result = load_conversation_from_disk("special:coder")
+        assert store_result is not None
+        store_conv, _ = store_result
+        store_tuples = [
+            (
+                m.role,
+                m.content,
+                [
+                    (tc.call_id, tc.tool_name, tc.arguments)
+                    for tc in (m.tool_calls or [])
+                ],
+                m.tool_call_id,
+                m.tokens_used,
+            )
+            for m in store_conv.messages
+        ]
+
+        assert json_tuples == store_tuples
+        # Each tuple equals the shared builder's output over the saved body —
+        # pinning that BOTH loaders consume the same deserialization shape.
+        from agent.persistence import _message_from_data
+        with open(json_path + ".migrated", encoding="utf-8") as f:
+            body = json.load(f)
+        rebuilt = [_message_from_data(m) for m in body["messages"]]
+        assert [
+            (m.role, m.content, m.tool_call_id, m.tokens_used) for m in rebuilt
+        ] == [(t[0], t[1], t[3], t[4]) for t in store_tuples]
+
+    def test_store_mode_guard_passes_after_hydration(self, tmp_path, monkeypatch):
+        """The trap the ruling closes: hydrate from store → append 2 → save
+        → rows 0..4, NO divergence flag, wm 4. The dual-anchor guard passes
+        naturally because rows == the message list by construction."""
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        store = TranscriptStore(db_path=str(tmp_path / "t.db"))
+        monkeypatch.setattr(persistence, "_store_override", store)
+
+        conv = self._make_conv()
+        save_conversation_to_disk(conv, "special:coder")
+        json_path = os.path.join(str(tmp_path), "conversations", "special:coder.json")
+        os.rename(json_path, json_path + ".migrated")
+
+        loaded_result = load_conversation_from_disk("special:coder")
+        assert loaded_result is not None
+        loaded, _ = loaded_result
+        loaded.messages.append(Message(role=MessageRole.USER, content="new-3"))
+        loaded.messages.append(Message(role=MessageRole.ASSISTANT, content="new-4"))
+        save_conversation_to_disk(loaded, "special:coder")
+
+        rows = store.load_all("special:coder")
+        assert [r["seq"] for r in rows] == [0, 1, 2, 3, 4]
+        assert store.session_watermark("special:coder") == 4
+        assert store.is_diverged("special:coder") is False, (
+            "hydrated session diverged-flagged — the load-gap trap fired"
+        )
+
+    def test_store_mode_corrupt_store_returns_none(self, tmp_path, monkeypatch, caplog):
+        """GARBAGE transcript.db + no JSON → None (no raise), warning
+        logged. The store failure here raises at CONSTRUCTION (_get_store →
+        TranscriptStore.__init__ → sqlite3.DatabaseError) — the load-path
+        acquisition guard catches it; a broken store must never crash a
+        send prep. Control pins: (a) a LOADABLE legacy DB with a seq=-1
+        poison row is NOT corrupt — the load tolerates the read and
+        reconstructs (never raises); (b) a fresh store's CHECK(seq >= 0)
+        blocks a negative-seq INSERT at the door (SP3 round-3 pin)."""
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+
+        # ── Case 1: corrupt DB — the real "store failure → None" probe ──
+        with open(os.path.join(str(tmp_path), "transcript.db"), "wb") as f:
+            f.write(b"garbage not a database" * 16)
+        orig_override = persistence._store_override
+        orig_singleton = persistence._store_singleton
+        persistence._store_override = None
+        persistence._store_singleton = None
+        try:
+            with caplog.at_level(logging.WARNING, logger="agent.persistence"):
+                result = load_conversation_from_disk("special:coder")
+        finally:
+            persistence._store_override = orig_override
+            persistence._store_singleton = orig_singleton
+        assert result is None  # never raises — the corrupt-store contract
+        assert any(
+            "transcript store unavailable for load" in r.message
+            for r in caplog.records
+        )
+
+        # ── Case 2 control: loadable legacy DB, seq=-1 poison row ──
+        # load_all SUCCEEDS (a poison row is dirty data, not a corrupt
+        # store) — the load reconstructs and never raises.
+        db_path = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                epoch INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tool_calls TEXT,
+                tool_call_id TEXT,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                timestamp TEXT NOT NULL,
+                UNIQUE(session_key, epoch, seq)
+            );
+            INSERT INTO turns (session_key, seq, epoch, role, content,
+                               tokens_used, timestamp)
+            VALUES ('special:coder', -1, 0, 'user', 'poison', 0,
+                    '2026-01-01T00:00:00.000Z');
+            """
+        )
+        conn.commit()
+        conn.close()
+        legacy = TranscriptStore(db_path=db_path)
+        monkeypatch.setattr(persistence, "_store_override", legacy)
+        loaded = load_conversation_from_disk("special:coder")
+        assert loaded is not None  # tolerated read — dirty data, not failure
+        assert [m.content for m in loaded[0].messages] == ["poison"]
+        legacy.close()
+
+        # ── Case 3 control: a FRESH store's CHECK(seq >= 0) blocks the seed
+        # at the door — the poison class is legacy-DB-only (SP3 round-3). ──
+        fresh = TranscriptStore(db_path=str(tmp_path / "fresh.db"))
+        with pytest.raises(sqlite3.IntegrityError):
+            fresh.append_turn("special:coder", "user", "x", seq=-1)
+        fresh.close()
 
 
 class TestResolveSessionWorkspace:

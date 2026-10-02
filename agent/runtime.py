@@ -105,29 +105,36 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# SPEC-08 SP3: the launch-time JSON→store migration is OPT-IN via env var.
-# Default OFF because the runtime constructor runs in the test suite too,
-# where ~50 tests build runtimes against the REAL config dir — an
-# unconditional sweep would rename users' live conversation files under
-# pytest. Set by the OPERATOR before launch (opt-in; the app does not set
-# it — see main.py's pointer to the SP4 ruling).
+# SPEC-08 SP3/SP4A: the launch-time JSON→store migration is gated by env var.
+# SP4A enables it: main.py sets CRABCAKES_MIGRATE_STORE=1 (setdefault — an
+# explicit =0 by the operator still wins) BEFORE importing ui.window, because
+# this flag is READ HERE at module-import time (ui.handlers.settings_handler
+# imports agent.runtime at ITS module top, so the gate would otherwise latch
+# before main() ever runs). SP4A's store-mode load makes rename safe: a
+# migrated session hydrates from store rows instead of loading as None.
 _MIGRATE_STORE_ON_INIT: bool = (
     os.environ.get("CRABCAKES_MIGRATE_STORE", "") == "1"
 )
 
 
-def _migrate_store_async(on_complete: "Callable[[dict], None] | None") -> threading.Thread:
+def _migrate_store_async(
+    on_complete: Callable[[dict], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> threading.Thread:
     """Start the once-per-process JSON→store migration on a daemon thread.
 
     Returns the Thread (joined by tests; never joined in production).
     ``on_complete`` (when given) is invoked ON THE DAEMON THREAD with the
     stats dict — receivers that touch GTK must hop to the main loop
     themselves (the runtime's _start_store_migration does this via
-    _dispatch).
+    _dispatch). ``on_progress`` rides the same thread (SP4A Edit 2: the
+    heartbeat every-10-sessions cadence set by migrate_conversations_to_store).
     """
     def _run() -> None:
         try:
-            run_store_migration_once(on_complete=on_complete)
+            run_store_migration_once(
+                on_complete=on_complete, on_progress=on_progress
+            )
         except Exception:
             # The sweep itself is per-session isolated; this catches only
             # constructor-level failures (e.g. the store's corrupt-DB raise
@@ -549,17 +556,29 @@ class AgentRuntime:
         except Exception:
             logger.exception("[runtime] conversation migration failed (non-fatal)")
 
-        # SPEC-08 SP3: one-time JSON→store migration — OFF the UI thread. The
-        # banner card is emitted by the on_complete callback on the MAIN LOOP
-        # via _dispatch (GLib.idle_add when GLib is wired); the runtime itself
-        # builds no card. Opt-in via _MIGRATE_STORE_ON_INIT (default OFF: the
-        # test suite constructs many runtimes against the REAL config dir —
-        # an unconditional sweep would rename users' live files under pytest).
+        # SPEC-08 SP3/SP4A: one-time JSON→store migration — OFF the UI
+        # thread. The banner card is emitted by the on_complete callback on
+        # the MAIN LOOP via _dispatch (GLib.idle_add when GLib is wired);
+        # the runtime itself builds no card. Flag state (BUG#3, SP4A fix
+        # round — this comment previously said "default OFF", stale since
+        # main.py's setdefault landed): DEFAULT ON in production (main.py
+        # sets CRABCAKES_MIGRATE_STORE=1 above the window import; an
+        # explicit =0 by the operator skips the sweep), pinned OFF
+        # suite-wide by tests/conftest.py (module level — collection-time
+        # `import main` latches this flag before any fixture runs).
         # BUG#2 (SP3 fix round 2): _running/_stopped are initialized HERE,
         # BEFORE the migration call — the guard closure reads them, and a
         # synchronous on_complete during __init__ must not AttributeError.
         self._running = False
         self._stopped = False
+        # SP4A: migration receiver defaults (set_on_store_migration may
+        # override) — _start_store_migration's dispatch prefers the receiver
+        # when set, the logged fallback otherwise. Progress defaults to the
+        # debug logger so the heartbeat is never a silent drop.
+        self._on_store_migration_callback: Callable[[dict], None] | None = None
+        self._on_store_migration_progress: (
+            Callable[[int, int], None] | None
+        ) = None
         if _MIGRATE_STORE_ON_INIT:
             self._start_store_migration()
         else:
@@ -676,21 +695,26 @@ class AgentRuntime:
         self._dispatch(self._on_enforcement_status, session_key, tool_name, status)
 
     def _start_store_migration(self) -> None:
-        """SPEC-08 SP3: launch the once-per-process JSON→store migration.
+        """SPEC-08 SP3/SP4A: launch the once-per-process JSON→store migration.
 
         Daemon thread (never blocks app start). The stats land as a banner
         event ON THE MAIN LOOP through _dispatch (GLib.idle_add when GLib is
         wired) — the runtime never touches GTK directly, and the card builder
         is receiver-owned (the runtime has no project_path/feed handler; it
-        ships a logged fallback receiver).
+        ships a logged fallback receiver). SP4A: when the handler wired a
+        receiver via set_on_store_migration, the dispatch prefers it over
+        the logged fallback — the receiver builds the FeedCardData.
 
         BUG#6 (SP3 fix round): the completion dispatch guards on
-        ``self._running`` — a runtime stopped before the sweep finishes must
+        ``self._stopped`` — a runtime STOPPED before the sweep finishes must
         DROP the callback (log-and-drop) instead of scheduling GLib.idle_add
-        into a torn-down main loop. The on_progress consumption + feed-card
-        wiring stays SP4 per the ruling.
+        into a torn-down main loop. (_running is the tool-loop flag and is
+        False during __init__ — guarding on it would false-drop an
+        init-time completion.) start() clears _stopped, so a restart
+        reopens the dispatch window. The progress heartbeat rides the same
+        _stopped window: the handler-owned receiver (set_on_store_migration)
+        renders it; the runtime logs at debug when none is wired.
         """
-
         def _on_complete_guarded(stats: dict) -> None:
             # BUG#2 (SP3 fix round 2): reads _stopped ONLY — never _running.
             # Three states: during __init__ (_running False, _stopped False)
@@ -704,9 +728,37 @@ class AgentRuntime:
                     stats.get("migrated", 0),
                 )
                 return
-            self._dispatch(_log_store_migration_banner, stats)
+            # BUG#1 (SP4A fix round): read the receiver AT DISPATCH TIME —
+            # production wires set_on_store_migration AFTER __init__ starts
+            # the sweep, so a launch-time closure snapshot captures the
+            # pre-wire None and the banner silently falls to the log
+            # fallback forever. (_on_progress_guarded below already reads
+            # at fire time — this mirrors it.)
+            receiver = (
+                getattr(self, "_on_store_migration_callback", None)
+                or _log_store_migration_banner
+            )
+            self._dispatch(receiver, stats)
 
-        thread = _migrate_store_async(on_complete=_on_complete_guarded)
+        def _on_progress_guarded(done: int, total: int) -> None:
+            # Same window as the completion guard: a heartbeat scheduled
+            # after stop would idle_add into a torn-down loop (BUG#6's
+            # class, progress flavor).
+            if getattr(self, "_stopped", False):
+                return
+            progress = getattr(self, "_on_store_migration_progress", None)
+            if progress is not None:
+                self._dispatch(progress, done, total)
+            else:
+                logger.debug(
+                    "[runtime] store migration progress: %d/%d sessions",
+                    done,
+                    total,
+                )
+
+        thread = _migrate_store_async(
+            on_complete=_on_complete_guarded, on_progress=_on_progress_guarded
+        )
         self._store_migration_thread = thread
 
     def _terminate_turn(self, result: TurnResult) -> TurnResult | None:
@@ -897,6 +949,33 @@ class AgentRuntime:
 
     def is_running(self) -> bool:
         return self._running
+
+    def set_on_store_migration(
+        self,
+        on_complete: Callable[[dict], None] | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """SP4A: wire the store-migration banner receiver + progress heartbeat.
+
+        ``on_complete`` (dict stats) — the handler-owned FeedCardData builder;
+        when set, the completion dispatch resolves it AT DISPATCH TIME
+        (BUG#1, SP4A fix round — never a launch-time closure snapshot:
+        production wires this AFTER __init__ has already started the sweep,
+        so a snapshot would capture None forever). Falls back to the
+        runtime's logged banner when unset. ``on_progress`` (done, total) —
+        the sweep's ≤-every-10-sessions heartbeat, likewise read at fire
+        time. Ruling 2 (handler-owned card): the runtime has no
+        project_path/feed handler, so it never builds the card itself. Both
+        dispatch through _stopped's window like every other completion path
+        (post-stop → dropped, restart → reopens).
+
+        Args:
+            on_complete: cb(stats: dict) — receives the full sweep stats
+                (migrated/turns/skipped/seconds/errors/kept_on_json/aborted).
+            on_progress: cb(done: int, total: int) — heartbeat, ≤ every 10.
+        """
+        self._on_store_migration_callback = on_complete
+        self._on_store_migration_progress = on_progress
 
     # ── Conversation management ─────────────────────────────────────────────────
 

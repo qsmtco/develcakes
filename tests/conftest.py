@@ -18,6 +18,20 @@ elif not os.environ.get('DISPLAY') and not os.environ.get('GDK_BACKEND'):
 # Ensure crabcakes package is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# SPEC-08 SP4: production now defaults the migration flag ON (main.py
+# setdefault) — pin it OFF for the whole pytest process BEFORE any test
+# module is collected. Collection-time imports (e.g. test_cli_nudge imports
+# `main`) pull in agent.runtime, which reads CRABCAKES_MIGRATE_STORE at
+# module-import time and latches _MIGRATE_STORE_ON_INIT; a fixture-time pin
+# would run too late. Without this, an AgentRuntime() built later in the
+# process could sweep the REAL config dir (the 2026-10-01 incident class —
+# the autouse store override cannot prevent a sweep: the flag path clears
+# the override itself). Bare os.environ, not monkeypatch: the value must be
+# correct for every import of agent.runtime in this process — there is
+# nothing to restore. The flag-default-off unit test in test_migration.py
+# pins THIS behavior (module-level seam, import-order-dependent).
+os.environ["CRABCAKES_MIGRATE_STORE"] = "0"
+
 
 @pytest.fixture(autouse=True)
 def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
