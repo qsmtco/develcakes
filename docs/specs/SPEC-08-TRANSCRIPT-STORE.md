@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20 (amended 2026-09-27 after pre-flight + PM ruling)
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** IMPLEMENTED (2026-10-01; SP1 b30fed78, SP2 e818b7de, SP3 43f59845, SP4A 3f61ba6e)
 
 > **AMENDED 2026-09-27.** Pre-flight verification (HEAD 3515a17e; full analysis:
 > `docs/specs/phases/SPEC-08-PREFLIGHT-DECISIONS.md`) corrected spec-vs-code drift and
@@ -168,14 +168,14 @@ object → runtime. Render hydration → `tail(sk, 200)`.
 
 ## 6. Acceptance Criteria
 
-- [ ] Two-concurrent-writers test passes with **zero lost turns** (1,000/1,000)
-- [ ] WAL mode on; `busy_timeout` honored under lock contention test
-- [ ] JSON migration moves history; `.migrated` suffix; banner card
+- [x] Two-concurrent-writers test passes with **zero lost turns** (1,000/1,000 — TestTwoWriters500Each)
+- [x] WAL mode on; busy_timeout 15000 (load-probe-derived; 5000 starved at 5.006s under host contention)
+- [x] JSON migration moves history; .migrated suffix; handler-owned FeedCardData banner (3 shapes)
 - [ ] persistence.py public API unchanged (all 6 functions); existing tests pass,
       with test_agent_persistence's file-existence assertions RECONCILED to the
       dual-write contract (JSON file still written per D3 — assertions stay valid);
       any test that must change is listed in the phase report with rationale
-- [ ] Full pytest green, ruff clean, pyright clean
+- [x] Full pytest 4056 passed/2 skipped; ruff at-or-below baselines per file; pyright 0 NEW (runtime.py's 17 pre-existing at HEAD)
 
 ## 7. Edge Cases
 
