@@ -14,6 +14,7 @@ _logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
+from ui.views.activity_pill import ActivityPillLabel
 from ui.views.chat_input_toolbar import ChatInputToolbar
 from ui.views.session_menu import show_session_menu, show_project_menu
 from utils.escaping import escape_for_pango
@@ -118,8 +119,8 @@ class MainContent(Gtk.Box):
 
         # ── Project Settings Bar — floating OVER the chat scroll area only ────
         # Placed as overlay on the notebook's chat area (not the tab bar).
-        # Semi-transparent; chat content scrolls underneath it.
-        # CSS .project-feed-bar provides rgba background + border-radius.
+        # Opaque (UI-PILLBAR P1: rgba 0.75 → #1e1e28); chat content scrolls
+        # underneath it. CSS .project-feed-bar provides background + radius.
         self._project_settings = Gtk.Box()
         self._project_settings.set_halign(Gtk.Align.FILL)
         self._project_settings.set_valign(Gtk.Align.START)
@@ -127,7 +128,7 @@ class MainContent(Gtk.Box):
         self._project_settings.set_margin_top(4)
         self._project_settings.set_margin_bottom(0)
         self._project_settings.add_css_class("project-feed-bar")
-        self._project_settings.set_visible(False)  # hidden until a project is opened
+        self._project_settings.set_visible(False)  # first update_project_settings() shows it (pill-only or full)
         _feed_lbl = Gtk.Label()
         _feed_lbl.set_halign(Gtk.Align.END)
         _feed_lbl.set_margin_start(8)
@@ -135,18 +136,19 @@ class MainContent(Gtk.Box):
         _feed_lbl.set_markup('<span foreground="#6b6b7a" font_desc="Sans 10">Project Settings</span>')
         self._project_settings.append(_feed_lbl)
 
-        # Singleton gear button (⚙) — right-aligned, opens the Settings dialog.
-        # Round 2 BUG #5: this widget is re-appended by update_project_settings()
-        # and BOTH legacy text setters after _clear_settings_bar() removes all
-        # children, so it is never lost across bar rebuilds (SPEC-...-FIX-3 §2.1).
-        # GTK4: set_has_frame(False), NOT set_relief()/ReliefStyle (removed in GTK4).
-        self._settings_btn = Gtk.Button(label="⚙")
-        self._settings_btn.set_has_frame(False)
-        self._settings_btn.set_focus_on_click(False)
-        self._settings_btn.add_css_class("project-bar-gear")
-        self._settings_btn.set_margin_end(8)
-        self._settings_btn.connect("clicked", self._on_settings_btn_clicked)
-        self._on_settings_clicked = None
+        # UI-PILLBAR Phase 1 — the SHARED activity-status pill lives at the
+        # bar's right end (info_box is hexpand+START, so the pill lands at
+        # the right edge). One pill for every tab: the ActivityPillAdapter
+        # in window.py resolves THIS widget (no per-surface pills anymore —
+        # those retire with chat_surface's copy in Phase 2). Hosted by BOTH
+        # bar rebuild paths (update_project_settings and the pill-only
+        # branch) after _clear_settings_bar() removes all children.
+        self._activity_pill = ActivityPillLabel()
+        # Audit suggestion (UI-PILLBAR P1): append at construction too —
+        # between the first tab open and the first update_project_settings
+        # the bar is a visible overlay with no pill (empty strip). The
+        # rebuild paths re-append after clearing; this closes the transient.
+        self._project_settings.append(self._activity_pill)
         self._on_agent_cycle = None
         self._on_autoaccept_cycle = None
 
@@ -284,11 +286,18 @@ class MainContent(Gtk.Box):
         Called by window.py when project opens/closes, members change, solo
         target changes, auto-accept level changes, or branch refresh lands.
 
-        Empty project (project_name falsy) -> hide the bar and return.
+        Empty project (project_name falsy) -> PILL-ONLY mode: the bar stays
+        VISIBLE with just the shared activity pill (Supervisor ruling,
+        UI-PILLBAR P1 — status stays visible on project-less tabs). The bar
+        goes fully hidden only while no chat tab exists at all.
         """
         if not project_name:
-            self._project_settings.set_visible(False)
             self._clear_settings_bar()
+            # PILL-ONLY MODE — PM ruling 2026-10-02: project-less tabs keep
+            # the bar in a 28px strip hosting ONLY the activity pill, so
+            # agent status remains visible everywhere. No project info.
+            self._project_settings.append(self._activity_pill)
+            self._project_settings.set_visible(True)
             return
 
         self._clear_settings_bar()
@@ -358,8 +367,14 @@ class MainContent(Gtk.Box):
         info_box.append(branch_label)
 
         self._project_settings.append(info_box)
-        # Always re-append the singleton gear — _clear_settings_bar() removed it.
-        self._project_settings.append(self._settings_btn)
+        # Re-append the shared pill — _clear_settings_bar() removed it.
+        # (info_box is hexpand+START; the pill lands at the bar's right end.)
+        self._project_settings.append(self._activity_pill)
+
+    def activity_pill(self) -> ActivityPillLabel:
+        """Read accessor for the SHARED activity pill (window.py's
+        ActivityPillAdapter resolver targets this). One widget, one truth."""
+        return self._activity_pill
 
     def _resolve_agent_display_name(self, session_key: str) -> str:
         """Resolve a member session_key to a human-readable name.
@@ -397,13 +412,6 @@ class MainContent(Gtk.Box):
             return
         self._on_autoaccept_cycle(current_level)
 
-    def _on_settings_btn_clicked(self, _btn):
-        if self._on_settings_clicked:
-            self._on_settings_clicked()
-
-    def set_on_settings_clicked(self, callback):
-        self._on_settings_clicked = callback
-
     def set_on_agent_cycle(self, callback):
         self._on_agent_cycle = callback
 
@@ -413,10 +421,11 @@ class MainContent(Gtk.Box):
     def set_project_settings_text(self, text: str):
         """Set text or markup on the project settings bar. Handles Pango markup correctly.
 
-        Backward compat: still clears the bar, appends the label, then re-appends the
-        singleton gear button so it is never lost (BUG #5). Uses the sibling-walk
-        _clear_settings_bar() helper (not `for child in list(box)`). A later
-        update_project_settings() call fully rebuilds the row.
+        Backward compat: still clears the bar, appends the label, then
+        re-appends the shared activity pill so it is never lost. Uses the
+        sibling-walk _clear_settings_bar() helper (not
+        `for child in list(box)`). A later update_project_settings() call
+        fully rebuilds the row.
         """
         self._clear_settings_bar()
         lbl = Gtk.Label()
@@ -428,7 +437,7 @@ class MainContent(Gtk.Box):
         else:
             lbl.set_text(text)
         self._project_settings.append(lbl)
-        self._project_settings.append(self._settings_btn)
+        self._project_settings.append(self._activity_pill)
 
     def set_on_buffer_changed(self, cb: callable) -> None:
         """Register callback for input buffer 'changed' events. cb(buffer)."""
@@ -486,9 +495,9 @@ class MainContent(Gtk.Box):
     def set_feed_bar_text(self, text):
         """Update the project feed bar with a status message (legacy).
 
-        Same gear-preservation as set_project_settings_text() (BUG #5): uses the
-        sibling-walk _clear_settings_bar() helper and re-appends the singleton
-        gear button so it is never lost.
+        Same pill-preservation as set_project_settings_text(): uses the
+        sibling-walk _clear_settings_bar() helper and re-appends the shared
+        activity pill so it is never lost.
         """
         self._clear_settings_bar()
         if text:
@@ -501,7 +510,7 @@ class MainContent(Gtk.Box):
             else:
                 lbl.set_text(text)
             self._project_settings.append(lbl)
-        self._project_settings.append(self._settings_btn)
+        self._project_settings.append(self._activity_pill)
 
     # ── Tab management ──────────────────────────────────────────────────────
 

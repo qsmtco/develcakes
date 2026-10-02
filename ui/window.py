@@ -252,14 +252,16 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self._left_panel.set_prompts_handler(self._prompts_handler)
 
-        # Activity handler — owns the activity-pill state machine (Phase 6)
+        # Activity handler — owns the activity-pill state machine (Phase 6).
+        # UI-PILLBAR P1: the resolver targets the SHARED pill in the project
+        # bar (main_content.activity_pill()) — one stable widget on every
+        # tab. The adapter's catch-up machinery no-ops (surface identity
+        # never changes); it stays as the duck-type the handler speaks.
         self._activity_handler = ActivityHandler(
             status_target=ActivityPillAdapter(
                 lambda: (
-                    self._chat_render_handler.surface_for_key(
-                        self._main_content.get_current_session_key()
-                    )
-                    if self._chat_render_handler is not None
+                    self._main_content.activity_pill()
+                    if getattr(self, "_main_content", None) is not None
                     else None
                 )
             ),
@@ -481,7 +483,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # ── Project settings bar — wire all callbacks (SPEC-...-FIX-3 §2.2) ──
         # Round 2 BUG #4: main_content clicks → window handlers.
-        self._main_content.set_on_settings_clicked(self._on_settings_btn_clicked)
+        # UI-PILLBAR P1: the bar's gear is GONE — no set_on_settings_clicked
+        # wiring. The toolbar's ⚙ Settings (wired to _open_settings at
+        # construction) is the sole settings path.
         self._main_content.set_on_agent_cycle(self._on_agent_cycle_clicked)
         self._main_content.set_on_autoaccept_cycle(self._on_autoaccept_cycle_clicked)
 
@@ -1325,10 +1329,6 @@ class MainWindow(Gtk.ApplicationWindow):
         newly confirmed level (Round 3 BUG #4).
         """
         self._refresh_settings_bar_for_active(level)
-
-    def _on_settings_btn_clicked(self):
-        """⚙ -> open the existing Settings dialog (fresh instance each call)."""
-        self._open_settings()
 
     def _on_providers_changed(self) -> None:
         """SPEC-01: a provider save landed — refresh cached runtime provider config.

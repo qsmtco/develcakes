@@ -31,7 +31,10 @@ from gi.repository import Gtk, Gdk
 APP_CSS = """
 /* -- Feed bar ----------------------------------------------------------- */
 .project-feed-bar {
-    background: rgba(30, 30, 40, 0.75);
+    /* UI-PILLBAR Phase 1: opaque — the bar is a chrome surface now (it
+       hosts the activity pill), not a floating translucent overlay. Same
+       hue as the old rgba(30, 30, 40, 0.75), alpha 1. */
+    background: #1e1e28;
     border-radius: 4px;
 }
 

@@ -4,9 +4,12 @@
 # SPEC-PROJECT-SETTINGS-BAR-ENHANCED-FIX-3 §5 Step 3 (Phase I.5).
 # Covers:
 #   - _clear_settings_bar()           (sibling-walk cleanup)
-#   - update_project_settings()       (empty hides; non-empty shows)
-#   - gear-preservation (BUG #5)      (set_project_settings_text /
-#                                       set_feed_bar_text re-append gear)
+#   - update_project_settings()       (empty -> PILL-ONLY; non-empty -> info)
+#   - pill-preservation               (set_project_settings_text /
+#                                       set_feed_bar_text re-append the pill;
+#                                       UI-PILLBAR P1 — was the gear, BUG #5)
+#   - settings-gear ABSENCE pin       (UI-PILLBAR P1: gear + setter + click
+#                                       handler deleted; toolbar is sole path)
 #   - xml_escape_text hardening (BUG #6) (project_name / branch literal)
 #   - _resolve_agent_display_name()   (BUG #7 .get() + truthiness fallback)
 #   - click-handler None guards
@@ -15,11 +18,11 @@
 # module-global `Gtk` for lightweight fakes so the REAL method bodies execute
 # without constructing any real GTK widgets.
 
-import pytest
 from unittest.mock import MagicMock
 
-from ui.views.main_content import MainContent
+import pytest
 
+from ui.views.main_content import MainContent
 
 # ── Fake Gtk classes (no real GTK construction) ──────────────────────────────
 
@@ -174,12 +177,15 @@ def mc(fake_gtk):
 
     The real method bodies (the units under test) execute against the fake
     Gtk classes. No real GTK widgets are constructed.
-    """
+
+    UI-PILLBAR P1: the singleton gear is DELETED (window.py's toolbar ⚙ is
+    the sole settings path) — the shared activity pill replaces it as the
+    preserved right-end widget. The fixture mirrors the new __init__ state
+    (ActivityPillLabel + cycle callbacks; no gear, no settings callback)."""
     instance = MainContent.__new__(MainContent)
     instance._project_settings = _FakeBox()
-    # Mirror the __init__ gear construction using the fake Gtk.
-    instance._settings_btn = _FakeGtk.Button(label="⚙")
-    instance._on_settings_clicked = None
+    # Mirror the __init__ pill construction (same class the real code uses).
+    instance._activity_pill = _FakeGtk.Label()
     instance._on_agent_cycle = None
     instance._on_autoaccept_cycle = None
     instance._agent_mgr = None
@@ -213,52 +219,61 @@ class TestClearSettingsBar:
 
 
 class TestUpdateProjectSettings:
-    def test_update_project_settings_hides_on_empty(self, mc):
-        """Falsy project_name -> set_visible(False) and bar cleared."""
+    def test_update_project_settings_pill_only_on_empty(self, mc):
+        """Falsy project_name -> PILL-ONLY mode (UI-PILLBAR P1 Supervisor
+        ruling): bar stays VISIBLE with exactly one child — the shared
+        activity pill. Status stays visible on project-less tabs; the old
+        hide-the-bar behavior is retired."""
         mc.update_project_settings("", 0, None, "off", None)
-        assert mc._project_settings.visible is False
-        assert len(mc._project_settings.children) == 0
+        assert mc._project_settings.visible is True
+        children = mc._project_settings.children
+        assert len(children) == 1
+        assert children[0] is mc._activity_pill
 
     def test_update_project_settings_shows_on_nonempty(self, mc):
-        """Valid args -> set_visible(True) and info_box + gear appended.
+        """Valid args -> set_visible(True) and info_box + pill appended.
 
         The bar ends with exactly two top-level children: the info_box and
-        the singleton gear button (which _clear_settings_bar removed)."""
+        the shared activity pill (which _clear_settings_bar removed)."""
         mc.update_project_settings("proj", 2, None, "off", "main")
 
         assert mc._project_settings.visible is True
         children = mc._project_settings.children
         assert len(children) == 2
-        assert children[1] is mc._settings_btn, (
-            "gear must be re-appended last (BUG #5)"
+        assert children[1] is mc._activity_pill, (
+            "pill must be re-appended last (right end of the bar)"
         )
         info_box = children[0]
         assert isinstance(info_box, _FakeBox)
 
 
-class TestGearPreservation:
-    def test_gear_preserved_in_set_project_settings_text(self, mc):
-        """set_project_settings_text re-appends the gear (BUG #5)."""
+class TestPillPreservation:
+    """UI-PILLBAR P1: the BUG #5 preservation contract transfers from the
+    deleted gear to the shared activity pill — same rebuild paths, same
+    sibling-walk cleanup, same re-append."""
+
+    def test_pill_preserved_in_set_project_settings_text(self, mc):
+        """set_project_settings_text re-appends the pill."""
         mc.set_project_settings_text("legacy")
-        # label + gear
-        assert mc._settings_btn.get_parent() is mc._project_settings
+        # label + pill
+        assert mc._activity_pill.get_parent() is mc._project_settings
         assert len(mc._project_settings.children) == 2
-        assert mc._project_settings.children[1] is mc._settings_btn
+        assert mc._project_settings.children[1] is mc._activity_pill
 
-    def test_gear_preserved_in_set_feed_bar_text(self, mc):
-        """set_feed_bar_text re-appends the gear (BUG #5)."""
+    def test_pill_preserved_in_set_feed_bar_text(self, mc):
+        """set_feed_bar_text re-appends the pill."""
         mc.set_feed_bar_text("status")
-        assert mc._settings_btn.get_parent() is mc._project_settings
+        assert mc._activity_pill.get_parent() is mc._project_settings
         assert len(mc._project_settings.children) == 2
-        assert mc._project_settings.children[1] is mc._settings_btn
+        assert mc._project_settings.children[1] is mc._activity_pill
 
-    def test_gear_preserved_through_repeated_calls(self, mc):
-        """Repeated rebuilds never lose the gear."""
+    def test_pill_preserved_through_repeated_calls(self, mc):
+        """Repeated rebuilds never lose the pill."""
         for _ in range(3):
             mc.set_project_settings_text("x")
-            assert mc._settings_btn.get_parent() is mc._project_settings
+            assert mc._activity_pill.get_parent() is mc._project_settings
         mc.set_feed_bar_text("y")
-        assert mc._settings_btn.get_parent() is mc._project_settings
+        assert mc._activity_pill.get_parent() is mc._project_settings
 
 
 class TestXmlEscapeHardening:
@@ -315,28 +330,27 @@ class TestResolveAgentDisplayName:
 
 class TestClickHandlersGuard:
     def test_click_handlers_guard_none(self, mc):
-        """Each click handler with callback set to None is a no-op (no
-        AttributeError / TypeError)."""
+        """Each surviving click handler with callback set to None is a no-op
+        (no AttributeError / TypeError). The settings paths are DELETED
+        (UI-PILLBAR P1) — they must not come back silently, so this test
+        pins their absence instead of their no-op behavior."""
         mc._on_agent_cycle = None
         mc._on_autoaccept_cycle = None
-        mc._on_settings_clicked = None
         mc._on_agent_label_clicked("special:x")   # must not raise
         mc._on_autoaccept_label_clicked("off")    # must not raise
-        mc._on_settings_btn_clicked(None)         # must not raise
+        assert not hasattr(mc, "_on_settings_btn_clicked")
+        assert not hasattr(mc, "set_on_settings_clicked")
+        assert not hasattr(mc, "_on_settings_clicked")
 
     def test_click_handlers_fire_when_wired(self, mc):
         """Wired callbacks are invoked with the expected argument."""
         agent_calls = []
         auto_calls = []
-        settings_calls = []
         mc.set_on_agent_cycle(lambda sk: agent_calls.append(sk))
         mc.set_on_autoaccept_cycle(lambda lvl: auto_calls.append(lvl))
-        mc.set_on_settings_clicked(lambda: settings_calls.append("clicked"))
 
         mc._on_agent_label_clicked("special:x")
         mc._on_autoaccept_label_clicked("files")
-        mc._on_settings_btn_clicked(None)
 
         assert agent_calls == ["special:x"]
         assert auto_calls == ["files"]
-        assert settings_calls == ["clicked"]
