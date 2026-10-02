@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import re
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -461,6 +463,291 @@ def migrate_conversation_files() -> int:
             count,
         )
     return count
+
+
+# ── SPEC-08 SP3: one-time JSON→store migration ───────────────────────────────
+
+# Batch boundary: the sessions-loop heartbeat. store.append_delta commits per
+# CALL (one transaction for a whole session's tail — not per-turn fsync), and
+# on_progress fires at most every _MIGRATION_PROGRESS_INTERVAL sessions, so a
+# 3,491-file sweep produces ~350 progress pings, not 3,491.
+_MIGRATION_PROGRESS_INTERVAL = 10
+
+
+def migrate_conversations_to_store(
+    on_progress: "Callable[[int, int], None] | None" = None,
+) -> dict:
+    """One-time JSON→store migration. Idempotent + resumable.
+
+    For each ``<sk>.json`` in conversations_dir(): if the store holds at
+    least as many turns for sk as the file has messages (COUNT-based check,
+    NOT the watermark — the SP2 audit's BUG#3 showed a wm that can run ahead
+    of rows; COUNT is the belt-and-braces predicate) AND the session is NOT
+    diverged-flagged, skip — dual-write already caught up. Otherwise append
+    the missing tail (explicit-index appends via append_delta, rows[i] at
+    JSON index base_idx+i — the same alignment _append_conversation_delta
+    uses), then rename the file to ``<sk>.json.migrated``.
+
+    Diverged sessions: NEVER renamed (fix-round-2 ruling — compacted sessions
+    are JSON-only forever; renaming would cement a store missing turns) and
+    NOT appended; counted in ``kept_on_json`` (the banner lists them).
+
+    Batching: one append_delta commit per session; the batch boundary is the
+    sessions-loop heartbeat (on_progress at most every 10 sessions).
+
+    Returns::
+
+        {"migrated": n_sessions, "turns": n_turns, "skipped": n,
+         "seconds": t, "errors": [(session_key, repr(e)), ...],
+         "kept_on_json": [session_key, ...]}
+
+    Non-destructive: NO file is deleted. Unreadable files are counted in
+    ``errors`` and LEFT AS-IS (never renamed) — a retry on the next launch
+    can attempt them again. A session whose append fails is likewise left
+    unrenamed: partial rows are harmless (append_delta is index-aligned and
+    idempotent; the retry skips indexes the store already holds).
+
+    ``on_progress(done, total)`` fires at most every 10 sessions plus a
+    final call at completion. Exceptions raised BY the callback are ignored
+    (a broken heartbeat must not abort the sweep).
+
+    Failure posture: the store ACQUISITION itself (corrupt transcript.db) is
+    inside the guarded region — on failure the function RETURNS a stats dict
+    with ``aborted=True`` and ``errors=[("<store>", repr(e))]`` (never
+    raises): JSON is untouched, nothing was renamed, and the next launch
+    retries (run_store_migration_once unsets the latch on abort).
+    """
+    start = time.monotonic()
+    result: dict = {
+        "migrated": 0,
+        "turns": 0,
+        "skipped": 0,
+        "seconds": 0.0,
+        "errors": [],
+        "kept_on_json": [],
+        "aborted": False,
+    }
+    d = conversations_dir()
+    try:
+        names = sorted(
+            f for f in os.listdir(d) if f.endswith(".json")
+        )
+    except OSError:
+        return result  # no conversations dir yet — nothing to migrate
+    total = len(names)
+    try:
+        store: TranscriptStore = _get_store()
+    except Exception as exc:  # abort-and-retry is the contract
+        # BUG#3 (SP3 fix round): a corrupt DB previously raised OUT of the
+        # sweep with the latch already set — silent total abort, no card, no
+        # retry. Now: return-and-retry. The SP4 banner renders "migration
+        # failed — JSON untouched, will retry next launch" from `aborted`.
+        logger.exception(
+            "[persistence] transcript store unavailable — migration ABORTED, "
+            "JSON untouched, will retry next launch"
+        )
+        result["aborted"] = True
+        result["errors"].append(("<store>", repr(exc)))
+        result["seconds"] = round(time.monotonic() - start, 3)
+        return result
+    for done, name in enumerate(names, start=1):
+        sk = name[: -len(".json")]
+        path = os.path.join(d, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            messages = data.get("messages", [])
+            if store.is_diverged(sk):
+                # Compacted session: JSON stays authoritative forever. Never
+                # renamed, never appended — the store rows are an audit ledger.
+                result["kept_on_json"].append(sk)
+            elif not messages:
+                # Empty history: nothing to append, but first store contact →
+                # the file IS migrated (renamed + counted), not skipped.
+                os.rename(path, path + ".migrated")
+                result["migrated"] += 1
+            else:
+                # BUG#4 precision: the skip branch reads COVERAGE via
+                # store.covers(); the append branch reads rows_before (its
+                # precheck + the turns baseline) then re-verifies with
+                # covers() post-append.
+                rows_before = len(store.load_all(sk))
+                if store.covers(sk, len(messages) - 1):
+                    # Skip branch: COVERAGE, not count (SP3 fix round 2).
+                    # covers() counts rows at seq <= file_len-1 in the CURRENT
+                    # epoch only — phantom high-seq rows (cardinality matches,
+                    # index missing) and multi-epoch load_all inflation
+                    # (prior-epoch rows) both fail it where
+                    # `rows_before >= len(messages)` passed.
+                    # Trust boundary (round 3, register-not-code): this
+                    # predicate is INDEX-coverage only — content equality is
+                    # the wrapper guard's job at save time (dual anchor) and
+                    # stable-ids post-MVP. Renaming asserts nothing about
+                    # content.
+                    os.rename(path, path + ".migrated")
+                    result["skipped"] += 1
+                elif rows_before >= len(messages):
+                    # A collision shape (count matched, coverage didn't):
+                    # exactly the wm-ahead class — error + keep the file +
+                    # retry next launch. Never rename on a guess.
+                    result["errors"].append(
+                        (
+                            sk,
+                            f"count/coverage mismatch: count={rows_before} file={len(messages)}",
+                        )
+                    )
+                    logger.warning(
+                        "[persistence] %s: skip-branch coverage mismatch "
+                        "(count=%d file=%d) — NOT migrated, file kept for retry",
+                        sk,
+                        rows_before,
+                        len(messages),
+                    )
+                else:
+                    # Store is behind (or absent): append the full JSON
+                    # history at its exact indexes. append_delta re-reads the
+                    # watermark IN-TX and skips already-committed indexes, so
+                    # a session a crashed earlier launch half-migrated
+                    # resumes cleanly.
+                    shaped = [_shape_json_message(m) for m in messages]
+                    store.append_delta(sk, 0, shaped)
+                    if not store.covers(sk, len(messages) - 1):
+                        # BUG#1 (SP3 fix round, round-2 repoint): the append
+                        # left the session uncovered — a wm-ahead state
+                        # (corrupt wm, phantom high-seq row) makes
+                        # append_delta start past every row and write
+                        # NOTHING. Renaming here would destroy the only copy
+                        # of the missing turns and report success. The rename
+                        # is EARNED by verified coverage: error + keep the
+                        # file + retry next launch.
+                        result["errors"].append(
+                            (
+                                sk,
+                                f"watermark ahead of rows: wm={store.session_watermark(sk)} rows={rows_before} file={len(messages)}",
+                            )
+                        )
+                        logger.warning(
+                            "[persistence] %s: store watermark ahead of rows "
+                            "(wm=%d rows=%d file=%d) — NOT migrated, file "
+                            "kept for retry",
+                            sk,
+                            store.session_watermark(sk),
+                            rows_before,
+                            len(messages),
+                        )
+                    else:
+                        # Rename ONLY now: the current epoch PROVABLY holds
+                        # every seq the file holds.
+                        os.rename(path, path + ".migrated")
+                        result["migrated"] += 1
+                        # BUG#4: rows actually written, not file size (a
+                        # resumed session appends only its missing tail).
+                        # max(0, …): rows_before is an all-epoch load_all
+                        # count, so phantom/multi-epoch inflation can exceed
+                        # the file size — the delta clamps at 0 rather than
+                        # reporting a negative turn count. Coverage above is
+                        # the correctness gate; this is a banner stat only.
+                        result["turns"] += max(0, len(messages) - rows_before)
+        except Exception as exc:  # noqa: BLE001 — per-session isolation IS the contract
+            # One bad file never aborts the sweep: collected + retried next
+            # launch (file left as-is).
+            logger.warning(
+                "[persistence] store migration failed for %s (left in place, "
+                "will retry next launch): %r",
+                sk,
+                exc,
+            )
+            result["errors"].append((sk, repr(exc)))
+        if on_progress is not None and (
+            done % _MIGRATION_PROGRESS_INTERVAL == 0 or done == total
+        ):
+            try:
+                on_progress(done, total)
+            except Exception:  # heartbeat must not kill the sweep
+                logger.exception("[persistence] migration on_progress callback raised")
+    result["seconds"] = round(time.monotonic() - start, 3)
+    if result["migrated"] or result["errors"] or result["kept_on_json"]:
+        logger.info(
+            "[persistence] JSON→store migration: %d session(s) migrated (%d turns), "
+            "%d already current, %d kept on JSON (diverged), %d error(s) in %.3fs",
+            result["migrated"],
+            result["turns"],
+            result["skipped"],
+            len(result["kept_on_json"]),
+            len(result["errors"]),
+            result["seconds"],
+        )
+    return result
+
+
+def _shape_json_message(m: dict) -> dict:
+    """Saved-JSON message dict → the store's persistence row shape.
+
+    The JSON body and _shape_message() produce the same fields; this is the
+    JSON-dict twin (input is a dict from json.load, not a Message object).
+    HIGH-3: no api_key field is read even if present in the file.
+    """
+    return {
+        "role": str(m.get("role", "")),
+        "content": str(m.get("content", "")),
+        "tool_calls": [
+            {
+                "call_id": tc.get("call_id"),
+                "tool_name": tc.get("tool_name"),
+                "arguments": tc.get("arguments", {}),
+            }
+            for tc in (m.get("tool_calls") or [])
+        ],
+        "tool_call_id": m.get("tool_call_id"),
+        "tokens_used": m.get("tokens_used") or 0,
+    }
+
+
+# ── SPEC-08 SP3: launch-time entry point (latch + banner gate) ────────────────
+
+# Once-per-process latch (same pattern as _CONVERSATION_MIGRATION_DONE above).
+_STORE_MIGRATION_DONE: bool = False
+
+
+def run_store_migration_once(
+    on_complete: "Callable[[dict], None] | None" = None,
+    on_progress: "Callable[[int, int], None] | None" = None,
+) -> "dict | None":
+    """Run the JSON→store migration at most once per process (SP3 launch path).
+
+    The production caller (runtime init) starts this on a daemon thread; the
+    card itself is built by the on_complete receiver ON THE MAIN LOOP — this
+    function never touches GTK.
+
+    Banner gate (spec): on_complete fires ONLY when migrated > 0 — a clean
+    install with zero legacy files must not produce a card. The full stats
+    dict (migrated/turns/skipped/seconds/errors/kept_on_json/aborted) is
+    passed so the card can report errors and kept-on-JSON sessions. When the
+    store itself is unavailable, the stats carry ``aborted=True`` and the
+    callback fires with it (the SP4 banner renders "migration failed — JSON
+    untouched, will retry next launch").
+
+    Returns the stats dict, or None when the latch had already fired (a
+    second AgentRuntime in-process must not re-sweep). On ``aborted=True``
+    the latch is UNSET — the next launch retries (a transient corrupt state
+    must not permanently silence the feature).
+    """
+    global _STORE_MIGRATION_DONE
+    if _STORE_MIGRATION_DONE:
+        return None
+    _STORE_MIGRATION_DONE = True
+    stats = migrate_conversations_to_store(on_progress=on_progress)
+    if stats["aborted"]:
+        # Return-and-retry: unset so the next launch sweeps again.
+        _STORE_MIGRATION_DONE = False
+    if (
+        stats["migrated"] > 0 or stats["aborted"] or stats["errors"]
+    ) and on_complete is not None:
+        try:
+            on_complete(stats)
+        except Exception:  # a broken card must not fail the sweep
+            logger.exception("[persistence] store-migration on_complete callback raised")
+    return stats
 
 
 # ── LOW-2: Per-session secure workspace ─────────────────────────────────────

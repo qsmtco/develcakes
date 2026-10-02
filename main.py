@@ -263,6 +263,13 @@ def main():
     be silently dropped). Verified empirically (GApplication probe +
     headless crash trace, 2026-09-13).
     """
+    # SPEC-08 SP3: the launch-time JSON→store migration is wired end-to-end
+    # (agent/runtime.py) but DISABLED by default pending a cross-phase ruling:
+    # SP2 made conversation load pure-JSON, so a migrated (renamed) session
+    # loads as None → fresh conversation → its first save diverged-flags the
+    # store and suspends the delta permanently. Do NOT set
+    # CRABCAKES_MIGRATE_STORE=1 until the load-path ruling lands (see
+    # .crabcakes/context.md 2026-10-01 and the SP3 phase report).
     app = DevelcakesApp()  # Create application instance
     return app.run(sys.argv)  # Explicit argv — see docstring; run(None) lies.
 

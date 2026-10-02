@@ -33,11 +33,15 @@ import sqlite3
 import threading
 import time
 
+# NOTE on CHECK(seq >= 0): CREATE TABLE IF NOT EXISTS does not ALTER existing
+# databases — the CHECK only guards FRESH DBs (it IntegrityErrors a negative
+# INSERT at the door). Pre-existing DBs keep their old table definition; the
+# query-level `seq >= 0` floor in covers() is the real fix for them.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_key TEXT NOT NULL,
-    seq INTEGER NOT NULL,
+    seq INTEGER NOT NULL CHECK(seq >= 0),
     epoch INTEGER NOT NULL DEFAULT 0,
     role TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
@@ -111,7 +115,7 @@ class TranscriptStore:
             # Bounded retry: 5 attempts x 10 ms cleared every failure in testing
             # (0/160) while keeping the wait far below any UI-visible threshold.
             self._wal_retry(5, 0.010)
-            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
         except BaseException:
             self._conn.close()
@@ -432,6 +436,36 @@ class TranscriptStore:
                 "SELECT watermark FROM sessions WHERE session_key = ?", (session_key,)
             ).fetchone()
             return row[0] if row else -1
+
+    def covers(self, session_key: str, upto: int) -> bool:
+        """True iff the CURRENT epoch holds a row at every seq in [0..upto].
+
+        Coverage, not count (SP3 audit BUG#1): cardinality matches while
+        indexes are missing (phantom high-seq rows) and load_all() spans all
+        epochs (prior-epoch rows inflate the count). One SQL COUNT against
+        the current epoch with seqs constrained to [0..upto] and UNIQUE
+        distinctness ⟺ exact coverage of every index in [0..upto].
+
+        The `seq >= 0` floor is LOAD-BEARING (round-3 fix): without it a
+        negative-seq row (corrupt DB / manual edit — exactly the threat
+        model) satisfies count==upto+1 while an in-range index is absent —
+        e.g. {0,1,-1} counts 3 and "covers" 0..2 with index 2 missing.
+
+        `upto < 0` → True vacuously (the empty range [0..-1] needs no rows).
+
+        Params bind session_key TWICE: the embedded _CUR_EPOCH subquery
+        carries its own ? placeholder (same pattern as tail()/row_at()).
+        """
+        if upto < 0:
+            return True
+        with self._lock:
+            self._ensure_open()
+            n = self._conn.execute(
+                "SELECT COUNT(*) FROM turns WHERE session_key = ?"
+                f" AND epoch = {_CUR_EPOCH} AND seq >= 0 AND seq <= ?",
+                (session_key, session_key, upto),
+            ).fetchone()[0]
+        return n == upto + 1
 
     # DELETED in the SP2 fix round (BUG#2/#3) — sync_watermark had no
     # replacement, and none is allowed by the ruling: the sessions watermark

@@ -20,8 +20,9 @@ import logging
 import os
 import threading
 import uuid
+from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from models.conversation import Conversation
@@ -55,6 +56,7 @@ from agent.persistence import (
     load_conversation_from_disk,
     migrate_conversation_files,
     resolve_session_workspace,
+    run_store_migration_once,
     save_conversation_to_disk,
 )
 
@@ -102,6 +104,59 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# SPEC-08 SP3: the launch-time JSON→store migration is OPT-IN via env var.
+# Default OFF because the runtime constructor runs in the test suite too,
+# where ~50 tests build runtimes against the REAL config dir — an
+# unconditional sweep would rename users' live conversation files under
+# pytest. Set by the OPERATOR before launch (opt-in; the app does not set
+# it — see main.py's pointer to the SP4 ruling).
+_MIGRATE_STORE_ON_INIT: bool = (
+    os.environ.get("CRABCAKES_MIGRATE_STORE", "") == "1"
+)
+
+
+def _migrate_store_async(on_complete: "Callable[[dict], None] | None") -> threading.Thread:
+    """Start the once-per-process JSON→store migration on a daemon thread.
+
+    Returns the Thread (joined by tests; never joined in production).
+    ``on_complete`` (when given) is invoked ON THE DAEMON THREAD with the
+    stats dict — receivers that touch GTK must hop to the main loop
+    themselves (the runtime's _start_store_migration does this via
+    _dispatch).
+    """
+    def _run() -> None:
+        try:
+            run_store_migration_once(on_complete=on_complete)
+        except Exception:
+            # The sweep itself is per-session isolated; this catches only
+            # constructor-level failures (e.g. the store's corrupt-DB raise
+            # surfaces inside _get_store on first use). Never fatal.
+            logger.exception("[runtime] JSON→store migration sweep failed (non-fatal)")
+
+    t = threading.Thread(target=_run, name="store-migration", daemon=True)
+    t.start()
+    return t
+
+
+def _log_store_migration_banner(stats: dict) -> None:
+    """Default banner receiver: log the migration stats (runs on main loop).
+
+    The runtime owns no project_path and no feed handler, so it cannot build
+    the FeedCardData itself — the card emitter is receiver-owned wiring. This
+    logged fallback keeps the event non-silent until that wiring lands.
+    """
+    logger.info(
+        "[runtime] transcript migration complete: %d session(s) migrated "
+        "(%d turns), %d already current, %d kept on JSON (diverged), "
+        "%d error(s), %.1fs",
+        stats.get("migrated", 0),
+        stats.get("turns", 0),
+        stats.get("skipped", 0),
+        len(stats.get("kept_on_json", [])),
+        len(stats.get("errors", [])),
+        stats.get("seconds", 0.0),
+    )
 
 
 # ── Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2 Edit A) ──
@@ -494,6 +549,24 @@ class AgentRuntime:
         except Exception:
             logger.exception("[runtime] conversation migration failed (non-fatal)")
 
+        # SPEC-08 SP3: one-time JSON→store migration — OFF the UI thread. The
+        # banner card is emitted by the on_complete callback on the MAIN LOOP
+        # via _dispatch (GLib.idle_add when GLib is wired); the runtime itself
+        # builds no card. Opt-in via _MIGRATE_STORE_ON_INIT (default OFF: the
+        # test suite constructs many runtimes against the REAL config dir —
+        # an unconditional sweep would rename users' live files under pytest).
+        # BUG#2 (SP3 fix round 2): _running/_stopped are initialized HERE,
+        # BEFORE the migration call — the guard closure reads them, and a
+        # synchronous on_complete during __init__ must not AttributeError.
+        self._running = False
+        self._stopped = False
+        if _MIGRATE_STORE_ON_INIT:
+            self._start_store_migration()
+        else:
+            # SPEC-08 SP3: the migration daemon thread (None when the env gate
+            # is off — set unconditionally so tests can assert the gate state).
+            self._store_migration_thread: threading.Thread | None = None
+
         # conversation_key → Conversation
         self._conversations: dict[str, Any] = {}
         # session_key → pending_approval {tool_name, args, result_event, result_ref}
@@ -501,7 +574,9 @@ class AgentRuntime:
         self._cancelled: set[str] = set()  # cancelled session keys
         self._cancel_requested: bool = False  # immediate cancel signal for running thread
         self._lock = threading.Lock()
-        self._running = False
+        # (_running is initialized at :561, BEFORE the migration call — the
+        # BUG#2 fix-round-2 init-order requirement; this line left in place
+        # would otherwise be the first assignment.)
         # RACE-FIX v4b: turn token set by the handler before send_message.
         # Captured by _dispatch at call time (background thread, stable per turn).
         # Passed to handler callbacks so they can reject stale cross-turn events.
@@ -599,6 +674,40 @@ class AgentRuntime:
         that was inline in _run_loop (spec §A.2.3).
         """
         self._dispatch(self._on_enforcement_status, session_key, tool_name, status)
+
+    def _start_store_migration(self) -> None:
+        """SPEC-08 SP3: launch the once-per-process JSON→store migration.
+
+        Daemon thread (never blocks app start). The stats land as a banner
+        event ON THE MAIN LOOP through _dispatch (GLib.idle_add when GLib is
+        wired) — the runtime never touches GTK directly, and the card builder
+        is receiver-owned (the runtime has no project_path/feed handler; it
+        ships a logged fallback receiver).
+
+        BUG#6 (SP3 fix round): the completion dispatch guards on
+        ``self._running`` — a runtime stopped before the sweep finishes must
+        DROP the callback (log-and-drop) instead of scheduling GLib.idle_add
+        into a torn-down main loop. The on_progress consumption + feed-card
+        wiring stays SP4 per the ruling.
+        """
+
+        def _on_complete_guarded(stats: dict) -> None:
+            # BUG#2 (SP3 fix round 2): reads _stopped ONLY — never _running.
+            # Three states: during __init__ (_running False, _stopped False)
+            # → dispatch normally; pre-start (same) → dispatch; post-stop
+            # (_stopped True) → drop. _running False during init would have
+            # false-dropped an init-time completion.
+            if getattr(self, "_stopped", False):
+                logger.info(
+                    "[runtime] store migration finished after stop — "
+                    "dropping completion callback (%d migrated)",
+                    stats.get("migrated", 0),
+                )
+                return
+            self._dispatch(_log_store_migration_banner, stats)
+
+        thread = _migrate_store_async(on_complete=_on_complete_guarded)
+        self._store_migration_thread = thread
 
     def _terminate_turn(self, result: TurnResult) -> TurnResult | None:
         """Single terminal transition function for all turn endings.
@@ -764,11 +873,20 @@ class AgentRuntime:
     def start(self) -> None:
         """Start the runtime. Loads saved conversations from disk."""
         self._running = True
+        # Restart reopens the migration-dispatch window: stop() latched
+        # _stopped to drop completion callbacks; a start() after stop() must
+        # clear it or every future migration completion is dropped forever
+        # (BUG#3, SP3 fix round 3). stop() re-latches on the way down.
+        self._stopped = False
         logger.info("AgentRuntime started")
 
     def stop(self) -> None:
         """Stop the runtime. Saves all conversations."""
         with self._lock:
+            # _stopped FIRST: the migration drop-guard reads this flag only —
+            # a completion racing stop() must see the stop before anything
+            # else mutates (BUG#2, SP3 fix round 2).
+            self._stopped = True
             self._running = False
             for sk, conv in list(self._conversations.items()):
                 try:

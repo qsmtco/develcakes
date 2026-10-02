@@ -195,10 +195,16 @@ def test_wal_mode_enabled(tmp_path):
 
 
 def test_busy_timeout_set(tmp_path):
-    """PRAGMA busy_timeout reports 5000 ms."""
+    """PRAGMA busy_timeout reports 15000 ms.
+
+    SP3 fix round 2: bumped from 5000 after the re-audit's load probe —
+    load-only starvation hit at exactly 5.006s under host IO contention
+    (5s expiry), and busy_timeout=15000 measured 6/6 clean under deliberate
+    parallel load. Worst-case stall only matters under pathological
+    contention; real writes are ms."""
     store = _store(tmp_path)
     row = store._conn.execute("PRAGMA busy_timeout").fetchone()
-    assert row[0] == 5000
+    assert row[0] == 15000
 
 
 def test_close_idempotent(tmp_path):
@@ -690,3 +696,115 @@ def test_row_at_anchor_probe(tmp_path):
     assert mid["tool_call_id"] == "c9"
     assert store.row_at("sk", 99) is None
     assert store.row_at("never-appended", 0) is None
+
+
+def test_covers_exact_unity_count_is_coverage(tmp_path):
+    """covers(): True iff the current epoch holds a row at every seq in
+    [0..upto] — count against seq<=upto == upto+1 (UNIQUE makes seqs
+    distinct, so equality ⟺ no gaps)."""
+    store = _store(tmp_path)
+    assert store.covers("sk", -1) is True      # vacuous: empty range
+    assert store.covers("sk", 0) is False      # no rows at all
+    store.append_turn("sk", "user", "m0")
+    assert store.covers("sk", 0) is True
+    assert store.covers("sk", 1) is False      # gap: index 1 missing
+    store.append_turn("sk", "assistant", "m1")
+    assert store.covers("sk", 1) is True
+    # Phantom high-seq row: count inflates, coverage does not.
+    store.append_turn("sk", "user", "phantom", seq=9)
+    assert store.covers("sk", 2) is False      # index 2 still missing
+    assert store.covers("sk", 1) is True       # [0..1] unaffected by phantom
+
+
+def test_covers_current_epoch_only(tmp_path):
+    """covers() reads the CURRENT epoch — prior-epoch rows never satisfy it
+    (the multi-epoch inflation probe)."""
+    store = _store(tmp_path)
+    for i in range(5):
+        store.append_turn("sk", "user", f"e0-{i}")
+    assert store.covers("sk", 4) is True
+    store.bump_epoch("sk")
+    # Current (epoch-1) holds nothing: coverage resets.
+    assert store.covers("sk", 0) is False
+    assert store.covers("sk", 4) is False
+    store.append_turn("sk", "user", "e1-0")
+    store.append_turn("sk", "user", "e1-1")
+    assert store.covers("sk", 1) is True
+    assert store.covers("sk", 2) is False      # epoch-0's 5 rows don't count
+    assert len(store.load_all("sk")) == 7      # load_all spans all epochs
+
+
+def test_covers_unknown_session_and_use_after_close(tmp_path):
+    """covers(): unknown session → False for any upto >= 0; closed store
+    raises the clear use-after-close error (same guard as every read)."""
+    store = _store(tmp_path)
+    assert store.covers("never-appended", 0) is False
+    store.close()
+    try:
+        store.covers("sk", 0)
+    except RuntimeError as exc:
+        assert "TranscriptStore is closed" in str(exc)
+    else:
+        raise AssertionError("covers() after close must raise RuntimeError")
+
+
+def test_covers_negative_seq_row_is_not_coverage(tmp_path):
+    """Round-3 BUG#1: covers() needs the `seq >= 0` floor — a negative-seq
+    row (corrupt DB / manual edit, exactly the threat model) must not
+    satisfy the count.
+
+    Built on a hand-rolled PRE-CHECK-SCHEMA table: CHECK(seq >= 0) only
+    guards FRESH DBs (CREATE TABLE IF NOT EXISTS never ALTERs), so a
+    pre-existing DB still accepts the poison row — the query floor is what
+    protects it. Seeds {0,1,-1}: covers(sk, 2) is False (index 2 absent,
+    the -1 row must not count), covers(sk, 1) stays True."""
+    import sqlite3 as _sq
+
+    db_path = str(tmp_path / "legacy.db")
+    legacy = _sq.connect(db_path)
+    legacy.execute(
+        "CREATE TABLE turns ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " session_key TEXT NOT NULL, seq INTEGER NOT NULL,"
+        " epoch INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL,"
+        " content TEXT NOT NULL DEFAULT '', tool_calls TEXT,"
+        " tool_call_id TEXT, tokens_used INTEGER NOT NULL DEFAULT 0,"
+        " timestamp TEXT NOT NULL, UNIQUE(session_key, epoch, seq))"
+    )
+    for seq, content in ((0, "m0"), (1, "m1"), (-1, "poison")):
+        legacy.execute(
+            "INSERT INTO turns (session_key, seq, epoch, role, content,"
+            " tool_calls, tool_call_id, tokens_used, timestamp)"
+            " VALUES ('sk', ?, 0, 'user', ?, NULL, NULL, 0,"
+            " strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            (seq, content),
+        )
+    legacy.commit()
+    legacy.close()
+
+    # IF NOT EXISTS keeps the legacy table (no CHECK) — the threat scenario.
+    store = TranscriptStore(db_path=db_path)
+
+    assert store.covers("sk", 2) is False  # count 3 == upto+1, but poison
+    assert store.covers("sk", 1) is True   # real rows unaffected
+    assert store.covers("sk", 0) is True
+
+
+def test_schema_rejects_negative_seq_on_fresh_db(tmp_path):
+    """The CHECK(seq >= 0) belt: a fresh DB IntegrityErrors a negative-seq
+    INSERT at the door. (Pre-existing DBs don't get the CHECK — IF NOT
+    EXISTS never ALTERs — which is why covers() carries its own floor.)"""
+    store = _store(tmp_path)
+    import sqlite3 as _sq
+
+    try:
+        store._conn.execute(
+            "INSERT INTO turns (session_key, seq, epoch, role, content,"
+            " tool_calls, tool_call_id, tokens_used, timestamp)"
+            " VALUES ('sk', -1, 0, 'user', 'x', NULL, NULL, 0,"
+            " strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+        )
+    except _sq.IntegrityError as exc:
+        assert "seq" in str(exc)
+    else:
+        raise AssertionError("CHECK(seq >= 0) must refuse a negative-seq INSERT")
