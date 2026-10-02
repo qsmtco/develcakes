@@ -17,7 +17,6 @@ _logger = logging.getLogger(__name__)
 from ui.views.activity_pill import ActivityPillLabel
 from ui.views.chat_input_toolbar import ChatInputToolbar
 from ui.views.session_menu import show_session_menu, show_project_menu
-from utils.escaping import escape_for_pango
 from utils.config import get_project_root
 
 class MainContent(Gtk.Box):
@@ -419,6 +418,8 @@ class MainContent(Gtk.Box):
         self._on_autoaccept_cycle = callback
 
     def set_project_settings_text(self, text: str):
+        # No production caller; test-only preservation contract (auditor note, P2).
+        # Delete with its tests when the bar rebuild unifies.
         """Set text or markup on the project settings bar. Handles Pango markup correctly.
 
         Backward compat: still clears the bar, appends the label, then
@@ -479,20 +480,9 @@ class MainContent(Gtk.Box):
         """Set callback for project settings updates. cb(project_name, member_count)."""
         self._on_feed_bar_update = cb
 
-    def _update_project_settings_from_project(self, project_name: str, member_count: int):
-        """Internal — called by window to refresh the project settings bar."""
-        if project_name:
-            self._project_settings.set_visible(True)
-            # MED-9: escape interpolated values to prevent Pango markup injection
-            safe_name = escape_for_pango(project_name)
-            self.set_project_settings_text(
-                f'<span font_desc="Sans 10"><b>{safe_name}</b>  ·  {member_count} member{"s" if member_count != 1 else ""}</span>'
-            )
-        else:
-            self._project_settings.set_visible(False)
-            self.set_project_settings_text('Project Settings')
-
     def set_feed_bar_text(self, text):
+        # No production caller; test-only preservation contract (auditor note, P2).
+        # Delete with its tests when the bar rebuild unifies.
         """Update the project feed bar with a status message (legacy).
 
         Same pill-preservation as set_project_settings_text(): uses the

@@ -34,7 +34,7 @@ def surface():
     s.destroy()
 
 
-# ── Tests 1-3: fallback API contract (append / stream / pill) ────────────
+# ── Tests 1-3: fallback API contract (append / stream) ────────────────────
 
 class TestFallbackPath:
     def test_append_message_renders_plain_text(self, surface):
@@ -56,19 +56,12 @@ class TestFallbackPath:
         surface.end_stream("never-started")
         assert surface._text().strip() == ""
 
-    def test_pill_cycles_text_and_class(self, surface):
-        for state in ("thinking", "tool", "error", "idle"):
-            surface.set_activity_pill(state)
-            assert surface._pill_label.get_text() == {
-                "thinking": "Thinking…",
-                "tool": "Tool running…",
-                "error": "Error",
-                "idle": "Idle",
-            }[state]
-        # Final state's class is present, the others are not.
-        css = surface._pill_label.get_css_classes()
-        assert "pill-idle" in css
-        assert "pill-thinking" not in css
+    # UI-PILLBAR P2: test_pill_cycles_text_and_class RETIRED with its
+    # subject — the per-surface pill (set_activity_pill/_pill_label) was
+    # deleted from both surface classes. Disposition: the shared bar pill
+    # (ui/views/activity_pill.ActivityPillLabel) owns that logic now; its
+    # swap contract is pinned in tests/test_activity_pill_label.py and the
+    # retirement contract in test_bar_pill_is_sole_pill (same file).
 
     def test_destroy_twice_safe(self, surface):
         surface.destroy()

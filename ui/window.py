@@ -34,7 +34,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib
 # Import UI components
 from ui.toolbar import Toolbar
 from ui.views.left_panel import LeftPanel
-from ui.views.chat_surface import ActivityPillAdapter
+from ui.views.activity_pill import ActivityPillAdapter
 from ui.views.main_content import MainContent
 from ui.views.activity_drawer import ActivityDrawer
 from ui.handlers.chat_handler import ChatHandler

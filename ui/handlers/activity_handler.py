@@ -1,6 +1,6 @@
 """
-ActivityHandler — 6-state activity machine driving the per-tab activity pill
-(status_target duck-type — the SP1 ActivityPillAdapter, SPEC-07 R4).
+ActivityHandler — 6-state activity machine driving the shared activity-status pill
+(project bar — UI-PILLBAR relocation; status_target duck-type, SPEC-07 R4).
 
 States: idle | sending | reasoning | streaming | tool_use | done
 

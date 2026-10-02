@@ -163,3 +163,30 @@ class TestConstruction:
         (ui/styles.py) apply to any Gtk.Label with the class; the subclass
         must not break that."""
         assert isinstance(ActivityPillLabel(), gi.repository.Gtk.Label)
+
+
+# ── UI-PILLBAR P2: the retirement contract ────────────────────────────────
+
+
+def test_bar_pill_is_sole_pill():
+    """P2 retirement contract: the per-surface pill is GONE from both chat
+    surface classes — the shared bar pill (ActivityPillLabel in this module)
+    is the ONLY pill. A regression re-adding set_activity_pill or
+    set_activity_status to either class fails here. Bare-safe: hasattr on
+    class objects constructs no widgets.
+
+    NOTE: ChatSurface here is the module-level binding — on a WebKit-less
+    box the import-time alias makes it TextViewFallback, collapsing the two
+    assertions to one class. Under xvfb (the mandated battery) both real
+    classes are pinned."""
+    from ui.views import chat_surface
+
+    for cls in (chat_surface.ChatSurface, chat_surface.TextViewFallback):
+        assert not hasattr(cls, "set_activity_pill"), (
+            f"{cls.__name__} re-acquired set_activity_pill — the per-surface "
+            "pill regression the P2 retirement forbids"
+        )
+        assert not hasattr(cls, "set_activity_status"), (
+            f"{cls.__name__} re-acquired set_activity_status — pill logic "
+            "belongs in ActivityPillLabel (ui/views/activity_pill.py)"
+        )

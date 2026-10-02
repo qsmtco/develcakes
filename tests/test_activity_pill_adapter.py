@@ -1,9 +1,9 @@
 # tests/test_activity_pill_adapter.py — SPEC-07 SP1 (R4 status-bar removal).
 #
 # This file runs BARE — no display, no xvfb (proven: env -u DISPLAY green).
-# Every surface is a pure fake; test 7 drives the real set_activity_status
-# via TextViewFallback.__new__ (skips __init__, so NO widget is built —
-# the segfault class is widget instantiation, not the gi namespace import);
+# Every surface is a pure fake. (UI-PILLBAR P2: SP1's test 7 — the real
+# set_activity_status driven via TextViewFallback.__new__ — retired with the
+# per-surface pill; its contract lives in tests/test_activity_pill_label.py.
 # test 8's ChatRenderHandler imports gi but only calls pure-Python code
 # (render_document/markdown → nh3 — no GTK calls on this path).
 #
@@ -21,10 +21,9 @@ import pytest
 from ui.handlers.activity_handler import ActivityHandler
 from ui.handlers.chat_render_handler import ChatRenderHandler
 from ui.styles import APP_CSS
-from ui.views.chat_surface import (
+from ui.views.activity_pill import (
     _ACTIVITY_STATE_TO_CSS,
     ActivityPillAdapter,
-    TextViewFallback,
 )
 
 
@@ -46,30 +45,6 @@ class FakeSurface:
     def set_activity_pill(self, state):
         # Deliberately NOT routed through the same list — see docstring.
         self.calls.append(("PILL", state))
-
-
-class FakeLabel:
-    """Label-like fake recording the exact swap sequence.
-
-    remove/add css_class and set_text are recorded in order so the test
-    asserts the SAME remove→add→stash dance set_activity_pill performs
-    (not just the end state).
-    """
-
-    def __init__(self):
-        self._text = "Idle"
-        self._css = "pill-idle"
-        self.ops: list[tuple] = []
-
-    def set_text(self, text):
-        self._text = text
-        self.ops.append(("set_text", text))
-
-    def remove_css_class(self, name):
-        self.ops.append(("remove", name))
-
-    def add_css_class(self, name):
-        self.ops.append(("add", name))
 
 
 # ── Required coverage 1: status text lands on the resolved surface ────────
@@ -219,34 +194,14 @@ def test_app_css_pill_rules_complete_and_distinct():
     assert all(c.startswith("#") for c in rules.values())  # non-empty, hex
 
 
-# ── Required coverage 7: unknown state keeps the current CSS class ────────
-
-
-def test_set_activity_status_unknown_state_keeps_class():
-    label = FakeLabel()
-    # Drive the REAL method via a minimal duck-typed host — set_activity_status
-    # only touches self._pill_label/self._pill_css, no gi needed.
-    host = TextViewFallback.__new__(TextViewFallback)
-    host._pill_label = label
-    host._pill_css = "pill-idle"
-
-    host.set_activity_status("Thinking…", "reasoning")  # known → swap
-    assert label.ops == [
-        ("set_text", "Thinking…"),
-        ("remove", "pill-idle"),
-        ("add", "pill-thinking"),
-    ]
-    assert host._pill_css == "pill-thinking"
-
-    label.ops.clear()
-    host.set_activity_status("Doing something odd", "martian_state")  # unknown
-    assert label.ops == [("set_text", "Doing something odd")]  # text only
-    assert host._pill_css == "pill-thinking"  # class KEPT (fail-quiet)
-
-    label.ops.clear()
-    host.set_activity_status("Plain", None)  # None → class untouched too
-    assert label.ops == [("set_text", "Plain")]
-    assert host._pill_css == "pill-thinking"
+# ── SP1 coverage 7: retired in UI-PILLBAR P2 ──────────────────────────────
+# test_set_activity_status_unknown_state_keeps_class RETIRED with its
+# subject: it drove TextViewFallback.set_activity_status via __new__, and
+# that method no longer exists (per-surface pill retired; the shared bar
+# pill owns the logic). The contract it pinned (known state → swap dance;
+# unknown/None → text lands, class kept) is pinned VERBATIM by
+# tests/test_activity_pill_label.py TestSetActivityStatus — same recorder
+# pattern, same assertions, against ActivityPillLabel. Nothing lost.
 
 
 # ── Required coverage 8: surface_for_key is READ-ONLY ─────────────────────

@@ -80,19 +80,6 @@ APP_CSS = """
     background: rgba(250, 204, 21, 0.25);
 }
 
-.project-bar-gear {
-    font-size: 14px;
-    padding: 0 8px;
-    min-height: 0;
-    border-radius: 3px;
-    background: transparent;
-    border: none;
-    box-shadow: none;
-}
-.project-bar-gear:hover {
-    background: rgba(255, 255, 255, 0.1);
-}
-
 /* -- Buttons ------------------------------------------------------------ */
 button.suggested-action {
     background: #6366f1;
