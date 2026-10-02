@@ -104,8 +104,16 @@ kept-on-JSON.
 
 ```bash
 stat -c '%a %n' ~/.config/crabcakes/transcript.db*    # all three 600
-grep -c "sk-" ~/.config/crabcakes/transcript.db       # 0 (no key-shaped strings)
-grep -c "sk-" ~/.config/crabcakes/transcript.db-wal   # 0
+# Key-shaped check (20+ char key material, not mere mentions of "sk-" in
+# conversation content — build/audit chats legitimately quote test fixtures
+# like sk-secret-12345 and grep commands):
+.venv/bin/python -c "
+import re, os
+home = os.path.expanduser('~')
+blob = open(home+'/.config/crabcakes/transcript.db','rb').read() + open(home+'/.config/crabcakes/transcript.db-wal','rb').read()
+hits = re.findall(rb'sk-[A-Za-z0-9_-]{20,}', blob)
+print('key-shaped strings:', len(hits), hits[:3])   # expect: 0 []
+print('total sk- mentions (content):', len(re.findall(rb'sk-', blob)))  # >0 is fine — it's chat content"
 ```
 
 ## PART E — Kill-switch (operator override)
