@@ -7,11 +7,25 @@
 # tool result output.
 #
 # No imports from ui/. No GTK. Pure logic + subprocess calls.
+#
+# THREAT MODEL (SPEC-09 SP0 fix round, Supervisor ruling 2026-10-02): the
+# gate's contract is "project-supplied config cannot falsify validation" —
+# NOT host hardening. Trusted roots for resolved binaries are therefore
+# exactly: system bins ∪ realpath(HOME) (operator tooling: ~/.local/bin
+# etc.) ∪ the app venv bin (admitted ONLY when the checked project IS the
+# running app or one of its git worktrees) ∪ the checked project's own
+# venv bin. A project's enforcement.json can point tiers at any binary
+# inside those roots — it cannot (a) resolve a binary from an untrusted
+# PATH prefix, or (b) reach the app's interpreter/dependency set unless
+# the project IS the app (venv-claim scan: dir/interpreter hops/pyvenv.cfg/
+# site-packages, all realpath'd). Host-level attacks (a malicious HOME,
+# a compromised system bin) are OUT of scope by this ruling.
 
 from __future__ import annotations
 
 import dataclasses
 import fnmatch
+import glob
 import json
 import logging
 import os
@@ -62,6 +76,66 @@ _ALLOWED_ENV_VARS: frozenset[str] = frozenset({
 # a symlink component (checkout reached via symlink) would self-deny
 # (Phase 2 re-audit BUG #1).
 _APP_ROOT: str = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# SPEC-09 SP0 (V3, pre-flight D2): the SPEC-09 worktree layout is
+# <repo>/.worktrees/<agent_id> — git worktrees of the running app's repo,
+# created by SP2's worktree_manager. Under the worktree phase, agents exec
+# with project_path = the worktree, whose realpath differs from _APP_ROOT —
+# the single-path identity compare would DENY a legitimate in-app worktree.
+# _is_app_worktree() (below) is the explicit membership rule; SP2 wires the
+# runtime to exec inside worktrees and builds on this contract — it must
+# exist and be tested BEFORE SP2's integration. The worktrees parent is
+# computed FROM _APP_ROOT at use time — no second cached global (a derived
+# path constant diverges from its source when _APP_ROOT is patched or the
+# checkout relocates; found by the SP0 V2×V3 composition test).
+
+
+def _is_app_worktree(project_path: str) -> bool:
+    """True when *project_path* is a git worktree OF the running app's repo.
+
+    SPEC-09 SP0 (V3, pre-flight ruling D2): the ACTUAL rule is
+    lexical/realpath membership — ``realpath(project_path)`` is a DIRECT
+    CHILD of ``realpath(_APP_ROOT + "/.worktrees")``, and existence is
+    NOT checked (a phantom child name passes by design;
+    ``test_real_worktree_without_git_still_passes_gate`` pins it). The
+    ``.worktrees`` parent must itself resolve under ``_APP_ROOT`` through
+    its own realpath (deny-all when a symlinked ``.worktrees`` points
+    outside the app). Consequence, pinned by ``test_d2``: a symlink
+    PLANTED ELSEWHERE whose realpath lands inside ``.worktrees`` DOES
+    confer membership — realpath collapsing means the link IS the member
+    it points at. A symlink whose realpath lands elsewhere does not.
+
+    SP2 wires the runtime to exec inside worktrees; this gate is the
+    contract SP2 builds on — it must exist and be tested BEFORE SP2's
+    integration. SP2 OBLIGATION (registered, re-audit BUG#14): worktree
+    wiring sets project_path to the REAL worktree path — never a symlink
+    into `.worktrees` (realpath would collapse the link INTO a member and
+    confer membership on a path SP2 does not control).
+    """
+    if not project_path or not isinstance(project_path, str):
+        return False
+    real_child = os.path.realpath(os.path.abspath(project_path))
+    real_app = os.path.realpath(_APP_ROOT)
+    real_parent = os.path.realpath(os.path.join(_APP_ROOT, ".worktrees"))
+    # SPEC-09 SP0 V3 no-symlink-escape rule: the .worktrees parent must
+    # itself resolve UNDER the app root — a symlinked .worktrees pointing
+    # outside the app (e.g. <app>/.worktrees → /tmp/evil) confers membership
+    # on /tmp/evil/agent (probe: hole was OPEN before this check,
+    # 2026-10-02). commonpath containment, fail-closed on ValueError.
+    try:
+        if os.path.commonpath([real_parent, real_app]) != real_app:
+            logger.warning(
+                "[enforcement] .worktrees resolves outside the app root — "
+                "worktree gate denies all: parent=%s app=%s",
+                real_parent, real_app,
+            )
+            return False
+    except ValueError:
+        return False
+    # Direct-child membership on the REALPATH of both sides (basename
+    # non-empty is implied: dirname(child) == parent means child != "/" —
+    # and "/" cannot be a child of a .worktrees dir).
+    return os.path.dirname(real_child) == real_parent
 
 
 def _get_scrubbed_env() -> dict[str, str]:
@@ -285,18 +359,296 @@ def _load_project_enforcement_config(project_path: str) -> dict | None:
 
 
 def _detect_venv_prefix(project_path: str, venv_path: str = ".venv") -> str | None:
-    """Return absolute path to venv Python interpreter, or None if no venv.
+    """Return absolute path to venv Python interpreter, or None if refused/absent.
 
     Replaces the previous shell-sourcing behavior (which was a CRIT-2 RCE vector —
     a poisoned activate script would run on every enforcement check).
     Callers should substitute `python3 -m pytest` → `<result> -m pytest` when
     this returns a non-None value. (Phase 0 / CRIT-2)
+
+    SP0 fix round (Debugger audit 2026-10-02): for a project that is NOT the
+    app (and not an app worktree), a venv is refused when ANY of these
+    surfaces resolves inside the app's own venv — each is a claim on the
+    running app's interpreter/dependency set:
+
+    1. the venv DIR's realpath (whole-.venv-dir symlink — V2 probe shape);
+    2. any symlink HOP in bin/python's chain (BUG#2: realpath alone misses
+       multi-hop links like bin/python → app venv bin/python → /usr/bin —
+       the final realpath is outside the app venv while a hop still rides
+       the app's files; replaced the dead literal clause-2, which compared
+       a realpath'd LHS to a non-realpath'd RHS and never fired);
+    3. pyvenv.cfg ``home``/``executable`` targets (realpath of the value,
+       hops included — a home pointing into the app venv is the same claim);
+    4. site-packages' realpath, located via the cfg ``version`` or a
+       ``lib/python*/site-packages`` glob (BUG#1 false-PASS shape: foreign
+       venv with its own pyvenv.cfg but site-packages symlinked into the
+       app venv imports the app's dependency set while dir+python look
+       native).
+
+    Refusal is None + a warning naming the surface (fail-closed; the tests
+    tier turns a refusal into a visible FAILED check via
+    _venv_refusal_reason — SP0 fix round BUG#3).
     """
     venv_abs = os.path.join(project_path, venv_path)
     python_abs = os.path.join(venv_abs, "bin", "python")
-    if os.path.isfile(python_abs):
-        return python_abs
+    if not os.path.isfile(python_abs):
+        return None
+
+    claims = _venv_app_claims(project_path, venv_path)
+    if claims:
+        app_venv_dir = os.path.realpath(os.path.join(_APP_ROOT, ".venv"))
+        surfaces = "; ".join(f"{surface} -> {evidence}" for surface, evidence in claims)
+        logger.warning(
+            "[enforcement] foreign project venv claims the app environment — "
+            "refused: %s (app venv: %s; claims: %s)",
+            python_abs, app_venv_dir, surfaces,
+        )
+        return None
+    return python_abs
+
+
+def _venv_refusal_reason(project_path: str, venv_path: str = ".venv") -> str | None:
+    """Human-readable refusal reason when the project venv claims the app
+    environment, None when the venv is absent, clean, or the project IS the
+    app/worktree. SP0 fix round (BUG#3): lets _check_tests turn a refusal
+    into a visible FAILED tier instead of a PATH-resolved fall-through.
+    """
+    claims = _venv_app_claims(project_path, venv_path)
+    if not claims:
+        return None
+    return "; ".join(f"{surface} -> {evidence}" for surface, evidence in claims)
+
+
+def _venv_app_claims(project_path: str, venv_path: str = ".venv") -> list[tuple[str, str]]:
+    """Scan a project venv for surfaces claiming the running app's
+    environment. Returns (surface, evidence) pairs; empty when none.
+
+    A project that is NOT the app (and not an app worktree) claiming any
+    of these surfaces is refused upstream (SP0 V2 + fix round, Debugger
+    BUG#1/#2/#3):
+    """
+    venv_abs = os.path.join(project_path, venv_path)
+    python_abs = os.path.join(venv_abs, "bin", "python")
+    # SP0 fix round 2 (BUG#13): isfile() follows the symlink chain, so a
+    # chain deeper than the kernel's ELOOP limit (~40) reads as "absent"
+    # and the venv would be silently admitted as "no venv". An EXISTING
+    # symlink at bin/python (lstat, no-follow) must be walked even when
+    # the follow-stat fails — an unresolvable chain is precisely the
+    # unverifiable case that must reach the (fail-closed) hop walk.
+    if not os.path.isfile(python_abs) and not os.path.islink(python_abs):
+        return []
+
+    real_venv_dir = os.path.realpath(venv_abs)
+    app_venv_dir = os.path.realpath(os.path.join(_APP_ROOT, ".venv"))
+    project_is_app = (
+        os.path.realpath(os.path.abspath(project_path)) == _APP_ROOT
+        or _is_app_worktree(project_path)
+    )
+    if project_is_app:
+        # The app (or a worktree of it) claiming its own venv is legitimate.
+        return []
+
+    claims: list[tuple[str, str]] = []
+    # 1. dir-level containment (equal counts — whole-dir symlink probe).
+    if _is_inside(real_venv_dir, app_venv_dir):
+        claims.append(("venv dir", real_venv_dir))
+    # 2. hop chain of bin/python (BUG#2 replacement for the dead clause).
+    #    SP0 fix round 2 (BUG#13): a TRUNCATED chain is itself a claim —
+    #    the tail is unproven, and silently dropping it could hide an
+    #    app-venv hop past the cap (fail-closed, cap stays 40).
+    hops, truncated = _symlink_chain(python_abs)
+    if truncated:
+        claims.append((
+            "interpreter symlink chain",
+            (
+                f"exceeded 40 hops — treated as claiming the app environment "
+                f"(fail-closed): {python_abs}"
+            ),
+        ))
+    for hop in hops:
+        if _is_inside(hop, app_venv_dir):
+            # SP0 fix round 2 (BUG#12): truthful detail. A binary chain
+            # ENTERING the app venv does not by itself prove the venv
+            # claims the app ENVIRONMENT (prefix/site-packages may be
+            # entirely local — e.g. a mirrored-interpreter layout); the
+            # refusal stays (conservative, ruling 12) but must not assert
+            # a claim that isn't there.
+            claims.append((
+                "interpreter symlink chain",
+                (
+                    f"enters the app venv ({hop}) — conservative refusal; "
+                    f"if this venv is genuinely independent, give it its "
+                    f"own interpreter binary"
+                ),
+            ))
+    # 3. pyvenv.cfg home/executable targets (absolute or venv-relative).
+    for key in ("home", "executable"):
+        raw = _pyvenv_cfg_value(venv_abs, key)
+        if not raw:
+            continue
+        target = raw if os.path.isabs(raw) else os.path.join(venv_abs, raw)
+        # Literal-form containment FIRST: `executable = <app>/.venv/bin/python`
+        # is a claim by its written path even when the file is a symlink
+        # whose resolution lands outside (realpath collapses past the
+        # literal address, and the hop walk starts by resolving it).
+        literal = os.path.normpath(target)
+        if _is_inside(literal, app_venv_dir):
+            claims.append((f"pyvenv.cfg {key}", literal))
+            continue
+        real_target = os.path.realpath(target)
+        if _is_inside(real_target, app_venv_dir):
+            claims.append((f"pyvenv.cfg {key}", real_target))
+            continue
+        cfg_hops, cfg_truncated = _symlink_chain(target)
+        if cfg_truncated:
+            claims.append((
+                f"pyvenv.cfg {key} (symlink chain)",
+                (
+                    f"exceeded 40 hops — treated as claiming the app "
+                    f"environment (fail-closed): {target}"
+                ),
+            ))
+            continue
+        for hop in cfg_hops:
+            if _is_inside(hop, app_venv_dir):
+                claims.append((f"pyvenv.cfg {key} (symlink hop)", hop))
+                break
+    # 4. site-packages realpath (BUG#1: the dependency-set surface itself).
+    #    SP0 fix round 2 (BUG#9+#11): EVERY candidate is checked — the
+    #    single-path helper early-returned the FIRST isdir hit, so a decoy
+    #    lib/python3.10/site-packages + a lying pyvenv.cfg version evaded
+    #    the scan while the REAL (app-linked) site-packages sat under the
+    #    cfg's claimed version. Enumerate lib AND lib64, dedup, check each.
+    for site_packages in _venv_site_packages_all(venv_abs):
+        if _is_inside(site_packages, app_venv_dir):
+            claims.append(("site-packages", site_packages))
+    return claims
+
+
+def _symlink_chain(path: str) -> tuple[list[str], bool]:
+    """Effective path after each SINGLE symlink hop along *path*'s chain.
+
+    realpath() collapses the whole chain, so a multi-hop link like
+    ``foreign/bin/python -> <app>/.venv/bin/python -> /usr/bin/python3``
+    resolves OUTSIDE the app venv and a containment check on the final
+    realpath misses the intermediate claim (Debugger BUG#2: the dead
+    clause-2 tried to catch exactly this and never fired; the original
+    implementation here made the same mistake — realpath per hop collapses
+    the chain too). This walk replaces the deepest symlink component with
+    its target, records the resulting path, and repeats until no component
+    is a symlink (cycles break via a seen-set; a 40-hop cap backstops).
+    Each recorded value is a claim surface for the caller's containment
+    checks.
+
+    Returns (hops, truncated). SP0 fix round 2 (BUG#13): ``truncated`` is
+    True when the walk hit the 40-hop cap — the caller MUST treat that as
+    a claim (fail-closed); a truncated chain is an unproven chain, and
+    silently dropping the tail would convert an unverifiable venv into an
+    admitted one (a deep link chain could hide an app-venv hop past the
+    cap).
+    """
+    hops: list[str] = []
+    current = os.path.abspath(path)
+    seen: set[str] = {current}
+    truncated = False
+    while True:
+        if len(hops) >= 40:
+            truncated = True
+            break
+        link = None
+        probe = current
+        while True:
+            parent, base = os.path.split(probe)
+            if not base:
+                break
+            if os.path.islink(probe):
+                link = probe
+                break
+            probe = parent
+        if link is None:
+            break
+        try:
+            target = os.readlink(link)
+        except OSError as e:
+            logger.debug("[enforcement] readlink failed on %s: %s", link, e)
+            break
+        target_abs = (
+            target if os.path.isabs(target)
+            else os.path.join(os.path.dirname(link), target)
+        )
+        current = os.path.normpath(
+            os.path.join(target_abs, os.path.relpath(current, link))
+        )
+        if current in seen:
+            break
+        seen.add(current)
+        hops.append(current)
+    return hops, truncated
+
+
+def _pyvenv_cfg_value(venv_abs: str, key: str) -> str | None:
+    """Value of *key* in the venv's pyvenv.cfg, or None (missing/unreadable)."""
+    cfg_path = os.path.join(venv_abs, "pyvenv.cfg")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip().lower() == key:
+                    return v.strip()
+    except OSError as e:
+        logger.debug("[enforcement] pyvenv.cfg unreadable at %s: %s", cfg_path, e)
     return None
+
+
+def _venv_site_packages_all(venv_abs: str) -> list[str]:
+    """Realpaths of EVERY existing site-packages dir under the venv, dedup'd.
+
+    SP0 fix round 2 (Debugger BUG#9 + BUG#11): the previous single-path
+    helper early-returned the FIRST ``isdir`` hit, so a decoy
+    ``lib/python3.10/site-packages`` (sorts before 3.12) plus a pyvenv.cfg
+    lying about ``version`` evaded the scan while the REAL (app-linked)
+    site-packages sat under the cfg's claimed version — probe: false-PASS
+    with ``import nh3``. Only ``lib/`` was globbed, missing lib64 hosts.
+
+    Strategy: glob ``lib*/python*/site-packages`` (lib AND lib64 bases)
+    PLUS the pyvenv.cfg ``version`` candidate (a lying version must not
+    HIDE the real one; the cfg candidate is also enumerated in case the
+    glob misses a nonstandard layout). No early return — every candidate
+    is realpath'd and returned for per-candidate containment checks.
+    """
+    candidates: list[str] = []
+    # SP0 fix round 3 (BUG#15): venv_abs is PROJECT-SUPPLIED text
+    # (enforcement.json venv_path) — unescaped, glob treats it as a PATTERN:
+    # ``.venv[1]`` opens a character class, the scan returns [] and an
+    # app-linked site-packages goes unseen (auditor probe: tier false-PASSED
+    # with ``import nh3``). glob.escape the literal base; the
+    # ``python*/site-packages`` tail stays a pattern. The cfg-``version``
+    # candidate below is a literal join (no glob).
+    candidates.extend(glob.glob(os.path.join(
+        glob.escape(venv_abs), "lib", "python*", "site-packages"
+    )))
+    candidates.extend(glob.glob(os.path.join(
+        glob.escape(venv_abs), "lib64", "python*", "site-packages"
+    )))
+    version = _pyvenv_cfg_value(venv_abs, "version")
+    if version:
+        parts = version.split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            candidates.append(os.path.join(
+                venv_abs, "lib", f"python{parts[0]}.{parts[1]}", "site-packages"
+            ))
+    seen: set[str] = set()
+    realpaths: list[str] = []
+    for candidate in candidates:
+        if not os.path.isdir(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        if real not in seen:
+            seen.add(real)
+            realpaths.append(real)
+    return realpaths
 
 
 # ── Tier 1: Syntax Guard ──────────────────────────────────────────────────────
@@ -355,6 +707,23 @@ def _check_syntax(
     # Build argv list — no shell=True, no string interpolation
     # Split the template and substitute {path} with the absolute path
     argv = [arg.replace("{path}", abs_path) for arg in checker.split()]
+
+    # SPEC-09 SP0 (V1): resolved-binary gate — same refusal contract as the
+    # tests/lint tiers (visible FAILED check, never a silent skip). The
+    # gate's actual reason is embedded (fix round: "resolves into the app
+    # environment" must reach the tier detail, not a hardcoded shadowing
+    # message).
+    allowed, gate_detail = _validate_resolved_binary(argv, project_path)
+    if not allowed:
+        logger.warning(
+            "[enforcement] syntax tier refused: %s (argv=%r)", gate_detail, argv,
+        )
+        return EnforcementCheck(
+            tier="syntax", tool="write_file", file=file_path,
+            passed=False,
+            detail=f"REFUSED: syntax binary — {gate_detail}",
+            output="", duration_ms=0,
+        )
 
     start = time.monotonic()
     try:
@@ -514,6 +883,200 @@ def _parse_command_to_argv(command: str) -> list[str]:
         return command.split()
 
 
+# SPEC-09 SP0 (V1): resolved-binary ROOT allowlist — the second gate after
+# the token allowlist (_ALLOWED_BINARIES, defense in depth). Verified live
+# vector (probe, 2026-10-02): a `pytest` shim planted in any user-writable
+# PATH dir executes with the scrubbed-but-real env because the token
+# allowlist only checks the first TOKEN string, not the resolved binary
+# path. After _parse_command_to_argv, argv[0] must resolve (shutil.which
+# against the scrubbed PATH) inside one of these roots — realpath'd on both
+# sides. (c) `<project>/.venv/bin` — the checked project's own venv — is
+# appended per-project inside the validator (needs project_path).
+_ALLOWED_BINARY_ROOTS: tuple[str, ...] = (
+    "/usr/bin",
+    "/usr/local/bin",
+    "/bin",
+    "/sbin",
+    "/usr/sbin",
+)
+
+
+def _is_inside(realpath_child: str, realpath_parent: str) -> bool:
+    """Realpath-both containment check (no ..-or-symlink escape).
+
+    ValueError on different drives — unreachable on Linux, fail-closed.
+    """
+    try:
+        return (
+            os.path.commonpath([realpath_child, realpath_parent])
+            == realpath_parent
+        )
+    except ValueError:
+        return False
+
+
+def _trusted_home_root() -> str | None:
+    """Trusted-root candidate: realpath of the operator's HOME (BUG#4).
+
+    The ruling treats the operator's home subtree as trusted user tooling
+    territory (e.g. ``~/.local/bin`` pipx/rustup installs). Returns None
+    (root absent → nothing admitted by it) when HOME resolves to ``/``
+    (a universal root would allow everything — refuse rather than
+    trust all) or when realpath raises.
+    """
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+    except (OSError, RuntimeError) as e:
+        logger.debug("[enforcement] HOME root unresolvable: %s", e)
+        return None
+    if home == "/":
+        return None
+    return home
+
+
+def _resolve_binary_roots(project_path: str) -> tuple[str, ...]:
+    """Allowed roots for resolved binaries, all realpath'd.
+
+    SPEC-09 SP0 fix round (Debugger BUG#3): the running interpreter's dir
+    is a trusted root ONLY when the checked project IS the running app
+    (``_APP_ROOT``) or one of its git worktrees — a foreign project whose
+    PATH resolves a binary into the app venv bin must NOT inherit the
+    app's dependency set via this root (probe: refused-venv foreign
+    project fell back to bare ``python3``, PATH resolved it into the app
+    venv, realpath landed in /usr/bin → admitted via system root... the
+    V2 refusal was silently bypassed). Trusted roots per the Supervisor
+    ruling: system bins ∪ realpath(HOME) ∪ app-venv bin (app/worktree
+    projects ONLY) ∪ the checked project's own venv bin.
+    """
+    roots = list(_ALLOWED_BINARY_ROOTS)
+    home_root = _trusted_home_root()
+    if home_root is not None:
+        roots.append(home_root)
+    project_is_app = bool(project_path) and (
+        os.path.realpath(os.path.abspath(project_path)) == _APP_ROOT
+        or _is_app_worktree(project_path)
+    )
+    if project_is_app:
+        exe_dir = os.path.dirname(sys.executable or "")
+        if exe_dir:
+            roots.append(os.path.realpath(exe_dir))
+    if project_path:
+        # SP0 fix round 3 (BUG#16): root (c) must AGREE with the app-env
+        # refusal's normalization — realpath the venv bin AND require the
+        # (realpath'd) venv to sit LITERALLY inside the checked project.
+        # A foreign ``.venv`` symlinked to the app venv realpaths OUT of
+        # the project → NOT root (c) → the resolution reaches the (now
+        # realpath'd) app-env refusal instead. App worktrees keep root (b)
+        # (the running interpreter dir) and don't need (c).
+        venv_bin_real = os.path.realpath(
+            os.path.join(project_path, ".venv", "bin")
+        )
+        project_real = os.path.realpath(os.path.abspath(project_path))
+        if (
+            _is_inside(venv_bin_real, project_real)
+            and venv_bin_real != project_real
+        ):
+            roots.append(venv_bin_real)
+    return tuple(roots)
+
+
+def _validate_resolved_binary(
+    argv: list[str], project_path: str
+) -> tuple[bool, str]:
+    """V1 gate — resolve argv[0] against the scrubbed PATH and require it to
+    live inside an allowed root (system bins, trusted HOME, running-interpreter
+    dir (app projects only), or the checked project's venv bin).
+
+    Returns (allowed, detail). Fail-closed: which() miss → refused with the
+    token named; symlink-into-user-dir resolution → refused (realpath of the
+    resolution must be inside a root, not the token's literal form).
+
+    SP0 fix round (Debugger BUG#3, probe (a)): for a project that is NOT the
+    app (and not an app worktree), a resolution INTO the app's own venv is
+    refused outright — argv[0] inside the venv layout confers the app's
+    interpreter + site-packages (sys.prefix is computed from argv[0]'s
+    location), which is exactly the env-bleed the V2 venv gate refuses at
+    detection time. This closes the fall-through: refused venv → bare
+    ``python3`` → PATH hit <app>/.venv/bin/python3 → realpath /usr/bin →
+    admitted via a system root → app dependency set ran the tests.
+
+    The token allowlist (_validate_test_command) stays upstream as defense
+    in depth — token first, then resolution.
+    """
+    if not argv:
+        return False, "empty argv"
+    token = argv[0]
+    scrubbed_path = _get_scrubbed_env().get("PATH", "")
+    resolved = shutil.which(token, path=scrubbed_path)
+    if resolved is None:
+        return False, (
+            f"binary not found via scrubbed PATH: {token!r} — "
+            "PATH shadowing refused"
+        )
+    app_venv_dir = os.path.realpath(os.path.join(_APP_ROOT, ".venv"))
+    project_is_app = bool(project_path) and (
+        os.path.realpath(os.path.abspath(project_path)) == _APP_ROOT
+        or _is_app_worktree(project_path)
+    )
+    # SP0 fix round 3 (BUG#16): normalize BOTH sides. resolved may arrive
+    # through a project symlink (``.venv`` → the app venv), so the literal
+    # dirname sits OUTSIDE the app venv while the binary IS the app's —
+    # realpath the dirname to match the realpath'd app_venv_dir (root (c)
+    # is realpath'd for the same reason).
+    # SP0 fix round 4 (BUG#18, auditor re-audit): dirname-realpath alone
+    # misses the FILE-level symlink shape — a foreign .venv/bin/pytest that
+    # symlinks directly to an app binary keeps a project-local dirname while
+    # the file itself IS the app's. Check the FULL realpath too; either hit
+    # (dir-level or file-level) refuses. The HOME root must never rescue an
+    # app-venv path.
+    if not project_is_app and (
+        _is_inside(os.path.realpath(os.path.dirname(resolved)), app_venv_dir)
+        or _is_inside(os.path.realpath(resolved), app_venv_dir)
+    ):
+        return False, (
+            "binary resolves into the app environment (foreign project) — "
+            f"env-bleed refused: {token!r} -> {resolved}"
+        )
+    real_resolved = os.path.realpath(resolved)
+    # SP0 fix round 2 (BUG#10, Supervisor ruling 10): project-containment
+    # OVERRIDES all trust roots. A resolved binary INSIDE the checked
+    # project's realpath is refused unless it lives in that project's own
+    # venv bin — otherwise the trusted HOME root admits a project-local
+    # binary for the ~/projects/<repo> layout (probe: the auditor's own
+    # repo shape — project under HOME, <proj>/tools/pytest admitted via
+    # the HOME root). This rule runs FIRST; the roots check below is the
+    # second layer. SP0 fix round 3 (BUG#16): the carve-out must AGREE
+    # with _resolve_binary_roots' root (c) — realpath'd and only for a
+    # venv bin literally inside the project (a symlinked foreign
+    # ``.venv`` does not get the carve-out).
+    project_real = os.path.realpath(os.path.abspath(project_path))
+    carve_out_bin = os.path.realpath(
+        os.path.join(project_real, ".venv", "bin")
+    )
+    carve_out = (
+        _is_inside(carve_out_bin, project_real)
+        and carve_out_bin != project_real
+    )
+    if (
+        project_real != "/"
+        and _is_inside(real_resolved, project_real)
+        and not (carve_out and _is_inside(real_resolved, carve_out_bin))
+    ):
+        return False, (
+            "binary resolves inside the checked project (outside its venv "
+            f"bin) — project-supplied binaries are not trusted for "
+            f"validation: {token!r} -> {real_resolved}"
+        )
+    roots = _resolve_binary_roots(project_path)
+    for root in roots:
+        if _is_inside(real_resolved, root):
+            return True, resolved
+    return False, (
+        f"binary resolves outside allowed roots — PATH shadowing refused: "
+        f"{token!r} -> {real_resolved} (allowed roots: {', '.join(roots)})"
+    )
+
+
 def _substitute_venv_python(argv: list[str], venv_python: str | None) -> list[str]:
     """Replace 'python3' with venv_python in argv if venv_python is set.
 
@@ -554,7 +1117,13 @@ def _resolve_tests_python(project_path: str, venv_python: str | None) -> str | N
     """
     if venv_python is not None:
         return venv_python
-    if os.path.realpath(project_path) != _APP_ROOT:
+    # SPEC-09 SP0 (V3): worktree-aware identity gate (pre-flight D2). A git
+    # worktree of the running app IS the app's source at a different path —
+    # it gets the running interpreter. Anything else foreign does not.
+    if (
+        os.path.realpath(project_path) != _APP_ROOT
+        and not _is_app_worktree(project_path)
+    ):
         return None
     from importlib.util import find_spec
 
@@ -620,6 +1189,24 @@ def _check_tests(
     # a venv probe miss falls back to the running interpreter (only when it
     # can import pytest) — bare `python3` on a PEP 668 host has no pytest
     # and false-FAILED the tier ("No module named pytest").
+    #
+    # SP0 fix round (Debugger BUG#3): a REFUSED venv (claim on the app
+    # environment) must NOT fall through to bare `python3` + PATH
+    # resolution — probe (b): refused foreign project's `python3` resolved
+    # via PATH into the app venv and the tier still PASSED. The refusal is
+    # a visible FAILED tier naming the surface; no execution attempt. V2's
+    # "refusal → tier skips as designed" note is superseded by this ruling.
+    venv_refusal = _venv_refusal_reason(project_path, test_config.venv_path)
+    if venv_refusal is not None:
+        return EnforcementCheck(
+            tier="tests", tool="write_file", file=file_path,
+            passed=False,
+            detail=(
+                "test interpreter refused (venv validation): "
+                f"{venv_refusal}"
+            ),
+            output="", duration_ms=0,
+        )
     venv_python = _resolve_tests_python(
         project_path, _detect_venv_prefix(project_path, test_config.venv_path)
     )
@@ -647,6 +1234,19 @@ def _check_tests(
         elif related_test:
             abs_test = os.path.join(project_path, related_test)
             cmd_str = test_config.command.replace("{test_file}", abs_test)
+            # SP0 fix round (BUG#6): the `command` field previously bypassed
+            # the token allowlist entirely — full_suite_command was gated,
+            # command was not — so `sh -c 'touch /tmp/marker'` parsed into
+            # argv and EXECUTED (shell=False still runs argv[0]='sh', and
+            # the resolved-binary gate rightly admits /usr/bin/sh; the token
+            # allowlist is the only layer that refuses it). Same treatment
+            # as the full_suite_command branches below.
+            if not _validate_test_command(cmd_str):
+                logger.warning(
+                    "[enforcement] test command uses non-allowed binary: %s",
+                    test_config.command,
+                )
+                return None
             argv = _parse_command_to_argv(cmd_str)
             argv = _substitute_venv_python(argv, venv_python)
         elif test_config.full_suite_command:
@@ -683,7 +1283,21 @@ def _check_tests(
             return None
 
     try:
-        result, duration_ms = _run_timed_command(argv, project_path, test_timeout)
+        run = _run_timed_command(argv, project_path, test_timeout)
+        if run is None:
+            # SPEC-09 SP0 (V1): resolved-binary gate refused argv[0] —
+            # surface the refusal as a FAILED check, never a silent skip
+            # (a silent skip would false-PASS the tier). Fix round: the
+            # gate's actual reason is embedded (app-env bleed vs PATH
+            # shadowing are different refusals with different remedies).
+            _, gate_detail = _validate_resolved_binary(argv, project_path)
+            return EnforcementCheck(
+                tier="tests", tool="write_file", file=file_path,
+                passed=False,
+                detail=f"REFUSED: test binary — {gate_detail}",
+                output="", duration_ms=0,
+            )
+        result, duration_ms = run
         output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
         # pytest returns exit code 5 when no tests collected
         if result.returncode == 5:
@@ -776,12 +1390,22 @@ def _detect_linter(file_path: str, project_path: str) -> tuple[str, list[str]] |
     return None
 
 
-def _run_timed_command(argv: list[str], project_path: str, timeout: int) -> tuple[subprocess.CompletedProcess, int]:
+def _run_timed_command(argv: list[str], project_path: str, timeout: int) -> tuple[subprocess.CompletedProcess, int] | None:
     """Run a subprocess with argv list, shell=False, scrubbed env.
 
-    Returns (result, duration_ms). Raises on timeout.
+    Returns (result, duration_ms), or None when the V1 resolved-binary gate
+    refuses argv[0] (SPEC-09 SP0: PATH-bleed — a shim planted in a
+    user-writable PATH dir must never execute). Raises on timeout.
     CRIT-1/CRIT-2: shell=False is enforced. Env is scrubbed to PATH/HOME/LANG only. (Phase 0)
     """
+    # SPEC-09 SP0 (V1): token allowlist upstream stays as defense in depth;
+    # this is the resolution-side gate on the actual binary that would run.
+    if not _validate_resolved_binary(argv, project_path)[0]:
+        logger.warning(
+            "[enforcement] subprocess refused by resolved-binary gate: argv=%r project=%s",
+            argv, project_path,
+        )
+        return None
     start = time.monotonic()
     result = subprocess.run(
         argv, shell=False, capture_output=True,
@@ -830,9 +1454,36 @@ def _check_lint(
     if not shutil.which(binary):
         return None
 
-    start = time.monotonic()
+    # SPEC-09 SP0 (V1): resolved-binary gate BEFORE the subprocess —
+    # refusal is a visible FAILED check (never silent, never a false pass).
+    # Fix round: the gate's actual reason is embedded (same contract as the
+    # syntax/tests tiers).
+    allowed, gate_detail = _validate_resolved_binary(argv, project_path)
+    if not allowed:
+        logger.warning(
+            "[enforcement] lint tier refused: %s (argv=%r)", gate_detail, argv,
+        )
+        return EnforcementCheck(
+            tier="lint", tool="write_file", file=file_path,
+            passed=False,
+            detail=f"REFUSED: lint binary — {gate_detail}",
+            output="", duration_ms=0,
+        )
+
     try:
-        result, duration_ms = _run_timed_command(argv, project_path, config.lint_timeout_seconds)
+        run = _run_timed_command(argv, project_path, config.lint_timeout_seconds)
+        if run is None:
+            # Unreachable while the gate above holds; handled for type
+            # honesty and defense-in-depth (same contract as the tests tier:
+            # refusal is a visible FAILED check, never a silent skip).
+            _, gate_detail = _validate_resolved_binary(argv, project_path)
+            return EnforcementCheck(
+                tier="lint", tool="write_file", file=file_path,
+                passed=False,
+                detail=f"REFUSED: lint binary — {gate_detail}",
+                output="", duration_ms=0,
+            )
+        result, duration_ms = run
         output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
         passed = result.returncode == 0
 
@@ -958,8 +1609,17 @@ def check(
     # Determine if syntax passed (for gating Tier 2/Tier 3)
     # A SKIPPED placeholder (verbose mode) is treated as "passed" for gating
     # purposes — it didn't fail, it just didn't run.
+    # SP0 fix round (BUG#5): a REFUSED syntax check (resolved-binary gate)
+    # is GATE-NEUTRAL for the downstream tiers, exactly like SKIPPED — the
+    # syntax binary being untrusted says nothing about the tests/lint
+    # binaries. Pre-fix, the refusal cascaded and silently disabled the
+    # tests and lint tiers (visible as missing tiers in the check() output;
+    # probe-proven in the audit).
     syntax_passed = all(
-        c.tier != "syntax" or c.passed or c.detail.startswith("SKIPPED:")
+        c.tier != "syntax"
+        or c.passed
+        or c.detail.startswith("SKIPPED:")
+        or c.detail.startswith("REFUSED:")
         for c in checks
     )
     # If no syntax check ran, default to True (don't gate)
