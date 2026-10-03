@@ -6113,3 +6113,234 @@ class TestCrabcardTabStamping:
             "rendered) — divergence is the pinned design, not a bug"
         )
         assert card.metadata["session_key"] == "special:coder"
+# ═══════════════ SPEC-09 SP2: writer worktree cwd (ARH integration) ═════════
+
+class _SP2FakeProjectHandler:
+    """Minimal active-project provider for the SP2 pins."""
+
+    def __init__(self, path):
+        self._path = path
+
+    def get_active_project_name(self):
+        return "proj"
+
+    def get_active_project_path(self):
+        return self._path
+
+
+def _sp2_make_handler():
+    """A minimal AgentRuntimeHandler with mocked UI deps (SP2)."""
+    from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+    mc = unittest.mock.MagicMock()
+    crh = unittest.mock.MagicMock()
+    return AgentRuntimeHandler(
+        main_content=mc, chat_render_handler=crh, GLib_module=None
+    )
+
+
+def _sp2_git_repo(tmp_path):
+    import git as gitpython
+    repo = gitpython.Repo.init(str(tmp_path))
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "t")
+        cw.set_value("user", "email", "t@t")
+    (tmp_path / "seed.txt").write_text("seed\n")
+    repo.index.add(["seed.txt"])
+    repo.index.commit("init")
+    return repo
+
+
+def _sp2_writer_def():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        display_name="Coder", role="coder", can_write=True, tools=["write_file"],
+        mcp_servers=None, api_key=None, app_title=None, fallback_provider=None,
+    )
+
+
+def _sp2_reader_def():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        display_name="Reader", role="reviewer", can_write=False, tools=["read_file"],
+        mcp_servers=None, api_key=None, app_title=None, fallback_provider=None,
+    )
+
+
+def test_writer_with_lease_gets_worktree_cwd(tmp_path):
+    """The SP2 core path: writer + live lease -> _worktree_for_turn returns
+    the REAL worktree path under the ACTIVE PROJECT (project-parameterized)."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    from models.work_unit import WorkUnit
+    from utils.work_persistence import claim_work, save_work_units
+    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
+                                            status="in-progress")])
+    assert claim_work(str(project), "00000001", "special:coder") is not None
+
+    got = handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    )
+    assert got is not None
+    assert got == os.path.realpath(got)
+    assert os.path.dirname(got) == os.path.realpath(
+        os.path.join(str(project), ".worktrees")
+    )
+
+
+def test_non_writer_no_worktree(tmp_path):
+    """A reader (can_write False) NEVER gets a worktree, lease or not."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    from models.work_unit import WorkUnit
+    from utils.work_persistence import claim_work, save_work_units
+    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
+                                            status="in-progress")])
+    claim_work(str(project), "00000001", "special:coder")
+
+    assert handler._worktree_for_turn(
+        "special:coder", _sp2_reader_def(), str(project)
+    ) is None
+
+
+def test_no_lease_no_worktree(tmp_path):
+    """Writer WITHOUT any live lease -> None (project root cwd)."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    assert handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    ) is None
+
+
+def test_expired_lease_no_worktree(tmp_path, monkeypatch):
+    """An EXPIRED lease is not a live lease (read-time TTL, SP1 semantics)."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    from models.work_unit import WorkUnit
+    from utils.work_persistence import claim_work, save_work_units
+    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
+                                            status="in-progress")])
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("utils.work_persistence._now", lambda: clock["now"])
+    claim_work(str(project), "00000001", "special:coder", ttl=60)
+    clock["now"] += 61.0
+
+    assert handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    ) is None
+
+
+def test_non_git_project_degrades_to_project_root(tmp_path):
+    """B3/v3 end-to-end at the seam: a writer+lease on a NON-GIT project
+    must not raise — the disabled manager yields None -> project root."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "plain"
+    project.mkdir()  # deliberately NOT a git repo
+
+    from models.work_unit import WorkUnit
+    from utils.work_persistence import claim_work, save_work_units
+    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
+                                            status="in-progress")])
+    claim_work(str(project), "00000001", "special:coder")
+
+    assert handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    ) is None
+
+
+def test_lease_expiry_reset_via_is_worktree_of(tmp_path):
+    """The v3 reset rule: is_worktree_of recognizes a stale worktree cwd so
+    the caller can repoint it at the project (LOW-8: the worktree itself is
+    NOT deleted — recoverable uncommitted work)."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    from models.work_unit import WorkUnit
+    from utils.work_persistence import claim_work, save_work_units
+    from utils.worktree_manager import is_worktree_of
+    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
+                                            status="in-progress")])
+    assert claim_work(str(project), "00000001", "special:coder") is not None
+    wt = handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    )
+    assert wt is not None
+    # the lease expires; the cwd still points at the worktree
+    from utils.work_persistence import release_work
+    release_work(str(project), "00000001", "special:coder")
+    assert handler._worktree_for_turn(
+        "special:coder", _sp2_writer_def(), str(project)
+    ) is None                      # next turn gets None -> project root
+    # the reset recognizer still classifies the old cwd as a worktree
+    assert is_worktree_of(str(project), wt) is True
+    # and the worktree survives (no deletion on the reset path)
+    assert os.path.isdir(wt)
+
+
+def test_d2_pin_both_branches(tmp_path, monkeypatch):
+    """D2 payoff, both branches. The 'app repo' is PATCHED to a tmp repo
+    (_APP_ROOT is computed from the module attribute at use time — SP0
+    design): a worktree of the app repo passes _is_app_worktree; a worktree
+    of a FOREIGN project does not (correct by design — foreign projects get
+    no app-venv benefits). The REAL app repo is never touched."""
+    from agent import enforcement
+    from utils.worktree_manager import WorktreeManager, is_worktree_of
+
+    # ── app-repo branch: gate True (patched _APP_ROOT -> tmp repo) ──
+    app_repo = tmp_path / "app"
+    app_repo.mkdir()
+    _sp2_git_repo(app_repo)
+    monkeypatch.setattr(enforcement, "_APP_ROOT", str(app_repo))
+    app_mgr = WorktreeManager(str(app_repo))
+    app_wt = app_mgr.ensure_worktree("d2-probe")
+    assert app_wt is not None
+    assert enforcement._is_app_worktree(app_wt) is True
+
+    # ── foreign-project branch: gate False, by design ──
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    _sp2_git_repo(foreign)
+    foreign_mgr = WorktreeManager(str(foreign))
+    foreign_wt = foreign_mgr.ensure_worktree("d2-probe")
+    assert foreign_wt is not None
+    assert enforcement._is_app_worktree(foreign_wt) is False
+    # ...but it IS a valid worktree OF ITS OWN repo (the reset recognizer)
+    assert is_worktree_of(str(foreign), foreign_wt) is True
+
+
+def test_worktree_exec_passes_enforcement_gate(tmp_path, monkeypatch):
+    """The D2 integration pin (brief test 12): a REAL worktree under the
+    (patched) app repo's .worktrees + the gate's app-identity branch —
+    _validate_resolved_binary admits a system binary with the worktree as
+    project_path (exec inside the worktree is allowed; app-venv benefits
+    ride the same gate branch). The REAL app repo is never touched."""
+    from agent import enforcement
+    from agent.enforcement import _validate_resolved_binary
+    from utils.worktree_manager import WorktreeManager
+
+    app_repo = tmp_path / "app"
+    app_repo.mkdir()
+    _sp2_git_repo(app_repo)
+    monkeypatch.setattr(enforcement, "_APP_ROOT", str(app_repo))
+
+    mgr = WorktreeManager(str(app_repo))
+    app_wt = mgr.ensure_worktree("d2-exec-probe")
+    assert app_wt is not None
+    assert enforcement._is_app_worktree(app_wt)
+    allowed, detail = _validate_resolved_binary(
+        ["/usr/bin/python3", "-m", "pytest", "tests/"], app_wt
+    )
+    assert allowed, f"worktree exec refused: {detail}"

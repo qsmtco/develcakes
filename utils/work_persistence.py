@@ -690,3 +690,26 @@ def assert_lease(project_path: str, unit_id: str, holder: str) -> bool:
         if unit is None or unit.lease is None:
             return False
         return unit.lease.holder == holder and _lease_is_live(unit.lease, _now())
+
+
+def find_live_lease(project_path: str, holder: str) -> WorkLease | None:
+    """The holder's LIVE lease, or None (SPEC-09 SP2's ARH lookup).
+
+    Holder-scoped SP1 read: scans work.json for a unit whose lease is held by
+    ``holder`` AND still live (read-time TTL via _lease_is_live — the ONE
+    liveness definition). Composes assert_lease's semantics for the
+    'which unit does this session hold?' question assert_lease cannot answer
+    (it needs unit_id). Under _LEASE_LOCK; never raises; never writes; does
+    NOT trip the module ID counter (uses _load_units_for_lease's raw loader).
+    """
+    _validate_holder(holder)
+    with _LEASE_LOCK:
+        for unit in _load_units_for_lease(project_path):
+            lease = unit.lease
+            if (
+                lease is not None
+                and lease.holder == holder
+                and _lease_is_live(lease, _now())
+            ):
+                return lease
+        return None
