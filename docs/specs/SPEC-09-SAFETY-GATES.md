@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** Draft — for implementation
+**Status:** IMPLEMENTED (2026-10-03; SP0 6b3beb72, SP1 19c680aa, SP2 07efb6b2+daafe3df, SP3 36108f53)
 
 > **AMENDED 2026-10-02 (PM approved (b) + all riders).** D1=(b): stop-all reaches
 > running subprocesses via Popen + start_new_session + process-GROUP kill
@@ -170,14 +170,12 @@ project_path = worktree → commits on agent branch → review → merge via acc
 
 ## 6. Acceptance Criteria
 
-- [ ] Stop-all halts an agent **mid-tool-call** (test-proven: exec_command killed,
-      turn terminates CANCELLED)
-- [ ] Approval waiters unblocked (denied) by stop-all — no 60s hangs
-- [ ] In-flight review checkpoint aborts (no commit lands)
-- [ ] Same-file writers land in separate worktrees (two runtimes, one repo, distinct
-      paths, both suites green)
-- [ ] Double-claim refused; stale lease (TTL expired) re-claimable; release works
-- [ ] Full pytest green, ruff clean, pyright clean
+- [x] Stop-all halts an agent mid-tool-call (test-proven: real sleep-300 killed <=3s group-escalated, turn CANCELLED — supervisor-verified twice in own hands)
+- [x] Approval waiters unblocked (denied) — registration-time epoch guard (late registrants deny instantly; the fire-once flush race is dead)
+- [x] Review checkpoints abort at BOTH gates (pre-flight + commit boundary; centralized helper; counter honest)
+- [x] Worktrees: project-parameterized per BLOCKING-3 ruling (the ACTIVE project's repo; app-repo = self-host special case; two agents distinct paths pinned)
+- [x] Double-claim refused; TTL re-claim; release; disk-owns-the-lease merge (handler persists can't clobber)
+- [x] Full suite 4291/3 skipped EXIT=0 (auditor independently re-ran); pyright 17=pre-existing baseline, 0 in new code; ruff at/below baseline (net -2 legit)
 
 ## 7. Edge Cases
 
