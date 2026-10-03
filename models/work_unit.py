@@ -8,9 +8,12 @@
 # Stdlib only (dataclasses, datetime, typing). No file I/O — persistence lives
 # in utils/work_persistence.py (Phase 2).
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
+
+_logger = logging.getLogger(__name__)
 
 
 # ── Module-level sequential counter ─────────────────────────────────────────
@@ -59,6 +62,66 @@ WORK_PRIORITY_LABELS = {
 }
 
 
+# ── Work lease model (SPEC-09 SP1) ────────────────────────────────────────────
+
+@dataclass
+class WorkLease:
+    """A claim on a Work Unit (SPEC-09 §2 — work claiming).
+
+    Stored INSIDE the owning WorkUnit record (pre-flight ruling D3: one atomic
+    write, no sidecar file). Expiry is computed at READ time as
+    ``now - claimed_at < ttl_seconds`` — there is no background sweeper; an
+    expired lease is simply re-claimable (and releasable) by anyone.
+    """
+
+    unit_id: str        # owning WorkUnit.id (zero-padded string)
+    holder: str         # claiming session_key
+    claimed_at: float   # time.time() at claim (refreshed on re-claim)
+    ttl_seconds: float
+
+    def to_dict(self) -> dict:
+        return {
+            "unit_id": self.unit_id,
+            "holder": self.holder,
+            "claimed_at": self.claimed_at,
+            "ttl_seconds": self.ttl_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkLease":
+        # ValueError (not TypeError) matches WorkUnit.from_dict: the persistence
+        # load path catches ValueError per record so one corrupt lease never
+        # aborts the whole work.json load.
+        if not isinstance(data, dict):
+            raise ValueError("Work lease record must be an object")  # noqa: TRY004
+
+        def string_field(name: str) -> str:
+            value = data.get(name)
+            if not isinstance(value, str):
+                raise ValueError(  # noqa: TRY004
+                    f"Work lease field {name!r} must be a string"
+                )
+            return value
+
+        def number_field(name: str) -> float:
+            value = data.get(name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(  # noqa: TRY004
+                    f"Work lease field {name!r} must be a number"
+                )
+            return float(value)
+
+        return cls(
+            unit_id=string_field("unit_id"),
+            holder=string_field("holder"),
+            claimed_at=number_field("claimed_at"),
+            # Type-validated only: a stored ttl <= 0 is an inert always-expired
+            # lease (claim_work refuses to write one). Tolerating it at load
+            # keeps one corrupt lease from discarding the whole unit record.
+            ttl_seconds=number_field("ttl_seconds"),
+        )
+
+
 # ── Work Unit model ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -77,6 +140,7 @@ class WorkUnit:
     completed_at: str = ""
     post_mortem_path: str = ""
     blocked_reason: str = ""
+    lease: WorkLease | None = None  # SPEC-09 D3: lease lives IN the record
 
     def to_dict(self) -> dict:
         return {
@@ -94,6 +158,7 @@ class WorkUnit:
             "completed_at": self.completed_at,
             "post_mortem_path": self.post_mortem_path,
             "blocked_reason": self.blocked_reason,
+            "lease": self.lease.to_dict() if self.lease is not None else None,
         }
 
     @classmethod
@@ -121,6 +186,22 @@ class WorkUnit:
         ):
             raise ValueError("Work Unit field 'depends_on' must be a list of strings")
 
+        lease_data = data.get("lease")
+        if lease_data is not None:
+            # Lease-only corruption (BUG#3): drop the lease, KEEP the unit.
+            # A malformed lease must not discard the whole record (the
+            # persistence load loop skips ValueError records wholesale).
+            try:
+                lease_data = WorkLease.from_dict(lease_data)
+            except ValueError as e:
+                logging.getLogger(__name__).warning(
+                    "WorkUnit %r: dropping corrupt lease (%s); "
+                    "unit record preserved",
+                    data.get("id", "?"),
+                    e,
+                )
+                lease_data = None
+
         return cls(
             id=string_field("id"),
             title=string_field("title"),
@@ -138,6 +219,7 @@ class WorkUnit:
             completed_at=string_field("completed_at"),
             post_mortem_path=string_field("post_mortem_path"),
             blocked_reason=string_field("blocked_reason"),
+            lease=lease_data,
         )
 
 

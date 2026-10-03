@@ -8,15 +8,19 @@
 
 import json
 import logging
+import math
 import os
 import re
-from typing import Iterable
+import threading
+import time
+from collections.abc import Iterable
 
 from models.work_unit import (
-    WorkUnit,
     WORK_PRIORITIES,
     WORK_PRIORITY_LABELS,
     WORK_STATUS_LABELS,
+    WorkLease,
+    WorkUnit,
     _work_init_counter,
 )
 from utils.project_awareness import _ensure_crabcakes_dir, get_crabcakes_dir
@@ -173,12 +177,68 @@ def load_work_units(project_path: str) -> list[WorkUnit]:
 # ── Saving ───────────────────────────────────────────────────────────────────
 
 
-def save_work_units(project_path: str, work_units: Iterable[WorkUnit]) -> None:
+def _merge_preserved_leases(
+    units: list[WorkUnit], on_disk: dict[str, WorkUnit]
+) -> None:
+    """Carry on-disk lease state into the records being written (BUG#1/probe G).
+
+    Rule: the DISK owns the lease. For each written unit that has an on-disk
+    counterpart, the resulting lease is the ON-DISK lease when it is non-None
+    AND still live; otherwise None. The in-memory lease is IGNORED entirely —
+    a store snapshot loaded before a claim/release carries no lease intent,
+    in either direction: stale-None would erase a live claim (probe D), while
+    stale-non-None would resurrect a released lease (probe G-A) or overwrite a
+    newer holder's live lease (probe G-B). New units (no on-disk record) keep
+    their in-memory lease (normally None). The caller holds _LEASE_LOCK across
+    both the disk read and the write; the disk read uses _load_valid_work_json
+    (NOT load_work_units) so the module ID counter is not tripped.
+    """
+    now = _now()
+    for unit in units:
+        disk_unit = on_disk.get(unit.id)
+        if disk_unit is None:
+            continue  # new unit — no on-disk counterpart
+        disk_lease = disk_unit.lease
+        if disk_lease is not None and _lease_is_live(disk_lease, now):
+            if unit.lease is None or unit.lease != disk_lease:
+                _logger.debug(
+                    "save_work_units: preserved live lease for %s "
+                    "(stale in-memory snapshot)",
+                    unit.id,
+                )
+            unit.lease = disk_lease
+        else:
+            if unit.lease is not None:
+                _logger.debug(
+                    "save_work_units: dropped stale in-memory lease for %s "
+                    "(disk owns the lease; on-disk state absent/expired)",
+                    unit.id,
+                )
+            unit.lease = None
+
+
+def save_work_units(
+    project_path: str,
+    work_units: Iterable[WorkUnit],
+    *,
+    preserve_leases: bool = True,
+) -> bool:
     """Persist Work Units to .crabcakes/work.json, then regenerate tasks.md.
 
     The JSON write is atomic (temp file + os.replace) and completes BEFORE the
     summary write. A failed summary write is logged and never corrupts or
     rolls back the JSON source of truth.
+
+    Lease merge (SPEC-09 SP1 fix, BUG#1 + probe G): with the default
+    ``preserve_leases=True`` the ON-DISK lease state wins for every unit that
+    already exists on disk — a live on-disk lease is carried into the write
+    and an absent/expired one is cleared — so stale in-memory snapshots can
+    neither erase a live claim nor resurrect a released lease. Pass
+    ``preserve_leases=False`` when the written lease IS the intent (the lease
+    API's own mutations: claim writes its new lease, release writes None).
+
+    Returns True when work.json was persisted; False on the silent no-op path
+    (directory preparation failed). Existing callers may ignore the return.
 
     A corrupt project state (.crabcakes is a regular file) raises RuntimeError
     from _ensure_crabcakes_dir — that is caught, logged, and the save is a
@@ -193,12 +253,16 @@ def save_work_units(project_path: str, work_units: Iterable[WorkUnit]) -> None:
             project_path,
             e,
         )
-        return
-    payload = {
-        "version": WORK_JSON_VERSION,
-        "work_units": [w.to_dict() for w in units],
-    }
-    _atomic_write_json(work_json_path(project_path), payload)
+        return False
+    with _LEASE_LOCK:  # merge read + write atomic under one acquisition
+        if preserve_leases:
+            on_disk = _load_units_for_lease(project_path)
+            _merge_preserved_leases(units, {w.id: w for w in on_disk})
+        payload = {
+            "version": WORK_JSON_VERSION,
+            "work_units": [w.to_dict() for w in units],
+        }
+        _atomic_write_json(work_json_path(project_path), payload)
     try:
         write_tasks_summary(project_path, units)
     except Exception as e:  # defensive: summary must never corrupt work.json
@@ -208,6 +272,7 @@ def save_work_units(project_path: str, work_units: Iterable[WorkUnit]) -> None:
             tasks_summary_path(project_path),
             e,
         )
+    return True
 
 
 # ── Generated summary ────────────────────────────────────────────────────────
@@ -412,10 +477,11 @@ def load_or_migrate_work_units(project_path: str) -> list[WorkUnit]:
     # until the JSON is durably written), then regenerate the summary.
     try:
         _ensure_crabcakes_dir(project_path)
-        _atomic_write_json(
-            json_path,
-            {"version": WORK_JSON_VERSION, "work_units": [w.to_dict() for w in migrated]},
-        )
+        with _LEASE_LOCK:  # shared .tmp file with lease writes — see lock note
+            _atomic_write_json(
+                json_path,
+                {"version": WORK_JSON_VERSION, "work_units": [w.to_dict() for w in migrated]},
+            )
     except (OSError, RuntimeError) as e:
         _logger.warning(
             "load_or_migrate_work_units: failed to persist migration to %s: %s",
@@ -434,3 +500,193 @@ def load_or_migrate_work_units(project_path: str) -> list[WorkUnit]:
         )
     _work_init_counter(migrated)  # advance past migrated ids before next create
     return migrated
+
+
+# ── Work leases (SPEC-09 SP1) ────────────────────────────────────────────────
+#
+# D3: the lease lives INSIDE the WorkUnit record — one atomic work.json write
+# per mutation, no sidecar file. TTL expiry is computed at READ time
+# (``now - claimed_at < ttl``); there is NO background sweeper — an expired
+# lease is simply re-claimable/releasable by anyone.
+#
+# Serialization: the module IS the store here (WorkUnitStore is deliberately
+# in-memory-only by architecture), so one module-level reentrant lock guards
+# EVERY work.json write (lease mutations AND the legacy save path — they share
+# the same .tmp file, so unsynchronized writers could publish torn JSON).
+# RLock because claim/release hold it across their own save_work_units call.
+# Reads stay lock-free: os.replace is atomic, so a reader sees the old or the
+# new file, never a mix. Scope note: this serializes threads within the
+# (single-process) app; cross-PROCESS lease arbitration is out of MVP scope.
+
+DEFAULT_LEASE_TTL_SECONDS = 900.0  # SPEC-09 §7: default 15 minutes
+
+_LEASE_LOCK = threading.RLock()
+
+
+def _now() -> float:
+    """Wall clock for lease TTL math. Module-level indirection so tests can
+    freeze/advance time via monkeypatch (utils.work_persistence._now)."""
+    return time.time()
+
+
+def _lease_is_live(lease: WorkLease, now: float) -> bool:
+    """True when the lease has not expired at read time ``now``.
+
+    Read-time TTL: no sweeper; an expired lease is simply re-claimable.
+    """
+    return (now - lease.claimed_at) < lease.ttl_seconds
+
+
+def _validate_holder(holder: str) -> str:
+    """Reject a non-string or empty holder (programmer error, like ttl <= 0).
+
+    An empty holder could never be re-asserted or released meaningfully, so
+    it is refused at the boundary instead of creating an unownable lease.
+    """
+    if not isinstance(holder, str) or not holder:
+        raise ValueError("holder must be a non-empty string")
+    return holder
+
+
+def _normalize_unit_id(unit_id: str) -> str:
+    """Canonicalize a unit id to the zero-padded 8-digit form (#3/3 → 00000003).
+
+    The lease API never silently misses on id FORM: '#3', '3', and '00000003'
+    all canonicalize to '00000003' (probe F). A malformed id (non-numeric
+    after '#' stripping, or empty) raises ValueError — a programmer error,
+    same class as ttl <= 0. An id that is well-formed but not in the store
+    remains the *unknown unit* case (None/False, never raises).
+    """
+    if not isinstance(unit_id, str) or not unit_id.strip():
+        raise ValueError("unit_id must be a non-empty string")
+    digits = unit_id.strip().lstrip("#")
+    if not digits.isdigit():
+        raise ValueError(
+            f"unit_id must be numeric (optionally #-prefixed), got {unit_id!r}"
+        )
+    return str(int(digits)).zfill(8)
+
+
+def _validate_ttl(ttl: float) -> float:
+    """Reject a non-numeric, bool, <= 0, NaN, or inf ttl (programmer error).
+
+    NaN and inf would poison the read-time TTL math (NaN < x is False forever
+    → an unexpirable lease; inf likewise) — refused at the boundary.
+    """
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+        raise ValueError("ttl must be a number")  # noqa: TRY004 — spec: ValueError
+    ttl = float(ttl)
+    if not math.isfinite(ttl):
+        raise ValueError(f"ttl must be finite, got {ttl}")
+    if ttl <= 0:
+        raise ValueError(f"ttl must be positive, got {ttl}")
+    return ttl
+
+
+def _load_units_for_lease(project_path: str) -> list[WorkUnit]:
+    """Load the unit list for a lease operation while holding _LEASE_LOCK.
+
+    A missing OR corrupt work.json maps to [] — every lease function then
+    treats the unit as unknown (None/False, never raises). Callers must only
+    save when a mutation actually landed, so an empty/corrupt store is never
+    rewritten as an empty store.
+    """
+    loaded = _load_valid_work_json(project_path)
+    return loaded if loaded is not None else []
+
+
+def claim_work(
+    project_path: str,
+    unit_id: str,
+    holder: str,
+    ttl: float = DEFAULT_LEASE_TTL_SECONDS,
+) -> WorkLease | None:
+    """Claim a Work Unit if unclaimed or the existing lease is expired.
+
+    Returns the new WorkLease on success; None = refused (another holder
+    holds a LIVE lease, or the unit is unknown — never raises on unknown).
+
+    Same-holder re-claim while live REFRESHES claimed_at (heartbeat
+    semantics) and returns the new lease — idempotent re-entry, not a
+    refusal. ttl <= 0 (or non-numeric) raises ValueError. An OSError from
+    the underlying write propagates — the claim did not land.
+    """
+    unit_id = _normalize_unit_id(unit_id)
+    _validate_holder(holder)
+    ttl = _validate_ttl(ttl)
+    with _LEASE_LOCK:
+        units = _load_units_for_lease(project_path)
+        unit = next((w for w in units if w.id == unit_id), None)
+        if unit is None:
+            return None
+        existing = unit.lease
+        if (
+            existing is not None
+            and _lease_is_live(existing, _now())
+            and existing.holder != holder
+        ):
+            return None  # live lease, different holder — refused
+        lease = WorkLease(
+            unit_id=unit.id,
+            holder=holder,
+            claimed_at=_now(),
+            ttl_seconds=ttl,
+        )
+        unit.lease = lease
+        # preserve_leases=False: the written lease IS the intent — the merge
+        # must not replace it with the (older) on-disk state. BUG#2: honor the
+        # bool — a silent no-op persist must not report success.
+        if not save_work_units(project_path, units, preserve_leases=False):
+            _logger.warning(
+                "claim_work: claim on unit %s not persisted (save failed); "
+                "reporting refusal",
+                unit_id,
+            )
+            return None
+        return lease
+
+
+def release_work(project_path: str, unit_id: str, holder: str) -> bool:
+    """Release a Work Unit lease iff ``holder`` matches or the lease expired.
+
+    True = released (lease cleared and persisted); False = not the holder of
+    a live lease / not held / unit unknown (never raises on unknown). An
+    expired lease is nobody's — anyone may release it.
+    """
+    unit_id = _normalize_unit_id(unit_id)
+    _validate_holder(holder)
+    with _LEASE_LOCK:
+        units = _load_units_for_lease(project_path)
+        unit = next((w for w in units if w.id == unit_id), None)
+        if unit is None or unit.lease is None:
+            return False
+        if unit.lease.holder != holder and _lease_is_live(unit.lease, _now()):
+            return False  # live lease owned by someone else
+        unit.lease = None
+        # preserve_leases=False: the written lease (None) IS the intent — the
+        # merge would resurrect the live on-disk lease being released. BUG#2:
+        # a silent no-op persist must not report success.
+        if not save_work_units(project_path, units, preserve_leases=False):
+            _logger.warning(
+                "release_work: release of unit %s not persisted (save failed); "
+                "reporting not-released",
+                unit_id,
+            )
+            return False
+        return True
+
+
+def assert_lease(project_path: str, unit_id: str, holder: str) -> bool:
+    """True iff ``holder`` holds a LIVE (not expired) lease on the unit.
+
+    Pure check — reads work.json but never writes. False on unknown unit,
+    no lease, wrong holder, or expiry (never raises on unknown).
+    """
+    unit_id = _normalize_unit_id(unit_id)
+    _validate_holder(holder)
+    with _LEASE_LOCK:
+        units = _load_units_for_lease(project_path)
+        unit = next((w for w in units if w.id == unit_id), None)
+        if unit is None or unit.lease is None:
+            return False
+        return unit.lease.holder == holder and _lease_is_live(unit.lease, _now())
