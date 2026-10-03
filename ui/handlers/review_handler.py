@@ -208,6 +208,20 @@ class ReviewHandler:
 
     # ── Review session lifecycle ────────────────────────────────────────
 
+    def _abort_checkpoint_for_stop_all(self, session_key: str) -> None:
+        """One abort path for BOTH stop-all checkpoint gates (SP3 fix round
+        BUG#4): emit the user-visible text AND note the abort so the next
+        stop-all summary card counts it. The pre-flight gate previously
+        emitted only — the card undercounted the common case."""
+        self._GLib.idle_add(
+            lambda sk=session_key: self._on_display_text(
+                sk, "checkpoint aborted: stop-all"
+            )
+        )
+        if (self._agent_runtime_handler is not None
+                and hasattr(self._agent_runtime_handler, "note_stop_all_aborted")):
+            self._agent_runtime_handler.note_stop_all_aborted()
+
     def start_review(self, project_name: str, session_key: str | None = None) -> None:
         """Start a review session: git add -A && git commit → checkpoint SHA."""
         state = self._states.get(project_name)
@@ -221,6 +235,14 @@ class ReviewHandler:
 
         project_path = state.project_path
 
+        # SPEC-09 SP3: no commit under stop-all. Checked BEFORE any git work
+        # (and re-checked just before the commit itself) — abort with a card
+        # instead of creating a checkpoint mid-halt.
+        if (self._agent_runtime_handler is not None
+                and self._agent_runtime_handler.stop_all_in_progress()):
+            self._abort_checkpoint_for_stop_all(sk)
+            return
+
         def _do():
             # Ensure it's a git repo
             if not git_ops.is_repo(project_path):
@@ -233,6 +255,14 @@ class ReviewHandler:
             stage_result = git_ops.stage_all(project_path)
             if not stage_result.success:
                 self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to stage files: {stage_result.error}"))
+                return
+
+            # SPEC-09 SP3: re-check at the commit boundary — stop-all may
+            # have landed while staging ran. A checkpoint created after the
+            # halt would fake a pre-halt state onto the branch.
+            if (self._agent_runtime_handler is not None
+                    and self._agent_runtime_handler.stop_all_in_progress()):
+                self._abort_checkpoint_for_stop_all(sk)
                 return
 
             # Commit checkpoint. allow_empty=True because a checkpoint is a

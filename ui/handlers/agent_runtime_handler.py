@@ -71,6 +71,15 @@ class AgentRuntimeHandler:
         # set_active_project -> self._active_project; managers cached here).
         self._worktree_managers: dict[str, Any] = {}
 
+        # SPEC-09 SP3: stop-all in-flight flag. Set True across the whole
+        # stop_all_agents() aggregation; ReviewHandler reads it via
+        # stop_all_in_progress() BEFORE git_ops.commit and aborts instead.
+        self._stop_all_in_progress: bool = False
+        # Review checkpoints aborted during the CURRENT stop-all window
+        # (ReviewHandler increments via note_stop_all_aborted(); the summary
+        # card consumes and resets the counter).
+        self._stop_all_aborted_checkpoints: int = 0
+
         # Shared routing table — set via set_agent_routing() (maps session_key → project_name)
         # Used to route special agent responses to project chat boxes when no direct tab exists.
         self._agent_to_project = None
@@ -337,6 +346,94 @@ class AgentRuntimeHandler:
     def set_review_handler(self, review_handler) -> None:
         """Set ReviewHandler after construction (deferred to avoid circular deps with window._build)."""
         self._review_handler = review_handler
+
+    def stop_all_agents(self) -> dict[str, str]:
+        """Stop every agent: cancel turns, kill registered processes, abort
+        in-flight review checkpoints. Merged sk → outcome across runtimes.
+
+        SPEC-09 SP3 aggregation seam (toolbar → here via window). Sets the
+        stop flag BEFORE iterating so a review checkpoint starting mid-loop
+        still sees it, clears it in finally; emits ONE summary feed card
+        (sessions cancelled, approvals denied, processes killed, checkpoints
+        aborted). The no-op case ("0 turns in flight") is carded too
+        (spec §7). Returns the merged outcome dict.
+        """
+        self._stop_all_in_progress = True
+        try:
+            merged: dict[str, str] = {}
+            for rt in list(self._runtimes.values()):
+                try:
+                    for sk, outcome in rt.stop_all().items():
+                        merged[sk] = outcome
+                except Exception:
+                    logger.exception("stop_all_agents: runtime stop_all raised")
+            # Review checkpoints that aborted under the flag report through
+            # this counter (ReviewHandler increments via note_aborted).
+            aborted = self._stop_all_aborted_checkpoints
+            self._stop_all_aborted_checkpoints = 0
+            self._emit_stop_all_card(merged, aborted)
+            return merged
+        finally:
+            self._stop_all_in_progress = False
+
+    def stop_all_in_progress(self) -> bool:
+        """True while stop-all is running. Review checkpoints read this
+        BEFORE git_ops.commit and abort instead (no commit under stop-all)."""
+        return self._stop_all_in_progress
+
+    def note_stop_all_aborted(self) -> None:
+        """ReviewHandler calls this when it aborts a checkpoint under the
+        stop-all flag; the count feeds the stop-all summary card."""
+        self._stop_all_aborted_checkpoints += 1
+
+    def _emit_stop_all_card(self, outcomes: dict[str, str], aborted_checkpoints: int) -> None:
+        """One summary card for a completed stop-all (spec §7). No-op case
+        (empty outcomes) still cards: "0 turns in flight"."""
+        if self._fh is None:
+            logger.info("stop-all card skipped: no feed handler wired")
+            return
+        cancelled = sum(1 for sk, o in outcomes.items() if sk != "*" and o.startswith("cancelled"))
+        denied = sum(
+            int(p.split(":")[1]) for o in outcomes.values() for p in o.split("+")
+            if p.startswith("denied:") and p.split(":")[1].isdigit()
+        )
+        killed = sum(
+            int(p.split(":")[1]) for o in outcomes.values() for p in o.split("+")
+            if p.startswith("killed:") and p.split(":")[1].isdigit()
+        )
+        # SP3 fix round (BUG#3): groups that SURVIVED SIGKILL surface as
+        # "N-unkillable" — a hostile-process situation the PM must SEE,
+        # never a silent success count.
+        unkillable = sum(
+            int(p.split("-")[0]) for o in outcomes.values() for p in o.split("+")
+            if p.endswith("-unkillable") and p.split("-")[0].isdigit()
+        )
+        lines = [f"Turns cancelled: {cancelled}"]
+        if denied:
+            lines.append(f"Approvals denied: {denied}")
+        if killed:
+            lines.append(f"Processes killed: {killed}")
+        if unkillable:
+            lines.append(
+                f"Processes UNKILLABLE: {unkillable} (survived SIGKILL — "
+                f"check with ps/kill manually)"
+            )
+        if aborted_checkpoints:
+            lines.append(f"Checkpoints aborted: {aborted_checkpoints}")
+        if not outcomes and not aborted_checkpoints:
+            lines = ["0 turns in flight — nothing to stop"]
+        from models.feed_card import FeedCardData
+        card = FeedCardData(
+            card_type="system",
+            source="system",
+            title="■ Stop All",
+            body="\n".join(lines),
+            author="Stop All",
+            timestamp=datetime.now(timezone.utc),
+            project_name=self._active_project[0] if self._active_project else "(none)",
+            metadata={"origin": "stop-all", "sessions": len(outcomes)},
+        )
+        self._fh.add_card(card)
 
     def set_feed_handler(self, feed_handler) -> None:
         """Set FeedHandler. Called by window.py during _build (Phase D)."""

@@ -17,7 +17,9 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -92,6 +94,141 @@ def _get_approval(session_key: str, tool_name: str, arguments: dict, *, approval
         return cb(session_key, tool_name, arguments)
     except Exception:
         return False
+
+
+# ── Process registry (SPEC-09 SP3 stop-all) ───────────────────────────────────
+#
+# session_key → list of live Popen handles from _exec_command. Stop-all
+# (runtime.stop_all → cancel_all_processes) group-kills these so a runaway
+# shell command cannot outlive its cancelled turn. Every handle in the
+# registry was started with start_new_session=True, making proc.pid a
+# PROCESS-GROUP leader — os.killpg reaches the whole tree (shells, sleeps,
+# compilers), which plain proc.terminate() (the shell only) would not.
+
+_PROCESS_REGISTRY: dict[str, list[subprocess.Popen]] = {}
+_PROCESS_REGISTRY_LOCK = threading.Lock()
+
+# SIGTERM → grace → SIGKILL escalation window (seconds).
+_KILL_ESCALATION_GRACE_SEC = 2.0
+
+
+def _group_alive(pgid: int) -> bool:
+    """True when the process GROUP still has a live member (killpg 0-probe).
+
+    SP3 fix round (BUG#1): group liveness is probed via killpg(pgid, 0) —
+    NOT the leader's reaping. A process group OUTLIVES its leader: any
+    member (or none) may remain, so the leader's exit proves nothing about
+    the group. ProcessLookupError → no member remains → False.
+    """
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Group exists but is not ours to signal — conservatively "alive".
+        return True
+
+
+def _group_kill(proc: subprocess.Popen) -> bool:
+    """SIGTERM → grace → SIGKILL one process GROUP; returns confirmed-dead.
+
+    SP3 fix round (BUG#1): escalation is gated on GROUP liveness (killpg
+    0-probe), never on the leader's reaping — a group outlives its leader,
+    so "the shell exited on SIGTERM" (probe C: bash -c 'trap "" TERM;
+    sleep & wait' under a TERM-honoring outer sh) used to skip escalation
+    and orphan the TERM-immune child holding the exec pipe. ProcessLookupError
+    at any probe means no member remains — that is success. Permission/state
+    errors fall through to the next escalation step rather than aborting
+    stop-all; the group that cannot be signalled is almost always already
+    gone (PermissionError on the 0-probe alone means it is not ours —
+    conservatively reported as unkillable, see cancel_all_processes).
+
+    SP3 fix round 2 (BUG#1): proc.poll() runs at the TOP of every wait
+    iteration, BEFORE the _group_alive probe. An unreaped ZOMBIE leader
+    keeps killpg(pgid, 0) succeeding, so without an in-window reap both
+    2s windows spun on a genuinely-empty group: every exec timeout ran
+    ~4s long (auditor: 5.01s vs 1.00s) and cancel_all reported FALSE
+    unkillable 12/12 (zrate probe) — the no-reaper windows (exec timeout
+    path; registry→communicate gap) have no communicate() reaper running.
+    poll() reaps; the zombie becomes waitable-dead; killpg then sees the
+    true (empty) group. Auditor's causation probe: 5.01s → 0.05s.
+    """
+    pgid = proc.pid  # start_new_session=True → pid IS the group leader id
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True  # group already gone — done
+    except (PermissionError, OSError):
+        # Cannot signal this group (permissions / reaped / exotic fs).
+        # Fall through to the probe; SIGKILL attempt follows.
+        pass
+    deadline = time.monotonic() + _KILL_ESCALATION_GRACE_SEC
+    while time.monotonic() < deadline:
+        proc.poll()  # reap the leader first — a zombie holds the probe truthy
+        if not _group_alive(pgid):
+            # Group confirmed dead (leader may have been reaped mid-wait).
+            try:
+                proc.wait(timeout=0)  # reap if we are the parent; else ignore
+            except (subprocess.TimeoutExpired, ChildProcessError, OSError, ValueError):
+                pass
+            return True
+        time.sleep(0.05)
+
+    # Still alive after the SIGTERM grace → SIGKILL the GROUP (probe B:
+    # killpg reaches ORPHANED members whose leader is gone).
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass  # gone between probe and signal, or unsignallable — probe decides
+    deadline = time.monotonic() + _KILL_ESCALATION_GRACE_SEC
+    while time.monotonic() < deadline:
+        proc.poll()  # reap-before-probe, same zombie hazard as the SIGTERM window
+        if not _group_alive(pgid):
+            try:
+                proc.wait(timeout=0)  # reap if we are the parent; else ignore
+            except (subprocess.TimeoutExpired, ChildProcessError, OSError, ValueError):
+                pass
+            return True
+        time.sleep(0.05)
+    return False  # group SURVIVED SIGKILL — hostile-process territory
+
+
+def cancel_all_processes(session_key: str | None = None) -> tuple[int, int]:
+    """Group-kill registered processes (SIGTERM → 2s → SIGKILL). All sessions
+    if None. Returns (killed, unkillable) — SP3 fix round BUG#3: only
+    group-confirmed-dead targets count as killed; survivors after SIGKILL
+    surface as unkillable (the stop-all card reports them; a group that
+    survives SIGKILL is a hostile-process situation the PM must SEE).
+    Escalation per process-group (start_new_session).
+
+    SPEC-09 SP3: the stop-all kill path. Registered handles are removed from
+    the registry under the lock; SP3 fix round (BUG#1): the former
+    `poll() is None` skip is GONE — a leader that already exited does not
+    prove its group is gone (probe I: `sleep 300 & echo started` leaves a
+    lingering orphan), so every registered group is probed+escalated
+    unconditionally; the dead-group case raises ProcessLookupError inside
+    _group_kill and resolves True harmlessly.
+    """
+    with _PROCESS_REGISTRY_LOCK:
+        if session_key is None:
+            keys = list(_PROCESS_REGISTRY.keys())
+        else:
+            keys = [session_key] if session_key in _PROCESS_REGISTRY else []
+        targets: list[tuple[str, subprocess.Popen]] = [
+            (sk, proc) for sk in keys for proc in _PROCESS_REGISTRY.get(sk, [])
+        ]
+        for sk in keys:
+            _PROCESS_REGISTRY.pop(sk, None)
+
+    killed = 0
+    unkillable = 0
+    for _sk, proc in targets:
+        if _group_kill(proc):
+            killed += 1
+        else:
+            unkillable += 1
+    return killed, unkillable
 
 
 # ── Path sandbox ───────────────────────────────────────────────────────────────
@@ -410,18 +547,46 @@ def _exec_command(command: str, project_path: str, timeout: int = 30, session_ke
     # root (as advertised by {{PROJECT_PATH}} in the system prompt).
     # scratch_dir is accepted as a parameter for API compatibility but ignored.
     exec_cwd = project_path
+    # SPEC-09 SP3: Popen + start_new_session (NOT subprocess.run). The process
+    # becomes its own process-group leader, registered for stop-all group
+    # kills; output, truncation, scrubbed-env and cwd semantics are
+    # byte-identical to the former subprocess.run call (binary pipes +
+    # explicit utf-8/replace decode, NOT text=True — text mode would decode
+    # with the locale codec under strict errors and change the contract).
+    proc: subprocess.Popen | None = None
+    registered = False
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=exec_cwd,
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=get_scrubbed_env(),
+            start_new_session=True,
         )
+        with _PROCESS_REGISTRY_LOCK:
+            _PROCESS_REGISTRY.setdefault(session_key, []).append(proc)
+        registered = True
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # SPEC-09 SP3: the OLD subprocess.run timeout killed only the
+            # shell — children (sleeps, servers) survived as orphans. Now
+            # group-kill the whole session (SIGTERM → 2s → SIGKILL, SP3 fix
+            # round BUG#1: group-liveness gated, so a TERM-immune child
+            # under a TERM-honoring leader cannot outlive its own timeout)
+            # + communicate() reaper so the pipes close and no zombie
+            # survives, then return the SAME timed-out ToolResult shape as
+            # before (empty streams, exit None). The outer finally
+            # unregisters.
+            _group_kill(proc)
+            try:
+                proc.communicate(timeout=_KILL_ESCALATION_GRACE_SEC)
+            except (subprocess.TimeoutExpired, ValueError, OSError):
+                pass  # reaper best-effort; the group is dead either way
+            return ToolResult(success=False, error=f"Command timed out after {timeout}s", duration_ms=int((time.monotonic() - start) * 1000))
         duration_ms = int((time.monotonic() - start) * 1000)
-        stdout_bytes = result.stdout
-        stderr_bytes = result.stderr
 
         # Separate stdout/stderr for caller inspection; combined for output
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -438,15 +603,15 @@ def _exec_command(command: str, project_path: str, timeout: int = 30, session_ke
         if len(combined) > MAX_EXEC_OUTPUT:
             combined = combined[:MAX_EXEC_OUTPUT] + f"\n[... truncated at {MAX_EXEC_OUTPUT} bytes ...]"
 
-        if result.returncode != 0:
+        if proc.returncode != 0:
             return ToolResult(
                 success=False,
                 output=combined,
-                error=f"Exit {result.returncode}",
+                error=f"Exit {proc.returncode}",
                 duration_ms=duration_ms,
                 stdout=stdout,
                 stderr=stderr,
-                exit_code=result.returncode,
+                exit_code=proc.returncode,
             )
 
         return ToolResult(
@@ -455,13 +620,31 @@ def _exec_command(command: str, project_path: str, timeout: int = 30, session_ke
             duration_ms=duration_ms,
             stdout=stdout,
             stderr=stderr,
-            exit_code=result.returncode,
+            exit_code=proc.returncode,
         )
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired:  # pragma: no cover — dead guard: the inner communicate-timeout handler above catches first and returns; kept minimal per the phase sketch, never reachable via Popen()/registry ops.
+        if proc is not None:
+            _group_kill(proc)
+            try:
+                proc.communicate(timeout=_KILL_ESCALATION_GRACE_SEC)
+            except (subprocess.TimeoutExpired, ValueError, OSError):
+                pass
         return ToolResult(success=False, error=f"Command timed out after {timeout}s", duration_ms=int((time.monotonic() - start) * 1000))
     except OSError as e:
         return ToolResult(success=False, error=f"Cannot execute: {e}", duration_ms=int((time.monotonic() - start) * 1000))
+    finally:
+        # SPEC-09 SP3: unregister on EVERY exit path (normal, timeout —
+        # which returns from inside the try — and exceptions). A registry
+        # entry must never outlive its process's tool call, or stop-all
+        # would signal dead groups forever after.
+        if registered and proc is not None:
+            with _PROCESS_REGISTRY_LOCK:
+                procs = _PROCESS_REGISTRY.get(session_key)
+                if procs is not None and proc in procs:
+                    procs.remove(proc)
+                if procs is not None and not procs:
+                    _PROCESS_REGISTRY.pop(session_key, None)
 
 
 def _list_files(path: str, project_path: str, recursive: bool = False) -> ToolResult:

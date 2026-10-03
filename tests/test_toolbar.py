@@ -85,3 +85,34 @@ class TestExistingBehaviorPreserved:
     def test_status_label_still_present(self):
         t = Toolbar()
         assert hasattr(t, "_status_label")
+
+
+# ═══════════════ SPEC-09 SP3: ■ Stop All button ══════════════════════════════
+
+class TestStopAllButton:
+    """■ Stop All — destructive styling, callback wiring (steel Rule 4/5:
+    the click handler is exercised, not just the attribute's existence)."""
+
+    def test_stop_all_button_present_and_destructive(self):
+        t = Toolbar()
+        assert hasattr(t, "_stop_all_btn")
+        assert t._stop_all_btn.get_label() == "■ Stop All"
+        assert "destructive-action" in t._stop_all_btn.get_css_classes()
+
+    def test_stop_all_click_fires_callback(self):
+        fired = []
+        t = Toolbar(on_stop_all_clicked=lambda: fired.append(True))
+        t._on_stop_all_click(None)  # simulate the click signal
+        assert fired == [True]
+
+    def test_stop_all_no_callback_no_crash(self):
+        t = Toolbar()  # no callback wired
+        t._on_stop_all_click(None)  # must not raise
+
+    def test_other_buttons_still_work_alongside(self):
+        fired = []
+        t = Toolbar(on_settings_clicked=lambda: fired.append("settings"),
+                    on_stop_all_clicked=lambda: fired.append("stop"))
+        t._on_settings_click(None)
+        t._on_stop_all_click(None)
+        assert fired == ["settings", "stop"]

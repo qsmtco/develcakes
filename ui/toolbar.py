@@ -16,7 +16,7 @@ class Toolbar(Gtk.Box):
     Extends Gtk.Box with horizontal orientation.
     """
 
-    def __init__(self, on_connect_clicked=None, *, on_settings_clicked=None):
+    def __init__(self, on_connect_clicked=None, *, on_settings_clicked=None, on_stop_all_clicked=None):
         # Initialize as a horizontal box — children lay out left to right
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL)
         # Fixed height of 40 pixels, width stretches to fill window (-1 = stretch)
@@ -25,6 +25,9 @@ class Toolbar(Gtk.Box):
         # Store the connect button callback
         self._on_connect_clicked = on_connect_clicked
         self._on_settings_clicked = on_settings_clicked
+        # SPEC-09 SP3: stop-all — wired by window.py to the ARH aggregation
+        # (lazy resolve via closure: the handler is built after the toolbar).
+        self._on_stop_all_clicked = on_stop_all_clicked
 
         # Stream toggle — left side of toolbar
         self._stream_btn = Gtk.ToggleButton(label="Stream: OFF")
@@ -82,6 +85,18 @@ class Toolbar(Gtk.Box):
         right_box.append(self._status_label)
         right_box.append(self._connect_btn)
 
+        # SPEC-09 SP3: ■ Stop All — destructive, halts every agent (turns +
+        # process groups + in-flight review checkpoints). Callback is the
+        # window's confirm+dispatch, wired via on_stop_all_clicked.
+        self._stop_all_btn = Gtk.Button(label="■ Stop All")
+        self._stop_all_btn.add_css_class("destructive-action")
+        self._stop_all_btn.set_size_request(100, -1)
+        self._stop_all_btn.set_tooltip_text(
+            "Halt every agent: cancel in-flight turns, kill spawned process "
+            "groups, abort pending review checkpoints.")
+        self._stop_all_btn.connect("clicked", self._on_stop_all_click)
+        right_box.append(self._stop_all_btn)
+
         # Assemble: left cluster | spacer | right content
         self.append(left_box)
         self.append(spacer)
@@ -113,6 +128,12 @@ class Toolbar(Gtk.Box):
         """Called when ⚙ Settings button is clicked. Delegates to window's callback."""
         if self._on_settings_clicked is not None:
             self._on_settings_clicked()
+
+    def _on_stop_all_click(self, *args):
+        """Called when ■ Stop All is clicked. Delegates to the window's
+        confirm-and-dispatch callback (window owns the dialog + ARH resolve)."""
+        if self._on_stop_all_clicked is not None:
+            self._on_stop_all_clicked()
 
     def set_settings_status(self, has_verified_provider: bool) -> None:
         """Show/hide the red dot. Window calls this on startup and after providers change."""

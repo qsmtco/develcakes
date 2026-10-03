@@ -127,6 +127,10 @@ class MainWindow(Gtk.ApplicationWindow):
         toolbar = Toolbar(
             on_connect_clicked=self._on_connect_clicked,
             on_settings_clicked=self._open_settings,
+            # SPEC-09 SP3: lazy closure — AgentRuntimeHandler is built later
+            # in _build; _on_stop_all_clicked resolves it inside the confirm
+            # branch, never at wiring time.
+            on_stop_all_clicked=lambda: self._on_stop_all_clicked(),
         )
         self._toolbar = toolbar
         self._toolbar.update_connection_state("offline")
@@ -1016,6 +1020,54 @@ class MainWindow(Gtk.ApplicationWindow):
         transport on/off switch behind this button).
         """
         logger.info("Connect pressed — no transport configured (SPEC-05 SP3c wires the transport toggle)")
+
+    def _on_stop_all_clicked(self, *args):
+        """■ Stop All — confirm, then halt every agent (SPEC-09 SP3).
+
+        Confirm-first: a mis-click here cancels every in-flight turn, kills
+        process groups and aborts checkpoints — expensive to undo. Dialog
+        infrastructure mirrors _show_auto_accept_warning (one-shot
+        _dispatched guard against the close-triggered second response).
+        The ARH callback resolves LAZILY inside the confirm branch — the
+        toolbar (and this method's wiring) is constructed BEFORE
+        AgentRuntimeHandler exists.
+        """
+        import gi
+        gi.require_version('Gtk', '4.0')
+        from gi.repository import Gtk
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Stop all agents?",
+            secondary_text=(
+                "Every in-flight agent turn will be cancelled, every spawned "
+                "process group killed (SIGTERM → SIGKILL), and any pending "
+                "review checkpoint aborted. This cannot be undone."
+            ),
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Stop All", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+
+        _dispatched = [False]
+
+        def _on_response(_dialog, response):
+            if _dispatched[0]:
+                return
+            _dispatched[0] = True
+            if response == Gtk.ResponseType.OK:
+                arh = self._agent_runtime_handler
+                if arh is not None:
+                    arh.stop_all_agents()
+                else:
+                    logger.warning("Stop All confirmed but no AgentRuntimeHandler — no-op")
+            _dialog.close()
+
+        dialog.connect("response", _on_response)
+        dialog.show()
 
     def _close_project_tab(self, name: str):
         """

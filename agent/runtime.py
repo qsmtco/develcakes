@@ -428,6 +428,13 @@ class AgentRuntime:
       Synchronized state (under self._lock):
         - _conversations (read in many places, written in create_conversation)
         - _cancelled, _cancel_requested (cancellation signals)
+        - _cancelled_epochs (SP3 fix round 2, BUG#2: per-session
+          cancellation epochs — the approval-registration guard reads
+          THESE, never _cancelled, because the loop's cancellation branch
+          discards its _cancelled entry. Armed by cancel() and by
+          _terminate_turn's CANCELLED terminal; cleared at the next
+          _run_loop start and on COMPLETED/FAILED terminals; never
+          touched by the loop's _cancelled.discard bookkeeping.)
         - _active_loops (per-session in-flight marker)
         - _pending_approvals (read in _dispatch_approval, written in
           cancel/approve_exec)
@@ -591,6 +598,16 @@ class AgentRuntime:
         # session_key → pending_approval {tool_name, args, result_event, result_ref}
         self._pending_approvals: dict[str, dict] = {}
         self._cancelled: set[str] = set()  # cancelled session keys
+        # SP3 fix round 2 (BUG#2): per-session cancellation epochs. cancel()
+        # and the CANCELLED terminal transition ARM these; the NEXT turn's
+        # start and COMPLETED/FAILED terminals CLEAR them. _dispatch_approval's
+        # registration guard reads THIS, never _cancelled — the loop's own
+        # cancellation branch DISCARDS its _cancelled entry (and the global
+        # _cancel_requested flag is shared across sessions), so _cancelled
+        # bookkeeping cannot survive long enough to gate late registrations.
+        # A SET, not a counter: only membership matters (the epoch either
+        # gates the session or it does not); monotonicity buys nothing.
+        self._cancelled_epochs: set[str] = set()
         self._cancel_requested: bool = False  # immediate cancel signal for running thread
         self._lock = threading.Lock()
         # (_running is initialized at :561, BEFORE the migration call — the
@@ -860,6 +877,20 @@ class AgentRuntime:
             self._turn_results[state_key] = result
             if sk not in self._turn_tokens:
                 self._turn_tokens[sk] = tk
+            # SP3 fix round 2 (BUG#2): epoch maintenance at the terminal
+            # transition, under _state_lock ONLY (this method must never
+            # take _lock — one caller already holds it). A CANCELLED
+            # terminal ARMS the epoch: it is the only durable trace of the
+            # cancellation (the loop's own branch discards _cancelled, and
+            # cancel() may have run while this transition's result was in
+            # flight) and it must keep gating late approval registrations.
+            # COMPLETED/FAILED terminals and the next turn's start CLEAR
+            # the epoch — a session that ran a turn to completion accepts
+            # approvals again (no permanent poisoning by the fix itself).
+            if result.status == TurnStatus.CANCELLED:
+                self._cancelled_epochs.add(sk)
+            else:
+                self._cancelled_epochs.discard(sk)
 
         # Dispatch the appropriate callback. This happens OUTSIDE the
         # state lock so a slow handler does not block other state
@@ -1189,6 +1220,15 @@ class AgentRuntime:
         with self._lock:
             # Mark as cancelled so _run_loop's check will catch it
             self._cancelled.add(session_key)
+            # SP3 fix round 2 (BUG#2): arm the cancellation epoch. This —
+            # with the loop's registration-time arm on the CANCELLED
+            # terminal — is what the approval registration guard reads;
+            # _cancelled alone is too fragile (the loop's cancellation
+            # branch DISCARDS its entry; _cancel_requested is a shared
+            # global). Cleared at the next turn's start and on
+            # COMPLETED/FAILED terminals; never cleared by the loop's
+            # _cancelled.discard bookkeeping.
+            self._cancelled_epochs.add(session_key)
             # Signal the running thread to break out of the loop immediately
             self._cancel_requested = True
             for sk in list(self._pending_approvals):
@@ -1196,6 +1236,15 @@ class AgentRuntime:
                     ev = self._pending_approvals[sk]["event"]
                     self._pending_approvals[sk]["result"] = None
                     ev.set()
+                    # SP3 fix round 2 (BUG#2c): POP the entry we just
+                    # denied. The old set-only flush left the entry behind
+                    # — a stale phantom approve_exec would resolve FIRST
+                    # (the hijack: a PM click resolved the phantom while
+                    # the live waiter hung out its 60s) and stop_all's
+                    # denied count read dead entries (zrate's false 12/12
+                    # on the PM's card). The waiter's result_ref already
+                    # carries the denial; the dict need not.
+                    self._pending_approvals.pop(sk, None)
             logger.info("Cancelled session %s (UX dispatch follows)", session_key)
         # §E: Clean up stuck-detection history when conversation ends.
         # _terminate_turn will also call _cleanup_tool_history (idempotent),
@@ -1212,6 +1261,75 @@ class AgentRuntime:
             self._on_error, session_key, CANCEL_MESSAGE,
             _turn_token=active_tk,
         )
+
+    def stop_all(self) -> dict[str, str]:
+        """Cancel every in-flight turn + kill every registered process. sk -> outcome.
+
+        SPEC-09 SP3 stop-all core. Per session: cancel() FIRST (the existing
+        per-session machinery — cancelled-set + _cancel_requested + the
+        approval deny-flush that unblocks _dispatch_approval waiters as
+        DENIED), THEN tools.cancel_all_processes(session_key) so a killed
+        process returns into a turn already marked cancelled (no zombie
+        dispatch: _terminate_turn's duplicate-terminal dedup absorbs the
+        late result).
+
+        Outcomes: "no_turn" (no in-flight loop), "cancelled" (cancel()
+        dispatched; process kill result appended), "cancelled+killed:N",
+        or "cancelled+killed:N+M-unkillable" (SP3 fix round BUG#3: a group
+        that SURVIVED SIGKILL — hostile-process territory, must be visible).
+        Runs synchronously; the killed groups' SIGTERM→2s→SIGKILL escalation
+        caps this method at roughly 4s per live process group.
+        """
+        with self._lock:
+            session_keys = list(self._active_loops)
+        from agent.tools import cancel_all_processes  # lazy, matches :1789 idiom
+        outcomes: dict[str, str] = {}
+        for sk in session_keys:
+            # Approvals deny-flushed by cancel() = matching pending keys at
+            # cancel time (cancel sets result=None + event and POPS — SP3
+            # fix round 2 (BUG#2c): the old no-pop flush left stale phantoms
+            # that approve_exec resolved FIRST (the hijack) and that the
+            # denied count read as real; count BEFORE — the same startswith
+            # prefix semantics cancel itself uses).
+            with self._lock:
+                denied = sum(1 for k in self._pending_approvals if k.startswith(sk))
+            self.cancel(sk)
+            killed, unkillable = cancel_all_processes(sk)
+            parts = ["cancelled"]
+            if denied:
+                parts.append(f"denied:{denied}")
+            if killed:
+                parts.append(f"killed:{killed}")
+            if unkillable:
+                parts.append(f"{unkillable}-unkillable")
+            outcomes[sk] = "+".join(parts)
+        # ALL sessions (this runtime's scope) — a process can outlive its
+        # loop's registry visibility only via races; sweep the rest too.
+        killed_other, unkillable_other = cancel_all_processes(None)
+        if killed_other or unkillable_other:
+            parts = []
+            if killed_other:
+                parts.append(f"killed:{killed_other}")
+            if unkillable_other:
+                parts.append(f"{unkillable_other}-unkillable")
+            outcomes["*"] = "+".join(parts)
+        # Final deny-flush: approvals registered after their session's
+        # cancel ran (register/cancel race) or orphaned from loops already
+        # gone. cancel() only flushes sessions it cancels; any waiter left
+        # behind here would hang out its full 60s — the exact hang
+        # stop-all exists to prevent. Same mechanics as cancel()'s flush,
+        # targeted at the ACTUAL waiter state (result_ref, which
+        # _dispatch_approval reads). SP3 fix round 2 (BUG#2c): entries are
+        # POPPED, not left — a stale phantom is the approve_exec hijack
+        # (PM click resolves the phantom; the live waiter hangs 60s) and
+        # poisons every later denied count.
+        with self._lock:
+            for key in list(self._pending_approvals):
+                pending = self._pending_approvals[key]
+                pending["result_ref"][0] = None
+                pending["event"].set()
+                self._pending_approvals.pop(key, None)
+        return outcomes
 
     # ── Tool loop ─────────────────────────────────────────────────────────────
 
@@ -1353,6 +1471,11 @@ class AgentRuntime:
         with self._state_lock:
             self._turn_tokens[session_key] = turn_token
             self._turn_state[(session_key, turn_token)] = TurnStatus.RUNNING
+            # SP3 fix round 2 (BUG#2): a NEW turn for this session ends the
+            # prior cancellation epoch — from here, this turn's approvals
+            # register normally (the no-permanent-poisoning control). The
+            # user cancelled the PREVIOUS turn, not the one they just sent.
+            self._cancelled_epochs.discard(session_key)
         try:
             with self._lock:
                 if not self._running:
@@ -2117,6 +2240,28 @@ class AgentRuntime:
         else:
             t = threading.Thread(target=do_approval, daemon=True)
             t.start()
+
+        # SP3 fix round 2 (BUG#2): registration is EPOCH-aware. The guard
+        # keys on _cancelled_epochs — armed by cancel(), re-armed by the
+        # CANCELLED terminal transition (the only durable trace when the
+        # loop's own branch already discarded _cancelled — the auditor's
+        # bypass probe), cleared at the next turn's start and on
+        # COMPLETED/FAILED terminals. It must NOT read _cancelled: the
+        # loop's cancellation branch discards that entry, which is exactly
+        # how a late registration bypassed the round-1 guard and hung 60s
+        # (dbg_sp3fix_bug2bypass). Pops its own entry: the early-return
+        # must not leak (dbg_sp3fix_regleak: 5/5 leaked, inflating
+        # stop_all's denied count forever).
+        with self._lock:
+            already_cancelled = session_key in self._cancelled_epochs
+            if already_cancelled:
+                self._pending_approvals.pop(approval_key, None)
+        if already_cancelled:
+            logger.info(
+                "Approval for %s refused at registration: cancellation epoch active",
+                session_key,
+            )
+            return None  # None = denial in every consumer of this method
 
         # Wait for approval (with timeout).
         # approve_exec() sets event and result_ref when PM clicks.
