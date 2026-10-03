@@ -67,6 +67,10 @@ class AgentRuntimeHandler:
         self._prep_locks: dict[str, "threading.Lock"] = {}
         self._prep_locks_guard = threading.Lock()
 
+        # SPEC-09 SP2: one WorktreeManager per active project (seam:
+        # set_active_project -> self._active_project; managers cached here).
+        self._worktree_managers: dict[str, Any] = {}
+
         # Shared routing table — set via set_agent_routing() (maps session_key → project_name)
         # Used to route special agent responses to project chat boxes when no direct tab exists.
         self._agent_to_project = None
@@ -75,6 +79,10 @@ class AgentRuntimeHandler:
         self._agents: dict[str, Any] = {}
         # Active project: (name, path) or None
         self._active_project: tuple[str, str] | None = None
+
+        # SPEC-09 SP2: one WorktreeManager per project path (created lazily;
+        # a non-git project degrades to a disabled manager). See
+        # _worktree_for_turn for the consumption site.
         # name → AgentRuntime instance (one rt per agent for isolation)
         self._runtimes: dict[str, Any] = {}
         # Tool call → feed card ID mapping: session_key → card_id
@@ -1154,6 +1162,61 @@ class AgentRuntimeHandler:
                 lock = self._prep_locks[session_key] = threading.Lock()
             return lock
 
+    def _worktree_for_turn(
+        self,
+        session_key: str,
+        agent_def: Any,
+        project_path: str | None,
+    ) -> str | None:
+        """SPEC-09 SP2: the worktree cwd for this turn, or None.
+
+        Writer (agent_def.can_write) + a LIVE SP1 lease held by this session
+        -> ensure + return the worktree path under the active project.
+        Non-writer, no lease, expired lease, non-git project, or ANY worktree
+        failure -> None (the turn runs in the project root; the worktree is
+        an optimization with safety rails, never a hard dependency).
+
+        Lease-expiry reset (v3 MED): a writer WITHOUT a live lease whose
+        current conv.project_path is a worktree is handled by the caller
+        (this method only decides the NEW path).
+        """
+        if not getattr(agent_def, "can_write", False):
+            return None
+        if not project_path:
+            return None
+        try:
+            # Deferred import: utils must not import ui (architecture rule);
+            # this helper is the ui-side consumer.
+            from utils.work_persistence import find_live_lease
+
+            if find_live_lease(project_path, session_key) is None:
+                return None
+            from utils.worktree_manager import WorktreeManager
+
+            manager = self._worktree_manager_for(project_path)
+            worktree_id = WorktreeManager.worktree_id_for_session(session_key)
+            return manager.ensure_worktree(worktree_id)
+        except Exception as e:  # noqa: BLE001 — a worktree failure must
+            # never break the turn; the agent falls back to the project root.
+            logger.warning(
+                "worktree resolve failed for %s in %s: %s",
+                session_key, project_path, e,
+            )
+            return None
+
+    def _worktree_manager_for(self, project_path: str):
+        """A WorktreeManager per project path, cached on ARH (managers are
+        cheap but not free; a git-repo probe per turn would be wasteful).
+        A non-git project yields a DISABLED manager (v3): the ctor degrades
+        instead of raising (probe N item 2)."""
+        cached = self._worktree_managers.get(project_path)
+        if cached is None:
+            from utils.worktree_manager import WorktreeManager
+
+            cached = WorktreeManager(project_path)
+            self._worktree_managers[project_path] = cached
+        return cached
+
     def _prepare_turn_conversation(
         self,
         *,
@@ -1201,6 +1264,18 @@ class AgentRuntimeHandler:
                 )
                 return
 
+            # SPEC-09 SP2: a WRITER holding a LIVE lease runs this turn in
+            # its per-writer worktree (<project>/.worktrees/<id>, realpath'd
+            # — SP0 BUG#14); everyone else (and any worktree failure) runs
+            # in the project root. MED-6 reset: the lease-loss branch lives
+            # in _worktree_for_turn via is_worktree_of on the CURRENT conv
+            # path — an expired lease repoints the cwd at the project while
+            # the worktree/branch survive for review.
+            worktree_cwd = self._worktree_for_turn(
+                session_key, agent_def, project_path
+            )
+            effective_project_path = worktree_cwd or project_path
+
             if rt.get_conversation(session_key) is None:
                 loaded = rt.load_conversation(session_key)
                 if loaded:
@@ -1211,7 +1286,7 @@ class AgentRuntimeHandler:
                     # the persisted values already match the active project.
                     rt._rebuild_conversation_context(
                         session_key,
-                        project_path,
+                        effective_project_path,
                         agent_role=agent_def.role,
                     )
 
@@ -1219,7 +1294,7 @@ class AgentRuntimeHandler:
                 rt.create_conversation(
                     agent_name=agent_def.display_name,
                     session_key=session_key,
-                    project_path=project_path,
+                    project_path=effective_project_path,
                     model=agent_model,               # Per-agent provider/model override
                     allowed_tools=agent_def.tools,   # Phase A: filtered tool set per agent
                     mcp_servers=agent_def.mcp_servers, # Phase B: MCP servers
@@ -1239,6 +1314,30 @@ class AgentRuntimeHandler:
                 # immediately without requiring an app restart.
                 conv = rt.get_conversation(session_key)
                 if conv is not None:
+                    # SPEC-09 SP2: keep the conversation's cwd in step with
+                    # the lease state. A just-claimed lease repoints a hot
+                    # conversation INTO the worktree (the write cwd lands
+                    # without a restart); a lapsed lease repoints a stale
+                    # worktree cwd back at the project root (LOW-8: the
+                    # worktree/branch survive for review — never deleted
+                    # here).
+                    if worktree_cwd is not None:
+                        if conv.project_path != worktree_cwd:
+                            conv.project_path = worktree_cwd
+                    elif (
+                        conv.project_path
+                        and project_path
+                        and conv.project_path != project_path
+                    ):
+                        from utils.worktree_manager import is_worktree_of
+
+                        if is_worktree_of(project_path, conv.project_path):
+                            logger.info(
+                                "turn for %s: lease gone — resetting stale "
+                                "worktree cwd to project root",
+                                session_key,
+                            )
+                            conv.project_path = project_path
                     if agent_def.api_key:
                         conv.api_key = agent_def.api_key
                     if agent_model:

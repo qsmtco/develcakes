@@ -766,10 +766,16 @@ def test_atomicity_under_concurrent_claims(tmp_path, monkeypatch):
     within a few trials. If the no-op run passes 10/10 trials cleanly, SKIP
     (power is scheduling-dependent) — never fail-flake on scheduler luck.
 
-    Runs the sensitivity FIRST; monkeypatch restores the real lock after.
+    Runs the sensitivity FIRST, then RESTORES the real lock explicitly
+    (monkeypatch alone only restores at teardown — the pin phase must run
+    WITH the lock) and re-seeds a clean store (a sensitivity trial can leave
+    torn JSON, which would fail every pin trial with 0 winners).
     """
     project = str(tmp_path)
     _seed_lease_store(project)
+
+    from utils.work_persistence import _LEASE_LOCK as real_lock
+
 
     class _NoLock:
         def __enter__(self):
@@ -783,6 +789,12 @@ def test_atomicity_under_concurrent_claims(tmp_path, monkeypatch):
     detected = any(
         not _one_claim_trial(project) for _trial in range(10)
     )
+    # Explicit mid-test restore: monkeypatch's undo runs at TEARDOWN, not
+    # here — without this the "locked" phase below races lock-free.
+    monkeypatch.setattr("utils.work_persistence._LEASE_LOCK", real_lock)
+    # A sensitivity trial can leave torn/corrupt JSON (that IS the race);
+    # re-seed a clean store so the pin measures the lock, not the wreckage.
+    _seed_lease_store(project)
     if not detected:
         pytest.skip(
             "no-lock configuration passed 10/10 trials cleanly — pin power "
