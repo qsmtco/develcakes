@@ -60,6 +60,7 @@ class ReviewHandler:
         on_display_card: Callable,
         on_display_text: Callable,
         on_feed_card=None,  # callback(FeedCardData) — add git_commit card to project feed
+        on_confirm_batch_accept=None,  # SP3/D4: cb(project_name, n_items, on_confirm) — None = accept without confirm
     ):
         self._GLib = GLib
         self._mc = main_content
@@ -69,6 +70,10 @@ class ReviewHandler:
         self._on_display_card = on_display_card
         self._on_display_text = on_display_text
         self._on_feed_card = on_feed_card
+        # SP3 (D4): window-injected confirm dialog for batch accepts.
+        # None (tests, headless) → _confirm_and_accept_* proceed DIRECTLY
+        # — disclosed: no confirmation on that path.
+        self._on_confirm_batch_accept = on_confirm_batch_accept
         self._agent_runtime_handler = None  # injected via set_agent_runtime_handler()
 
         # Per-project review states: project_name -> ReviewState
@@ -164,10 +169,12 @@ class ReviewHandler:
                 )
 
 
-    def _emit_feed_card(self, card_dict: dict) -> None:
+    def _emit_feed_card(self, card_dict: dict, metadata: dict | None = None) -> None:
         """Convert git_commit card dict to FeedCardData and fire feed callback.
 
         Only fires if _on_feed_card is set. Mirrors work_handler._emit_feed_card.
+        SP3 (D5): optional metadata dict rides the card — queue emissions
+        carry metadata["agent"] = agent_key (feed filter-by-agent surface).
         """
         if not self._on_feed_card:
             return
@@ -180,8 +187,51 @@ class ReviewHandler:
             timestamp=datetime.now(timezone.utc),
             project_name=card_dict.get("project_name", ""),
             commit_sha=card_dict.get("commit_sha"),
+            metadata=metadata or {},
         )
         self._on_feed_card(feed_card)
+
+    def _refresh_queue_view(self, project_name: str) -> None:
+        """SP3 (D4/D4b): rebuild the review bar's queue region after any
+        queue mutation. Gathers [(agent_key, pending_count)] in
+        first-enqueue order on the mutation thread, then schedules the
+        widget update on the GTK main loop via idle_add. No bar (headless,
+        tab not built) → skip silently. Never touches queue state — the
+        handler owns the data, the bar is a pure view."""
+        agents = [(k, self.pending_count(project_name, k))
+                  for k in self.agents_with_pending(project_name)]
+        bar = self._mc.get_review_bar() if self._mc else None
+        if bar is None:
+            return
+        self._GLib.idle_add(lambda a=agents: bar.set_queue_view(a))
+
+    def _confirm_and_accept_agent(self, project_name: str, agent_key: str) -> None:
+        """SP3 (D4): one agent's queue, routed through the window's confirm
+        dialog when one is wired; direct accept when not (None — the
+        tests' path, disclosed in the ctor docstring)."""
+        n = self.pending_count(project_name, agent_key)
+        if n == 0:
+            return
+        if self._on_confirm_batch_accept is not None:
+            self._on_confirm_batch_accept(
+                project_name, n,
+                lambda: self.accept_agent_queue(agent_key, project_name))
+        else:
+            self.accept_agent_queue(agent_key, project_name)
+
+    def _confirm_and_accept_all(self, project_name: str) -> None:
+        """SP3 (D4 + D8): every AGENT queue (never "pm"), confirmed as one
+        action; direct accept when no confirmer is wired."""
+        n = sum(self.pending_count(project_name, k)
+                for k in self.agents_with_pending(project_name)
+                if k != "pm")
+        if n == 0:
+            return
+        if self._on_confirm_batch_accept is not None:
+            self._on_confirm_batch_accept(
+                project_name, n, lambda: self.accept_all_queues(project_name))
+        else:
+            self.accept_all_queues(project_name)
 
     # ── Mode management ─────────────────────────────────────────────────
 
@@ -220,6 +270,15 @@ class ReviewHandler:
         bar.set_accept_callback(lambda: self.accept_changes(project_name, "approved"))
         bar.set_reject_callback(lambda: self.reject_changes(project_name, "rejected"))
 
+        # SPEC-10 SP3 (D4): queue batch-accept wiring. The bar is a pure
+        # view — these route through the confirm helpers (window's dialog
+        # when injected at construction, direct accept otherwise).
+        bar.set_queue_callbacks(
+            on_accept_agent=lambda ak: self._confirm_and_accept_agent(
+                project_name, ak),
+            on_accept_all=lambda: self._confirm_and_accept_all(project_name),
+        )
+
         if state.is_active():
             bar.set_state_reviewing(state.checkpoint_sha or "")
         else:
@@ -227,6 +286,12 @@ class ReviewHandler:
 
         self._mc.set_review_bar(bar)
         self._on_review_started(project_name, bar)
+        # SP3 fix round (BUG#1): seed the queue region — the bar may be
+        # built over SURVIVING queues (GAP-5b tab reopen / mode toggle);
+        # without this the bar renders chipless until the next mutation.
+        # Safe after set_review_bar: _refresh_queue_view resolves the bar
+        # via get_review_bar() (idle_add ordering keeps it live).
+        self._refresh_queue_view(project_name)
 
     # ── Review session lifecycle ────────────────────────────────────────
 
@@ -740,10 +805,21 @@ class ReviewHandler:
         self._enqueue(project_name, agent_key, QueueEntry(
             agent_key=agent_key, sha=sha, path_used=path_used,
             ts=datetime.now(UTC)))
+        # SP3 (D5): PM-facing checkpoint card — "feed filter-by-agent comes
+        # free". metadata["agent"] = agent_key rides the card.
+        self._emit_feed_card({
+            "title": f"Checkpoint queued: {agent_key}",
+            "body": f"{sha[:7]} in {path_used}",
+            "project_name": project_name,
+            "commit_sha": sha,
+        }, metadata={"agent": agent_key})
 
     def _enqueue(self, project_name: str, agent_key: str, entry: QueueEntry) -> None:
         """Append one entry; enforce the D9 cap (50/agent FIFO, drop-OLDEST
-        with warning log + feed card). Caller must have validated the entry."""
+        with warning log + feed card). Caller must have validated the entry.
+
+        SP3: refreshes the bar's queue region after EVERY mutation (cap
+        path included) — one choke point per queue primitive."""
         dropped = None
         with self._queue_lock:
             lst = self._queues.setdefault(project_name, {}).setdefault(agent_key, [])
@@ -763,7 +839,8 @@ class ReviewHandler:
                 "body": f"Entry {dropped.sha[:7]} exceeded the {_QUEUE_CAP}-entry cap.",
                 "project_name": project_name,
                 "commit_sha": dropped.sha,
-            })
+            }, metadata={"agent": agent_key})
+        self._refresh_queue_view(project_name)
 
     def _dequeue(self, project_name: str, agent_key: str, entry: QueueEntry) -> None:
         """Remove one accepted/dropped entry (equality match on the NamedTuple).
@@ -771,7 +848,7 @@ class ReviewHandler:
         Disclosed choice: list.remove is equality-based and O(n) — acceptable
         at the D9 cap (≤50 entries/agent). A miss logs (never raises): the
         entry may already have been removed by a concurrent batch.
-        """
+        SP3: refreshes the bar's queue region (chips must vanish)."""
         with self._queue_lock:
             lst = self._queues.get(project_name, {}).get(agent_key, [])
             try:
@@ -781,18 +858,21 @@ class ReviewHandler:
                     "dequeue miss for %s/%s %s — already removed?",
                     project_name, agent_key, entry.sha[:7],
                 )
+        self._refresh_queue_view(project_name)
 
     def _drain_pm_queue(self, project_name: str) -> None:
         """D8 REV 2 (SP2 fix round): the PM's own /accept (success path) or
         /reject IS the drain of the project's "pm" queue — the moment the
         review session resolves, the queued PM checkpoints are moot. Drains
-        ALL of them. Never called from accept_all_queues (D8)."""
+        ALL of them. Never called from accept_all_queues (D8).
+        SP3: refreshes the bar (the pm chip must vanish)."""
         with self._queue_lock:
             lst = self._queues.get(project_name, {}).get("pm", [])
             drained = len(lst)
             lst.clear()
         if drained:
             _logger.info("pm queue drained (%d entries) for %s", drained, project_name)
+        self._refresh_queue_view(project_name)
 
     def accept_agent_queue(self, agent_key: str, project_name: str,
                            session_key: str | None = None) -> None:
@@ -935,7 +1015,11 @@ class ReviewHandler:
         # Stale cards FIRST (BUG#2: emitted here, outside the project lock),
         # then the summary card.
         for card in stale_cards:
-            self._emit_feed_card(card)
+            # SP3 fix round (BUG#2): metadata rides the emit — a feed
+            # filtered by agent must not lose the stale card. agent_key is
+            # the per-agent loop parameter (all stale cards in one batch
+            # belong to one agent).
+            self._emit_feed_card(card, metadata={"agent": agent_key})
         if aborted:
             title = (f"PARTIAL: accepted {succeeded} for {agent_key}, "
                      f"stopped at item {succeeded + stale + 1}")
@@ -951,7 +1035,7 @@ class ReviewHandler:
             "body": body,
             "project_name": project_name,
             "commit_sha": None,
-        })
+        }, metadata={"agent": agent_key})
 
     def accept_all_queues(self, project_name: str,
                           session_key: str | None = None) -> None:

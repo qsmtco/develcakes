@@ -832,10 +832,10 @@ class TestStaleCardEmitsUnlocked:
         lock_held_at_emit = []
         real_emit = handler._emit_feed_card
 
-        def probing_emit(card_dict):
+        def probing_emit(card_dict, metadata=None):
             lock = handler._project_lock_for("testproject")
             lock_held_at_emit.append(lock.locked())
-            real_emit(card_dict)
+            real_emit(card_dict, metadata=metadata)
 
         handler._emit_feed_card = probing_emit
 
@@ -1012,3 +1012,173 @@ class TestCheckoutPathsSerialized:
         assert counter["max"] == 1, (
             f"REV 4b: revert ∥ batch-accept mutated git concurrently "
             f"(max={counter['max']})")
+
+
+# ── SPEC-10 SP3: bar-refresh wiring + confirm helpers + D5 bridge (5b/5d) ────
+
+class _BarDouble:
+    """Records set_queue_view payloads; no GTK (handler side is GTK-free)."""
+
+    def __init__(self):
+        self.calls: list[list] = []
+
+    def set_queue_view(self, agents):
+        self.calls.append(agents)
+
+
+class TestSp3BarRefreshWiring:
+    """5b: _refresh_queue_view after every queue mutation; 5c: confirm
+    helpers (None confirmer = direct accept, the tests' path); 5d: D5
+    metadata bridge on queue feed cards."""
+
+    def _wired(self):
+        bar = _BarDouble()
+        rh = _make_handler()
+        rh._mc.get_review_bar.return_value = bar
+        return rh, bar
+
+    def test_enqueue_refreshes_bar(self):
+        """enqueue_agent_checkpoint → bar.set_queue_view with the pending
+        list (order + counts)."""
+        rh, bar = self._wired()
+        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
+        rh.enqueue_agent_checkpoint("proj", "special:debugger", "b" * 40, "/y")
+        rh.enqueue_agent_checkpoint("proj", "special:coder", "c" * 40, "/z")
+        assert bar.calls[-1] == [
+            ("special:coder", 2), ("special:debugger", 1)]
+
+    def test_dequeue_and_drain_refresh_bar(self):
+        """_dequeue and _drain_pm_queue both refresh (chips vanish)."""
+        rh, bar = self._wired()
+        e1 = _entry("special:coder", "a" * 40, "/x")
+        rh._enqueue("proj", "special:coder", e1)
+        n0 = len(bar.calls)
+        rh._dequeue("proj", "special:coder", e1)
+        assert bar.calls[-1] == []
+        rh._enqueue("proj", "pm", _entry("pm", "b" * 40, "/p"))
+        rh._drain_pm_queue("proj")
+        assert bar.calls[-1] == []
+        assert len(bar.calls) == n0 + 3
+
+    def test_refresh_skips_when_no_bar(self):
+        """get_review_bar() → None (headless/before tab build) → no crash."""
+        rh = _make_handler()
+        rh._mc.get_review_bar.return_value = None
+        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
+        assert rh.pending_count("proj", "special:coder") == 1
+
+    def test_confirm_path_without_window(self):
+        """5c: on_confirm_batch_accept=None (tests) → accept runs directly."""
+        rh, _bar = self._wired()
+        assert rh._on_confirm_batch_accept is None
+        rh._enqueue("proj", "special:coder", _entry("special:coder", "a" * 40, "/x"))
+        called = []
+        rh.accept_agent_queue = lambda ak, p, session_key=None: called.append(ak)
+        rh._confirm_and_accept_agent("proj", "special:coder")
+        assert called == ["special:coder"]
+
+    def test_confirm_path_with_window(self):
+        """5c: injected confirmer receives (project, N, cb); the accept
+        runs only when the confirmer invokes cb."""
+        rh, _bar = self._wired()
+        rh._enqueue("proj", "special:coder", _entry("special:coder", "a" * 40, "/x"))
+        seen = []
+        rh._on_confirm_batch_accept = (
+            lambda project, n, cb: seen.append((project, n, cb)))
+        called = []
+        rh.accept_agent_queue = lambda ak, p, session_key=None: called.append(ak)
+        rh._confirm_and_accept_agent("proj", "special:coder")
+        assert [s[:2] for s in seen] == [("proj", 1)]
+        assert called == []          # NOT accepted yet
+        seen[0][2]()                 # confirmer says yes
+        assert called == ["special:coder"]
+
+    def test_confirm_all_sums_agent_queues_excluding_pm(self):
+        """D8: _confirm_and_accept_all's N excludes the pm queue."""
+        rh, _bar = self._wired()
+        rh._enqueue("proj", "pm", _entry("pm", "a" * 40, "/p"))
+        rh._enqueue("proj", "special:coder", _entry("special:coder", "b" * 40, "/x"))
+        rh._enqueue("proj", "special:debugger", _entry("special:debugger", "c" * 40, "/y"))
+        seen = []
+        rh._on_confirm_batch_accept = (
+            lambda project, n, cb: seen.append((project, n, cb)))
+        rh._confirm_and_accept_all("proj")
+        assert seen[0][:2] == ("proj", 2)
+
+    def test_checkpoint_card_metadata_agent(self):
+        """5d / D5: enqueue_agent_checkpoint emits a PM-facing checkpoint
+        card with metadata['agent'] = agent_key (filter-by-agent surface)."""
+        cards = []
+        rh = _make_handler(on_feed_card=lambda c: cards.append(c))
+        rh._mc.get_review_bar.return_value = None
+        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
+        checkpoint_cards = [c for c in cards
+                            if "Checkpoint queued" in c.title]
+        assert checkpoint_cards, f"no checkpoint card in {[c.title for c in cards]}"
+        assert checkpoint_cards[0].metadata.get("agent") == "special:coder"
+        assert checkpoint_cards[0].commit_sha == "a" * 40
+
+    def test_accept_summary_card_metadata_agent(self):
+        """D5: the accept summary card also carries metadata['agent']."""
+        cards = []
+        rh = _make_handler(on_feed_card=lambda c: cards.append(c))
+        with patch("ui.handlers.review_handler.git_ops") as mgit, \
+                patch("ui.handlers.review_handler.threading.Thread") as mthread:
+            mgit.stage_all.return_value = MockGitResult(success=True)
+            mgit.commit.return_value = MockGitResult(success=True, sha="f" * 40)
+            rh._states["proj"] = ReviewState(project_path="/nowhere/real",
+                                             review_mode="review")
+            # A project-ROOT item (path not under .worktrees) → the root
+            # accept branch → mocked stage+commit succeed → summary card.
+            rh._enqueue("proj", "special:coder",
+                        _entry("special:coder", "b" * 40, "/x"))
+            rh.accept_agent_queue("special:coder", "proj")
+            target, args = mthread.call_args.kwargs["target"], \
+                mthread.call_args.kwargs["args"]
+            target(*args)
+        summary = [c for c in cards if c.title.startswith("Queue accepted for")]
+        assert summary, f"no summary card in {[c.title for c in cards]}"
+        assert summary[0].metadata.get("agent") == "special:coder"
+
+
+class TestSp3FixRound:
+    """SP3 fix round: BUG#1 bar-build seed, BUG#2 stale-card metadata."""
+
+    def test_show_review_bar_seeds_queue_view(self):
+        """BUG#1: a bar built over SURVIVING queues (GAP-5b reopen path)
+        must seed the region — set_queue_view called with the pending list
+        (pm included; the bar renders it read-only).
+
+        Shape: queues populate while NO bar exists (get_review_bar → None,
+        refreshes skip), then the bar attaches and _show_review_bar runs —
+        exactly the reopen/mode-toggle order. RED pre-fix: 0 calls (the
+        bar-attached-during-enqueue shape would self-refresh and mask the
+        missing seed)."""
+        rh = _make_handler()
+        rh._mc.get_review_bar.return_value = None  # no bar yet (closed tab)
+        rh._enqueue("proj", "pm", _entry("pm", "a" * 40, "/p"))
+        rh._enqueue("proj", "special:coder", _entry("special:coder", "b" * 40, "/x"))
+        bar = _BarDouble()
+        rh._mc.get_review_bar.return_value = bar
+        assert bar.calls == [], "precondition: surviving queues never refreshed a bar"
+        rh._show_review_bar("proj", ReviewState(project_path="/p",
+                                                review_mode="review"))
+        assert bar.calls, "set_queue_view never called — bar built chipless"
+        assert bar.calls[-1] == [("pm", 1), ("special:coder", 1)]
+
+    def test_stale_drop_card_metadata_agent(self, temp_repo):
+        """BUG#2: the stale-drop card carries metadata['agent'] (feed
+        filter-by-agent must not lose it)."""
+        wt_dir = os.path.join(temp_repo, ".worktrees", "coder-3")
+        os.makedirs(wt_dir)
+        captured = []
+        handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
+        handler._enqueue("testproject", "special:coder", _entry(
+            "special:coder", "3" * 40, os.path.realpath(wt_dir)))
+        shutil.rmtree(wt_dir)
+        handler.accept_agent_queue("special:coder", "testproject")
+        assert _wait_until(
+            lambda: handler.pending_count("testproject", "special:coder") == 0)
+        stale = [c for c in captured if "stale entry dropped" in c.title]
+        assert stale, f"no stale card in {[c.title for c in captured]}"
+        assert stale[0].metadata.get("agent") == "special:coder"

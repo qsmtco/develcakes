@@ -618,6 +618,7 @@ class MainWindow(Gtk.ApplicationWindow):
             on_display_card=self._on_command_card,
             on_display_text=self._on_command_text,
             on_feed_card=self._feed_handler.add_card,
+            on_confirm_batch_accept=self._confirm_batch_accept,  # SPEC-10 SP3 D4
         )
         self._review_handler.set_agent_runtime_handler(self._agent_runtime_handler)
 
@@ -1064,6 +1065,52 @@ class MainWindow(Gtk.ApplicationWindow):
                     arh.stop_all_agents()
                 else:
                     logger.warning("Stop All confirmed but no AgentRuntimeHandler — no-op")
+            _dialog.close()
+
+        dialog.connect("response", _on_response)
+        dialog.show()
+
+    def _confirm_batch_accept(self, project_name: str, n: int,
+                              on_confirm) -> None:
+        """SPEC-10 SP3 (D4): confirmation for batch-accepting N queue
+        entries — mirrors _on_stop_all_clicked's dialog pattern (one-shot
+        _dispatched guard, WARNING type, default CANCEL). Shows the N and
+        the double-click/enqueue-boundary note (Coder's round-2
+        disclosure). The accept runs ONLY on OK. Cannot be undone by one
+        click — worktree items are marked reviewed (no new commit), root
+        items commit with the agent trailer."""
+        import gi
+        gi.require_version('Gtk', '4.0')
+        from gi.repository import Gtk
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=(f"Accept {n} checkpoint{'s' if n != 1 else ''} "
+                  f"in {project_name}?"),
+            secondary_text=(
+                "Worktree checkpoints are marked reviewed (no new commit — "
+                "the 'Agent:' trailer already rides the checkpoint commit); "
+                "project-root items commit with the agent trailer. A rapid "
+                "double-click can span an enqueue boundary — a checkpoint "
+                "arriving mid-batch is accepted in the next batch. This "
+                "cannot be undone by one click."
+            ),
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button(f"Accept {n}", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+
+        _dispatched = [False]
+
+        def _on_response(_dialog, response):
+            if _dispatched[0]:
+                return
+            _dispatched[0] = True
+            if response == Gtk.ResponseType.OK:
+                on_confirm()
             _dialog.close()
 
         dialog.connect("response", _on_response)

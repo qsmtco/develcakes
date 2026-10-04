@@ -99,6 +99,21 @@ class ReviewBar(Gtk.Box):
         self._btn_accept.connect("clicked", lambda _: self._on_accept_all() if self._on_accept_all else None)
         self._btn_reject.connect("clicked", lambda _: self._on_reject_all() if self._on_reject_all else None)
 
+        # SPEC-10 D4: per-agent queue view (additive region, 5a). Appended
+        # AFTER _buttons_box; visibility tied to non-empty queues (D4b: the
+        # session-state buttons above are untouched).
+        self._queue_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._queue_box.set_visible(False)
+        self._queue_box.add_css_class("review-bar-queues")
+        self._queue_sep = Gtk.Label(label="│")
+        self._queue_sep.set_visible(False)
+        self.append(self._queue_sep)
+        self.append(self._queue_box)
+        self._on_queue_accept_agent = None   # cb(agent_key)
+        self._on_queue_accept_all = None     # cb()
+        self._queue_agents: dict[str, Gtk.Widget] = {}  # agent_key -> per-agent chip
+        self._selected_agent: str | None = None
+
     def set_accept_callback(self, cb):
         """Set the Accept All callback."""
         self._on_accept_all = cb
@@ -164,3 +179,107 @@ class ReviewBar(Gtk.Box):
             self.add_css_class("review-bar-loading")
         else:
             self.remove_css_class("review-bar-loading")
+
+    # ── SPEC-10 D4: queue view (SP3, additive region) ───────────────────
+
+    def set_queue_callbacks(self, on_accept_agent, on_accept_all) -> None:
+        """SPEC-10 D4: batch accept wiring. on_accept_agent(agent_key) —
+        accept one agent's queue; on_accept_all() — all agent queues.
+        Pure view: the handlers route through the window's confirm dialog
+        (window.py wraps these callbacks at wiring time)."""
+        self._on_queue_accept_agent = on_accept_agent
+        self._on_queue_accept_all = on_accept_all
+
+    def _queue_children(self) -> list[Gtk.Widget]:
+        """Snapshot the queue box's children (re-entrancy-safe rebuild)."""
+        out = []
+        child = self._queue_box.get_first_child()
+        while child is not None:
+            out.append(child)
+            child = child.get_next_sibling()
+        return out
+
+    def _select_agent(self, agent_key: str | None) -> None:
+        """Select one agent as the 'Accept All (agent)' target. 'pm' is
+        never selectable (D8) — selection falls back to the first
+        non-pm agent, or None."""
+        if agent_key == "pm":
+            agent_key = next(
+                (k for k in self._queue_agents if k != "pm"), None)
+        self._selected_agent = agent_key
+        # Visual highlight: the selected chip gets the selected css class.
+        for key, chip in self._queue_agents.items():
+            if key == agent_key:
+                chip.add_css_class("review-queue-chip-selected")
+            else:
+                chip.remove_css_class("review-queue-chip-selected")
+
+    def set_queue_view(self, agents: list) -> None:
+        """SPEC-10 D4: rebuild the queue region.
+
+        agents = [(agent_key, pending_count), ...] in first-enqueue order
+        (ReviewHandler supplies via agents_with_pending + pending_count).
+        Empty list → hide the region. 'pm' renders as a read-only chip with
+        a tooltip (D8); batch buttons never target 'pm'. Re-entrancy: may
+        be called from idle callbacks — children are cleared before
+        rebuild (GTK4: remove while walking get_first_child()).
+        """
+        # Clear previous children (idle-callback re-entrancy).
+        for child in self._queue_children():
+            self._queue_box.remove(child)
+        self._queue_agents.clear()
+
+        if not agents:
+            self._queue_box.set_visible(False)
+            self._queue_sep.set_visible(False)
+            self._selected_agent = None
+            return
+
+        for agent_key, count in agents:
+            chip = Gtk.Button(label=f"{agent_key} ({count})")
+            chip.add_css_class("review-queue-chip")
+            if agent_key == "pm":
+                # D8: read-only — tooltip explains the drain path; clicks
+                # do not select it (batch buttons can never target pm).
+                chip.set_tooltip_text(
+                    "PM queue — drained by your own /accept")
+                chip.set_sensitive(False)
+            else:
+                chip.connect("clicked", lambda _b, k=agent_key:
+                             self._select_agent(k))
+            self._queue_agents[agent_key] = chip
+            self._queue_box.append(chip)
+
+        # Batch buttons: 'Accept All (agent)' targets the selected (or
+        # first) non-pm agent; 'Accept All (everyone)' never includes pm.
+        # SUGG#3 (SP3 fix round): with ONLY pm chips present there is no
+        # valid per-agent target — disable the button (enabled +
+        # _selected_agent=None was a silent no-op on click).
+        has_agent_chip = any(k != "pm" for k in self._queue_agents)
+        btn_agent = Gtk.Button(label="Accept All (agent)")
+        btn_agent.add_css_class("review-queue-btn-agent")
+        btn_agent.set_sensitive(has_agent_chip)
+        btn_agent.connect("clicked", lambda _b: (
+            self._on_queue_accept_agent(self._selected_agent)
+            if self._selected_agent is not None
+            and self._on_queue_accept_agent is not None else None))
+        btn_all = Gtk.Button(label="Accept All (everyone)")
+        btn_all.add_css_class("review-queue-btn-all")
+        btn_all.connect("clicked", lambda _b: (
+            self._on_queue_accept_all() if self._on_queue_accept_all is not None
+            else None))
+        self._queue_box.append(btn_agent)
+        self._queue_box.append(btn_all)
+
+        # Preserve a valid selection across refreshes; default to the first
+        # non-pm agent.
+        if (self._selected_agent is None
+                or self._selected_agent not in self._queue_agents
+                or self._selected_agent == "pm"):
+            self._select_agent(next(
+                (k for k in self._queue_agents if k != "pm"), None))
+        else:
+            self._select_agent(self._selected_agent)
+
+        self._queue_box.set_visible(True)
+        self._queue_sep.set_visible(True)
