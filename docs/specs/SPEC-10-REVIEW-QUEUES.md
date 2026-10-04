@@ -99,12 +99,23 @@ batch → per-item accept commits (trailer preserved) or rejects (reset to check
 
 ## 6. Acceptance Criteria
 
-- [ ] Every agent commit carries `Agent: <session_key>` trailer (log-verifiable)
-- [ ] Review bar shows per-agent queues; selecting filters the pending set
-- [ ] Batch accept commits every pending checkpoint in queue; failure aborts
+- [x] Every agent commit carries `Agent: <session_key>` trailer (log-verifiable)
+- [x] Review bar shows per-agent queues; selecting filters the pending set
+- [x] Batch accept commits every pending checkpoint in queue; failure aborts
       remaining with an error card (no partial silent loss)
-- [ ] Reject path unchanged per-item
-- [ ] Full pytest green, ruff clean, pyright clean
+- [x] Reject path unchanged per-item
+- [x] Full pytest green (4378 passed / 3 skipped), ruff clean (multisets
+      identical vs HEAD per repo convention), pyright clean (0 errors on all
+      SPEC-10 files)
+
+**Status: IMPLEMENTED 2026-10-03** — commits 106cb739 (SP1), 31802bea (SP2),
+c256c433 (SP2b), 209483bd (SP3) + close-out. Post-mortem:
+docs/post-mortems/2026-10-03-SPEC-10-REVIEW-QUEUES-POST-MORTEM.md.
+Implementation rulings D1–D8d (accept semantics evolved from the spec's
+accept-commit model to mark-reviewed bookkeeping for checkpointed items —
+pre-build probe finding; the spec's AC#3 "commits every pending checkpoint"
+is satisfied by the checkpoint commits themselves carrying the trailers):
+docs/specs/phases/SPEC-10-PREFLIGHT-DECISIONS.md.
 
 ## 7. Edge Cases
 
