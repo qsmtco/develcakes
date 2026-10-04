@@ -261,6 +261,20 @@ mid-turn kills already have their own surfacing; a failed checkpoint shouldn't
 spam the agent's transcript. The queue simply doesn't get the entry (and the
 agent's uncommitted work stays in the worktree — recoverable via git directly).
 
+### D8d — Per-session checkpoint serialization *(ruling on SP2b audit ISSUE#2, 2026-10-03)*
+Two same-session checkpoint threads (turn N + turn N+1 overlapping) race in
+one worktree — the "one writer per worktree" premise of D3 REV 4b's no-lock
+rule does not hold WITHIN a session. Consequence without serialization: a
+checkpoint git failure (D8c non-fatal) silently drops that turn's queue
+entry; the LAST turn's work never self-heals into the queue. Ruling: a
+**per-session checkpoint lock on ARH** (dict session_key → Lock, mirroring
+`_prep_locks`; no eviction — session keys are roster-bounded), held around
+the whole checkpoint body (stage → gates → commit → enqueue). Worktree
+checkpoints still take NO project lock (the project lock is for the shared
+root only); the per-session lock serializes same-session threads. Sweep
+semantics make serialization correct: the blocked checkpoint B sweeps
+everything A committed plus its own turn's work.
+
 ### D9 — Queue caps
 In-memory queue cap per agent: 50 entries (FIFO overflow drops OLDEST with a
 warning log + a feed card noting the drop). Bounded-memory invariant (P11

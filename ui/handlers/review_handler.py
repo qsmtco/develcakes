@@ -719,6 +719,28 @@ class ReviewHandler:
         with self._queue_lock:
             return len(self._queues.get(project_name, {}).get(agent_key, []))
 
+    def enqueue_agent_checkpoint(self, project_name: str, agent_key: str,
+                                 sha: str, path_used: str) -> None:
+        """SPEC-10 SP2b: PUBLIC enqueue for ARH's turn-complete checkpoints
+        (D2 REV 2). Cap (D9) + lock (D9b) enforced by _enqueue. Fail-closed
+        validation (SP2b fix round, SUGGESTION#3): non-str / empty /
+        bad-sha-shape inputs are REJECTED with a warning log — never raise,
+        never enqueue garbage (mirrors SP1's post-wrapping posture; D9b's
+        lock discipline is upheld)."""
+        if (not isinstance(project_name, str) or not project_name.strip()
+                or not isinstance(agent_key, str) or not agent_key.strip()
+                or not isinstance(sha, str)
+                or not _VALID_SHA_RE.match(sha)
+                or not isinstance(path_used, str) or not path_used.strip()):
+            _logger.warning(
+                "enqueue_agent_checkpoint: rejected malformed entry "
+                "(project=%r, agent=%r, sha=%r, path=%r)",
+                project_name, agent_key, sha, path_used)
+            return
+        self._enqueue(project_name, agent_key, QueueEntry(
+            agent_key=agent_key, sha=sha, path_used=path_used,
+            ts=datetime.now(UTC)))
+
     def _enqueue(self, project_name: str, agent_key: str, entry: QueueEntry) -> None:
         """Append one entry; enforce the D9 cap (50/agent FIFO, drop-OLDEST
         with warning log + feed card). Caller must have validated the entry."""

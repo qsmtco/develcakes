@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest.mock
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -6344,3 +6345,359 @@ def test_worktree_exec_passes_enforcement_gate(tmp_path, monkeypatch):
         ["/usr/bin/python3", "-m", "pytest", "tests/"], app_wt
     )
     assert allowed, f"worktree exec refused: {detail}"
+
+
+# ── SPEC-10 SP2b: turn-complete agent checkpoints (D2 REV 2 / D2b / D8b / D8c) ──
+
+class _Spec10ImmediateGLib:
+    """idle_add runs inline (ReviewHandler double for headless tests)."""
+
+    def idle_add(self, fn, *a, **k):
+        fn(*a, **k)
+        return 0
+
+
+class TestSpec10AgentCheckpoints:
+    """ARH wiring: COMPLETED writer turns checkpoint under an active review
+    session; attribution from the dispatch-time snapshot (token-fresh); two
+    stop-all gates; worktree checkpoints take no project lock (D3 REV 4b)."""
+
+    def _wait(self, cond, timeout=5.0):
+        import time as _t
+        deadline = _t.monotonic() + timeout
+        while _t.monotonic() < deadline:
+            if cond():
+                return True
+            _t.sleep(0.01)
+        return cond()
+
+    def _spec10_rh(self):
+        from ui.handlers.review_handler import ReviewHandler
+        return ReviewHandler(
+            GLib=_Spec10ImmediateGLib(),
+            main_content=unittest.mock.MagicMock(),
+            project_handler=unittest.mock.MagicMock(),
+            on_review_started=unittest.mock.MagicMock(),
+            on_review_ended=unittest.mock.MagicMock(),
+            on_display_card=unittest.mock.MagicMock(),
+            on_display_text=unittest.mock.MagicMock(),
+            on_feed_card=unittest.mock.MagicMock(),
+        )
+
+    def _wired(self, tmp_path, agent_def=None):
+        """ARH + ReviewHandler + active review session on a real git repo,
+        writer registered, snapshot recorded for a live token. Returns
+        (handler, rh, project_str, token)."""
+        import git as gitpython
+
+        from models.review_state import ReviewState
+
+        handler = _sp2_make_handler()
+        rh = self._spec10_rh()
+        handler.set_review_handler(rh)
+        project = tmp_path / "proj"
+        project.mkdir()
+        _sp2_git_repo(project)
+        pstr = str(project)
+
+        rh._states["proj"] = ReviewState(
+            project_path=pstr, review_mode="review",
+            checkpoint_sha="c" * 40)
+        handler._agents["special:coder"] = agent_def or _sp2_writer_def()
+        token = object()
+        handler._turn_tokens["special:coder"] = token
+        handler._turn_attr["special:coder"] = ("proj", pstr, pstr)
+        _ = gitpython  # keep import shaped like the SP2 block
+        return handler, rh, pstr, token
+
+    def _finish(self, handler, sk="special:coder", token=None):
+        token = token if token is not None else handler._turn_tokens.get(sk)
+        handler._do_response_complete(sk, "done", token)
+
+    def test_completed_writer_turn_checkpoints_under_review(self, tmp_path):
+        """AC#1 core path: COMPLETED writer turn under an active review
+        session → queue entry (path_used == write cwd) + 'Agent:' trailer on
+        the checkpoint commit."""
+        import git as gitpython
+
+        handler, rh, pstr, token = self._wired(tmp_path)
+        self._finish(handler, token=token)
+
+        assert self._wait(
+            lambda: rh.pending_count("proj", "special:coder") == 1), (
+            "no queue entry after completed writer turn")
+        entry = rh._queues["proj"]["special:coder"][0]
+        assert entry.agent_key == "special:coder"
+        assert entry.path_used == pstr
+        body = gitpython.Repo(pstr).git.log("--format=%B", "-1")
+        assert "[review] agent checkpoint" in body
+        assert "Agent: special:coder" in body.splitlines()
+
+    def test_non_writer_no_checkpoint(self, tmp_path):
+        """D2b: a reader (can_write=False) never checkpoints.
+
+        BUG#1 fix: the old synchronous ``== 0`` assert raced the checkpoint
+        daemon thread and passed with the guard deleted. Pinned by asserting
+        NO entry appears within a settle window — fails if the can_write
+        guard is removed (the thread enqueues within ~1s in that case)."""
+        handler, rh, _pstr, token = self._wired(
+            tmp_path, agent_def=_sp2_reader_def())
+        self._finish(handler, token=token)
+        assert not self._wait(
+            lambda: rh.pending_count("proj", "special:coder") != 0,
+            timeout=1.0,
+        ), "can_write guard missing: checkpoint enqueued despite reader agent"
+
+    def test_review_off_no_checkpoint(self, tmp_path):
+        """D2b: review_mode 'off' → no checkpoint.
+
+        BUG#1 fix: settle-window pin (see test_non_writer_no_checkpoint) —
+        fails if the review-mode guard is removed."""
+        from models.review_state import ReviewState
+
+        handler, rh, _pstr, token = self._wired(tmp_path)
+        rh._states["proj"] = ReviewState(
+            project_path=_pstr, review_mode="off", checkpoint_sha=None)
+        self._finish(handler, token=token)
+        assert not self._wait(
+            lambda: rh.pending_count("proj", "special:coder") != 0,
+            timeout=1.0,
+        ), "review-mode guard missing: checkpoint enqueued despite mode 'off'"
+
+    def test_no_active_session_no_checkpoint(self, tmp_path):
+        """D2b: no active review session (checkpoint_sha None) → none.
+
+        BUG#1 fix: settle-window pin (see test_non_writer_no_checkpoint) —
+        fails if the is_active() half of the review gate is removed."""
+        from models.review_state import ReviewState
+
+        handler, rh, _pstr, token = self._wired(tmp_path)
+        rh._states["proj"] = ReviewState(
+            project_path=_pstr, review_mode="review", checkpoint_sha=None)
+        self._finish(handler, token=token)
+        assert not self._wait(
+            lambda: rh.pending_count("proj", "special:coder") != 0,
+            timeout=1.0,
+        ), "is_active guard missing: checkpoint enqueued despite inactive session"
+
+    def test_malformed_enqueue_rejected_fail_closed(self):
+        """SUGGESTION#3: enqueue_agent_checkpoint validates (types + sha
+        shape) and REJECTS garbage with a log — never raises, never
+        enqueues. RED (pre-fix): the wrapper enqueued under a None key
+        (garbage in the dict, unreachable by pending_count)."""
+        rh = self._spec10_rh()
+        # Bad sha shape (not hex/HEAD) — rejected.
+        rh.enqueue_agent_checkpoint("proj", "special:coder",
+                                    "NOT-A-SHA", "/tmp/x")
+        # Non-str sha — rejected without raising.
+        rh.enqueue_agent_checkpoint("proj", "special:coder",
+                                    12345, "/tmp/x")
+        # Empty agent key — rejected.
+        rh.enqueue_agent_checkpoint("proj", "", "a" * 40, "/tmp/x")
+        # Whitespace-only path — rejected.
+        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "   ")
+        assert rh.pending_count("proj", "special:coder") == 0
+        # The pre-fix failure shape: the garbage landed under a None key.
+        assert not rh._queues.get("proj", {}).get(None), (
+            "garbage enqueued under a None key — validation guard missing")
+
+    def test_malformed_enqueue_valid_sha_accepted(self):
+        """SUGGESTION#3 happy path: a well-formed entry still enqueues."""
+        rh = self._spec10_rh()
+        rh.enqueue_agent_checkpoint("proj", "special:coder",
+                                    "a" * 40, "/tmp/x")
+        assert rh.pending_count("proj", "special:coder") == 1
+        entry = rh._queues["proj"]["special:coder"][0]
+        assert entry.sha == "a" * 40
+        assert entry.path_used == "/tmp/x"
+
+    def test_stale_token_skips_checkpoint(self, tmp_path):
+        """D2 REV 2: completion carrying a SUPERSEDED token → no enqueue
+        (the snapshot may belong to the new turn; never attribute stale).
+
+        BUG#1 fix: settle-window pin (see test_non_writer_no_checkpoint) —
+        fails if the token-freshness guard is removed."""
+        handler, rh, _pstr, token = self._wired(tmp_path)
+        rotated = object()
+        handler._turn_tokens["special:coder"] = rotated
+        self._finish(handler, token=token)  # OLD token
+        assert not self._wait(
+            lambda: rh.pending_count("proj", "special:coder") != 0,
+            timeout=1.0,
+        ), "token-freshness guard missing: checkpoint enqueued despite stale token"
+
+    def test_overlapping_same_session_checkpoints_serialize(self, tmp_path,
+                                                            monkeypatch):
+        """SPEC-10 D8d (ISSUE#2): two overlapping same-session completions
+        in ONE WORKTREE both land. Worktree checkpoints take NO project
+        lock (D3 REV 4b — the tree is agent-private), so before D8d the
+        two checkpoint daemons raced inside git (index.lock /
+        COMMIT_EDITMSG collisions — auditor measured 18/25 one-fail) and
+        D8c swallowed the failure, silently dropping that turn's queue
+        entry. The per-session checkpoint lock serializes the whole
+        checkpoint body, so every completion enqueues exactly one entry:
+        10 iterations × 2 turns == 20 entries.
+
+        The git boundary is mocked with 0.1s sleeps (the auditor's stress
+        shape) so the two daemons deterministically overlap — without it,
+        real git ops finish fast enough that back-to-back completions
+        never collide and the test cannot fail (measured 0/8 RED without
+        the sleeps)."""
+        import threading
+        from pathlib import Path
+
+        import ui.handlers.agent_runtime_handler as arh_mod
+        from utils import git_ops
+        from utils.worktree_manager import WorktreeManager
+
+        handler, rh, pstr, _token = self._wired(tmp_path)
+        sk = "special:coder"
+        wt = WorktreeManager(pstr).ensure_worktree("special-coder")
+        assert wt is not None
+        # The snapshot's write cwd is the WORKTREE: in_worktree branch —
+        # no project lock; the only serialization is the D8d session lock.
+        handler._turn_attr[sk] = ("proj", pstr, wt)
+
+        real_commit = git_ops.commit
+        real_stage = git_ops.stage_all
+        successes: list[bool] = []
+        lk = threading.Lock()
+
+        def slow_commit(path, message, **kw):
+            time.sleep(0.1)  # widen: A inside commit while B stages
+            r = real_commit(path, message, **kw)
+            with lk:
+                successes.append(bool(r.success))
+            return r
+
+        def slow_stage(path):
+            time.sleep(0.1)
+            return real_stage(path)
+
+        monkeypatch.setattr(arh_mod.git_ops, "commit", slow_commit)
+        monkeypatch.setattr(arh_mod.git_ops, "stage_all", slow_stage)
+
+        wroot = Path(wt)
+        for i in range(10):
+            for suffix in ("a", "b"):
+                handler._session_completed.discard(sk)
+                t = object()
+                handler._turn_tokens[sk] = t
+                (wroot / f"t{i}-{suffix}.txt").write_text(f"turn {i} {suffix}\n")
+                self._finish(handler, token=t)
+        assert self._wait(
+            lambda: rh.pending_count("proj", sk) >= 20, timeout=15.0), (
+            f"overlapping same-session WORKTREE checkpoints lost entries: "
+            f"{rh.pending_count('proj', sk)}/20 "
+            f"(commit outcomes: {successes})")
+        assert rh.pending_count("proj", sk) == 20
+
+    def test_tab_switch_attribution(self, tmp_path):
+        """D2 REV 2/GAP-6: the entry lands under the SNAPSHOT's project even
+        after _active_project switched — completion never reads
+        _active_project."""
+        handler, rh, _pstr, token = self._wired(tmp_path)
+        handler._active_project = ("projB", "/tmp/spec10-other-proj")
+        self._finish(handler, token=token)
+        assert self._wait(
+            lambda: rh.pending_count("proj", "special:coder") == 1), (
+            "checkpoint mis-attributed after tab switch")
+        assert rh.pending_count("projB", "special:coder") == 0
+
+    def test_stop_all_gates_agent_checkpoint(self, tmp_path):
+        """D8b REV 2 gate 1: stop-all in flight pre-thread → abort, counted,
+        NO commit created (repo HEAD unchanged), no queue entry."""
+        import git as gitpython
+
+        handler, rh, pstr, token = self._wired(tmp_path)
+        head_before = gitpython.Repo(pstr).head.commit.hexsha
+        handler._stop_all_in_progress = True
+        self._finish(handler, token=token)
+        assert self._wait(lambda: handler._stop_all_aborted_checkpoints >= 1), (
+            "gate-1 abort was not counted via note_stop_all_aborted")
+        assert rh.pending_count("proj", "special:coder") == 0
+        assert gitpython.Repo(pstr).head.commit.hexsha == head_before, (
+            "gate-1 abort must not commit")
+
+    def test_stop_all_gate2_before_commit(self, tmp_path):
+        """D8b REV 2 gate 2: stop-all lands WHILE staging ran → the
+        commit-boundary re-check aborts: no commit, no enqueue, counted."""
+        import git as gitpython
+
+        handler, rh, pstr, token = self._wired(tmp_path)
+        head_before = gitpython.Repo(pstr).head.commit.hexsha
+
+        # Capture the REAL function BEFORE patching — a module-attribute
+        # lookup inside the side_effect would resolve to the mock itself
+        # (infinite recursion).
+        from utils import git_ops as _git_ops_mod
+        real_stage = _git_ops_mod.stage_all
+
+        def _stage_then_flag(project_path):
+            result = real_stage(project_path)
+            handler._stop_all_in_progress = True  # lands mid-checkpoint
+            return result
+
+        with patch("utils.git_ops.stage_all", side_effect=_stage_then_flag):
+            self._finish(handler, token=token)
+            assert self._wait(
+                lambda: handler._stop_all_aborted_checkpoints >= 1), (
+                "gate-2 abort was not counted")
+
+        assert rh.pending_count("proj", "special:coder") == 0
+        assert gitpython.Repo(pstr).head.commit.hexsha == head_before, (
+            "gate-2 must abort BEFORE the commit")
+
+    def test_checkpoint_failure_non_fatal(self, tmp_path):
+        """D8c: commit failure → no enqueue, no raise, no error into the
+        agent's chat surfaces — turn completion unaffected. ARH has no
+        _on_display_text (that's ReviewHandler's); the agent-chat surfaces
+        are _crh (bubbles) and _fh (feed cards)."""
+        handler, rh, _pstr, token = self._wired(tmp_path)
+
+        def _boom(*a, **k):
+            return unittest.mock.MagicMock(success=False, error="boom", sha=None)
+
+        with patch("utils.git_ops.commit", side_effect=_boom):
+            self._finish(handler, token=token)  # must not raise
+        assert rh.pending_count("proj", "special:coder") == 0
+        fh = handler._fh if handler._fh is not None else unittest.mock.MagicMock()
+        card_calls = [str(c) for c in fh.add_card.call_args_list]
+        assert not any("checkpoint" in c.lower() and "fail" in c.lower()
+                       for c in card_calls), (
+            f"checkpoint error surfaced to the chat: {card_calls}")
+
+    def test_worktree_turn_checkpoints_in_worktree(self, tmp_path):
+        """D2/D5b/D3 REV 4b: a leased writer's checkpoint commits in its
+        WORKTREE (agent-private tree — no project lock held) while the PM
+        holds the root project lock: no deadlock, entry path_used ==
+        worktree, trailer on the worktree-branch commit."""
+        import git as gitpython
+
+        handler, rh, pstr, token = self._wired(tmp_path)
+
+        from models.work_unit import WorkUnit
+        from utils.work_persistence import claim_work, save_work_units
+        save_work_units(pstr, [WorkUnit(id="00000042", title="t",
+                                        status="in-progress")])
+        assert claim_work(pstr, "00000042", "special:coder") is not None
+        wt = handler._worktree_for_turn("special:coder", _sp2_writer_def(), pstr)
+        assert wt is not None, "fixture precondition: no worktree resolved"
+        handler._turn_attr["special:coder"] = ("proj", pstr, wt)
+
+        # Dirty the WORKTREE so the checkpoint has something to sweep.
+        (Path(wt) / "agent_work.txt").write_text("work\n")
+
+        lock = rh._project_lock_for("proj")
+        with lock:  # PM-side root lock HELD during the whole checkpoint
+            self._finish(handler, token=token)
+            done = self._wait(
+                lambda: rh.pending_count("proj", "special:coder") == 1,
+                timeout=10.0)
+
+        assert done, "worktree checkpoint never completed — project-lock " \
+            "deadlock (D3 REV 4b: agent-private trees take NO project lock)"
+        entry = rh._queues["proj"]["special:coder"][0]
+        assert entry.path_used == wt
+        body = gitpython.Repo(wt).git.log("--format=%B", "-1")
+        assert "Agent: special:coder" in body.splitlines()
