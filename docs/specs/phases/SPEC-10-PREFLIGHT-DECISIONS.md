@@ -133,16 +133,43 @@ outside a review session → no checkpoint, no queue entry.
    commit; an accept commit would be empty or livelock). Merge to main stays
    manual per-unit (spec Out-of-scope). Dequeue keys on the **bookkeeping
    success**, not a git success. The batch card reports per-item outcomes.
-3. For project-root items (unleased writers, PM): existing `accept_changes`
-   path (stage + commit with `agent_trailer=<agent_key>`), dequeue on commit
-   success.
+3. For project-root items (unleased writers, PM): existing accept path —
+   stage + commit with `agent_trailer=<agent_key>`. **REV 3 ruling (audit
+   BUG#1, 2026-10-03):** the D2 checkpoint already committed the work, so a
+   root item on a CLEAN tree is the NORMAL end-state — treat commit failure
+   with the exact error `"nothing to commit (working tree clean)"` as
+   **bookkeeping success + dequeue** (mirroring step 2; never fabricate an
+   empty commit, never strand the entry). Any OTHER commit failure is a real
+   git failure → abort-remaining. The same REV 3 ruling applies to
+   `accept_changes`' PM path: its existing friendly "Nothing to commit"
+   branch stays, and its real commits gain `agent_trailer="pm"` (GAP-4).
 4. Queue item is removed on success; **failure aborts remaining items with an
    error card reporting exactly how many succeeded before the failure** (spec:
    no partial silent loss). Root-cause items (stale path) are dropped with an
    error card and do NOT abort remaining (BUG#5 fix — only item-level git
-   failures abort the batch).
-5. `accept_all_queues()` = iterate all agent queues (excluding "pm" by default,
-   per spec §7 row 1) + the PM's own queue last.
+   failures abort the batch). **REV 4 ruling (re-audit Finding A, 2026-10-03):**
+   the git critical section (stage/commit) is serialized **per project across
+   ALL public accept entry points** — a `_project_accept_lock: dict[str,
+   threading.Lock]` (or single in-flight guard) held by
+   `_accept_agent_queue_sync` around the stage/commit section. Concurrent
+   public calls (double-click, accept_all + per-agent) then block-or-no-op,
+   never stampede. Snapshot-iterate may still run concurrently with the
+   enqueue side (fine — `_queue_lock` guards the dict), but two stage/commit
+   sections never overlap on one repo. **REV 4b enumeration (re-audit BUG#1
+   + BUG#4, 2026-10-03):** "ALL public accept entry points" means every
+   mutating git call on the project root, complete list: `accept_changes`
+   (stage + diff-read + commit), `start_review` (stage + commit),
+   `reject_changes` (checkout), `reject_file` (checkout),
+   `revert_file_to_sha` (checkout), and `_accept_agent_queue_sync`.
+   Read-only diffs (`check_changes`' `diff_against`) take no lock. The
+   lock-dict is intentionally NEVER
+   evicted on project close (ruling vs BUG#3): evicting a lock an in-flight
+   accept holds would let close→reopen→setdefault create a second live lock
+   for one project — reintroducing the stampede the lock exists to prevent.
+   The ~40-byte-per-name leak is the accepted cost (single-user desktop,
+   bounded by distinct project names per session).
+5. `accept_all_queues()` = iterate all agent queues (excluding "pm" — see D8)
+   in insertion order.
 6. **Dequeue-on-success-only** (fail-safe for races): items are removed from
    the queue only after their accept succeeds. If an agent's new checkpoint
    lands mid-batch (race), it lands in *next* batch (spec §7 row 2) — natural
@@ -200,10 +227,18 @@ accept time the path is re-verified (worktree still registered / root still
 matches) — stale entries (worktree removed) surface as error cards, not
 silent skips.
 
-### D8 — PM queue ("pm") never batch-accepted with agents' by default
-Per spec §7 row 1. `accept_all_queues()` processes agent queues first, PM last,
-and only when the PM's own queue is non-empty. The confirmation dialog
-separates "N agent checkpoints" from "M PM items".
+### D8 — PM queue ("pm") never included in batch accept *(REV 2 — 2026-10-03)*
+Per spec §7 row 1: `accept_all_queues()` processes **agent queues only** —
+the literal key `"pm"` is excluded from every batch accept. **REV 2 ruling
+(audit BUG#4):** the PM queue has a consumer — `accept_changes`' success
+path dequeues the project's "pm" entries (and `reject_changes` clears them
+too: a rejected session's checkpoints are moot). The PM's own `/accept` /
+`/reject` IS the drain. **REV 3 ruling (re-audit Finding B, 2026-10-03):**
+EVERY session-resolving exit path drains — including the diff-read-error
+branch's `_reset_state` (the session is already reset there; orphaned pm
+entries would desync from any live session and the next `/review` enqueues
+fresh ones anyway). Rationale: the PM's own edits are the one queue whose
+acceptance should never ride along with a bulk action.
 
 ### D8b — Stop-all gate *(REV 2 — post-probe, 2026-10-03)*
 Agent-side checkpoint creation inherits SP3's stop-all gates — with the

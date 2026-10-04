@@ -4,22 +4,27 @@
 # All GTK via GLib.idle_add(). No git calls on the main thread.
 
 import logging
+import os
 import re
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Callable
 
 from models.command import Command, CommandResult
 from models.feed_card import FeedCardData
 
-from models.review_state import ReviewState
+from models.review_state import QueueEntry, ReviewState
 from utils import git_ops
 from utils.diff_parser import parse_diff
+from utils.worktree_manager import WORKTREES_DIR_NAME
 
 
 # MED-11: Validate git commit SHA to prevent argument injection
 _VALID_SHA_RE = re.compile(r"^(HEAD|[0-9a-fA-F]{4,40})$")
+
+# SPEC-10 D9: per-agent queue cap — FIFO overflow drops the OLDEST entry.
+_QUEUE_CAP = 50
 
 _logger = logging.getLogger(__name__)
 
@@ -75,6 +80,23 @@ class ReviewHandler:
         # Feed handler reference for persisting review resolutions (set via
         # set_feed_handler; REVIEW-PERSIST-1 Edit B)
         self._feed_handler = None
+
+        # SPEC-10: per-agent review queues. project_name -> agent_key ->
+        # ordered QueueEntry list. Guarded by self._queue_lock (D9b) —
+        # enqueue arrives from ARH runtime threads, reads from the review
+        # bar (main thread), batch accept from the PM's click.
+        self._queues: dict[str, dict[str, list[QueueEntry]]] = {}
+        self._queue_lock = threading.Lock()
+
+        # D3 REV 4 + REV 4a (BUG#3 ruling): serializes the git critical
+        # section per project across ALL public accept entry points. Two
+        # workers may snapshot-iterate concurrently (the dict lock guards
+        # the queues), but two stage/commit sections never overlap on one
+        # repo. NO EVICTION on project close (D3 REV 4a): evicting a lock an
+        # in-flight accept holds would let close→reopen→setdefault create a
+        # second live lock for one project — reintroducing the stampede.
+        # ~40 bytes per distinct project name is the accepted cost.
+        self._project_accept_locks: dict[str, threading.Lock] = {}
 
 
     def set_chat_handler(self, chat_handler):
@@ -244,46 +266,66 @@ class ReviewHandler:
             return
 
         def _do():
-            # Ensure it's a git repo
-            if not git_ops.is_repo(project_path):
-                init_result = git_ops.init_repo(project_path)
-                if not init_result.success:
-                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to init git repo: {init_result.error}"))
+            # D3 REV 4a: the project accept lock covers stage + commit (+ the
+            # enqueue after — _queue_lock-only, safe to nest). Without it,
+            # start_review ∥ accept_all race the repo's index (auditor:
+            # 3/20 index contention).
+            with self._project_lock_for(project_name):
+                # Ensure it's a git repo
+                if not git_ops.is_repo(project_path):
+                    init_result = git_ops.init_repo(project_path)
+                    if not init_result.success:
+                        self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to init git repo: {init_result.error}"))
+                        return
+
+                # Stage all
+                stage_result = git_ops.stage_all(project_path)
+                if not stage_result.success:
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to stage files: {stage_result.error}"))
                     return
 
-            # Stage all
-            stage_result = git_ops.stage_all(project_path)
-            if not stage_result.success:
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to stage files: {stage_result.error}"))
-                return
+                # SPEC-09 SP3: re-check at the commit boundary — stop-all may
+                # have landed while staging ran. A checkpoint created after the
+                # halt would fake a pre-halt state onto the branch.
+                if (self._agent_runtime_handler is not None
+                        and self._agent_runtime_handler.stop_all_in_progress()):
+                    self._abort_checkpoint_for_stop_all(sk)
+                    return
 
-            # SPEC-09 SP3: re-check at the commit boundary — stop-all may
-            # have landed while staging ran. A checkpoint created after the
-            # halt would fake a pre-halt state onto the branch.
-            if (self._agent_runtime_handler is not None
-                    and self._agent_runtime_handler.stop_all_in_progress()):
-                self._abort_checkpoint_for_stop_all(sk)
-                return
+                # Commit checkpoint. allow_empty=True because a checkpoint is a
+                # valid SHA marker even on a clean tree (user can start a review
+                # without any changes to capture the current state).
+                # SPEC-10: the literal "pm" trailer attributes PM checkpoints
+                # (rejection is impossible — clean str; see SP1's D1 guard).
+                commit_result = git_ops.commit(
+                    project_path, "[review] checkpoint", allow_empty=True,
+                    agent_trailer="pm",
+                )
+                if not commit_result.success:
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to create checkpoint: {commit_result.error}"))
+                    return
 
-            # Commit checkpoint. allow_empty=True because a checkpoint is a
-            # valid SHA marker even on a clean tree (user can start a review
-            # without any changes to capture the current state).
-            commit_result = git_ops.commit(project_path, "[review] checkpoint", allow_empty=True)
-            if not commit_result.success:
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to create checkpoint: {commit_result.error}"))
-                return
+                sha = commit_result.sha
 
-            sha = commit_result.sha
+                # SPEC-10: PM checkpoints enter the "pm" queue (GAP-3/D8). The
+                # PM's queue is drained only by the PM's own explicit action —
+                # never by accept_all_queues (D8).
+                self._enqueue(project_name, "pm", QueueEntry(
+                    agent_key="pm",
+                    sha=sha,
+                    path_used=project_path,
+                    ts=datetime.now(UTC),
+                ))
 
-            def _update_state(sk=sk):
-                state.checkpoint_sha = sha
-                state.is_dirty = False
-                state.last_check_files = []
-                bar = self._mc.get_review_bar()
-                if bar is not None:
-                    bar.set_state_reviewing(sha)
-                    bar.set_loading(False)
-                self._on_display_text(sk, f"🔍 Review session started — checkpoint {sha[:7]}")
+                def _update_state(sk=sk):
+                    state.checkpoint_sha = sha
+                    state.is_dirty = False
+                    state.last_check_files = []
+                    bar = self._mc.get_review_bar()
+                    if bar is not None:
+                        bar.set_state_reviewing(sha)
+                        bar.set_loading(False)
+                    self._on_display_text(sk, f"🔍 Review session started — checkpoint {sha[:7]}")
 
             self._GLib.idle_add(_update_state)
 
@@ -363,35 +405,65 @@ class ReviewHandler:
         checkpoint_sha = state.checkpoint_sha
 
         def _do():
-            # Stage all
-            stage_result = git_ops.stage_all(project_path)
-            if not stage_result.success:
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to stage: {stage_result.error}"))
-                return
+            # D3 REV 4a: the project accept lock covers the WHOLE root git
+            # critical section (stage → diff-read → commit). Nesting order
+            # project_lock → queue_lock ONLY; the _drain_pm_queue and
+            # _persist_review_resolution calls in the idle closures run
+            # later on the main thread, after release — they never nest
+            # under the project lock from this path.
+            with self._project_lock_for(project_name):
+                # Stage all
+                stage_result = git_ops.stage_all(project_path)
+                if not stage_result.success:
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to stage: {stage_result.error}"))
+                    return
 
-            # Generate the commit message from the ACTUAL staged files, not
-            # from the input message parameter. The input message is just
-            # user intent ("Accept: Modified X") but the real diff is in
-            # repo.index.diff("HEAD").
-            #
-            # Only catch ImportError (gitpython not installed). Other exceptions
-            # (InvalidGitRepositoryError, BadName, etc.) are reported to the
-            # user as real errors — NOT silently treated as "nothing to commit",
-            # which would mask a broken git repo or other real failure.
-            try:
-                import git as gitpython
-            except ImportError:
-                # gitpython not installed — fall through to empty case
-                staged = []
-            else:
+                # Generate the commit message from the ACTUAL staged files, not
+                # from the input message parameter. The input message is just
+                # user intent ("Accept: Modified X") but the real diff is in
+                # repo.index.diff("HEAD").
+                #
+                # Only catch ImportError (gitpython not installed). Other exceptions
+                # (InvalidGitRepositoryError, BadName, etc.) are reported to the
+                # user as real errors — NOT silently treated as "nothing to commit",
+                # which would mask a broken git repo or other real failure.
                 try:
-                    repo = gitpython.Repo(project_path)
-                    staged = repo.index.diff("HEAD")
-                except Exception as e:
-                    # Real error reading the diff — report to user, reset state.
-                    self._GLib.idle_add(lambda sk=sk, err=e: self._on_display_text(
-                        sk, f"❌ Failed to read diff: {type(err).__name__}: {err}"
+                    import git as gitpython
+                except ImportError:
+                    # gitpython not installed — fall through to empty case
+                    staged = []
+                else:
+                    try:
+                        repo = gitpython.Repo(project_path)
+                        staged = repo.index.diff("HEAD")
+                    except Exception as e:
+                        # Real error reading the diff — report to user, reset state.
+                        self._GLib.idle_add(lambda sk=sk, err=e: self._on_display_text(
+                            sk, f"❌ Failed to read diff: {type(err).__name__}: {err}"
+                        ))
+                        def _reset_state(sk=sk):
+                            state.checkpoint_sha = None
+                            state.is_dirty = False
+                            state.last_check_files = []
+                            bar = self._mc.get_review_bar()
+                            if bar:
+                                bar.set_state_idle()
+                                bar.set_loading(False)
+                            self._on_review_ended(project_name)
+                            # D8 REV 3 (SP2 fix round 2, Finding B): this branch
+                            # RESOLVES the session too — every session-resolving
+                            # exit drains pm; otherwise the entries are orphaned.
+                            self._drain_pm_queue(project_name)
+                        self._GLib.idle_add(_reset_state)
+                        return
+
+                if not staged:
+                    # Working tree is clean — nothing to commit. Show a friendly
+                    # message instead of the misleading "Failed to commit" error.
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(
+                        sk, "ℹ️ Nothing to commit — working tree clean. No changes were accepted."
                     ))
+                    # Still update the state so the review bar resets.
                     def _reset_state(sk=sk):
                         state.checkpoint_sha = None
                         state.is_dirty = False
@@ -401,42 +473,26 @@ class ReviewHandler:
                             bar.set_state_idle()
                             bar.set_loading(False)
                         self._on_review_ended(project_name)
+                        # D8 REV 2: "Nothing to commit" also resolves the session.
+                        self._drain_pm_queue(project_name)
                     self._GLib.idle_add(_reset_state)
                     return
 
-            if not staged:
-                # Working tree is clean — nothing to commit. Show a friendly
-                # message instead of the misleading "Failed to commit" error.
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(
-                    sk, "ℹ️ Nothing to commit — working tree clean. No changes were accepted."
-                ))
-                # Still update the state so the review bar resets.
-                def _reset_state(sk=sk):
-                    state.checkpoint_sha = None
-                    state.is_dirty = False
-                    state.last_check_files = []
-                    bar = self._mc.get_review_bar()
-                    if bar:
-                        bar.set_state_idle()
-                        bar.set_loading(False)
-                    self._on_review_ended(project_name)
-                self._GLib.idle_add(_reset_state)
-                return
+                # Build a descriptive message from the actual files
+                file_list = sorted({d.a_path or d.b_path for d in staged if d.a_path or d.b_path})
+                if len(file_list) == 1:
+                    full_message = f"[review] accepted: Accept: Modified {file_list[0]}"
+                elif len(file_list) <= 3:
+                    full_message = f"[review] accepted: Accept: Modified {len(file_list)} files ({', '.join(file_list)})"
+                else:
+                    full_message = f"[review] accepted: Accept: Modified {len(file_list)} files ({', '.join(file_list[:3])}...)"
 
-            # Build a descriptive message from the actual files
-            file_list = sorted({d.a_path or d.b_path for d in staged if d.a_path or d.b_path})
-            if len(file_list) == 1:
-                full_message = f"[review] accepted: Accept: Modified {file_list[0]}"
-            elif len(file_list) <= 3:
-                full_message = f"[review] accepted: Accept: Modified {len(file_list)} files ({', '.join(file_list)})"
-            else:
-                full_message = f"[review] accepted: Accept: Modified {len(file_list)} files ({', '.join(file_list[:3])}...)"
-
-            # Commit
-            commit_result = git_ops.commit(project_path, full_message)
-            if not commit_result.success:
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to commit: {commit_result.error}"))
-                return
+                # Commit. SPEC-10 BUG#5 (SP2 fix round): the PM's accept commit
+                # carries the "pm" attribution trailer (GAP-4; D1/SP1 guard).
+                commit_result = git_ops.commit(project_path, full_message, agent_trailer="pm")
+                if not commit_result.success:
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to commit: {commit_result.error}"))
+                    return
 
             def _update_state(sk=sk):
                 state.checkpoint_sha = None
@@ -458,6 +514,8 @@ class ReviewHandler:
                 # REVIEW-PERSIST-1 Edit B: the decision must also land on the
                 # review-flagged tool-result cards, or it is lost on reload.
                 self._persist_review_resolution(project_name, project_path, True)
+                # D8 REV 2: the accept commit resolved the session — drain pm.
+                self._drain_pm_queue(project_name)
 
             self._GLib.idle_add(_update_state)
 
@@ -488,16 +546,20 @@ class ReviewHandler:
                 sk, f"Reverting {len(files_to_revert)} file(s): {file_list_display}"
             ))
 
-            # MED-11: Validate commit_sha before passing to git
-            _validate_sha(sha)
+            # D3 REV 4a: the checkout is a root git critical section — hold
+            # the project accept lock (same discipline as accept_changes).
+            with self._project_lock_for(project_name):
+                # MED-11: Validate commit_sha before passing to git
+                _validate_sha(sha)
 
-            result = git_ops.checkout_paths(project_path, sha, files_to_revert)
-            if not result.success:
-                self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to revert: {result.error}"))
-                return
+                result = git_ops.checkout_paths(project_path, sha, files_to_revert)
+                if not result.success:
+                    self._GLib.idle_add(lambda sk=sk: self._on_display_text(sk, f"Failed to revert: {result.error}"))
+                    return
 
-            # Send rejection message to all project members
-            self._send_rejection_messages(project_name, reason, sha)
+                # Send rejection message to all project members
+                # (idle_add-marshalled — non-blocking under the lock).
+                self._send_rejection_messages(project_name, reason, sha)
 
             def _update_state(sk=sk):
                 state.checkpoint_sha = None
@@ -518,6 +580,9 @@ class ReviewHandler:
                 # REVIEW-PERSIST-1 Edit B: persist the resolution on the
                 # review-flagged tool-result cards (accept-path parity).
                 self._persist_review_resolution(project_name, project_path, False)
+                # D8 REV 2: a rejected session's checkpoints are moot —
+                # clear the project's pm entries.
+                self._drain_pm_queue(project_name)
 
             self._GLib.idle_add(_update_state)
 
@@ -534,12 +599,16 @@ class ReviewHandler:
 
         session_key = f"project:{project_name}"
         def _do():
-            result = git_ops.checkout_paths(project_path, sha, [file_path])
-            if not result.success:
-                self._GLib.idle_add(lambda sk=session_key: self._on_display_text(sk, f"Failed to revert {file_path}: {result.error}"))
-                return
+            # D3 REV 4b: the checkout is a root git critical section — same
+            # per-project accept lock as accept_changes/reject_changes.
+            # Nesting: project_lock only (no queue_lock needed here).
+            with self._project_lock_for(project_name):
+                result = git_ops.checkout_paths(project_path, sha, [file_path])
+                if not result.success:
+                    self._GLib.idle_add(lambda sk=session_key: self._on_display_text(sk, f"Failed to revert {file_path}: {result.error}"))
+                    return
 
-            self._GLib.idle_add(lambda sk=session_key: self._on_display_text(sk, f"↩ {file_path} reverted to checkpoint"))
+                self._GLib.idle_add(lambda sk=session_key: self._on_display_text(sk, f"↩ {file_path} reverted to checkpoint"))
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -574,14 +643,18 @@ class ReviewHandler:
         session_key = f"project:{project_name}"
 
         def _do():
-            result = git_ops.checkout_paths(project_path, target_sha, [file_path])
-            if not result.success:
-                self._GLib.idle_add(lambda sk=session_key: self._on_display_text(
-                    sk, f"⚠ Failed to revert {file_path}: {result.error}"))
-                return
+            # D3 REV 4b: root git critical section — project accept lock
+            # (same discipline as reject_file; on_complete fires on the main
+            # thread AFTER the lock is released, via idle_add).
+            with self._project_lock_for(project_name):
+                result = git_ops.checkout_paths(project_path, target_sha, [file_path])
+                if not result.success:
+                    self._GLib.idle_add(lambda sk=session_key: self._on_display_text(
+                        sk, f"⚠ Failed to revert {file_path}: {result.error}"))
+                    return
 
-            self._GLib.idle_add(lambda sk=session_key: self._on_display_text(
-                sk, f"↩ {file_path} reverted to {target_sha[:7]}"))
+                self._GLib.idle_add(lambda sk=session_key: self._on_display_text(
+                    sk, f"↩ {file_path} reverted to {target_sha[:7]}"))
             # BUG #1: fire on_complete callback on main thread after success
             if on_complete is not None:
                 self._GLib.idle_add(lambda cb=on_complete: cb())
@@ -631,6 +704,259 @@ class ReviewHandler:
     def get_state(self, project_name: str) -> ReviewState | None:
         """Get current review state for a project."""
         return self._states.get(project_name)
+
+    # ── SPEC-10: per-agent queues (D9b surface) ────────────────────────
+
+    def agents_with_pending(self, project_name: str) -> list[str]:
+        """Agent keys with ≥1 pending entry, in first-enqueue order.
+        O(agents) under the lock; snapshot semantics."""
+        with self._queue_lock:
+            q = self._queues.get(project_name, {})
+            return [k for k, v in q.items() if v]
+
+    def pending_count(self, project_name: str, agent_key: str) -> int:
+        """Pending entry count for one agent. O(1) lookup + len."""
+        with self._queue_lock:
+            return len(self._queues.get(project_name, {}).get(agent_key, []))
+
+    def _enqueue(self, project_name: str, agent_key: str, entry: QueueEntry) -> None:
+        """Append one entry; enforce the D9 cap (50/agent FIFO, drop-OLDEST
+        with warning log + feed card). Caller must have validated the entry."""
+        dropped = None
+        with self._queue_lock:
+            lst = self._queues.setdefault(project_name, {}).setdefault(agent_key, [])
+            lst.append(entry)
+            if len(lst) > _QUEUE_CAP:
+                dropped = lst.pop(0)
+        if dropped is not None:
+            # Emitted AFTER the lock: _emit_feed_card runs on the caller's
+            # thread and must never run while holding _queue_lock (disclosed
+            # choice — the brief offered emit-inside-lock as the alternative).
+            _logger.warning(
+                "review queue cap hit for %s/%s — dropped OLDEST %s",
+                project_name, agent_key, dropped.sha[:7],
+            )
+            self._emit_feed_card({
+                "title": f"Review queue cap: dropped oldest for {agent_key}",
+                "body": f"Entry {dropped.sha[:7]} exceeded the {_QUEUE_CAP}-entry cap.",
+                "project_name": project_name,
+                "commit_sha": dropped.sha,
+            })
+
+    def _dequeue(self, project_name: str, agent_key: str, entry: QueueEntry) -> None:
+        """Remove one accepted/dropped entry (equality match on the NamedTuple).
+
+        Disclosed choice: list.remove is equality-based and O(n) — acceptable
+        at the D9 cap (≤50 entries/agent). A miss logs (never raises): the
+        entry may already have been removed by a concurrent batch.
+        """
+        with self._queue_lock:
+            lst = self._queues.get(project_name, {}).get(agent_key, [])
+            try:
+                lst.remove(entry)
+            except ValueError:
+                _logger.debug(
+                    "dequeue miss for %s/%s %s — already removed?",
+                    project_name, agent_key, entry.sha[:7],
+                )
+
+    def _drain_pm_queue(self, project_name: str) -> None:
+        """D8 REV 2 (SP2 fix round): the PM's own /accept (success path) or
+        /reject IS the drain of the project's "pm" queue — the moment the
+        review session resolves, the queued PM checkpoints are moot. Drains
+        ALL of them. Never called from accept_all_queues (D8)."""
+        with self._queue_lock:
+            lst = self._queues.get(project_name, {}).get("pm", [])
+            drained = len(lst)
+            lst.clear()
+        if drained:
+            _logger.info("pm queue drained (%d entries) for %s", drained, project_name)
+
+    def accept_agent_queue(self, agent_key: str, project_name: str,
+                           session_key: str | None = None) -> None:
+        """SPEC-10 D3 (REV 2 + REV 3): accept every pending entry for one agent.
+
+        Worktree items (path under <project>/.worktrees/): "mark reviewed"
+        bookkeeping — NO new commit (D2's checkpoint already carries the
+        Agent: trailer; an accept commit would be empty or livelock). Merge
+        stays manual per-unit.
+        Project-root items (unleased writers): stage + commit with
+        agent_trailer=<agent_key>; a commit failure with the EXACT error
+        "nothing to commit (working tree clean)" is the normal D2 end-state —
+        bookkeeping success + dequeue, never a fabricated empty commit
+        (D3 REV 3).
+        Snapshot-iterate; dequeue-on-success-only; stale items (worktree
+        gone) drop with an error card and do NOT abort remaining; item-level
+        git failures abort remaining with a partial-completion card.
+
+        BUG#2 (SP2 fix round): runs in ONE background thread — the per-agent
+        body lives in _accept_agent_queue_sync so accept_all_queues can drive
+        every agent sequentially on a SINGLE worker (never concurrent
+        stage/commit on one repo).
+        """
+        state = self._states.get(project_name)
+        if state is None:
+            return
+        sk = session_key or f"project:{project_name}"
+        project_path = state.project_path
+        threading.Thread(
+            target=self._accept_agent_queue_sync,
+            args=(agent_key, project_name, sk, project_path),
+            daemon=True,
+        ).start()
+
+    def _project_lock_for(self, project_name: str) -> threading.Lock:
+        """D3 REV 4: the per-project accept lock. Dict.setdefault is atomic
+        in CPython (GIL) — one lock per project, no separate guard lock
+        (disclosed choice from the brief's two options)."""
+        return self._project_accept_locks.setdefault(
+            project_name, threading.Lock())
+
+    def _accept_agent_queue_sync(self, agent_key: str, project_name: str,
+                                 sk: str, project_path: str) -> None:
+        """The per-agent accept body — runs ON the caller's background thread.
+        Shared by accept_agent_queue (one thread, one agent) and
+        accept_all_queues (ONE thread iterating all agents sequentially) so
+        the two entry points cannot drift (BUG#2, SP2 fix round)."""
+        with self._queue_lock:
+            snapshot = list(self._queues.get(project_name, {}).get(agent_key, []))
+        if not snapshot:
+            self._GLib.idle_add(lambda sk=sk: self._on_display_text(
+                sk, f"No pending checkpoints for {agent_key}"))
+            return
+
+        outcomes: list[str] = []
+        succeeded = failed = stale = 0
+        stale_cards: list[dict] = []  # BUG#2: emitted AFTER the lock is released
+        # D3 step 1: the worktrees ROOT for this project. A queued path is
+        # a worktree item iff its realpath is a DIRECT child of this root
+        # (is_worktree_of's shape rule is banned for liveness — D3 BUG#5 —
+        # the isdir check below is the liveness verdict).
+        worktrees_root = os.path.realpath(
+            os.path.join(project_path, WORKTREES_DIR_NAME))
+        aborted = False
+        # D3 REV 4: hold the project's accept lock for the WHOLE loop —
+        # per-entry release would let an interleaved accept_all's agent B
+        # slip between this agent's entries (cross-invocation stampede,
+        # Finding A). The summary card emits AFTER the lock.
+        with self._project_lock_for(project_name):
+            for entry in snapshot:
+                entry_real = os.path.realpath(os.path.abspath(entry.path_used))
+                # BUG#6 (SP2 fix round, LOW — bounded): liveness here is isdir-only.
+                # An existing-but-unregistered dir under .worktrees could surface a
+                # misleading "reviewed" card — never a bad commit (worktree accept
+                # is bookkeeping-only). SP2b handoff: registration membership via
+                # WorktreeManager.path_for arrives with the ARH wiring; the
+                # ".worktrees-as-project" edge is registered, not fixed here.
+                is_wt = os.path.dirname(entry_real) == worktrees_root
+                if is_wt:
+                    # Worktree item — mark reviewed (D3 step 2). Liveness check
+                    # BEFORE anything else (D3 step 1): a stale entry drops with
+                    # its own card and never aborts the batch.
+                    if not os.path.isdir(entry_real):
+                        stale += 1
+                        outcomes.append(f"stale (worktree gone): {entry.sha[:7]}")
+                        # BUG#2 (fix round 3): card DEFERRED — never emit a feed
+                        # card while holding the project lock (non-reentrant
+                        # Lock; same-thread re-entry would deadlock). Emitted
+                        # right after the with-block, summary card follows.
+                        stale_cards.append({
+                            "title": f"Review queue: stale entry dropped for {agent_key}",
+                            "body": (f"Checkpoint {entry.sha[:7]} points at a removed "
+                                     f"worktree ({entry.path_used}) — dropped from the "
+                                     f"queue, not accepted."),
+                            "project_name": project_name,
+                            "commit_sha": entry.sha,
+                        })
+                        self._dequeue(project_name, agent_key, entry)
+                        continue
+                    # Accept = bookkeeping: the checkpoint commit on the agent
+                    # branch already carries the trailer (D3 REV 2 BUG#4) —
+                    # no new commit, no merge (manual per-unit).
+                    succeeded += 1
+                    outcomes.append(f"reviewed {entry.sha[:7]}")
+                    self._dequeue(project_name, agent_key, entry)
+                else:
+                    # Project-root item — real accept commit (D3 step 3).
+                    stage = git_ops.stage_all(project_path)
+                    if not stage.success:
+                        failed += 1
+                        outcomes.append(f"stage failed: {entry.sha[:7]}")
+                        aborted = True
+                        break
+                    commit = git_ops.commit(
+                        project_path,
+                        f"[review] accepted: {agent_key} checkpoint {entry.sha[:7]}",
+                        agent_trailer=agent_key,
+                    )
+                    if not commit.success:
+                        # D3 REV 3 (audit BUG#1): the D2 checkpoint already
+                        # committed the work, so a CLEAN tree is the normal
+                        # end-state — bookkeeping success + dequeue. Match the
+                        # EXACT git_ops error string; never allow_empty=True
+                        # (that would fabricate empty commits). Any OTHER
+                        # failure is a real git failure → abort-remaining.
+                        if commit.error == "nothing to commit (working tree clean)":
+                            succeeded += 1
+                            outcomes.append(f"reviewed (clean) {entry.sha[:7]}")
+                            self._dequeue(project_name, agent_key, entry)
+                            continue
+                        failed += 1
+                        outcomes.append(f"commit failed: {entry.sha[:7]}")
+                        aborted = True
+                        break
+                    succeeded += 1
+                    outcomes.append(f"accepted {entry.sha[:7]}")
+                    self._dequeue(project_name, agent_key, entry)
+
+        # One summary card for the batch (per-item outcomes included).
+        # Stale cards FIRST (BUG#2: emitted here, outside the project lock),
+        # then the summary card.
+        for card in stale_cards:
+            self._emit_feed_card(card)
+        if aborted:
+            title = (f"PARTIAL: accepted {succeeded} for {agent_key}, "
+                     f"stopped at item {succeeded + stale + 1}")
+            body = ("; ".join(outcomes) +
+                    f" — REMAINING {len(snapshot) - succeeded - stale} "
+                    "entries stay queued.")
+        else:
+            title = (f"Queue accepted for {agent_key}: {succeeded} ok, "
+                     f"{stale} stale, {failed} failed")
+            body = "; ".join(outcomes) if outcomes else "queue empty"
+        self._emit_feed_card({
+            "title": title,
+            "body": body,
+            "project_name": project_name,
+            "commit_sha": None,
+        })
+
+    def accept_all_queues(self, project_name: str,
+                          session_key: str | None = None) -> None:
+        """SPEC-10 D8 (+ D8 REV 2): batch-accept every AGENT queue — the
+        literal "pm" key is never included (the PM's own /accept is its
+        drain). BUG#2 (SP2 fix round): ONE background worker iterates all
+        agents SEQUENTIALLY — the old per-agent-thread loop raced
+        stage/commit on one repo. Disclosed: no join on the GTK main
+        thread; agents are snapshotted under the lock up front."""
+        state = self._states.get(project_name)
+        if state is None:
+            return
+        sk = session_key or f"project:{project_name}"
+        project_path = state.project_path
+        agent_keys = [k for k in self.agents_with_pending(project_name)
+                      if k != "pm"]
+        if not agent_keys:
+            self._GLib.idle_add(lambda sk=sk: self._on_display_text(
+                sk, "No pending agent checkpoints to accept."))
+            return
+
+        def _do():
+            for agent_key in agent_keys:
+                self._accept_agent_queue_sync(
+                    agent_key, project_name, sk, project_path)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── Project lifecycle hooks ─────────────────────────────────────────
 
@@ -687,7 +1013,14 @@ class ReviewHandler:
             self._states[project_name].project_path = project_path
 
     def on_project_closed(self, project_name: str) -> None:
-        """Called when a project tab closes. Cleans up ReviewState."""
+        """Called when a project tab closes. Cleans up ReviewState.
+
+        SPEC-10 GAP-5b ruling: review queues deliberately SURVIVE project
+        close (kept in memory keyed by project_name) so a reopen shows the
+        same pending checkpoints. Nothing committed is lost on app restart
+        either — worktrees + branches survive; do not "fix" this by clearing
+        _queues here.
+        """
         self._states.pop(project_name, None)
 
     def on_project_members_changed(self, project_name: str, members: list[str]) -> None:

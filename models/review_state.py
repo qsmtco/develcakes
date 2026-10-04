@@ -5,7 +5,8 @@
 # keyed by project_name.
 
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime
+from typing import NamedTuple, Optional
 
 
 @dataclass
@@ -24,3 +25,19 @@ class ReviewState:
     def can_checkpoint(self) -> bool:
         """True if review mode is on and no active session (can start a new one)."""
         return self.review_mode == "review" and self.checkpoint_sha is None
+
+
+class QueueEntry(NamedTuple):
+    """One pending reviewable checkpoint, attributed to an agent (SPEC-10).
+
+    agent_key: queue identity — an agent session_key (e.g. "special:coder")
+        or the literal "pm" for PM-initiated checkpoints (D3/D8).
+    sha: checkpoint commit SHA (full hex).
+    path_used: ABSOLUTE, realpath'd tree the checkpoint committed in — the
+        worktree for leased writers, else the project root (D2/D5b).
+    ts: UTC enqueue time.
+    """
+    agent_key: str
+    sha: str
+    path_used: str
+    ts: datetime
