@@ -773,3 +773,184 @@ class TestStatusPorcelainFn:
         (subdir / "app.py").write_text("x")
         result = status_porcelain(str(subdir))
         assert len(result) > 0, f"subdir returned empty: {result}"
+
+
+class TestCommitAgentTrailer:
+    """SPEC-10 SP1: commit() gains agent_trailer support (D1 fail-closed).
+
+    Every new-behavior test here was proven RED against HEAD 92694f2f
+    (before the commit() edit) — see SP1 report for the RED run output.
+    """
+
+    def test_commit_agent_trailer_in_log(self, temp_repo):
+        """Trailer lands as a literal 'Agent: <key>' line in the message body."""
+        fpath = os.path.join(temp_repo, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(temp_repo)
+        result = commit(temp_repo, "checkpoint", agent_trailer="special:coder")
+        assert result.success is True, f"commit failed: {result.error}"
+        head = get_head_sha(temp_repo)
+        assert head.sha == result.sha
+        log_result = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
+        assert "Agent: special:coder" in log_result
+        trailer_line = [l for l in log_result.splitlines() if l.startswith("Agent: ")]
+        assert trailer_line == ["Agent: special:coder"], f"unexpected trailer lines: {trailer_line}"
+
+    def test_commit_agent_trailer_rejects_newline(self, repo_with_commit):
+        r"""Newline in trailer value → fail-closed rejection, NO commit created."""
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True
+        result = commit(path, "checkpoint", agent_trailer="bad\nAgent: fake")
+        assert result.success is False
+        assert "reject" in result.error.lower()
+        after = get_head_sha(path)
+        assert after.sha == before.sha, "commit was created despite rejection!"
+
+    def test_commit_no_trailer_no_agent_line(self, temp_repo):
+        """Default (no agent_trailer) behavior: no 'Agent:' line ever appears."""
+        fpath = os.path.join(temp_repo, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(temp_repo)
+        result = commit(temp_repo, "plain commit")
+        assert result.success is True
+        log_result = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
+        assert "Agent:" not in log_result
+
+    def test_commit_agent_trailer_rejects_empty_after_strip(self, repo_with_commit):
+        """Whitespace-only trailer → reject, no commit."""
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True
+        result = commit(path, "checkpoint", agent_trailer="   ")
+        assert result.success is False
+        assert "reject" in result.error.lower()
+        assert get_head_sha(path).sha == before.sha
+
+    def test_commit_agent_trailer_rejects_nul(self, repo_with_commit):
+        r"""NUL byte in trailer → reject, no commit."""
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True
+        result = commit(path, "checkpoint", agent_trailer="\x00")
+        assert result.success is False
+        assert "reject" in result.error.lower()
+        assert get_head_sha(path).sha == before.sha
+
+    def test_commit_agent_trailer_rejects_unit_separator(self, repo_with_commit):
+        r"""ASCII unit separator (\x1f) in trailer → reject, no commit (file_log BUG #1 family)."""
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True
+        result = commit(path, "checkpoint", agent_trailer="\x1f")
+        assert result.success is False
+        assert "reject" in result.error.lower()
+        assert get_head_sha(path).sha == before.sha
+
+    def test_commit_agent_trailer_strips_surrounding_whitespace(self, temp_repo):
+        """Trailer value is stripped; committed line is exactly 'Agent: special:coder'."""
+        fpath = os.path.join(temp_repo, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(temp_repo)
+        result = commit(temp_repo, "checkpoint", agent_trailer="  special:coder  ")
+        assert result.success is True
+        log_result = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
+        lines = log_result.splitlines()
+        assert lines[-1] == "Agent: special:coder", f"last line: {lines[-1]!r}"
+        assert "Agent:   special:coder" not in log_result
+
+
+_SEPS = ["\u2028", "\u2029", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85"]
+
+
+class TestCommitAgentTrailerHardening:
+    """SPEC-10 SP1 fix round: splitlines-boundary rejection (BUG#1) + non-str
+    guard (BUG#2). Both tests were proven RED against the 4-char-set guard
+    before the fix landed. Runs on repo_with_commit so the HEAD-unchanged
+    assertion compares REAL shas (a no-commit repo cannot detect a commit).
+    """
+
+    @pytest.mark.parametrize(
+        "label,trailer_value",
+        [
+            (f"sep{i}-standalone", s)
+            for i, s in enumerate(_SEPS)
+        ]
+        + [
+            (f"sep{i}-embedded", f"special:coder{s}Agent: evil")
+            for i, s in enumerate(_SEPS)
+        ],
+    )
+    def test_commit_agent_trailer_rejects_unicode_and_vertical_separators(
+        self, repo_with_commit, label, trailer_value
+    ):
+        r"""BUG#1: any Python splitlines() boundary in the trailer must be
+        rejected fail-closed — standalone OR embedded mid-value — with NO
+        commit created (HEAD sha unchanged, compared against a real sha).
+        """
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True  # real HEAD sha required for the compare
+        result = commit(path, "checkpoint", agent_trailer=trailer_value)
+        assert result.success is False, (
+            f"[{label}] trailer {trailer_value!r} was ACCEPTED — forged-line "
+            f"hole still open; error={result.error!r}"
+        )
+        assert "reject" in result.error.lower()
+        assert result.sha is None
+        after = get_head_sha(path)
+        assert after.sha == before.sha, f"[{label}] commit was created despite rejection!"
+
+    @pytest.mark.parametrize("bad_value", [123, 3.14, ["k"], b"key"])
+    def test_commit_agent_trailer_rejects_non_str(self, repo_with_commit, bad_value):
+        """BUG#2: non-str agent_trailer must return a fail-closed GitResult,
+        never raise (file contract: 'Never raises unhandled exceptions').
+        b'key' is the silent-garbage variant: it passes .strip() and the old
+        char-set check and would commit "Agent: b'key'" — must reject.
+        """
+        path, _ = repo_with_commit
+        fpath = os.path.join(path, "file.txt")
+        with open(fpath, "w") as f:
+            f.write("content\n")
+        stage_all(path)
+        before = get_head_sha(path)
+        assert before.success is True
+        try:
+            result = commit(path, "checkpoint", agent_trailer=bad_value)
+        except Exception as e:  # noqa: BLE001 — deliberate: ANY raise here is the BUG#2 failure mode
+            pytest.fail(
+                f"commit(agent_trailer={bad_value!r}) raised {type(e).__name__}: {e} — "
+                "raw exception escaped instead of fail-closed GitResult"
+            )
+        assert isinstance(result, GitResult), f"expected GitResult, got {type(result)}"
+        assert result.success is False, (
+            f"[{type(bad_value).__name__}] non-str trailer was ACCEPTED "
+            f"(sha={result.sha!r}) — silent-garbage attribution hole"
+        )
+        assert "reject" in result.error.lower()
+        assert result.sha is None
+        after = get_head_sha(path)
+        assert after.sha == before.sha, "commit was created despite rejection!"

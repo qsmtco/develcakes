@@ -106,7 +106,8 @@ def stage_all(project_path: str) -> GitResult:
         return GitResult(success=False, stdout="", error=_safe_error(e), sha=None)
 
 
-def commit(project_path: str, message: str, allow_empty: bool = False) -> GitResult:
+def commit(project_path: str, message: str, allow_empty: bool = False,
+           agent_trailer: str | None = None) -> GitResult:
     """Commit staged changes. Returns SHA in result.sha.
 
     Args:
@@ -116,11 +117,58 @@ def commit(project_path: str, message: str, allow_empty: bool = False) -> GitRes
             for checkpoint markers where the SHA itself is the desired output.
             Default is False — refuse to create empty commits, since they
             pollute the git log with the captain's signature on nothing.
+        agent_trailer: Optional session key appended as a literal
+            "Agent: <key>" line in the commit message body. Must be a str
+            that is a single line by Python's own definition — values
+            containing any splitlines() boundary (\n, \r, \r\n, \v, \f,
+            \x1c, \x1d, \x1e, \x85, U+2028, U+2029 — ten single-character
+            boundaries plus the \r\n pair), NUL (\x00), the NON-boundary
+            unit separator (\x1f), or empty-after-strip are REJECTED
+            fail-closed (success=False, error explains the rejection) rather
+            than silently dropping attribution. Non-str values are rejected
+            the same way (never raise).
 
     Returns:
         GitResult. If allow_empty is False and the working tree is clean,
         returns success=False with error="nothing to commit (working tree clean)".
     """
+    # SPEC-10 SP1 (D1): agent attribution trailer, fail-closed sanitization.
+    # SPEC-10 SP1 fix round (BUG#1): gate on Python's OWN line-boundary
+    # definition — str.splitlines() recognises ten single-character
+    # boundaries plus the \r\n pair (\n \r \r\n \v \f \x1c \x1d \x1e \x85
+    # U+2028 U+2029); a fixed reject-set let 8 of them forge additional
+    # trailer lines for any Python-side body consumer.
+    # NUL and \x1f are NOT splitlines boundaries, so they stay explicitly
+    # checked (\x1f: file_log BUG #1 family; \x00: git plumbing hazard).
+    # Empty-after-strip is rejected too: an "Agent: " line with no value is
+    # ambiguous attribution. NEVER silently drop the trailer.
+    # SPEC-10 SP1 fix round (BUG#2): the guard runs BEFORE any value access
+    # and non-str values fail closed — this function's contract is to never
+    # raise unhandled exceptions.
+    if agent_trailer is not None:
+        if not isinstance(agent_trailer, str):
+            return GitResult(
+                success=False,
+                stdout="",
+                error="agent_trailer rejected: must be a string",
+                sha=None,
+            )
+        trailer_value = agent_trailer.strip()
+        if (
+            not trailer_value
+            or len(trailer_value.splitlines()) != 1
+            or any(c in trailer_value for c in ("\x00", "\x1f"))
+        ):
+            return GitResult(
+                success=False,
+                stdout="",
+                error=(
+                    "agent_trailer rejected: must be a non-empty single line "
+                    "without control characters or line separators"
+                ),
+                sha=None,
+            )
+        message = f"{message}\n\nAgent: {trailer_value}"
     try:
         repo = gitpython.Repo(project_path)
         # Empty-check: refuse to commit if there's nothing staged (unless caller
