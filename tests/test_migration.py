@@ -568,7 +568,16 @@ class TestLaunchWiring:
         main_src = (Path(__file__).resolve().parent.parent / "main.py").read_text(
             encoding="utf-8"
         )
-        assert 'os.environ.setdefault("CRABCAKES_MIGRATE_STORE", "1")' in main_src
+        # SPEC-11 SP2 fix round (D2 + HIGH audit fix): main.py's default-ON
+        # write is GATED on get_env — an OLD-name kill-switch must survive
+        # it. The gated form (get_env is None → write) is what the
+        # subprocess kill-switch test in tests/test_env_divergence.py pins
+        # end-to-end; this source pin catches a revert to a bare setdefault,
+        # which silently defeats the old name (setdefault never sees it).
+        assert (
+            'if get_env("MIGRATE_STORE") is None:' in main_src
+            and 'os.environ["DEVELCAKES_MIGRATE_STORE"] = "1"' in main_src
+        )
 
     def test_init_without_flag_touches_nothing(self):
         """AgentRuntime __init__ with the flag unset performs NO migration

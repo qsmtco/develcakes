@@ -2,7 +2,7 @@
 # Prompt improvement via MiniMax API.
 #
 # Security Manifest:
-#   Reads: ~/.config/crabcakes/config.json (apiKey, baseUrl, model)
+#   Reads: ~/.config/develcakes/config.json (apiKey, baseUrl, model)
 #   Reads: <crabcakes_root>/prompts/system/improve.md (system prompt template)
 #   External: POST to baseUrl (MiniMax API), HTTPS
 #   No files written; no secrets stored
@@ -68,7 +68,7 @@ _config_lock = threading.Lock()
 
 
 def _load_config():
-    """Load config from ~/.config/crabcakes/config.json (cached)."""
+    """Load config from ~/.config/develcakes/config.json (cached)."""
     global _config
     with _config_lock:
         if _config is not None:
@@ -98,7 +98,7 @@ def improve_prompt(raw_text, callback, GLib=None):
 
     api_key = cfg.get("apiKey", "").strip()
     if not api_key:
-        _dispatch(callback, None, "MINIMAX_API_KEY not set in ~/.config/crabcakes/config.json", GLib)
+        _dispatch(callback, None, "MINIMAX_API_KEY not set in ~/.config/develcakes/config.json", GLib)
         return
 
     base_url = cfg.get("baseUrl", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL

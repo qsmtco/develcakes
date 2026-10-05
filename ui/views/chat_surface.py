@@ -34,14 +34,16 @@ from gi.repository import GLib, Gtk
 
 logger = logging.getLogger(__name__)
 
-# CRABCAKES_NO_WEBKIT=1 forces the TextViewFallback path (spec §7 runtime-failure
-# case). Needed on Ubuntu 24.04 with apparmor_restrict_unprivileged_userns=1:
-# WebKit 6.0 IMPORTS fine but its bwrap sandbox + dbus-proxy cannot launch, so
-# the first page render SIGTRAPs the whole app. The env var makes the import
-# fail deliberately → the alias below routes to the fallback surface.
-import os as _os
+# DEVELCAKES_NO_WEBKIT=1 forces the TextViewFallback path (spec §7
+# runtime-failure case). Needed on Ubuntu 24.04 with
+# apparmor_restrict_unprivileged_userns=1: WebKit 6.0 IMPORTS fine but its
+# bwrap sandbox + dbus-proxy cannot launch, so the first page render SIGTRAPs
+# the whole app. The env var makes the import fail deliberately → the alias
+# below routes to the fallback surface. Old CRABCAKES_ name rides the
+# one-release fallback (utils.config.get_env — D2).
+from utils.config import get_env
 
-if _os.environ.get("CRABCAKES_NO_WEBKIT"):
+if get_env("NO_WEBKIT"):
     WebKit = None
     _WEBKIT_VERSION = None
 else:

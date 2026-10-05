@@ -27,6 +27,8 @@ from typing import Any, Callable
 
 import httpx
 
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
+
 # ── Dataclasses ────────────────────────────────────────────────────────────────
 
 
@@ -878,9 +880,10 @@ def _web_search(query: str, count: int = 5) -> ToolResult:
 
 
 def _is_web_fetch_restricted() -> bool:
-    """MED-3 opt-in check: returns True when CRABCAKES_WEB_FETCH_RESTRICT=1.
-    Default off per Q3 decision."""
-    return os.environ.get("CRABCAKES_WEB_FETCH_RESTRICT", "") == "1"
+    """MED-3 opt-in check: returns True when WEB_FETCH_RESTRICT=1
+    (DEVELCAKES_WEB_FETCH_RESTRICT; the old CRABCAKES_ name rides the
+    one-release fallback — utils.config.get_env). Default off per Q3."""
+    return get_env("WEB_FETCH_RESTRICT") == "1"
 
 
 def _reject_restricted_url(url: str) -> ToolResult | None:

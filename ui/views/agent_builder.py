@@ -636,7 +636,7 @@ class AgentBuilderDialog:
         try:
             all_servers = load_mcp_servers()
         except (FileNotFoundError, OSError, MCPConfigError) as exc:
-            dim = Gtk.Label(label="No MCP servers configured.\nAdd servers to ~/.config/crabcakes/mcp-servers.json")
+            dim = Gtk.Label(label="No MCP servers configured.\nAdd servers to ~/.config/develcakes/mcp-servers.json")
             dim.add_css_class("dim-label")
             dim.set_justify(Gtk.Justification.LEFT)
             dim.set_xalign(0.0)
@@ -648,7 +648,7 @@ class AgentBuilderDialog:
         enabled_servers = {name: cfg for name, cfg in all_servers.items() if cfg.enabled}
 
         if not enabled_servers:
-            dim = Gtk.Label(label="No MCP servers configured.\nAdd servers to ~/.config/crabcakes/mcp-servers.json")
+            dim = Gtk.Label(label="No MCP servers configured.\nAdd servers to ~/.config/develcakes/mcp-servers.json")
             dim.add_css_class("dim-label")
             dim.set_justify(Gtk.Justification.LEFT)
             dim.set_xalign(0.0)

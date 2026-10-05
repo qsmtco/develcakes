@@ -183,7 +183,7 @@ def get_default_si_config(can_write: bool = False) -> dict:
 
 
 def load_agent_defs() -> list[dict]:
-    """Scan ~/.config/crabcakes/agents/ for definition files. Parse and validate.
+    """Scan ~/.config/develcakes/agents/ for definition files. Parse and validate.
 
     Seeds built-in defaults (Coder, Debugger) if directory is empty.
     Returns list of agent definition dicts. Empty list if dir missing.
@@ -286,7 +286,7 @@ def load_agent_def_by_role(role: str) -> dict | None:
 
 
 def save_agent_def(agent_def: dict) -> str:
-    """Write an agent definition to ~/.config/crabcakes/agents/<name>.yaml.
+    """Write an agent definition to ~/.config/develcakes/agents/<name>.yaml.
 
     Creates directory if needed. Returns file path.
     Uses YAML if pyyaml is available, otherwise JSON.

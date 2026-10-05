@@ -128,7 +128,7 @@ def init_project_config(
     Migration logic:
       1. If .crabcakes/ exists → do nothing (already initialized)
       2. If crabcakes.md at project root → copy to .crabcakes/project.md
-      3. If legacy members.json in ~/.config/crabcakes/projects/<name>/ → migrate
+      3. If legacy members.json in ~/.config/develcakes/projects/<name>/ → migrate
       4. Otherwise → generate skeleton
     """
     crab_dir = get_crabcakes_dir(project_path)

@@ -146,7 +146,8 @@ class ProjectHandler:
 
         Args:
             name:  Project display name (must be non-empty)
-            path:  Optional path override. Defaults to $CRABCAKES_PROJECTS_DIR/<name>
+            path:  Optional path override. Defaults to $DEVELCAKES_PROJECTS_DIR/<name>
+            (old $CRABCAKES_PROJECTS_DIR rides the one-release fallback — D2)
             pm_name: Project manager display name (e.g. "Captain")
             pm_id:   Project manager identifier (e.g. "cli")
 

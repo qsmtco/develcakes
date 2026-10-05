@@ -12,11 +12,13 @@
 #   The composed system prompt for Coder (all templates + tool descriptions) is
 #   approximately 14K chars / ~3.5K tokens. Tool descriptions alone are ~3.8K chars.
 #   For a 128K context model this is negligible (<3%). For smaller models, monitor.
-#   Set CRABCAKES_PROMPT_DEBUG=1 to dump the full composed prompt to stdout.
+#   Set DEVELCAKES_PROMPT_DEBUG=1 to dump the full composed prompt to stdout.
 
 import os
 import logging
 import re
+
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 
 _logger = logging.getLogger(__name__)
 
@@ -343,8 +345,9 @@ def compose_system_prompt(
                 result, file_context_with_core, model_max_tokens
             )
 
-    # Debug dump — set CRABCAKES_PROMPT_DEBUG=1 to inspect the full composed prompt
-    if os.environ.get("CRABCAKES_PROMPT_DEBUG"):
+    # Debug dump — set DEVELCAKES_PROMPT_DEBUG=1 to inspect the full composed prompt
+    # (old CRABCAKES_ name rides the one-release fallback — utils.config.get_env)
+    if get_env("PROMPT_DEBUG"):
         import sys
         print(f"\n{'='*60}", file=sys.stderr)
         print(f"COMPOSED PROMPT ({len(result)} chars / ~{len(result)//4} tokens)", file=sys.stderr)

@@ -79,7 +79,7 @@ class AgentListHandler:
         # cause the lookup to miss → the handler returns the deterministic
         # default "#6366f1" instead of the cached color. This is by design
         # (cache is keyed by role, not display_name), but worth noting for
-        # operators editing ~/.config/crabcakes/agents/*.yaml.
+        # operators editing ~/.config/develcakes/agents/*.yaml.
         from agent.special_agents import get_special_agents
         from models.colors import color_for_special_agent
         for agent_def in get_special_agents():

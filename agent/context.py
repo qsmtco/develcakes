@@ -17,6 +17,8 @@ import re
 from fnmatch import fnmatch
 from typing import Callable
 
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
+
 # ── System prompts now loaded from prompts/system/ via utils/prompt_loader.py ──
 
 # ── Gitignore ─────────────────────────────────────────────────────────────────
@@ -251,13 +253,14 @@ def _load_project_prompts_context(project_path: str) -> str:
 
 
 # Directories excluded from file context by default.
-# Set CRABCAKES_INCLUDE_DOCS=1 to override.
+# Set DEVELCAKES_INCLUDE_DOCS=1 to override (old CRABCAKES_ name rides the
+# one-release fallback — utils.config.get_env).
 EXCLUDED_DIRS = frozenset({"docs", ".docs", "documentation"})
 
 
 def _include_docs() -> bool:
     """Whether to include the docs/ directory in file context. Defaults False."""
-    return os.environ.get("CRABCAKES_INCLUDE_DOCS", "0") == "1"
+    return get_env("INCLUDE_DOCS") == "1"
 
 def _read_key_files(project_path: str) -> str:
     """

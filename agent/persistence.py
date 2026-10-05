@@ -1,7 +1,7 @@
 """Conversation persistence — disk I/O for conversation state.
 
 Extracted from agent/runtime.py (Phase 6). Stateless module-level helpers
-for saving/loading conversations to ~/.config/crabcakes/conversations/.
+for saving/loading conversations to ~/.config/develcakes/conversations/.
 
 Security:
   - HIGH-3: api_key is NEVER serialized. Re-resolved from providers.yaml on load.
@@ -570,7 +570,7 @@ _CONVERSATION_MIGRATION_DONE: bool = False
 def migrate_conversation_files() -> int:
     """One-time sweep: remove api_key from existing conversation files.
 
-    HIGH-3: scans ~/.config/crabcakes/conversations/*.json, removes the
+    HIGH-3: scans ~/.config/develcakes/conversations/*.json, removes the
     "api_key" field if present, writes back atomically with chmod 0600.
     New saves never include api_key. Idempotent — safe to call multiple times.
 

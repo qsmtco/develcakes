@@ -33,6 +33,7 @@ gi.require_version('Pango', '1.0')
 from gi.repository import Gtk, Pango, Gdk
 
 from utils.escaping import escape_for_pango, xml_escape_text, xml_template
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 from utils.config import get_project_root
 from utils.markdown import format_markdown
 from utils.block_parser import extract_blocks
@@ -58,13 +59,14 @@ _ALLOWED_ROOTS_FALLBACK = (
 def _get_allowed_roots() -> tuple[str, ...]:
     """LOW-7: compute the set of allowed root paths for the image viewer.
 
-    Reads CRABCAKES_ACTIVE_PROJECT_PATH env var if set, plus the fallback
-    roots (home + /tmp). The active project path is passed by the handler
-    that owns the chat bubble, via os.environ (ui/handlers/ sets this when
-    a project is active).
+    Reads the active project root env var (DEVELCAKES_ACTIVE_PROJECT_PATH;
+    old CRABCAKES_ name rides the one-release fallback via
+    utils.config.get_env) if set, plus the fallback roots (home + /tmp). The
+    active project path is passed by the handler that owns the chat bubble,
+    via os.environ (ui/handlers/ sets this when a project is active).
     """
     roots: list[str] = []
-    project = os.environ.get("CRABCAKES_ACTIVE_PROJECT_PATH", "").strip()
+    project = (get_env("ACTIVE_PROJECT_PATH") or "").strip()
     if project:
         roots.append(project)
     roots.extend(_ALLOWED_ROOTS_FALLBACK)

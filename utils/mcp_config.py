@@ -1,7 +1,7 @@
 # utils/mcp_config.py
 # MCP server configuration loader.
 #
-# Manifest: Loads MCP server configs from ~/.config/crabcakes/mcp-servers.json
+# Manifest: Loads MCP server configs from ~/.config/develcakes/mcp-servers.json
 # No network, no GTK, no state — pure functions.
 #
 # Architecture: utils/ is pure Python, no dependencies on UI or network.
@@ -159,7 +159,7 @@ def get_mcp_servers_path() -> str:
 
 
 def load_mcp_servers(use_cache: bool = True) -> dict[str, MCPServerConfig]:
-    """Load all MCP server configs from ~/.config/crabcakes/mcp-servers.json.
+    """Load all MCP server configs from ~/.config/develcakes/mcp-servers.json.
 
     Args:
         use_cache: If True, cache loaded config (default). Clear with _clear_cache().

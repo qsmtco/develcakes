@@ -13,7 +13,7 @@
 # If the user denies, the project's `.crabcakes/` content is silently
 # skipped for the session (and for future sessions, until they approve).
 #
-# Storage: `~/.config/crabcakes/trusted_projects.json` (or the platform-
+# Storage: `~/.config/develcakes/trusted_projects.json` (or the platform-
 # equivalent via utils.config.get_config_dir()). The file holds a mapping
 # from absolute project path to {trusted: bool, ts: ISO8601 timestamp,
 # reason: str}. Reverse mapping is not needed.

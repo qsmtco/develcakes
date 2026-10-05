@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 # project open, cleared by clear_active_project_path() on project close.
 # Without this wiring, the viewer only ever has the home + /tmp fallback
 # roots — see test_low7_image_viewer.py for the threat model.
-ACTIVE_PROJECT_ENV = "CRABCAKES_ACTIVE_PROJECT_PATH"
+# SPEC-11 SP2: the VALUE is the new DEVELCAKES_ literal (D2); readers route
+# through utils.config.get_env, so an old CRABCAKES_ACTIVE_PROJECT_PATH set
+# by external scripts still resolves via the one-release fallback.
+ACTIVE_PROJECT_ENV = "DEVELCAKES_ACTIVE_PROJECT_PATH"
 
 
 def set_active_project_path(project_path: str) -> None:
@@ -42,6 +45,11 @@ def set_active_project_path(project_path: str) -> None:
         return
     normalized = os.path.abspath(os.path.expanduser(project_path))
     os.environ[ACTIVE_PROJECT_ENV] = normalized
+    # SPEC-11 SP2 (audit BUG#2): also overwrite the OLD literal — the
+    # get_env reader honors it via the one-release fallback, so a legacy
+    # value left here would resurface as a stale allowed root after
+    # clear_active_project_path pops only the new name.
+    os.environ["CRABCAKES_ACTIVE_PROJECT_PATH"] = normalized
 
 
 def clear_active_project_path() -> None:
@@ -49,8 +57,11 @@ def clear_active_project_path() -> None:
 
     Uses pop with a default so a stale value from a prior session cannot
     leak (and so the call is safe even if no project was ever opened).
+    Pops BOTH names (audit BUG#2, one-release): the reader falls back to
+    the old literal, so leaving it set would re-expose a stale root.
     """
     os.environ.pop(ACTIVE_PROJECT_ENV, None)
+    os.environ.pop("CRABCAKES_ACTIVE_PROJECT_PATH", None)
 
 
 def wire_settings_handler(

@@ -1,7 +1,7 @@
 # agent/special_agents.py
 # Special agent registry for the agent runtime.
 #
-# Loads agent definitions from ~/.config/crabcakes/agents/*.yaml (or .json).
+# Loads agent definitions from ~/.config/develcakes/agents/*.yaml (or .json).
 # Built-in defaults (Coder, Debugger) are seeded from prompts/default_agents/
 # on first launch.
 #

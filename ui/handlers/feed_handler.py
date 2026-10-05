@@ -27,6 +27,7 @@ from ui.views.feed_card import build_feed_card, update_card_badge, update_card_i
 from utils import git_ops
 from utils import feed_store
 from utils import conversation_store
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 
 if TYPE_CHECKING:
     from gi.repository import Gtk
@@ -1172,7 +1173,7 @@ class FeedHandler:
         with self._lock:
             self._card_widgets[card_id] = new_widget
 
-        if os.environ.get("CRABCAKES_DEBUG"):
+        if get_env("DEBUG"):
             _logger.info("feed card rebuilt (no seam): %s", card_id)
 
         # Replace widget in FeedTab on main thread

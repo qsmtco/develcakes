@@ -79,7 +79,7 @@ class AuditLog:
         """Flush audit log to disk as JSON lines.
 
         Args:
-            path: Output file path. Defaults to ~/.config/crabcakes/audit-log.jsonl.
+            path: Output file path. Defaults to ~/.config/develcakes/audit-log.jsonl.
 
         Returns:
             The file path written, or None if no entries.

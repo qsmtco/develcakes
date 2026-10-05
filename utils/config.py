@@ -41,6 +41,22 @@ def get_v1_config_dir() -> str:
 MIGRATION_MARKER = "MIGRATED_FROM_V1"
 
 
+def get_env(name: str) -> str | None:
+    """DEVELCAKES_<name> if set, else CRABCAKES_<name> (one-release fallback).
+
+    D2 (docs/specs/phases/SPEC-11-PREFLIGHT-DECISIONS.md): reads the NEW name
+    first; the old name is honored only when the new one is unset — never
+    mixed. "Set" is PRESENCE, not truthiness: an empty-string value is
+    returned as-is (an operator's explicit DEVELCAKES_X= must not resurrect
+    the old name). Sites must not read os.environ directly for the renamed
+    family. Removal of the fallback is a registered post-MVP chore.
+    """
+    new = os.environ.get(f"DEVELCAKES_{name}")
+    if new is not None:
+        return new
+    return os.environ.get(f"CRABCAKES_{name}")
+
+
 # The one-time migration copy list (D3): bare file names inside the config
 # dir, and directories that are recursed with per-file byte verification.
 _MIGRATION_FILES = (
@@ -364,13 +380,14 @@ def get_projects_config_dir() -> str:
 def get_projects_dir() -> str:
     """Return the browsable projects directory (actual project folders).
 
-    Controlled by $CRABCAKES_PROJECTS_DIR, defaults to ~/projects.
+    Controlled by $DEVELCAKES_PROJECTS_DIR (old $CRABCAKES_PROJECTS_DIR
+    rides the one-release fallback — see get_env), defaults to ~/projects.
     This is the root that the FileTree widget navigates.
     """
-    return os.environ.get(
-        "CRABCAKES_PROJECTS_DIR",
-        os.path.join(os.path.expanduser("~"), "projects"),
-    )
+    path = get_env("PROJECTS_DIR")
+    if path is None:
+        return os.path.join(os.path.expanduser("~"), "projects")
+    return path
 
 
 def get_project_root() -> str:

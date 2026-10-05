@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from agent.config import LLMProviderConfig
 
 from agent.audit import AuditLog
+from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 # Typed callback protocols (Phase 1 — SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
 # §2.1). The handler's `_on_*` methods already satisfy these structurally;
 # the type hints in `__init__` document the contract.
@@ -106,14 +107,16 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # SPEC-08 SP3/SP4A: the launch-time JSON→store migration is gated by env var.
-# SP4A enables it: main.py sets CRABCAKES_MIGRATE_STORE=1 (setdefault — an
+# SP4A enables it: main.py sets DEVELCAKES_MIGRATE_STORE=1 (setdefault — an
 # explicit =0 by the operator still wins) BEFORE importing ui.window, because
 # this flag is READ HERE at module-import time (ui.handlers.settings_handler
 # imports agent.runtime at ITS module top, so the gate would otherwise latch
 # before main() ever runs). SP4A's store-mode load makes rename safe: a
 # migrated session hydrates from store rows instead of loading as None.
+# SPEC-11 SP2: read via get_env — the old CRABCAKES_MIGRATE_STORE rides the
+# one-release fallback (conftest's pin depends on it).
 _MIGRATE_STORE_ON_INIT: bool = (
-    os.environ.get("CRABCAKES_MIGRATE_STORE", "") == "1"
+    get_env("MIGRATE_STORE") == "1"
 )
 
 
@@ -569,7 +572,7 @@ class AgentRuntime:
         # the runtime itself builds no card. Flag state (BUG#3, SP4A fix
         # round — this comment previously said "default OFF", stale since
         # main.py's setdefault landed): DEFAULT ON in production (main.py
-        # sets CRABCAKES_MIGRATE_STORE=1 above the window import; an
+        # sets DEVELCAKES_MIGRATE_STORE=1 above the window import; an
         # explicit =0 by the operator skips the sweep), pinned OFF
         # suite-wide by tests/conftest.py (module level — collection-time
         # `import main` latches this flag before any fixture runs).

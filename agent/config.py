@@ -184,7 +184,7 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
     Load agent configuration from <config_dir>/agent.json.
 
     Uses utils/config.get_config_dir() for path resolution, which respects
-    $XDG_CONFIG_HOME and falls back to ~/.config/crabcakes.
+    $XDG_CONFIG_HOME and falls back to ~/.config/develcakes.
 
     Args:
         config_path: Optional override for testing. If None, uses <config_dir>/agent.json.

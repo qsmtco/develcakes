@@ -10,8 +10,10 @@ import gi
 import logging
 from datetime import datetime, timezone
 
+from utils.config import get_env
+
 # Configure logging early — before any module imports that might use logging
-_log_level = logging.DEBUG if os.environ.get("CRABCAKES_DEBUG") else logging.WARNING
+_log_level = logging.DEBUG if get_env("DEBUG") else logging.WARNING
 logging.basicConfig(
     level=_log_level,
     format="%(name)s %(levelname)s %(message)s",
@@ -21,13 +23,20 @@ logging.basicConfig(
 # SPEC-08 SP4A: store-mode load (agent/persistence.py) hydrates migrated
 # sessions from transcript.db, so renaming the legacy JSON away no longer
 # orphans a conversation — the one-time JSON→store migration sweep is safe
-# to DEFAULT ON. setdefault: an explicit CRABCAKES_MIGRATE_STORE=0 by the
-# operator still skips the sweep. This MUST sit before the ui.window import
-# below: agent.runtime reads the flag at MODULE-IMPORT time (its
-# settings_handler importer pulls agent.runtime in at top level), so
-# setting it inside main() would latch too late. Tests are isolated:
-# tests/conftest.py pins =0 process-wide before any agent.runtime import.
-os.environ.setdefault("CRABCAKES_MIGRATE_STORE", "1")
+# to DEFAULT ON. The write is GATED on get_env (SPEC-11 SP2 fix round — a
+# bare setdefault of the NEW name defeated the old-name kill-switch: with
+# the operator holding CRABCAKES_MIGRATE_STORE=0 and the new name unset,
+# setdefault wrote DEVELCAKES_MIGRATE_STORE=1 anyway and get_env read the
+# new name first). Gated shape: the default lands ONLY when NEITHER name
+# is set — an explicit =0 by the operator (either name) still skips the
+# sweep. This MUST sit before the ui.window import below: agent.runtime
+# reads the flag at MODULE-IMPORT time (its settings_handler importer pulls
+# agent.runtime in at top level), so setting it inside main() would latch
+# too late. Tests are isolated: tests/conftest.py pins
+# CRABCAKES_MIGRATE_STORE=0 (old name — the gate must keep honoring it)
+# before any agent.runtime import.
+if get_env("MIGRATE_STORE") is None:
+    os.environ["DEVELCAKES_MIGRATE_STORE"] = "1"
 
 # Require GTK 4.0 — must be called before importing Gtk
 gi.require_version('Gtk', '4.0')
@@ -277,13 +286,15 @@ def main():
     """
     # SPEC-08 SP3→SP4: the launch-time JSON→store migration is wired
     # end-to-end (agent/runtime.py) and ENABLED by default since SP4 —
-    # main.py sets CRABCAKES_MIGRATE_STORE=1 (setdefault) above the window
-    # import. SP4's store-mode load closed the rename-safety gap: a
-    # migrated (renamed) session hydrates from transcript.db rows with the
-    # exact JSON shape, so its first save passes the dual-anchor guard
-    # instead of diverged-flagging the store. Operator override: launch
-    # with CRABCAKES_MIGRATE_STORE=0 to skip the sweep (JSON files stay
-    # authoritative; the banner card simply never fires).
+    # main.py writes DEVELCAKES_MIGRATE_STORE=1 above the window import,
+    # gated on get_env so an explicit operator opt-out by EITHER name (new
+    # or old) suppresses it. SP4's store-mode load closed the rename-safety
+    # gap: a migrated (renamed) session hydrates from transcript.db rows
+    # with the exact JSON shape, so its first save passes the dual-anchor
+    # guard instead of diverged-flagging the store. Operator override:
+    # launch with MIGRATE_STORE=0 (DEVELCAKES_ or CRABCAKES_ name) to skip
+    # the sweep (JSON files stay authoritative; the banner card simply
+    # never fires).
     app = DevelcakesApp()  # Create application instance
     return app.run(sys.argv)  # Explicit argv — see docstring; run(None) lies.
 
