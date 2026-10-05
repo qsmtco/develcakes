@@ -46,7 +46,8 @@ class TestGetProvidersPath:
     def test_returns_path_under_config_dir(self, tmp_config_dir):
         path = ps.get_providers_path()
         assert path.endswith("providers.yaml")
-        assert "crabcakes" in path
+        # SPEC-11 SP1 (D4): config dir is now develcakes (spec-drift update).
+        assert "develcakes" in path
 
     def test_contains_yaml_filename(self, tmp_config_dir):
         path = ps.get_providers_path()

@@ -1354,8 +1354,9 @@ class TestListConversations:
         with tempfile.TemporaryDirectory() as tmpdir:
             rt, old_xdg = self._isolated_runtime(tmpdir)
 
-            # _conversations_dir() lives at <XDG>/crabcakes/conversations
-            conv_dir = os.path.join(tmpdir, "crabcakes", "conversations")
+            # _conversations_dir() lives at <XDG>/develcakes/conversations
+            # (SPEC-11 SP1 config-dir divergence — was crabcakes).
+            conv_dir = os.path.join(tmpdir, "develcakes", "conversations")
             os.makedirs(conv_dir, exist_ok=True)
             corrupt_path = os.path.join(conv_dir, "corrupt-session.json")
             with open(corrupt_path, "w") as f:
@@ -1373,7 +1374,7 @@ class TestListConversations:
         with tempfile.TemporaryDirectory() as tmpdir:
             rt, old_xdg = self._isolated_runtime(tmpdir)
 
-            conv_dir = os.path.join(tmpdir, "crabcakes", "conversations")
+            conv_dir = os.path.join(tmpdir, "develcakes", "conversations")
             os.makedirs(conv_dir, exist_ok=True)
             path = os.path.join(conv_dir, "no-name-session.json")
             with open(path, "w") as f:

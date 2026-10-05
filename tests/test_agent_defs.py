@@ -280,7 +280,7 @@ class TestValidateAgentDef:
 
     def test_unknown_provider(self, monkeypatch, tmp_path):
         # Set up providers.yaml so get_available_providers returns known names
-        config_dir = str(tmp_path / ".config" / "crabcakes")
+        config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
         from utils.providers_store import save_providers
@@ -341,7 +341,7 @@ class TestAvailableOptions:
 
     def test_get_available_providers(self, monkeypatch, tmp_path):
         # get_available_providers now reads from providers.yaml
-        config_dir = str(tmp_path / ".config" / "crabcakes")
+        config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
         from utils.providers_store import save_providers

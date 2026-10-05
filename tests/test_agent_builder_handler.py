@@ -167,7 +167,7 @@ class TestOptions:
 
     def test_provider_options(self, handler, monkeypatch, tmp_path):
         # get_provider_options reads from providers.yaml via get_available_providers
-        config_dir = str(tmp_path / ".config" / "crabcakes")
+        config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
         from utils.providers_store import save_providers

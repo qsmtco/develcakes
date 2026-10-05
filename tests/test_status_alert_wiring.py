@@ -80,8 +80,12 @@ def _backdate(root, when):
 
 
 def _config_dir(home):
-    """The conversations dir lives under ~/.config/crabcakes (not the project)."""
-    d = home / ".config" / "crabcakes"
+    """The conversations dir lives under the app config dir (not the project).
+
+    SPEC-11 SP1 (D4): get_config_dir() now resolves to develcakes — was
+    crabcakes. Spec-drift update with disclosure.
+    """
+    d = home / ".config" / "develcakes"
     (d / "conversations").mkdir(parents=True, exist_ok=True)
     return d
 

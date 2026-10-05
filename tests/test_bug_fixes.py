@@ -174,7 +174,7 @@ class TestProviderManagement:
         consolidated to providers.yaml). The test now exercises the handler's
         new methods which delegate to utils.providers_store.
         """
-        config_dir = str(tmp_path / ".config" / "crabcakes")
+        config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("XDG_CONFIG_HOME", os.path.join(str(tmp_path), ".config"))

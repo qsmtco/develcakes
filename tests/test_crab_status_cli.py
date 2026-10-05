@@ -79,7 +79,9 @@ def _project(tmp_path, name="proj"):
 
 
 def _config_dir(tmp_path):
-    d = tmp_path / "home" / ".config" / "crabcakes"
+    # SPEC-11 SP1 (D4): the CLI resolves config via get_config_dir() →
+    # develcakes now. Was crabcakes — spec-drift update with disclosure.
+    d = tmp_path / "home" / ".config" / "develcakes"
     (d / "conversations").mkdir(parents=True, exist_ok=True)
     return d
 

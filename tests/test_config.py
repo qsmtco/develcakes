@@ -7,13 +7,19 @@ from unittest.mock import patch
 
 
 class TestGetConfigDir:
-    def test_defaults_to_config_crabcakes(self):
-        """Default config dir is ~/.config/crabcakes when XDG_CONFIG_HOME is unset."""
+    def test_defaults_to_config_develcakes(self):
+        """Default config dir is ~/.config/develcakes when XDG_CONFIG_HOME is unset.
+
+        SPEC-11 SP1 (D4): config-dir divergence — the v2 app owns
+        ~/.config/develcakes; the v1 crabcakes dir is migration source only
+        (get_v1_config_dir). Was crabcakes before SPEC-11 — spec drift per
+        SP1 §1c, updated with disclosure.
+        """
         with patch.dict(os.environ, {}, clear=True):
             from utils.config import get_config_dir
             result = get_config_dir()
-            assert "crabcakes" in result
-            assert result.endswith("crabcakes")
+            assert "develcakes" in result
+            assert result.endswith("develcakes")
 
     def test_respects_xdg_config_home(self):
         """$XDG_CONFIG_HOME, if set, takes precedence over ~/.config."""
@@ -24,8 +30,31 @@ class TestGetConfigDir:
             import utils.config
             importlib.reload(utils.config)
             from utils.config import get_config_dir
-            assert get_config_dir() == "/custom/xdg/crabcakes"
+            assert get_config_dir() == "/custom/xdg/develcakes"
             importlib.reload(utils.config)  # restore for other tests
+
+
+class TestGetV1ConfigDir:
+    """SPEC-11 SP1: the v1 dir getter mirrors the old crabcakes shape."""
+
+    def test_defaults_to_config_crabcakes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            from utils.config import get_v1_config_dir
+            result = get_v1_config_dir()
+            assert "crabcakes" in result
+            assert result.endswith("crabcakes")
+
+    def test_respects_xdg_config_home(self):
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/xdg"}):
+            from utils.config import get_v1_config_dir
+            assert get_v1_config_dir() == "/custom/xdg/crabcakes"
+
+    def test_getters_diverge(self):
+        """The two getters must never return the same dir (else the
+        migration would read and write the same tree)."""
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/custom/xdg"}):
+            from utils.config import get_config_dir, get_v1_config_dir
+            assert get_config_dir() != get_v1_config_dir()
 
 
 class TestGetConfigFile:
