@@ -112,13 +112,21 @@ app runs fully on `~/.config/develcakes/`. Repo state writes land in `.develcake
 
 ## 6. Acceptance Criteria
 
-- [ ] `develcakes` launcher boots the app with new app id
-- [ ] First run migrates v1 config: conversations, agents, providers, audit log all
+- [x] `develcakes` launcher boots the app with new app id
+- [x] First run migrates v1 config: conversations, agents, providers, audit log all
       present in new dir; v1 dir untouched; banner reports the move
-- [ ] Second run: no re-migration (marker); no banner
-- [ ] `.develcakes/` state dir; zero `.crabcakes` path references in code
-- [ ] Old `CRABCAKES_*` env vars still honored for one release (fallback)
-- [ ] Full pytest green, ruff clean, pyright clean
+- [x] Second run: no re-migration (marker); no banner
+- [~] `.develcakes/` state dir — **DEFERRED (BLOCKING-1)**: the repo state dir keeps
+      `.crabcakes/` until v2 self-hosts (v1 is still the build host reading it). Zero
+      UNINTENDED `.crabcakes` references; `CRABCAKES_DIR_NAME` intentionally remains.
+- [x] Old `CRABCAKES_*` env vars still honored for one release (fallback)
+- [x] Full pytest green, ruff clean (multisets identical vs HEAD per convention),
+      pyright clean
+
+**Status: IMPLEMENTED 2026-10-04** (state-dir rename deferred per BLOCKING-1) —
+commits 7b2f7122 (SP1), f0e8f65e (SP2), 8cf0740b (SP3) + close-out. Post-mortem:
+docs/post-mortems/2026-10-04-SPEC-11-RENAME-MIGRATION-POST-MORTEM.md. Decisions
+D1–D10 + BLOCKING-1: docs/specs/phases/SPEC-11-PREFLIGHT-DECISIONS.md.
 
 ## 7. Edge Cases
 
