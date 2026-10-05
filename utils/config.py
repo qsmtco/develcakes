@@ -85,6 +85,16 @@ def _copy_file_verified(src: str, dst: str) -> None:
         data = fh.read()
     with open(dst, "wb") as fh:
         fh.write(data)
+    # Preserve the source file's permission mode. v1's key-bearing files are
+    # 0600 (agent.json, providers.yaml per agent/config.py; transcript.db per
+    # SPEC-08) — open(dst, "wb") creates at the process umask, silently
+    # LOOSENING them to 0644/0664, a security regression on the one-time copy.
+    # Best-effort: a perms failure (non-POSIX FS, read-only) must never break
+    # the migration.
+    try:
+        os.chmod(dst, os.stat(src).st_mode & 0o777)
+    except OSError:
+        pass
     if os.path.getsize(dst) != len(data):
         raise OSError(f"byte-count mismatch after copy: {src} -> {dst}")
 

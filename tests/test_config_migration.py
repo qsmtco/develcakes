@@ -1067,3 +1067,49 @@ class TestMigrateV1Config:
         retry = migrate_v1_config()
         assert retry is not None and set(retry["copied"]) == FULL_ENTRIES
         assert os.path.isfile(marker) and os.path.getsize(marker) > 0
+
+
+class TestMigrationPreservesPermissions:
+    """SPEC-11 live-test regression: migrate_v1_config() must PRESERVE source
+    file modes. v1's key-bearing files are 0600 (agent.json, providers.yaml
+    per agent/config.py; transcript.db per SPEC-08). open(dst, "wb") creates
+    at the process umask — silently LOOSENING 0600 to 0644/0664, a security
+    regression on the one-time copy (found in live manual testing)."""
+
+    def test_key_files_keep_0600(self, xdg):
+        from utils.config import migrate_v1_config
+
+        v1 = xdg / "crabcakes"
+        v1.mkdir()
+        for name in ("agent.json", "providers.yaml"):
+            p = v1 / name
+            p.write_bytes(b"key-material\n")
+            os.chmod(p, 0o600)
+        # transcript.db triple, 0600
+        for name in ("transcript.db", "transcript.db-wal", "transcript.db-shm"):
+            p = v1 / name
+            p.write_bytes(b"dbbytes")
+            os.chmod(p, 0o600)
+
+        migrate_v1_config()
+
+        new = xdg / "develcakes"
+        for name in ("agent.json", "providers.yaml",
+                     "transcript.db", "transcript.db-wal", "transcript.db-shm"):
+            mode = os.stat(new / name).st_mode & 0o777
+            assert mode == 0o600, (
+                f"{name} migrated with mode {oct(mode)} — key-bearing file "
+                f"must stay 0600 (source was 0600)"
+            )
+
+    def test_arbitrary_mode_preserved(self, xdg):
+        """Not just 0600 — whatever the source mode is, the copy matches it."""
+        from utils.config import migrate_v1_config
+
+        v1 = xdg / "crabcakes"
+        v1.mkdir()
+        p = v1 / "agent.json"
+        p.write_bytes(b"x\n")
+        os.chmod(p, 0o640)
+        migrate_v1_config()
+        assert os.stat(xdg / "develcakes" / "agent.json").st_mode & 0o777 == 0o640
