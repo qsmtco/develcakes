@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Develcakes
+Comment=AI-native project development environment
+Exec=develcakes
+Icon=develcakes
+Terminal=false
+Categories=Development;
+StartupWMClass=develcakes
+# GTK4's WM class for com.develcakes.app may differ — verify on a real session (post-MVP)

@@ -8,9 +8,9 @@ import hashlib
 import json
 import gi
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
-from utils.config import get_env
+from utils.config import get_env, migrate_v1_config  # migrate: SPEC-11 SP3 (D3)
 
 # Configure logging early — before any module imports that might use logging
 _log_level = logging.DEBUG if get_env("DEBUG") else logging.WARNING
@@ -45,6 +45,7 @@ from gi.repository import Gio, Gtk
 # Import the main window (assembles all UI components)
 from ui.window import MainWindow
 from ui.styles import apply_styles
+from models.feed_card import FeedCardData  # SPEC-11 SP3: migration banner card
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ class DevelcakesApp(Gtk.Application):
         # the second process exits. That is the entire transport — no socket
         # of ours, no daemon, no reconnect loop.
         super().__init__(
-            application_id='com.crabcakes.app',
+            application_id='com.develcakes.app',
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
         # Connect the 'activate' signal — fired when app is first started
@@ -102,11 +103,21 @@ class DevelcakesApp(Gtk.Application):
         # Connect 'command-line' — fired (in the primary instance) for every
         # invocation, including the very first one after flag registration.
         self.connect('command-line', self.on_command_line)
-        # Set application icon for taskbar/dock (installed in hicolor icon theme)
-        Gtk.Window.set_default_icon_name('crabcakes')
+        # Set application icon for taskbar/dock. D5 (SPEC-11 SP3): the
+        # THEME-NAME mechanism is preserved — GTK4 has no
+        # Gtk.Window.set_default_icon (file-based is a GTK3 API, verified
+        # absent); the name resolves via hicolor entries installed by
+        # pyproject data-files (share/icons/hicolor/<size>/apps/develcakes.png).
+        Gtk.Window.set_default_icon_name('develcakes')
         # Set in on_activate; lets the command-line handler reach the handler
         # graph of the running instance. None until the GUI is built.
         self._main_window = None
+        # SPEC-11 SP3 (D3): migrate_v1_config() runs in main() BEFORE this
+        # object is constructed; its report is parked here and the banner is
+        # emitted in on_activate (the feed handler exists only after the
+        # window build). None = nothing to report (fresh install, marker, or
+        # both-dirs no-op).
+        self._pending_migration_report: dict | None = None
 
     def on_activate(self, app):
         """
@@ -117,6 +128,57 @@ class DevelcakesApp(Gtk.Application):
         win = MainWindow(application=app)  # Pass app as the application instance
         win.present()  # Show the window (GTK4 uses present() instead of show_all())
         self._main_window = win  # CLI handler reaches the handler graph through this
+        # SPEC-11 SP3 (D3): the v1-config banner is DEFERRED to here — the
+        # migration itself already ran at the top of main() (before the app
+        # object existed), but the feed handler only exists once the window
+        # is built. Emit once from the stored report; a None report (no-op
+        # guard) emits nothing. report=None-check narrows for the type
+        # checker; getattr keeps __init__-less test constructions safe.
+        report = getattr(self, "_pending_migration_report", None)
+        if report is not None:
+            self._emit_migration_banner(report)
+            self._pending_migration_report = None
+
+    def _emit_migration_banner(self, report: dict) -> None:
+        """Surface the one-time v1→v2 config-migration result as a feed card.
+
+        SPEC-02 pattern (system card, no file snapshot). Success lists
+        copied/skipped counts; failure names the failing entry AND states
+        that the v1 dir is untouched (D3's non-destructive contract is
+        user-facing). Defensive: a feed-less window shape must never crash
+        startup — the report is dropped, not raised.
+        """
+        window = self._main_window
+        feed = getattr(window, "_feed_handler", None) if window else None
+        if feed is None:
+            logger.warning("migration banner: no feed handler; report dropped")
+            return
+        failed = report.get("failed") or []
+        if failed:
+            title = "Config migration from v1 FAILED"
+            body = (
+                f"{failed[0]} — v1 untouched; develcakes starts fresh. "
+                "Fix the v1 dir and relaunch to retry."
+            )
+        else:
+            copied = report.get("copied") or []
+            skipped = report.get("skipped") or []
+            title = "Config migrated from v1"
+            body = f"{len(copied)} copied, {len(skipped)} skipped."
+        try:
+            feed.add_card(
+                FeedCardData(
+                    card_type="system",
+                    source="system",
+                    title=title,
+                    body=body,
+                    author="system",
+                    timestamp=datetime.now(UTC),
+                    project_name="",
+                )
+            )
+        except Exception:  # banner must never break startup (logged, dropped)
+            logger.exception("migration banner card emission failed")
 
     def on_command_line(self, app, command_line) -> int:
         """
@@ -295,7 +357,14 @@ def main():
     # launch with MIGRATE_STORE=0 (DEVELCAKES_ or CRABCAKES_ name) to skip
     # the sweep (JSON files stay authoritative; the banner card simply
     # never fires).
-    app = DevelcakesApp()  # Create application instance
+    # SPEC-11 SP3 (D3 ordering): one-time v1→v2 config migration — BEFORE
+    # the app object, before any window/config-reading import side effects.
+    # No-op on marker/content guards; a report is parked on the app and the
+    # banner is DEFERRED to on_activate (the feed handler exists only after
+    # the window build — verified: on_activate constructs MainWindow).
+    report = migrate_v1_config()
+    app = DevelcakesApp()
+    app._pending_migration_report = report
     return app.run(sys.argv)  # Explicit argv — see docstring; run(None) lies.
 
 

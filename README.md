@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="icons/logo-rounded.png" alt="CrabCakes" width="280">
+<img src="icons/logo-rounded.png" alt="Develcakes" width="280">
 
-# CrabCakes:PDE
+# Develcakes:PDE
 
 ### The first **Project Development Environment**.
 
@@ -18,7 +18,7 @@
 
 <br>
 
-> *"Other tools make agents do things. CrabCakes orchestrates them as a team."*
+> *"Other tools make agents do things. Develcakes orchestrates them as a team."*
 
 <br>
 
@@ -28,9 +28,9 @@
 
 ---
 
-## <img src="icons/emoji/crab.png" width="80" height="80" alt="crab" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> What is CrabCakes?
+## <img src="icons/emoji/crab.png" width="80" height="80" alt="crab" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> What is Develcakes?
 
-**CrabCakes is a native Linux desktop app that reimagines software development as a group chat — where some of your teammates happen to be AI agents.**
+**Develcakes is a native Linux desktop app that reimagines software development as a group chat — where some of your teammates happen to be AI agents.** (v2 hard fork of CrabCakes:PDE — v1 lineage and history preserved below.)
 
 Open a project. The team appears. You type a message, it fans out to every member. Agents respond, collaborate, write code, review each other's work, and you see all of it happen in real time in a **social-media-style Project Feed**.
 
@@ -49,7 +49,7 @@ Open a project. The team appears. You type a message, it fans out to every membe
 
 This is the first **PDE** — a *Project Development Environment*.
 
-> CrabCakes is not a harness. A harness wraps API calls. CrabCakes is where AI and humans build software together. The **project** is the first-class citizen. Agents, humans, git, files, reviews — those all orbit the project.
+> Develcakes is not a harness. A harness wraps API calls. Develcakes is where AI and humans build software together. The **project** is the first-class citizen. Agents, humans, git, files, reviews — those all orbit the project.
 
 ---
 
@@ -72,7 +72,7 @@ Every member — you, Coder, Debugger, your remote agents — shares a single co
 
 Both run locally against **OpenAI**, **MiniMax**, **Anthropic**, or any OpenAI-compatible API. No gateway required.
 
-> Built-in agents are just YAML files in `prompts/default_agents/`. Drop a new one in `~/.config/crabcakes/agents/` and it appears in your team — with your choice of provider, model, system prompt, emoji, color, and tool set. No code required. No fork needed.
+> Built-in agents are just YAML files in `prompts/default_agents/`. Drop a new one in `~/.config/develcakes/agents/` and it appears in your team — with your choice of provider, model, system prompt, emoji, color, and tool set. No code required. No fork needed.
 
 ### <img src="icons/emoji/shield.png" width="80" height="80" alt="shield" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Post-Write Enforcement
 
@@ -178,13 +178,13 @@ Push-to-talk via **faster-whisper** — a Python-native speech-to-text engine. N
 Connect any [Model Context Protocol](https://modelcontextprotocol.io/) server to your agents. GitHub, PostgreSQL, Sentry, Puppeteer, Filesystem, Memory — any MCP server becomes a tool library. Agents get structured, well-described tools with proper schemas instead of raw shell commands.
 
 **What's implemented:**
-- **stdio transport** — MCP clients launch as subprocesses; CrabCakes talks to them over stdin/stdout
+- **stdio transport** — MCP clients launch as subprocesses; Develcakes talks to them over stdin/stdout
 - **Tool discovery** — agents automatically discover all tools a server exposes (the Memory server exposes 9 tools: `create_entities`, `read_graph`, `search_nodes`, and more)
 - **Hot-reload** — add or remove a server from an agent's config in the Edit Agent dialog; no restart needed. The runtime reconnects on the next message
-- **Works for all agents** — any special agent (Coder, Debugger, Test Engineer, etc.) can be MCP-enabled per-agent in `~/.config/crabcakes/agents/{agent}.yaml`
+- **Works for all agents** — any special agent (Coder, Debugger, Test Engineer, etc.) can be MCP-enabled per-agent in `~/.config/develcakes/agents/{agent}.yaml`
 
 ```yaml
-# ~/.config/crabcakes/agents/coder.yaml
+# ~/.config/develcakes/agents/coder.yaml
 mcp_servers:
   - memory      # Knowledge graph — 9 tools
   - filesystem  # Local file access
@@ -196,13 +196,13 @@ The **Memory server is verified working end-to-end** through the UI. Agents can 
 
 - **File tree** in the left panel with file-type icons, git status badges, size and modified-date columns, 6-mode sort (name, status, size, modified, type, depth), and live search/filter. Open any file, browse directories, see what's changed at a glance.
 - **Project settings bar** — an actionable bar above the chat showing the project name, member count, active agent, file-change auto-accept level, and git branch. Click to cycle agents or toggle auto-accept. All state in one row, no hunting through menus.
-- **Project creation** scaffolds `AGENTS.md` and `.crabcakes/` for you.
+- **Project creation** scaffolds `AGENTS.md` and `.crabcakes/` for you (per-project state dir keeps the v1 name until v2 self-hosts — the `.develcakes/` rename is the registered first post-MVP unit).
 - **Membership toggles** — who do you need on this project? Add someone mid-sprint. Remove them when the work is done. Changes fan out immediately, no restart, no reconfigure.
-- **Agent Discovery** — connect to an OpenClaw gateway and CrabCakes pulls the full agent roster. Remote agents blend seamlessly into project group chats alongside your local Coder and Debugger. The split between local and remote is invisible to the user.
+- **Agent Discovery** — connect to an OpenClaw gateway and Develcakes pulls the full agent roster. Remote agents blend seamlessly into project group chats alongside your local Coder and Debugger. The split between local and remote is invisible to the user.
 
 ### <img src="icons/emoji/construction.png" width="80" height="80" alt="construction" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Custom Agent Builder
 
-Coder and Debugger are just the starting point. Use the built-in **Agent Builder UI** to configure a new agent visually — pick a provider, model, system prompt role, emoji, color, tool set. Or drop a YAML file into `~/.config/crabcakes/agents/`. **No code required. No fork needed.** Agents load at startup.
+Coder and Debugger are just the starting point. Use the built-in **Agent Builder UI** to configure a new agent visually — pick a provider, model, system prompt role, emoji, color, tool set. Or drop a YAML file into `~/.config/develcakes/agents/`. **No code required. No fork needed.** Agents load at startup.
 
 ---
 
@@ -266,7 +266,7 @@ Proposed changes to `coder.md` require human approval. Project rules and bug jou
 
 You write the spec, the trio writes, audits, and ships the code. No human intervention needed inside the loop.
 
-> Other tools give an agent a task and hope. CrabCakes gives three agents a **protocol** — a phased, audited, verified loop where no single agent's output is trusted without independent confirmation. The builder can't skip tests because the supervisor runs them independently. The supervisor can't skip the audit because the auditor is mandatory. The auditor can't fix code because that's the builder's job. **Separation of concerns, enforced structurally.**
+> Other tools give an agent a task and hope. Develcakes gives three agents a **protocol** — a phased, audited, verified loop where no single agent's output is trusted without independent confirmation. The builder can't skip tests because the supervisor runs them independently. The supervisor can't skip the audit because the auditor is mandatory. The auditor can't fix code because that's the builder's job. **Separation of concerns, enforced structurally.**
 
 ### <img src="icons/emoji/team.png" width="80" height="80" alt="team" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> The Trio
 
@@ -323,20 +323,20 @@ A typical strong configuration:
 | **Builder** | GPT-4o or MiniMax M2 | Code generation, following structured instructions, writing clean diffs |
 | **Auditor** | Claude 3.5 Sonnet or DeepSeek | Adversarial reasoning, finding edge cases, challenging assumptions |
 
-Configure per-agent in `~/.config/crabcakes/agents/`:
+Configure per-agent in `~/.config/develcakes/agents/`:
 
 ```yaml
-# ~/.config/crabcakes/agents/supervisor.yaml
+# ~/.config/develcakes/agents/supervisor.yaml
 provider: openai-compatible
 model: minimax/MiniMax-M3
 # ... system prompt, tools, etc.
 
-# ~/.config/crabcakes/agents/coder.yaml
+# ~/.config/develcakes/agents/coder.yaml
 provider: openai
 model: gpt-4o
 # ...
 
-# ~/.config/crabcakes/agents/debugger.yaml
+# ~/.config/develcakes/agents/debugger.yaml
 provider: anthropic
 model: claude-3-5-sonnet
 # ...
@@ -514,15 +514,15 @@ pip install pygobject websockets cryptography gitpython \
 ### Run
 
 ```bash
-git clone https://github.com/qsmtco/crabcakes.git
-cd crabcakes
+git clone https://github.com/qsmtco/develcakes.git
+cd develcakes
 
 # Launch — works immediately, no gateway required
 python main.py
 
 # Optional: connect to OpenClaw for remote agents
 openclaw gateway start
-# Then click Connect in the CrabCakes toolbar
+# Then click Connect in the Develcakes toolbar
 ```
 
 ### First Steps
@@ -539,15 +539,21 @@ openclaw gateway start
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway URL |
-| `CRABCAKES_PROJECTS_DIR` | `~/projects` | Root directory for projects |
+| `DEVELCAKES_PROJECTS_DIR` | `~/projects` | Root directory for projects |
+| `DEVELCAKES_DEBUG` | _(off)_ | Set truthy for verbose logging |
+| `DEVELCAKES_WEB_FETCH_RESTRICT` | _(off)_ | Restrict web fetch to allowlisted domains |
+| `DEVELCAKES_INCLUDE_DOCS` | _(off)_ | Include docs/ in file context |
+| `DEVELCAKES_NO_WEBKIT` | _(off)_ | Force the TextView fallback chat surface |
+| `DEVELCAKES_MIGRATE_STORE` | `1` | JSON→store migration at launch (0 skips) |
+| `DEVELCAKES_PROMPT_DEBUG` | _(off)_ | Dump the full composed prompt to stderr |
 | `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size (tiny, base, small, ...) |
-| `CRABCAKES_KB_SYNTHESIS_URL` | `localhost:18790` | Local KB HTTP server (MCP retrieval) |
-| `CRABCAKES_DEBUG` | `0` | Set `1` for verbose logging |
-| `CRABCAKES_TEXTVIEW_BUBBLES` | _(off)_ | Feature flag: new TextView/TextTag rendering |
-| `CRABCAKES_WEB_FETCH_RESTRICT` | _(off)_ | Restrict web fetch to allowlisted domains |
 
-Agent configs live in `~/.config/crabcakes/`. LLM provider settings in `agent.json`. MCP server registry in `mcp-servers.json`. Everything is plain files — version-controllable, diffable, greppable.
+Every `DEVELCAKES_*` variable also answers to its legacy `CRABCAKES_*` name
+for one release (config migration included: your v1 `~/.config/crabcakes/`
+is copied to `~/.config/develcakes/` on first launch). `STT_MODEL_SIZE` is
+not part of the renamed family — it keeps its name.
+
+Agent configs live in `~/.config/develcakes/`. LLM provider settings in `agent.json`. MCP server registry in `mcp-servers.json`. Everything is plain files — version-controllable, diffable, greppable.
 
 ---
 
@@ -583,20 +589,17 @@ ui/handlers/
 ├── agent_command_handler.py       Audit reports · enforcement
 ├── agent_list_handler.py          Agent roster
 ├── agent_runtime_handler.py       Local agent bridge
-├── auxilium_wizard_handler.py     Onboarding wizard
 ├── chat_handler.py                Send · fan-out · routing
 ├── chat_render_handler.py         Markdown · bubbles · streaming
 ├── collab_handler.py              ask / delegate / stop / tell
 ├── command_handler.py             Backtick command parser
-├── connection_sync_handler.py     Post-connect wiring
 ├── crabwatch_handler.py           File system watcher
 ├── feed_handler.py                Feed card lifecycle
 ├── file_tree_handler.py           File tree sort · filter · prefs
 ├── forward_handler.py             Agent-to-agent forwarding
-├── gateway_handler.py             WebSocket lifecycle
 ├── input_toolbar_handler.py       Chat input controls
 ├── media_handler.py               STT + prompt improvement
-├── project_handler.py             Project open/close/create
+├── project_handler.py             Project open/close/create · onboarding
 ├── project_list_handler.py        Project browser
 ├── prompts_handler.py             Prompt library
 ├── review_handler.py              Review lifecycle
@@ -608,17 +611,14 @@ ui/handlers/
 ### Project Layout
 
 ```
-crabcakes/
+develcakes/
 ├── main.py                          # Entry point
-├── gateway/
-│   └── client.py                    # WebSocket client · v3 device auth
 ├── models/                          # Pure data — no UI deps
 │   ├── agents.py                    # Agent manager · colors · sessions
 │   ├── routing.py                   # Session → project routing
 │   ├── command.py                   # Command parsing · registry
 │   ├── conversation.py              # Conversation + Message dataclasses
 │   ├── conversation_snapshot.py     # Serializable snapshots
-│   ├── task.py                      # Task + TaskStore
 │   ├── feed_card.py                 # Feed card data
 │   ├── activity.py                  # Activity bubble data
 │   ├── review_state.py              # Review session state
@@ -626,10 +626,6 @@ crabcakes/
 │   ├── colors.py                    # Agent color rotation
 │   ├── providers.py                 # Provider config data
 │   └── team.py                      # Team membership
-├── chat/                            # TextView/TextTag rendering (feature-flagged)
-│   ├── parser.py                    # Markdown → segment AST (mistune 3.x)
-│   ├── renderer.py                  # Segment → Gtk.TextView + TextTags
-│   └── segments.py                  # 10 frozen dataclasses (TextSeg, CodeBlock, ...)
 ├── agent/                           # Local agent runtime
 │   ├── runtime.py                   # Tool loop · streaming · cost tracking
 │   ├── tools.py                     # 8 built-in tools
@@ -642,8 +638,6 @@ crabcakes/
 │   ├── callbacks.py                 # Typed callback protocols
 │   ├── audit.py                     # AuditEntry + AuditLog
 │   ├── persistence.py               # Conversation save/load
-│   ├── kb_server.py                 # Local KB HTTP server
-│   ├── kb_lookup.py                 # Sentence-Transformers retrieval
 │   └── llm/                         # Provider adapters (extracted from runtime)
 │       ├── protocol.py              # LLMProvider Protocol
 │       ├── openai_provider.py       # OpenAI call + stream
@@ -692,15 +686,14 @@ crabcakes/
 │   │   ├── code-review.md           # Review mode instructions
 │   │   ├── improve.md               # Prompt improver system prompt
 │   │   ├── default.md               # Default agent prompt
-│   │   ├── auxilium.md              # Onboarding guide prompt
+│   │   ├── supervisor.md            # Supervisor agent instructions
 │   │   ├── cc-implementation.md     # Implementation loop context
 │   │   ├── crabcakes-commands.md    # Slash-command reference
 │   │   └── crabcakes-context.md     # Project awareness template
 │   └── default_agents/              # Built-in agent YAMLs
 │       ├── coder.yaml
 │       ├── debugger.yaml
-│       ├── auxilium.yaml
-│       └── crabcakes.yaml
+│       └── supervisor.yaml
 ├── .crabcakes/                      # Per-project config (git-tracked)
 │   ├── project.md                   # Project manifest
 │   ├── workflow.md                  # Phase history
@@ -735,7 +728,7 @@ Every tool today makes the same trade-off: agents work alone (fast, uncontrolled
 
 The real problem isn't making agents do things. **It's orchestrating them as a team.**
 
-CrabCakes solves this by making the **project itself the social context.** Not a prompt you feed them. Not a task list you manage. The actual project — its files, its history, its team — is what they operate inside. You see everything. You control what gets merged. Agents collaborate with each other and you watch it happen in real time.
+Develcakes solves this by making the **project itself the social context.** Not a prompt you feed them. Not a task list you manage. The actual project — its files, its history, its team — is what they operate inside. You see everything. You control what gets merged. Agents collaborate with each other and you watch it happen in real time.
 
 > **The project IS the chat. The feed IS the dashboard. Agents are teammates you manage.**
 
@@ -751,7 +744,7 @@ Named after the Chesapeake Bay delicacy — sweet, rich, and built from parts ot
 
 *Part of the [Qontinuum Bridge](https://github.com/qsmtco) project.*
 
-**CrabCakes — where your project is the chat.**
+**Develcakes — where your project is the chat.**
 
 *The first PDE.*
 

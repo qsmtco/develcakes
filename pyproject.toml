@@ -1,5 +1,5 @@
 [project]
-name = "crabcakes"
+name = "develcakes"
 version = "0.1.0"
 description = "GTK4 AI-native project development environment for OpenClaw"
 requires-python = ">=3.11"
@@ -24,10 +24,12 @@ dependencies = [
 ]
 
 [project.scripts]
-# Console entry point — creates the `crabcakes` launcher on PATH
+# Console entry point — creates the `develcakes` launcher on PATH
 # (~/.local/bin for a --user install, or the venv's bin/ for a venv install).
 # Target is main:main, so main.py must expose a callable main().
-crabcakes = "main:main"
+# SPEC-11 SP3 (D1): the old `crabcakes` entry is REMOVED (spec explicit) —
+# it disappears from the venv on reinstall.
+develcakes = "main:main"
 
 [project.optional-dependencies]
 dev = [
@@ -44,6 +46,20 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["main"]
+
+# SPEC-11 SP3 (D5) + fix round (BUG#1): theme lookup needs the BASENAME
+# develcakes.png — size-named sources (16.png..256.png) can never satisfy
+# Icon=develcakes (auditor wheel-verified: zero entries resolved). The
+# originals stay in-repo untouched (README references them; no code reads
+# them by path — verified); data-files maps the THEME TREE copies instead.
+[tool.setuptools.data-files]
+"share/icons/hicolor/16x16/apps" = ["icons/hicolor/16x16/apps/develcakes.png"]
+"share/icons/hicolor/32x32/apps" = ["icons/hicolor/32x32/apps/develcakes.png"]
+"share/icons/hicolor/48x48/apps" = ["icons/hicolor/48x48/apps/develcakes.png"]
+"share/icons/hicolor/64x64/apps" = ["icons/hicolor/64x64/apps/develcakes.png"]
+"share/icons/hicolor/128x128/apps" = ["icons/hicolor/128x128/apps/develcakes.png"]
+"share/icons/hicolor/256x256/apps" = ["icons/hicolor/256x256/apps/develcakes.png"]
+"share/applications" = ["data/com.develcakes.app.desktop"]
 
 [tool.setuptools.packages.find]
 # Patterns are PACKAGE names, not filesystem paths. "ui/*" matched nothing
