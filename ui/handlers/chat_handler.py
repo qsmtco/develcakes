@@ -214,8 +214,11 @@ class ChatHandler:
                 buf.set_text("")
                 # Forward-to commands: show echo and route via gateway
                 if result.forward_to and result.forward_text:
-                    agent_name = result.forward_to.split("/")[-1]
-                    echo_text = f"→ @{agent_name}: {result.forward_text}"
+                    target = result.forward_to
+                    forward_text = result.forward_text  # SP4a-audit BUG#3: capture with target
+                    agent_name = target.split("/")[-1]
+                    echo_text = f"→ @{agent_name}: {forward_text}"
+
                     def _show_echo_and_forward():
                         chat_box = self._mc.get_chat_box()
                         if chat_box is not None:
@@ -230,10 +233,25 @@ class ChatHandler:
                                     on_forward_click=self._on_forward_message,
                                     agent_name="You",
                                 )
-                        # Route through AgentRuntime for special agents, gateway for others
-                        # Local path only (SPEC-05 R1): the receiver no-ops
-                        # with a warning for unregistered/remote keys.
-                        self._send_local(result.forward_to, result.forward_text)
+                        # SPEC-12 §2f (BUG#2/#11/#14): /ask + /delegate open a
+                        # PRIVATE (agent-keyed) tab and route THIS send's reply
+                        # there. Idempotent: an existing tab is focused, not
+                        # recreated.
+                        if self._agent_runtime_handler is None:
+                            # SP4a-audit BUG#2: ARH unwired — avoid an
+                            # AttributeError; _send_local still DROPS the send
+                            # with its standard warning (the fallback does not
+                            # rescue delivery).
+                            self._send_local(target, forward_text)
+                            return
+                        if self._mc.get_chat_box_for_session(target) is None:
+                            # BUG#20c: "special:coder" has no "/", split(...,1)
+                            # still yields the whole string — strip the
+                            # "special:" prefix for a clean tab label.
+                            label = target.split(":", 1)[-1]
+                            self._mc.create_chat_tab(target, label)
+                        self._agent_runtime_handler.send_to_special_agent(
+                            target, forward_text, reply_target=target)
                     self._dispatch(_show_echo_and_forward)
                 elif result.broadcast_targets and result.forward_text:
                     # BUG #4 fix: fan-out @ broadcast to all project members

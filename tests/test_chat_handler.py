@@ -140,6 +140,17 @@ class FakeMainContent:
                 return self._fake_chat_box
         return None
 
+    def create_chat_tab(self, session_key, agent_name):
+        """SP4a parity: the forward_to branch opens a private tab via
+        mc.create_chat_tab — the fake records it and registers the key so
+        get_chat_box_for_session resolves it (real MainContent selects the
+        page itself; the fake just tracks the mapping)."""
+        page = len(self._tab_sessions)
+        self._tab_sessions[page] = session_key
+        self.created_tabs = getattr(self, "created_tabs", [])
+        self.created_tabs.append((session_key, agent_name))
+        return page
+
     # ── Helpers for test assertions ──────────────────────────────────────────
 
     def clear_messages(self):
@@ -159,13 +170,25 @@ class FakeGatewayClient:
     def __init__(self, connected=True):
         self._connected = connected  # vestigial — nothing consults it post-R1
         self._sent = []  # (session_key, text)
+        # SP4a: reply_target (BUG#11) recorded SEPARATELY — get_sent()'s
+        # 2-tuple contract is untouched for the existing asserts.
+        self._reply_targets: list[str | None] = []
 
     # ── The real receiver interface (what ChatHandler now calls) ──
     def get_special_agents(self):
         return {}
 
-    def send_to_special_agent(self, session_key, text):
+    def send_to_special_agent(self, session_key, text, reply_target=None):
+        # SP4a parity: the forward branch passes reply_target (BUG#11).
+        # Recorded SEPARATELY so get_sent()'s 2-tuple contract is untouched
+        # for the existing asserts.
         self._sent.append((session_key, text))
+        self._reply_targets.append(reply_target)
+
+    def get_reply_targets(self):
+        """SP4a: reply_targets parallel to get_sent() — for the private-view
+        pins (SP4 tests land later; recorded now so the fake is complete)."""
+        return list(self._reply_targets)
 
     # ── Compat shims (dead post-R1, kept for fixtures) ──
     def is_connected(self):
@@ -968,5 +991,37 @@ class TestSlashCommandInSpecialAgentTab:
         # Command handler was called
         mock_cmd.process_input.assert_called_once()
         # The forward target (special:coder) was called via send_to_special_agent
-        # with the extracted payload, not the raw /ask text
-        mock_arh.send_to_special_agent.assert_called_once_with("special:coder", "do the thing")
+        # with the extracted payload, not the raw /ask text — and the reply is
+        # routed PRIVATELY (reply_target=target, SPEC-12 BUG#11: /ask's reply
+        # renders in the agent's own tab, not the project surface).
+        mock_arh.send_to_special_agent.assert_called_once_with(
+            "special:coder", "do the thing", reply_target="special:coder")
+        # SP4a-audit BUG#1: the private tab is OPENED with the BUG#20c label
+        # ("special:" prefix stripped). Falsifier: drop create_chat_tab → RED.
+        assert mc.created_tabs == [("special:coder", "coder")], mc.created_tabs
+
+    def test_forward_command_does_not_recreate_existing_tab(self):
+        """SP4a-audit BUG#1 residual (idempotency): a second /ask to the same
+        target must NOT recreate its private tab. Refills the buffer so the
+        second send actually reaches the branch (an emptied buffer made the
+        original assertion vacuous). Falsifier: drop the
+        `get_chat_box_for_session(target) is None` guard → RED."""
+        from models.command import CommandResult
+        result = CommandResult(
+            handled=True,
+            forward_to="special:coder",
+            forward_text="do the thing",
+        )
+        handler, mc, _mock_arh, mock_cmd = self._make_special_agent_handler(
+            "/ask @Coder \"do the thing\"", result,
+        )
+        handler.on_send()
+        assert mc.created_tabs == [("special:coder", "coder")]
+
+        # Refill and re-drive — the branch must see the tab already exists.
+        mock_cmd.process_input.return_value = result
+        mc._input_buffer.set_text('/ask @Coder "again"')
+        handler.on_send()
+        assert mc.created_tabs == [("special:coder", "coder")], (
+            "an existing private tab must not be recreated"
+        )
