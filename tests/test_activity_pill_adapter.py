@@ -295,15 +295,17 @@ class FakeChatBox:
         self.children.append(widget)
 
 
-def test_project_tab_resolver_picks_per_key(monkeypatch):
-    """SP2 Edit 4 ruling: on a project tab, surface_for_key('project:<name>')
-    returns the project's PRIMARY (welcome) surface, while the agent key
-    returns the agent's own surface — two keys, two distinct surfaces. The
-    window resolver (surface_for_key(get_current_session_key())) must pick
-    per-key: the project pill renders project-tab activity; agent surfaces'
-    pills stay untouched. Multi-surface display (N pills on a project tab)
-    is the SP3/SP4 REGISTER item — this pin fixes the RESOLVER contract, not
-    the display question."""
+def test_project_tab_resolver_uses_display_key(monkeypatch):
+    """SPEC-12 display-key ruling (was SP2 Edit 4's per-key pin): the
+    project tab has ONE surface keyed by the DISPLAY key
+    (`project:alpha`); an agent reply routed into it with
+    mount_key='project:alpha' SHARES that surface (no per-agent surface
+    anymore). The window resolver (surface_for_key) must therefore key on
+    the display key: 'project:alpha' resolves the shared surface; the
+    legacy agent key resolves NOTHING (retired model).
+    Multi-surface display (N pills on a project tab) is the SP3/SP4
+    REGISTER item — this pin fixes the RESOLVER contract, not the display
+    question."""
     import ui.handlers.chat_render_handler as crh
 
     handler = crh.ChatRenderHandler()
@@ -323,19 +325,16 @@ def test_project_tab_resolver_picks_per_key(monkeypatch):
 
     monkeypatch.setattr(crh, "create_chat_surface", factory)
 
-    # Project tab opens → welcome renders → PRIMARY surface keyed project:alpha.
+    # Project tab opens → welcome renders → surface keyed project:alpha.
     handler.render_welcome("project:alpha")
-    # An agent reply routes into the project tab (mount_key) but its surface
-    # is cached under the AGENT key.
+    # An agent reply routes into the project tab (mount_key) and SHARES the
+    # project surface (display-keyed cache — SPEC-12).
     handler.render_sync("Agent", "working the task", "agent:coder",
                         mount_key="project:alpha")
 
-    assert len(created) == 2  # one surface per key — no cross-key reuse
-    project_surface = handler.surface_for_key("project:alpha")
-    agent_surface = handler.surface_for_key("agent:coder")
-    assert project_surface is created[0]
-    assert agent_surface is created[1]
-    assert project_surface is not agent_surface  # per-key resolution
+    assert len(created) == 1                          # one display-keyed surface
+    assert handler.surface_for_key("project:alpha") is created[0]
+    assert handler.surface_for_key("agent:coder") is None   # retired model
 
 
 # ── SPEC-07 SP2 fix round BUG #1: the (text, state) mapping pin ───────────

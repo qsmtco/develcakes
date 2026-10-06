@@ -520,38 +520,53 @@ class TestSurfaceMountLifecycle:
         assert self._mounted_in(boxes["sk"], created[0])
 
     def test_project_routed_reply_mounts_in_project_box(self, monkeypatch):
-        """FIX 2 (BUG #2) — the headline-use-case pin: a project-routed
-        reply renders with session_key=<agent sk> but mount_key=<resolved
-        project box key> → the surface mounts in the project tab's box.
-        Personal-tab reply (no mount_key) still mounts under its own key."""
-        agent_box = Gtk.Box()   # no tab for the agent session itself
+        """SPEC-12 display-key pin (was FIX 2's headline case): a
+        project-routed reply renders with session_key=<agent sk> but
+        mount_key=<resolved project box key> → the surface is CACHED under
+        the DISPLAY key (`project:alpha`) and mounts in the project tab's
+        box — ONE surface per project box, shared by every agent routed
+        there. Personal-tab replies (no mount_key) keep their own
+        session-keyed surfaces."""
+        agent_box = Gtk.Box()   # the agent session's own (non-project) tab
         project_box = Gtk.Box()  # the visible project group-chat tab
         boxes = {"project:alpha": project_box, "agent:sk": agent_box}
         handler, created = self._wired_handler(monkeypatch, boxes)
         handler.render_sync("Agent", "to project", "agent:sk",
                             mount_key="project:alpha")
+        # ONE surface, keyed by the DISPLAY key (the project box).
+        assert set(handler._surfaces) == {"project:alpha"}
         assert created[0].get_parent() is project_box
-        assert agent_box.get_first_child() is None  # NOT in the agent box
-        # Personal-tab control: no mount_key → own session key.
+        assert agent_box.get_first_child() is None       # not in the agent box
+        # Personal reply (no mount_key) → own SESSION key.
         handler.render_sync("Agent", "personal", "agent:other")
-        other = handler._surfaces["agent:other"]
-        assert other.get_parent() is None  # no box for that key — unmounted, fine
-        # And a direct-tab session with no mount_key mounts under its own key.
+        assert "agent:other" in handler._surfaces
+        assert handler._surfaces["agent:other"].get_parent() is None
+        # Same session, NO mount_key → a DISTINCT session-keyed surface
+        # (display key falls back to the session key), mounted in its own
+        # box (agent:sk resolves in the getter map).
         handler.render_sync("Agent", "direct", "agent:sk", mount_key=None)
-        second = handler._surfaces["agent:sk"]
-        assert second is created[0]   # same cached surface (cache stays session-keyed)
-        assert second.get_parent() is project_box  # mount-once: NOT remounted
+        assert "agent:sk" in handler._surfaces          # session key
+        assert handler._surfaces["agent:sk"] is not created[0]
+        assert handler._surfaces["agent:sk"].get_parent() is agent_box
+        # The project surface is untouched by the personal/direct renders.
+        assert handler._surfaces["project:alpha"] is created[0]
+        assert created[0].get_parent() is project_box
 
-    def test_surface_cache_stays_session_keyed_with_mount_key(self, monkeypatch):
-        """FIX 2 — surface CACHE keyed by session_key (streaming continuity)
-        while MOUNT uses mount_key: two renders with different mount_keys
-        still hit ONE cached surface for the session."""
+    def test_surface_cache_is_display_keyed(self, monkeypatch):
+        """SPEC-12 — surface CACHE keyed by DISPLAY key (mount_key or
+        session_key): different display keys → different surfaces; the same
+        display key from a DIFFERENT session → the SAME surface (the
+        one-surface-per-project-box point)."""
         boxes = {"project:alpha": Gtk.Box(), "project:beta": Gtk.Box()}
         handler, created = self._wired_handler(monkeypatch, boxes)
         handler.render_sync("Agent", "one", "agent:sk", mount_key="project:alpha")
         handler.render_sync("Agent", "two", "agent:sk", mount_key="project:beta")
-        assert len(created) == 1  # one surface, session-keyed cache
-        assert handler._surfaces["agent:sk"] is created[0]
+        assert set(handler._surfaces) == {"project:alpha", "project:beta"}
+        assert len(created) == 2                     # two display keys, 2 surfaces
+        # Same display key, DIFFERENT session → SAME surface (the point).
+        handler.render_sync("Agent", "three", "agent:other", mount_key="project:alpha")
+        assert handler._surfaces["project:alpha"] is created[0]
+        assert len(created) == 2
 
     def test_surface_for_box_identity_lookup(self, monkeypatch):
         """FIX 3 seam: surface_for_box resolves the surface mounted in a
@@ -715,9 +730,12 @@ class TestStreamingMountLifecycle:
         assert "final" in _document(list(created[0]._rows))
         assert "<strong>answer</strong>" in _document(list(created[0]._rows))
 
-    def test_close_project_kills_agent_surface_mounted_there(self, monkeypatch):
-        """FIX 10 — closing the PROJECT session destroys the AGENT-keyed
-        surface mounted in the project box and tombstones the agent key."""
+    def test_close_project_kills_the_project_surface(self, monkeypatch):
+        """SPEC-12: the routed surface is CACHED under the project key, so
+        closing the project destroys it and tombstones the project key —
+        and leaves NO agent-keyed surface behind (the routed session does
+        not get its own surface). Falsifier: a session-keyed cache → the
+        pre-close `"project:alpha" in _surfaces` assert fails."""
         project_box = Gtk.Box()
         boxes = {"project:alpha": project_box}
         handler, created = self._wired(monkeypatch, boxes)
@@ -725,19 +743,53 @@ class TestStreamingMountLifecycle:
                             mount_key="project:alpha")
         surface = created[0]
         assert surface.get_parent() is project_box
+        # THE PIN (non-tautological): the surface lives UNDER THE PROJECT KEY
+        # and the routed session did NOT create a session-keyed surface.
+        assert handler._surfaces.get("project:alpha") is surface
+        assert "agent:sk" not in handler._surfaces
         destroyed: list = []
         surface.destroy = lambda: destroyed.append(True)
         handler.close_session("project:alpha")
-        assert destroyed == [True]                     # mounted surface died
-        assert "agent:sk" not in handler._surfaces     # agent key released
-        assert handler._closed_sessions.get("agent:sk") is True
+        assert destroyed == [True]
+        assert "project:alpha" not in handler._surfaces
+        assert handler._closed_sessions.get("project:alpha") is True
+
+    def test_close_project_fans_out_over_extra_surfaces_in_box(self, monkeypatch):
+        """SPEC-12 defensive path: close_session must destroy + tombstone
+        EVERY surface mounted in the closed box, even when more than one is
+        present (reachable when a direct session's getter key resolves to
+        the same box). Seeded manually — the display-key model produces N=1
+        by construction, so the loop needs an explicit stray. Falsifier:
+        remove the fan-out loop body → the stray survives (assert fails)."""
+        project_box = Gtk.Box()
+        boxes = {"project:alpha": project_box}
+        handler, created = self._wired(monkeypatch, boxes)
+        # Primary project surface.
+        handler.render_sync("Agent", "primary", "agent:sk",
+                            mount_key="project:alpha")
+        # Stray second surface mounted DIRECTLY in the same box, cached under
+        # its own display key (the shape the loop defends against).
+        stray = TextViewFallback()
+        project_box.append(stray)
+        handler._surfaces["agent:stray"] = stray
+        handler._surfaces_by_parent[id(project_box)] = stray  # index consistency
+        destroyed: list = []
+        created[0].destroy = lambda: destroyed.append(id(created[0]))
+        stray.destroy = lambda: destroyed.append(id(stray))
+        handler.close_session("project:alpha", box=project_box)
+        assert id(created[0]) in destroyed       # primary fanned out
+        assert id(stray) in destroyed            # stray fanned out
+        assert handler._surfaces == {}           # both drained
+        assert handler._closed_sessions.get("project:alpha") is True
+        assert handler._closed_sessions.get("agent:stray") is True
 
     def test_reopen_remounts_after_project_close(self, monkeypatch):
-        """FIX 10 — reopen path, REWRITTEN for r3: a bare setter re-wire does
-        NOT clear tombstones anymore (the r2 clear-all WAS the trap — any
-        setter call resurrected every closed session). Only the production
-        reopen entry (create_chat_tab → pop_tombstones_for_box) clears; the
-        next render then creates a FRESH surface in the new box."""
+        """FIX 10 — reopen path, REWRITTEN for r3 and re-pinned for
+        SPEC-12: a bare setter re-wire does NOT clear tombstones anymore
+        (the r2 clear-all WAS the trap — any setter call resurrected every
+        closed session). Only the production reopen entry (create_chat_tab
+        → pop_tombstones_for_box) clears; the next render then creates a
+        FRESH surface in the new box."""
         from ui.views.main_content import MainContent
 
         project_box = Gtk.Box()
@@ -758,12 +810,12 @@ class TestStreamingMountLifecycle:
         win.set_child(mc)
         mc.set_chat_render_handler(handler)
         mc.create_chat_tab("project:alpha", "Alpha")
-        # SP5c-1: tab creation emits the welcome — the project key's surface
-        # is created EAGERLY here (+1), and agent:sk's fresh surface lands
-        # on the render below (total 3: first-life + welcome + second-life).
+        # SPEC-12: welcome created the reopened project surface (+1); the
+        # agent render SHARES it (display-keyed) — total 2: first-life +
+        # reopened project surface (no per-agent surface anymore).
         handler.render_sync("Agent", "second life", "agent:sk",
                             mount_key="project:alpha")
-        assert len(created) == 3  # fresh agent surface — not the old orphan
+        assert len(created) == 2  # welcome's fresh surface — not the old orphan
         win.destroy()
 
     def test_late_render_after_close_does_not_resurrect(self, monkeypatch):
@@ -938,26 +990,24 @@ class TestRound3Lifecycle:
         assert len(created) == 1
         assert "sk" in handler._surfaces
 
-    def test_close_destroys_all_surfaces_in_project_box(self, monkeypatch):
-        """FIX 2 — TWO agent surfaces mounted in one project box; closing
-        the project destroys BOTH and tombstones BOTH (the round-2 `break`
-        killed only the first). Also pins FIX 6: the id(box) index entries
-        for dead boxes are popped."""
+    def test_close_destroys_the_project_surface(self, monkeypatch):
+        """SPEC-12 — two agent renders with the SAME mount_key share ONE
+        project-keyed surface; closing the project destroys it and
+        tombstones the project key (also pins FIX 6: the id(box) index
+        entries for dead boxes are popped)."""
         project_box = Gtk.Box()
         boxes = {"project:alpha": project_box}
         handler, created = self._wired(monkeypatch, boxes)
         handler.render_sync("Agent", "a", "agent:one", mount_key="project:alpha")
         handler.render_sync("Agent", "b", "agent:two", mount_key="project:alpha")
-        assert len(created) == 2
+        assert len(created) == 1                      # ONE surface per project box
         destroyed: list = []
-        for s in created:
-            s.destroy = lambda s=s: destroyed.append(s)
+        created[0].destroy = lambda: destroyed.append(True)
         handler.close_session("project:alpha")
-        assert sorted(map(id, destroyed)) == sorted(map(id, created))
-        assert set(handler._surfaces) == set()
-        assert handler._closed_sessions.get("agent:one") is True
-        assert handler._closed_sessions.get("agent:two") is True
-        assert id(project_box) not in handler._surfaces_by_parent  # FIX 6
+        assert destroyed == [True]
+        assert handler._surfaces == {}
+        assert handler._closed_sessions.get("project:alpha") is True
+        assert id(project_box) not in handler._surfaces_by_parent   # FIX 6 kept
 
     def test_reopen_via_create_chat_tab_clears_tombstones(self, monkeypatch):
         """FIX 3 — TEST-FIRST, rewritten to the PRODUCTION reopen path:
@@ -989,9 +1039,10 @@ class TestRound3Lifecycle:
         handler.set_chat_container_getter(lambda sk: new_box if sk == "project:alpha" else None)
         handler.render_sync("Agent", "second life", "agent:sk",
                             mount_key="project:alpha")
-        # SP5c-1: +1 — create_chat_tab's welcome emission eagerly created
-        # the project key's surface (welcome + first-life + second-life).
-        assert len(created) == 3                   # fresh surface — not resurrected orphan
+        # SPEC-12: welcome re-created the reopened project surface; the
+        # agent render SHARES it (display-keyed) — total 2: first-life +
+        # reopened project surface.
+        assert len(created) == 2                   # fresh surface — not resurrected orphan
         win.destroy()
 
 
@@ -1025,40 +1076,42 @@ class TestCloseFanOutProductionPath:
 
     def test_project_close_fans_out_and_reopen_remounts(self, monkeypatch):
         """THE pin: real create_chat_tab → agent render into the project box
-        → real _close_tab(project) → reopen. The BUG #2 defect (dead
-        fan-out) leaves the agent surface in the DETACHED old box (blank
-        pane); the fix must tombstone+destroy it at close and remount a
-        fresh surface in the NEW box on reopen. Falsifier contract: revert
-        `box=closing_box` at main_content._close_tab → this pin turns red
-        (the agent surface survives close in the detached box)."""
+        → real _close_tab(project) → reopen. SPEC-12: the project surface
+        already exists (welcome created it eagerly at tab creation), so the
+        agent render SHARES it — the surface's key IS the project key. The
+        BUG #2 defect (dead fan-out) leaves the surface in the DETACHED old
+        box (blank pane); the fix must tombstone+destroy it at close and
+        remount a fresh surface in the NEW box on reopen. Falsifier
+        contract: revert `box=closing_box` at main_content._close_tab →
+        this pin turns red (the surface survives close in the detached box)."""
         mc, win, handler, created = self._production_stack(monkeypatch)
         try:
             mc.create_chat_tab("project:alpha", "Alpha")
             old_box = mc.get_chat_box_for_session("project:alpha")
-            agent_before = len(created)
             handler.render_sync("Agent", "hello", "agent:x", mount_key="project:alpha")
-            assert created[agent_before].get_parent() is old_box
+            # ONE surface for the project box (welcome + agent rows share it).
+            assert handler._surfaces["project:alpha"].get_parent() is old_box
+            assert len(created) == 1  # welcome's surface; the render shared it
 
             page = mc._find_page_by_session("project:alpha")
             assert page is not None
             mc._close_tab(page)               # THE REAL production close path
             assert mc.get_chat_box_for_session("project:alpha") is None
 
-            # The fan-out MUST have fired: agent surface destroyed +
+            # The fan-out MUST have fired: project surface destroyed +
             # tombstoned (BUG #2 defect = both skipped, blank-pane class).
-            assert "agent:x" not in handler._surfaces
-            assert handler._closed_sessions.get("agent:x") is True
-            assert created[agent_before].get_parent() is None
+            assert "project:alpha" not in handler._surfaces
+            assert handler._closed_sessions.get("project:alpha") is True
+            assert created[0].get_parent() is None
 
-            # Reopen: tombstones pop, and a fresh agent render mounts in the
+            # Reopen: tombstones pop, and a fresh surface mounts in the
             # NEW box (the blank-pane defect = render lands in the old box).
             mc.create_chat_tab("project:alpha", "Alpha")
-            assert "agent:x" not in handler._closed_sessions
+            assert "project:alpha" not in handler._closed_sessions
             new_box = mc.get_chat_box_for_session("project:alpha")
             assert new_box is not old_box
-            agent_before = len(created)
             handler.render_sync("Agent", "back", "agent:x", mount_key="project:alpha")
-            assert created[agent_before].get_parent() is new_box
+            assert handler._surfaces["project:alpha"].get_parent() is new_box
         finally:
             win.destroy()
 

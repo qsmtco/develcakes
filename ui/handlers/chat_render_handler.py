@@ -1,11 +1,14 @@
 # ui/handlers/chat_render_handler.py
 # Chat render handler — routes transcript append/stream paths to the
-# per-session HTML chat surface (SPEC-06 R2 Phase A, SP4 repoint).
+# display-keyed (one per project box) HTML chat surface (SPEC-06 R2 Phase A,
+# SP4 repoint; key domain migrated to display keys by SPEC-12 SP2).
 #
 # SPEC-06 SP4 (R2A): the Pango bubble pipeline is RETIRED for the transcript
 # role. render_async/render_sync/streaming now route through
 # render/html.render_document (markdown → HTML → sanitize, ALWAYS in the
-# path) into a per-session ChatSurface (ui/views/chat_surface.py). Per
+# path) into a display-keyed ChatSurface (ui/views/chat_surface.py) — the
+# cache key is `mount_key or session_key`, so every agent rendering into one
+# project tab shares ONE surface. Per
 # ruling R1 the surface owns the widget tree: on_bubble_ready fires with
 # None (all callers already tolerate None — `if bubble is not None` guards
 # verified at chat_handler :228/:532 and agent_runtime_handler :2101/:2116/
@@ -111,12 +114,13 @@ def _surface_role(role: str) -> str:
 
 class ChatRenderHandler:
     """
-    Routes chat transcript content to per-session HTML chat surfaces.
+    Routes chat transcript content to the display-keyed HTML chat surface
+    (one surface per project box; SPEC-12).
 
     SPEC-06 SP4 pipeline (replaces the Pango bubble pipeline):
       text → render/html.render_document()   (markdown → HTML → nh3 sanitize,
                                               fail-closed — ALWAYS in the path)
-           → ChatSurface.append_message()    (per-session, windowed deque)
+           → ChatSurface.append_message()    (display-keyed, windowed deque)
 
     Feature parity (ruling R2 — dispositions):
       DROPPED for Phase A (documented): forward buttons, copy buttons,
@@ -135,8 +139,9 @@ class ChatRenderHandler:
     def __init__(self, GLib_module=None):
         self._GLib = GLib_module
         self._reentrancy = _ReentrancySet()
-        # SPEC-06 SP4: per-session chat surfaces (ruling R1 — the surface
-        # owns the widget tree). Lazily created; destroy via close_session.
+        # SPEC-06 SP4: display-keyed chat surfaces (SPEC-12: one per project
+        # box; ruling R1 — the surface owns the widget tree). Lazily
+        # created; destroy via close_session.
         self._surfaces: dict = {}
         self._on_forward_message = None   # set via set_on_forward_message()
         self._main_content = None
@@ -167,7 +172,7 @@ class ChatRenderHandler:
         #     Cleared when the key's box is LIVE again (tab/project reopen =
         #     legit new render → fresh surface). Keyed dict (bounded by
         #     sessions-ever-closed) to keep insertion order debuggable.
-        #   _mount_misses — consecutive None-getter misses per session key.
+        #   _mount_misses — consecutive None-getter misses per display key.
         #     FIX 11: at _MOUNT_MISS_LIMIT the unmountable surface is evicted
         #     (recreated lazily) so a dead getter can't accumulate surfaces.
         #   _surfaces_by_parent — id(chat_box) → surface index for the O(1)
@@ -206,8 +211,11 @@ class ChatRenderHandler:
         via pop_tombstones_for_box, driven by create_chat_tab."""
         self._container_getter = getter
 
-    def _mount_surface(self, session_key: str, surface, mount_key: str | None = None) -> bool:
+    def _mount_surface(self, key: str, surface, mount_key: str | None = None) -> bool:
         """Mount the surface into a chat box — IDEMPOTENT RETRY (FIX 1).
+
+        SPEC-12: the first arg is the surface's DISPLAY key (the cache key it
+        lives under); it only feeds the getter fallback.
 
         FIX 1 (SP5a audit BUG #1): the old one-shot skipped mounting forever
         when the box didn't exist yet at surface creation (early render /
@@ -234,8 +242,8 @@ class ChatRenderHandler:
         if getter is None:
             return False
         # FIX 2: mount into the RESOLVED display key's box (project tabs);
-        # falls back to the render session key (personal tabs unchanged).
-        chat_box = getter(mount_key or session_key)
+        # falls back to the surface's display key (personal tabs unchanged).
+        chat_box = getter(mount_key or key)
         if chat_box is None:
             return False
         chat_box.append(surface)
@@ -270,7 +278,12 @@ class ChatRenderHandler:
         return None
 
     def surface_for_key(self, session_key: str):
-        """SPEC-07 SP1: READ-ONLY surface lookup by session key (or None).
+        """SPEC-07 SP1: READ-ONLY surface lookup by DISPLAY key (or None).
+
+        SPEC-12: the arg is a display key (`mount_key or session_key` — for
+        a project tab, `project:<name>`) — the surface CACHE is display-
+        keyed. A legacy agent key (`agent:coder`) is no longer a cache key
+        and returns None.
 
         Deliberately NOT _surface_for() — that method creates and mounts on
         a miss; status resolution runs on a 250ms tick and must be
@@ -280,45 +293,50 @@ class ChatRenderHandler:
         return self._surfaces.get(session_key)
 
     def _surface_for(self, session_key: str, mount_key: str | None = None):
-        """Lazy per-session surface (created on first use).
+        """Lazy per-PROJECT surface (SPEC-12: display-keyed).
+
+        SPEC-12 BUG#1 fix: the cache is keyed by the DISPLAY key
+        (`mount_key or session_key`), NOT the raw session key — one surface
+        per project box. Mount retries (FIX 1) and eviction (FIX 11) are
+        tracked on the same display key. Streaming stays session-keyed
+        (see _stream_text/_streaming) — do not touch those here.
 
         FIX 1: _mount_surface runs on EVERY call — idempotent (parent guard)
         until the box exists, so a None-getter at creation is recovered on
         the next render (the SP5a blank-window case, incl. project routing).
-        FIX 2: mount_key — the display key whose box the surface mounts in
-        (project-routed replies); the surface CACHE stays keyed by
-        session_key (streaming continuity).
         FIX 11 (round 2): a surface still unmounted after _MOUNT_MISS_LIMIT
         consecutive getter misses is EVICTED (destroyed; recreated lazily if
         a render comes later) — a dead getter can't accumulate surfaces.
         """
-        surface = self._surfaces.get(session_key)
+        display_key = mount_key or session_key
+        surface = self._surfaces.get(display_key)
         if surface is None:
             surface = create_chat_surface()
-            self._surfaces[session_key] = surface
-        mounted = self._mount_surface(session_key, surface, mount_key)  # SP5a FIX 1: retry
+            self._surfaces[display_key] = surface
+        # SP5a FIX 1: retry — idempotent on every call (parent guard).
+        mounted = self._mount_surface(display_key, surface, display_key)
         # FIX 11: track consecutive mount misses — ONLY when a getter is
         # actually wired (a None-getter-at-all is the pre-wiring state; the
         # round-1 FIX 1 retry semantics apply there, and unit surfaces that
         # work unmounted must not be evicted for it). A wired getter that
         # keeps returning None is the dead-wiring case the cap bounds.
         if mounted:
-            self._mount_misses.pop(session_key, None)
+            self._mount_misses.pop(display_key, None)
         elif surface.get_parent() is None and self._container_getter is not None:
-            self._mount_misses[session_key] = self._mount_misses.get(session_key, 0) + 1
+            self._mount_misses[display_key] = self._mount_misses.get(display_key, 0) + 1
         if (not mounted
                 and surface.get_parent() is None
                 and self._container_getter is not None
-                and self._mount_misses.get(session_key, 0) >= self._MOUNT_MISS_LIMIT):
+                and self._mount_misses.get(display_key, 0) >= self._MOUNT_MISS_LIMIT):
             surface.destroy()
-            del self._surfaces[session_key]
-            self._mount_misses.pop(session_key, None)
+            self._surfaces.pop(display_key, None)          # BUG#1b: no KeyError
+            self._mount_misses.pop(display_key, None)
             # SP5c-1-audit BUG #3: the eviction destroys the surface — the
             # welcome flag must die with it (a recreated surface is a fresh
             # mount and must re-welcome). Without the discard, the stale
             # flag suppresses the recreated surface's welcome (same
             # lockstep as close_session / pop_tombstones_for_box).
-            self._welcome_shown.discard(session_key)
+            self._welcome_shown.discard(display_key)
             # FIX 7 (r3): this is a MESSAGE DROP, not silent cleanup — the
             # render that triggered eviction is lost. REGISTER: the
             # lost-message window is now exactly "dead getter at the 4th
@@ -327,8 +345,8 @@ class ChatRenderHandler:
             # getter re-wires (tab reopen) or a later render mounts.
             _logger.warning(
                 "chat surface evicted after %d consecutive mount misses — "
-                "dropped render for sk=%r (dead getter / closed tab)",
-                self._MOUNT_MISS_LIMIT, session_key)
+                "dropped render for display_key=%r (dead getter / closed tab)",
+                self._MOUNT_MISS_LIMIT, display_key)
             # Brief contract: recreate LAZILY — this render drops (the SP3
             # destroyed-surface contract already swallows late appends), so
             # no live-but-orphaned surface lingers while wiring is dead.
@@ -361,7 +379,16 @@ class ChatRenderHandler:
         already popped when close_session runs — which made the entire
         fan-out dead in production (probe: sp5c1-fanout-probe.py). The box
         argument wins when present; the getter remains the fallback for
-        direct close_session(key) calls (tests, non-tab callers)."""
+        direct close_session(key) calls (tests, non-tab callers).
+
+        SPEC-12 key domain: `session_key` here is the closing TAB's key,
+        which IS its display key (`project:<name>` for a project tab) — the
+        tombstone and the pop below hit the DISPLAY-keyed structures
+        unchanged. The fan-out loop stays DEFENSIVE ("plus any surface
+        mounted in the passed box"): each victim's key `sk` is now a
+        display key (the cache is display-keyed), tombstoned on itself;
+        one box holds one surface, so N≤1 in the normal case. Streaming
+        structures stay SESSION-keyed — untouched here."""
         self._closed_sessions[session_key] = True
         surface = self._surfaces.pop(session_key, None)
         if surface is not None:
@@ -447,15 +474,17 @@ class ChatRenderHandler:
         # session's late render is DROPPED (an unmounted orphan surface must
         # not resurrect after close). NOT cleared here: closure is only
         # reversed by re-wiring (reopen path), not by the late render itself.
-        key = session_key or ""
-        if self._closed_sessions.get(key):
+        # SPEC-12 BUG#1a: tombstones are DISPLAY-keyed — a late render for a
+        # session routed into a closed project tab dies on the TAB's key.
+        display_key = mount_key or session_key or ""      # SPEC-12 BUG#1a
+        if self._closed_sessions.get(display_key):
             return
-        surface = self._surface_for(key, mount_key=mount_key)
+        surface = self._surface_for(session_key or "", mount_key=mount_key)
         # FIX 11: _surface_for returns None when the unmountable surface was
         # JUST evicted (lazy recreation) — this render drops, exactly like
         # the tombstone path above.
         if surface is None:
-            _logger.debug("render dropped: surface evicted after mount misses sk=%r", key)
+            _logger.debug("render dropped: surface evicted after mount misses display_key=%r", display_key)
             return
         surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
         # FIX 1 (r3): the round-2 parent re-read reset that lived here is
@@ -486,24 +515,27 @@ class ChatRenderHandler:
         (self._welcome_shown) suppresses re-emission on tab reopen (the
         surface and its document state survive reopen; the flag mirrors the
         surface's lifetime exactly — cleared at close/fan-out/tombstone-pop).
+
+        SPEC-12: the arg is the TAB key, which IS its display key (project
+        tab → `project:<name>`); every gate here runs on the display key.
         """
-        key = session_key or ""
-        if key in self._welcome_shown:
+        display_key = session_key or ""
+        if display_key in self._welcome_shown:
             return
         # Tombstone drop (mirrors _append_to_surface's guard order): a
         # closed key's late welcome is DROPPED — _surface_for does NOT know
         # about tombstones (the check lives in the append path), so it must
         # be explicit here or the welcome leaks onto the orphan surface.
-        if self._closed_sessions.get(key):
+        if self._closed_sessions.get(display_key):
             return
         # Guard order (mirrors _append_to_surface): surface FIRST — if the
         # unmountable surface was just evicted (FIX 11, lazy recreation),
         # this emission drops with the render; the flag is NOT consumed so
         # the recreated surface still gets its welcome.
-        surface = self._surface_for(key)
+        surface = self._surface_for(display_key)
         if surface is None:
             return
-        if key in self._welcome_shown:
+        if display_key in self._welcome_shown:
             return
         # Composition — the SAME pipeline as agent content, then re-sanitize
         # (constraint 2: never raw HTML into the surface). The stable CSS
@@ -535,14 +567,14 @@ class ChatRenderHandler:
             return
         if not html_fragment:
             return  # fail-closed returned "" — no empty welcome row
-        if key in self._welcome_shown:
+        if display_key in self._welcome_shown:
             return
         surface.append_message("system", html_fragment)
-        self._welcome_shown.add(key)
+        self._welcome_shown.add(display_key)
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 
-    def render_async(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None, agent_name: str = None, agent_color: str = None):
+    def render_async(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None, agent_name: str = None, agent_color: str = None, mount_key: str | None = None):
         """
         Compose HTML off-thread, append to the session surface on main.
 
@@ -551,12 +583,18 @@ class ChatRenderHandler:
         on_forward_click/agent_color are accepted for signature compat and
         ignored (dropped for Phase A, ruling R2).
 
+        SPEC-12 BUG#4+#10: pass mount_key for any non-project caller; the
+        surface cache is display-keyed (mount_key or session_key). SP4c
+        threads the mount_key at the chat_handler call sites.
+
         Args:
             role:           "You", "Agent" or "System"
             text:           Raw message text
             session_key:    For reentrancy guarding and surface selection
             on_bubble_ready: callback(None) — called on main thread
             on_error:       optional callback(error_msg) — called on main thread
+            mount_key:      display key the surface is cached/mounted under
+                            (project-routed renders); None → session_key
         """
         if not self._reentrancy.add(session_key):
             return  # render already in flight
@@ -571,9 +609,11 @@ class ChatRenderHandler:
                         # FIX 10 (round 2): tombstone check in the async path
                         # too — close_session during an in-flight compose
                         # drops the late render (no resurrection).
-                        if self._closed_sessions.get(session_key):
+                        # SPEC-12 BUG#1a: the tombstone set is DISPLAY-keyed.
+                        display_key = mount_key or session_key
+                        if self._closed_sessions.get(display_key):
                             return
-                        surface = self._surface_for(session_key)
+                        surface = self._surface_for(session_key, mount_key=mount_key)
                         # FIX 11: evicted-just-now surface → drop (lazy
                         # recreation contract, same as _append_to_surface).
                         if surface is None:
@@ -584,7 +624,7 @@ class ChatRenderHandler:
                     except Exception:
                         _logger.exception("surface append failed — escaped raw text fallback")
                         try:
-                            self._surface_for(session_key).append_message(
+                            self._surface_for(session_key, mount_key=mount_key).append_message(
                                 _surface_role(role),
                                 _html.escape(text) + "<!-- fallback: escaped raw -->",
                                 agent_name=agent_name,
@@ -673,8 +713,9 @@ class ChatRenderHandler:
                         looked up from _main_content._agent_mgr using session_key.
             mount_key: FIX 2 — key of the box the surface mounts in
                        (project-routed replies pass the resolved box key;
-                       None → mounts/verifies under session_key). Surface
-                       CACHE stays session-keyed.
+                       None → mounts/verifies under session_key). SPEC-12:
+                       the surface CACHE is DISPLAY-keyed
+                       (mount_key or session_key), not session-keyed.
 
         Returns:
             None — ALWAYS (ruling R1: the surface owns the widget tree;
@@ -773,7 +814,9 @@ class ChatRenderHandler:
             render: Append the final row (default True).
             mount_key: FIX 7 — key of the box the surface mounts in
                 (project-routed replies pass the resolved key; None →
-                mounts/verifies under session_key). Cache stays session-keyed.
+                mounts/verifies under session_key). SPEC-12: the surface
+                CACHE is DISPLAY-keyed (mount_key or session_key), not
+                session-keyed.
         """
         if session_key not in self._streaming:
             return
