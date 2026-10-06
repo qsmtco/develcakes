@@ -175,6 +175,15 @@ class AgentRuntimeHandler:
         # so same-turn deltas are never wrongly dropped.
         self._turn_tokens: dict[str, object] = {}
 
+        # SPEC-12 (R5 REV 3): turn-scoped reply target. session_key → the
+        # DISPLAY key the CURRENT turn's reply renders under. Set on ENTRY of
+        # every send_to_special_agent (reply_target or the routing key);
+        # consumed by _reply_key() at the 11 render/mount sites; cleared at
+        # the END of _do_response_complete/_do_error (SP3b). A per-send slot
+        # (never a session-scoped mark) so a member's private /ask reply does
+        # not mute its LATER group replies.
+        self._turn_reply_target: dict[str, str] = {}
+
         # SPEC-10 SP2b (D2 REV 2): dispatch-time attribution snapshot for the
         # turn-complete agent checkpoint: session_key ->
         # (project_name, project_path, write_cwd). None until
@@ -1183,13 +1192,23 @@ class AgentRuntimeHandler:
 
     # ── Public: send a message to a special agent ────────────────────────────
 
-    def send_to_special_agent(self, session_key: str, text: str) -> None:
+    def send_to_special_agent(self, session_key: str, text: str,
+                              reply_target: str | None = None) -> None:
         """
         Send a user message to a special agent for processing.
 
         Called by ChatHandler.on_send() when the target tab is a special agent.
 
         Requires an active project — special agents are project-scoped.
+
+        Args:
+            session_key: the agent session key.
+            text: the message text.
+            reply_target: SPEC-12 (R5 REV 3) — the DISPLAY key this turn's
+                reply renders under. `/ask`+`/delegate`/bubble-forward pass
+                the agent's own key (private view); group fan-out passes
+                "project:<name>"; None → the routing key (the project).
+                Never a persistent mark — cleared at turn end (SP3b).
         """
         agent_def = self._agents.get(session_key)
         if agent_def is None:
@@ -1202,6 +1221,12 @@ class AgentRuntimeHandler:
         # Special agents require an active project.
         # (The KB-helper carve-out died with the KB stack, SPEC-04.)
         if self._active_project is None:
+            # SPEC-12 SP3a-audit BUG#1: this guard DOES render (an error
+            # bubble via _do_error, whose _resolve_chat_box is slot-first) —
+            # a stale slot from a prior /ask would shadow the session's own
+            # tab and drop/misroute that error. Clear it so the error
+            # resolves to the session's own tab (pre-SP3a behavior).
+            self._turn_reply_target.pop(session_key, None)
             if self._GLib is not None:
                 self._GLib.idle_add(self._do_error, session_key,
                                     "Open a project first. Special agents work within projects.")
@@ -1209,6 +1234,17 @@ class AgentRuntimeHandler:
                 self._do_error(session_key,
                                "Open a project first. Special agents work within projects.")
             return
+
+        # SPEC-12 (BUG#18/#26): ALWAYS normalize the slot for a send that will
+        # actually run — a non-targeting caller defaults to the routing
+        # (project) key, so no stale private target survives. Placed AFTER
+        # both early-return guards so the slot is set only for sends that run
+        # a turn. (The no-project guard above instead CLEARS the slot — its
+        # error render is slot-consuming; SP3a-audit BUG#1.)
+        self._turn_reply_target[session_key] = (
+            reply_target if reply_target is not None
+            else self._resolve_mount_key(session_key)
+        )
 
         if self._active_project is not None:
             project_name, project_path = self._active_project
@@ -1591,40 +1627,44 @@ class AgentRuntimeHandler:
     # ── Chat box resolution ────────────────────────────────────────────────
 
     def _resolve_chat_box(self, session_key: str):
-        """Resolve the chat box for a session key.
-
-        If no direct tab exists (e.g. special agent messaged from project group chat),
-        looks up the project via AgentRoutingTable and returns the project chat box.
-        """
-        chat_box = self._mc.get_chat_box_for_session(session_key)
-        if chat_box is not None:
-            return chat_box
-        # No direct tab — check if this agent is routed to a project
+        """SPEC-12 R7: resolve the box from the turn reply key (slot first),
+        else the direct tab, else the agent's project, else the ACTIVE
+        project, else None (no project open, no tab)."""
+        key = self._turn_reply_target.get(session_key) or session_key
+        direct = self._mc.get_chat_box_for_session(key)
+        if direct is not None:
+            return direct
+        project_name = None
         if self._agent_to_project is not None:
             project_name = self._agent_to_project.get_project(session_key)
-            if project_name is not None:
-                logger.debug("[handler] _resolve_chat_box: sk=%s → project:%s", session_key, project_name)
-                return self._mc.get_chat_box_for_session(f"project:{project_name}")
-        logger.debug("[handler] _resolve_chat_box: sk=%s → None (no tab, no routing)", session_key)
+        if project_name is None and self._active_project is not None:
+            project_name = self._active_project[0]
+        if project_name is not None:
+            return self._mc.get_chat_box_for_session(f"project:{project_name}")
         return None
 
-    def _resolve_mount_key(self, session_key: str) -> str | None:
-        """SPEC-06 SP5a FIX 2: the RESOLVED display key whose chat box
-        renders this session's transcript — the mount_key passed to
-        render_sync so the surface mounts in the VISIBLE box.
+    def _reply_key(self, session_key: str) -> str:
+        """SPEC-12 (R5 REV 3): the CURRENT turn's reply/display key — the
+        per-send private target when set, else the routing (project) key.
+        NEVER None (falls back to the session key), so a mount_key passed to
+        render_sync/render_async is always a real key."""
+        return (self._turn_reply_target.get(session_key)
+                or self._resolve_mount_key(session_key)
+                or session_key)
 
-        Mirrors _resolve_chat_box's lookup (direct tab first, then the
-        project group-chat key from AgentRoutingTable) but returns the KEY
-        instead of the widget: personal-tab sessions return their own key,
-        project-routed sessions return "project:<name>". None = no visible
-        box (handler retries the mount on the next render — FIX 1)."""
-        if self._mc.get_chat_box_for_session(session_key) is not None:
-            return session_key
+    def _resolve_mount_key(self, session_key: str) -> str:
+        """SPEC-12 R7: the agent's project, else the ACTIVE open project,
+        else the raw session key (no project open). NEVER None — a caller
+        always gets a real key. Turn-scoped private targets are applied by
+        the CALLER via _reply_key (R5 REV 3)."""
+        project_name = None
         if self._agent_to_project is not None:
             project_name = self._agent_to_project.get_project(session_key)
-            if project_name is not None:
-                return f"project:{project_name}"
-        return None
+        if project_name is None and self._active_project is not None:
+            project_name = self._active_project[0]
+        if project_name is not None:
+            return f"project:{project_name}"
+        return session_key
 
     # ── SPEC-08 SP4A: store-migration banner card + progress ─────────────────
 
@@ -2476,158 +2516,174 @@ class AgentRuntimeHandler:
             if complete_token is not current_token:
                 logger.debug("_do_response_complete: stale completion (token mismatch) for %s, skipping", session_key)
                 return
+        # SPEC-12 (R5 REV 3): bind the turn's reply key ONCE and use it at
+        # every render/mount site below. The pop is turn-GUARDED (SP3b-audit
+        # BUG#1): a nested send to the same session_key inside the try runs a
+        # NEW turn and sets a NEW slot — the outer finally must not clobber
+        # it. Capture THIS turn's token so the finally can check ownership.
+        my_token = self._turn_tokens.get(session_key)
+        reply_key = self._reply_key(session_key)
+        try:
+            # RACE-FIX v4: Mark session ended + completed BEFORE any rendering
+            # work or early returns. This ensures:
+            # 1. Stale deltas see the flag (regardless of idle ordering)
+            # 2. Duplicate completion is prevented (boolean, not counter-based)
+            # 3. Even if _crh is None, the flags are set (fixes early-return gap)
+            self._ended_sessions.add(session_key)
+            if session_key in self._session_completed:
+                logger.debug("_do_response_complete: duplicate completion for %s, skipping", session_key)
+                return
+            self._session_completed.add(session_key)
 
-        # RACE-FIX v4: Mark session ended + completed BEFORE any rendering
-        # work or early returns. This ensures:
-        # 1. Stale deltas see the flag (regardless of idle ordering)
-        # 2. Duplicate completion is prevented (boolean, not counter-based)
-        # 3. Even if _crh is None, the flags are set (fixes early-return gap)
-        self._ended_sessions.add(session_key)
-        if session_key in self._session_completed:
-            logger.debug("_do_response_complete: duplicate completion for %s, skipping", session_key)
-            return
-        self._session_completed.add(session_key)
+            # SPEC-10 SP2b (D2 REV 2): turn-complete agent checkpoint. Fires for
+            # COMPLETED turns only (this method IS the completed-turn dispatch —
+            # CANCELLED/FAILED turns route to _do_error, which never calls this).
+            self._maybe_agent_checkpoint(session_key, complete_token)
 
-        # SPEC-10 SP2b (D2 REV 2): turn-complete agent checkpoint. Fires for
-        # COMPLETED turns only (this method IS the completed-turn dispatch —
-        # CANCELLED/FAILED turns route to _do_error, which never calls this).
-        self._maybe_agent_checkpoint(session_key, complete_token)
+            if self._crh is None:
+                return
 
-        if self._crh is None:
-            return
+            # Clear accumulated streaming text — no longer needed
+            self._streaming_text.pop(session_key, None)
+            self._last_delta_dispatch.pop(session_key, None)
+            # AC3 Part A: drop any pending coalesced dispatch + dirty flag — the
+            # turn is over; leftovers would suppress scheduling on the next turn.
+            self._delta_dispatch_pending.discard(session_key)
+            self._delta_dirty.discard(session_key)
 
-        # Clear accumulated streaming text — no longer needed
-        self._streaming_text.pop(session_key, None)
-        self._last_delta_dispatch.pop(session_key, None)
-        # AC3 Part A: drop any pending coalesced dispatch + dirty flag — the
-        # turn is over; leftovers would suppress scheduling on the next turn.
-        self._delta_dispatch_pending.discard(session_key)
-        self._delta_dirty.discard(session_key)
-
-        was_streaming = self._crh.is_streaming(session_key)
-        project_name = self._active_project[0] if self._active_project else None
-
-        logger.debug("[handler] _do_response_complete: sk=%s was_streaming=%s text_len=%d",
-                     session_key, was_streaming, len(text or ""))
-
-        # Resolve the agent's display name from the local agent registry.
-        # None for unregistered session_keys (defensive — fallback in
-        # end_streaming / render_sync uses agent_mgr.get_name which works
-        # for gateway agents).
-        agent_def = self._agents.get(session_key)
-        resolved_name = agent_def.display_name if agent_def else None
-
-        # RACE-FIX: The authoritative full text is the `text` argument from the
-        # runtime (the complete LLM response). sb.plain_text may be stale if the
-        # handler's throttle skipped update_streaming calls for later chunks.
-        # Overwrite sb.plain_text with the full text BEFORE crabcard extraction
-        # so _finalize always renders the complete message.
-        if was_streaming and text:
-            self._crh.set_streaming_text(session_key, text)
-
-        # Phase C: Extract crabcards from the authoritative text before end_streaming
-        if was_streaming and project_name and self._fh is not None:
-            from utils.crabcard_parser import extract_crabcards
-            full_text = self._crh.get_streaming_text(session_key) or ""
-            if full_text:
-                cleaned, cards = extract_crabcards(full_text, project_name, "Special Agent")
-                if cards:
-                    # Batch all cards from one response into a single main-thread
-                    # pass — avoids N idle callbacks racing the vadjustment.
-                    for card_data in cards:
-                        card_data.project_name = project_name
-                        card_data.metadata["session_key"] = session_key
-                        card_data.metadata["tab_key"] = (
-                            self._resolve_mount_key(session_key) or session_key)
-                        # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
-                        # crabcards must resolve to the emitting session's tab
-                        # after the window's old linkage callback died.
-                    self._fh.add_cards_batch(cards)
-                    # Overwrite streaming text with cleaned version so
-                    # end_streaming._finalize renders the bubble without crabcard blocks
-                    self._crh.set_streaming_text(session_key, cleaned)
-
-        # Phase B: end_streaming() finalizes the bubble (uses current sb.plain_text).
-        # Pass resolved_name so local special agents get their header.
-        # BUG #22: if the streaming text is empty (tool-only turn where the BUG #21
-        # empty-delta started a bubble but no content arrived), suppress the final
-        # bubble render — the streaming widget is cleaned up, but no empty header
-        # bubble is created. end_streaming's render=False does the cleanup only.
-        streaming_text = self._crh.get_streaming_text(session_key) or ""
-        self._crh.end_streaming(
-            session_key,
-            agent_name=resolved_name,
-            render=bool(streaming_text.strip()),
-            # FIX 7 (SP5a round 2): mount_key through the STREAMING path —
-            # production always streams (was_streaming always True), so the
-            # final transcript row's surface must mount by the RESOLVED key
-            # exactly like the render_sync fallback path already does.
-            mount_key=self._resolve_mount_key(session_key),
-        )
-
-        # Non-streaming fallback: render from text argument with crabcard extraction
-        # Defensive: if response completed with empty text and no streaming bubble,
-        # render a fallback message so the user sees feedback instead of silence.
-        if not was_streaming and not text:
-            chat_box = self._resolve_chat_box(session_key)
-            if chat_box is not None:
-                fallback_text = "⚠️ Agent returned no content. This may indicate a configuration error or an issue with the LLM provider."
-                bubble = self._crh.render_sync(
-                    "System", fallback_text, session_key, agent_name="System",
-                    mount_key=self._resolve_mount_key(session_key),
-                )
-                if bubble is not None:
-                    chat_box.append(bubble)
-                self._mc.scroll_chat_to_bottom()
-
-        if not was_streaming and text:
-            if project_name and self._fh is not None:
-                from utils.crabcard_parser import extract_crabcards
-                cleaned, cards = extract_crabcards(text, project_name, "Special Agent")
-                if cards:
-                    # Batch: single idle callback, single smart scroll
-                    for card_data in cards:
-                        card_data.project_name = project_name
-                        card_data.metadata["session_key"] = session_key
-                        card_data.metadata["tab_key"] = (
-                            self._resolve_mount_key(session_key) or session_key)
-                        # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
-                        # same contract as the streaming block above.
-                    self._fh.add_cards_batch(cards)
-                text_for_bubble = cleaned if cards else text
-            else:
-                text_for_bubble = text
-
-            chat_box = self._resolve_chat_box(session_key)
-            if chat_box is not None:
-                bubble = self._crh.render_sync(
-                    "Agent", text_for_bubble, session_key, agent_name=resolved_name or "Agent",
-                    mount_key=self._resolve_mount_key(session_key),
-                )
-                if bubble is not None:
-                    chat_box.append(bubble)
-                self._mc.scroll_chat_to_bottom()
-
-        # Agent command parsing hook (Phase 6.2) — fire after bubble render, before lifecycle
-        if self._on_agent_response is not None and text:
+            was_streaming = self._crh.is_streaming(session_key)
             project_name = self._active_project[0] if self._active_project else None
-            self._on_agent_response(session_key, text, project_name)
 
-        # Fire lifecycle: agent finished → ActivityHandler progress bar
-        if self._on_agent_end_cb:
-            self._on_agent_end_cb(session_key)
-        # Phase 4 Part C: drain this session's batched bubbles BEFORE the
-        # drawer's end separator, so a queued tool row can never render
-        # underneath the separator that follows it.
-        self.flush_pending_activity_bubbles(session_key)
-        # NEW: drawer-lifecycle end → drawer separator
-        if self._on_drawer_lifecycle is not None:
-            agent_def_dl = self._agents.get(session_key)
-            agent_name_dl = agent_def_dl.display_name if agent_def_dl else "Agent"
-            self._on_drawer_lifecycle(session_key, agent_name_dl, "end")
-        # _ended_sessions is now set at the TOP of _do_response_complete (line 1454)
-        # for race-safety. This duplicate add is harmless (idempotent) but kept
-        # for documentation of the lifecycle endpoint.
+            logger.debug("[handler] _do_response_complete: sk=%s was_streaming=%s text_len=%d",
+                         session_key, was_streaming, len(text or ""))
+
+            # Resolve the agent's display name from the local agent registry.
+            # None for unregistered session_keys (defensive — fallback in
+            # end_streaming / render_sync uses agent_mgr.get_name which works
+            # for gateway agents).
+            agent_def = self._agents.get(session_key)
+            resolved_name = agent_def.display_name if agent_def else None
+
+            # RACE-FIX: The authoritative full text is the `text` argument from the
+            # runtime (the complete LLM response). sb.plain_text may be stale if the
+            # handler's throttle skipped update_streaming calls for later chunks.
+            # Overwrite sb.plain_text with the full text BEFORE crabcard extraction
+            # so _finalize always renders the complete message.
+            if was_streaming and text:
+                self._crh.set_streaming_text(session_key, text)
+
+            # Phase C: Extract crabcards from the authoritative text before end_streaming
+            if was_streaming and project_name and self._fh is not None:
+                from utils.crabcard_parser import extract_crabcards
+                full_text = self._crh.get_streaming_text(session_key) or ""
+                if full_text:
+                    cleaned, cards = extract_crabcards(full_text, project_name, "Special Agent")
+                    if cards:
+                        # Batch all cards from one response into a single main-thread
+                        # pass — avoids N idle callbacks racing the vadjustment.
+                        for card_data in cards:
+                            card_data.project_name = project_name
+                            card_data.metadata["session_key"] = session_key
+                            card_data.metadata["tab_key"] = (
+                                reply_key)
+                            # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
+                            # crabcards must resolve to the emitting session's tab
+                            # after the window's old linkage callback died.
+                        self._fh.add_cards_batch(cards)
+                        # Overwrite streaming text with cleaned version so
+                        # end_streaming._finalize renders the bubble without crabcard blocks
+                        self._crh.set_streaming_text(session_key, cleaned)
+
+            # Phase B: end_streaming() finalizes the bubble (uses current sb.plain_text).
+            # Pass resolved_name so local special agents get their header.
+            # BUG #22: if the streaming text is empty (tool-only turn where the BUG #21
+            # empty-delta started a bubble but no content arrived), suppress the final
+            # bubble render — the streaming widget is cleaned up, but no empty header
+            # bubble is created. end_streaming's render=False does the cleanup only.
+            streaming_text = self._crh.get_streaming_text(session_key) or ""
+            self._crh.end_streaming(
+                session_key,
+                agent_name=resolved_name,
+                render=bool(streaming_text.strip()),
+                # FIX 7 (SP5a round 2): mount_key through the STREAMING path —
+                # production always streams (was_streaming always True), so the
+                # final transcript row's surface must mount by the RESOLVED key
+                # exactly like the render_sync fallback path already does.
+                mount_key=reply_key,
+            )
+
+            # Non-streaming fallback: render from text argument with crabcard extraction
+            # Defensive: if response completed with empty text and no streaming bubble,
+            # render a fallback message so the user sees feedback instead of silence.
+            if not was_streaming and not text:
+                chat_box = self._resolve_chat_box(session_key)
+                if chat_box is not None:
+                    fallback_text = "⚠️ Agent returned no content. This may indicate a configuration error or an issue with the LLM provider."
+                    bubble = self._crh.render_sync(
+                        "System", fallback_text, session_key, agent_name="System",
+                        mount_key=reply_key,
+                    )
+                    if bubble is not None:
+                        chat_box.append(bubble)
+                    self._mc.scroll_chat_to_bottom()
+
+            if not was_streaming and text:
+                if project_name and self._fh is not None:
+                    from utils.crabcard_parser import extract_crabcards
+                    cleaned, cards = extract_crabcards(text, project_name, "Special Agent")
+                    if cards:
+                        # Batch: single idle callback, single smart scroll
+                        for card_data in cards:
+                            card_data.project_name = project_name
+                            card_data.metadata["session_key"] = session_key
+                            card_data.metadata["tab_key"] = (
+                                reply_key)
+                            # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
+                            # same contract as the streaming block above.
+                        self._fh.add_cards_batch(cards)
+                    text_for_bubble = cleaned if cards else text
+                else:
+                    text_for_bubble = text
+
+                chat_box = self._resolve_chat_box(session_key)
+                if chat_box is not None:
+                    bubble = self._crh.render_sync(
+                        "Agent", text_for_bubble, session_key, agent_name=resolved_name or "Agent",
+                        mount_key=reply_key,
+                    )
+                    if bubble is not None:
+                        chat_box.append(bubble)
+                    self._mc.scroll_chat_to_bottom()
+
+            # Agent command parsing hook (Phase 6.2) — fire after bubble render, before lifecycle
+            if self._on_agent_response is not None and text:
+                project_name = self._active_project[0] if self._active_project else None
+                self._on_agent_response(session_key, text, project_name)
+
+            # Fire lifecycle: agent finished → ActivityHandler progress bar
+            if self._on_agent_end_cb:
+                self._on_agent_end_cb(session_key)
+            # Phase 4 Part C: drain this session's batched bubbles BEFORE the
+            # drawer's end separator, so a queued tool row can never render
+            # underneath the separator that follows it.
+            self.flush_pending_activity_bubbles(session_key)
+            # NEW: drawer-lifecycle end → drawer separator
+            if self._on_drawer_lifecycle is not None:
+                agent_def_dl = self._agents.get(session_key)
+                agent_name_dl = agent_def_dl.display_name if agent_def_dl else "Agent"
+                self._on_drawer_lifecycle(session_key, agent_name_dl, "end")
+            # _ended_sessions is now set at the TOP of _do_response_complete (line 1454)
+            # for race-safety. This duplicate add is harmless (idempotent) but kept
+            # for documentation of the lifecycle endpoint.
+        finally:
+            # SP3b-audit BUG#1: pop ONLY this turn's slot — a nested
+            # same-session send inside the try owns a NEWER token; leave it.
+            # SP3b-audit BUG#1 residual: a None-token (legacy / guard-2
+            # deferred) call has no independent identity — do NOT pop (the
+            # next send normalizes the slot via BUG#18).
+            if (complete_token is not None
+                    and self._turn_tokens.get(session_key) is my_token):
+                self._turn_reply_target.pop(session_key, None)
 
     def _on_token_usage(self, session_key: str, total_tokens: int, cost: float) -> None:
         """AgentRuntime token usage callback. Store and log."""
@@ -2743,7 +2799,7 @@ class AgentRuntimeHandler:
                 session_key, agent_name=None, render=bool(streaming_text.strip()),
                 # FIX 4 (SP5a r3): thread the resolved mount key like the
                 # main :2102 path — the final row mounts in the project box.
-                mount_key=self._resolve_mount_key(session_key),
+                mount_key=self._reply_key(session_key),
             )
 
         chat_box = self._resolve_chat_box(session_key)
@@ -2762,7 +2818,7 @@ class AgentRuntimeHandler:
         )
         bubble = self._crh.render_sync(
             "Agent", text, session_key, agent_name=None,
-            mount_key=self._resolve_mount_key(session_key),
+            mount_key=self._reply_key(session_key),
         )
         if bubble is not None:
             chat_box.append(bubble)
@@ -2798,11 +2854,11 @@ class AgentRuntimeHandler:
             self._crh.end_streaming(
                 session_key, agent_name=None, render=bool(streaming_text.strip()),
                 # FIX 4 (SP5a r3): resolved mount key threaded like :2102.
-                mount_key=self._resolve_mount_key(session_key),
+                mount_key=self._reply_key(session_key),
             )
             bubble = self._crh.render_sync(
                 "Agent", text, session_key, agent_name=None,
-                mount_key=self._resolve_mount_key(session_key),
+                mount_key=self._reply_key(session_key),
             )
             if bubble is not None:
                 chat_box.append(bubble)
@@ -2875,129 +2931,141 @@ class AgentRuntimeHandler:
             if error_token is not current_token:
                 logger.debug("_do_error: stale error (token mismatch) for %s, skipping", session_key)
                 return
-        # RACE-FIX v4: Mark session ended + completed (same as _do_response_complete).
-        self._ended_sessions.add(session_key)
-        if session_key in self._session_completed:
-            logger.debug("_do_error: duplicate completion for %s, skipping", session_key)
-            return
-        self._session_completed.add(session_key)
+        # SPEC-12: bind once; the pop is turn-GUARDED (SP3b-audit BUG#1 — a
+        # nested same-session send owns a newer token and must keep its slot).
+        my_token = self._turn_tokens.get(session_key)
+        reply_key = self._reply_key(session_key)
+        try:
+            # RACE-FIX v4: Mark session ended + completed (same as _do_response_complete).
+            self._ended_sessions.add(session_key)
+            if session_key in self._session_completed:
+                logger.debug("_do_error: duplicate completion for %s, skipping", session_key)
+                return
+            self._session_completed.add(session_key)
 
-        logger.debug("[handler] _do_error: sk=%s msg=%s", session_key, message)
-        self._streaming_text.pop(session_key, None)
-        self._last_delta_dispatch.pop(session_key, None)
-        # AC3 Part A: drop any pending coalesced dispatch + dirty flag — the
-        # turn is over; leftovers would suppress scheduling on the next turn.
-        self._delta_dispatch_pending.discard(session_key)
-        self._delta_dirty.discard(session_key)
-        # When the runtime passes a raw exception object (not a string),
-        # translate it to a user-friendly message for display while keeping
-        # the exception stored in _last_error_exception for context enrichment.
-        if isinstance(message, BaseException):
-            from agent.llm.streaming import friendly_error_message
-            display_msg = friendly_error_message(message)
-        else:
-            display_msg = str(message)
-        # Resolve agent display name from the local registry so the error
-        # bubble header shows "Coder" / "Debugger" / etc. instead of "Agent".
-        # Mirrors the resolution in _do_response_complete.
-        agent_def = self._agents.get(session_key)
-        resolved_name = agent_def.display_name if agent_def else None
-        if self._crh is not None:
-            # BUG #22 guard (same pattern as _do_response_complete): on a
-            # tool-only turn the streaming bubble exists but holds no text —
-            # end_streaming must clean up WITHOUT rendering an empty bubble.
-            streaming_text = self._crh.get_streaming_text(session_key) or ""
-            self._crh.end_streaming(
-                session_key,
-                agent_name=resolved_name,
-                render=bool(streaming_text.strip()),
-                # FIX 4 (SP5a r3): resolved mount key threaded like :2102.
-                mount_key=self._resolve_mount_key(session_key),
-            )
-            chat_box = self._resolve_chat_box(session_key)
-            if chat_box is not None:
-                rendered = f"[Error] {display_msg}"
+            logger.debug("[handler] _do_error: sk=%s msg=%s", session_key, message)
+            self._streaming_text.pop(session_key, None)
+            self._last_delta_dispatch.pop(session_key, None)
+            # AC3 Part A: drop any pending coalesced dispatch + dirty flag — the
+            # turn is over; leftovers would suppress scheduling on the next turn.
+            self._delta_dispatch_pending.discard(session_key)
+            self._delta_dirty.discard(session_key)
+            # When the runtime passes a raw exception object (not a string),
+            # translate it to a user-friendly message for display while keeping
+            # the exception stored in _last_error_exception for context enrichment.
+            if isinstance(message, BaseException):
+                from agent.llm.streaming import friendly_error_message
+                display_msg = friendly_error_message(message)
+            else:
+                display_msg = str(message)
+            # Resolve agent display name from the local registry so the error
+            # bubble header shows "Coder" / "Debugger" / etc. instead of "Agent".
+            # Mirrors the resolution in _do_response_complete.
+            agent_def = self._agents.get(session_key)
+            resolved_name = agent_def.display_name if agent_def else None
+            if self._crh is not None:
+                # BUG #22 guard (same pattern as _do_response_complete): on a
+                # tool-only turn the streaming bubble exists but holds no text —
+                # end_streaming must clean up WITHOUT rendering an empty bubble.
+                streaming_text = self._crh.get_streaming_text(session_key) or ""
+                self._crh.end_streaming(
+                    session_key,
+                    agent_name=resolved_name,
+                    render=bool(streaming_text.strip()),
+                    # FIX 4 (SP5a r3): resolved mount key threaded like :2102.
+                    mount_key=reply_key,
+                )
+                chat_box = self._resolve_chat_box(session_key)
+                if chat_box is not None:
+                    rendered = f"[Error] {display_msg}"
+                    try:
+                        exc_obj = self._last_error_exception.get(session_key)
+                        if exc_obj is not None:
+                            ctx = getattr(exc_obj, "_crabcakes_context", None)
+                            if ctx:
+                                rendered += f"\nProvider: {ctx.get('provider')} | Model: {ctx.get('model')}"
+                    except Exception:
+                        pass
+                    bubble = self._crh.render_sync(
+                        "Agent", rendered, session_key, agent_name=resolved_name or "Agent",
+                        mount_key=reply_key,
+                    )
+                    if bubble is not None:
+                        chat_box.append(bubble)
+                    self._mc.scroll_chat_to_bottom()
+
+            # SPEC-02: turn-fatal errors surface in the Project Feed too, not just
+            # chat + stderr. Same guard pattern as publish_cli_nudge_card (:538):
+            # the card is skipped only when no feed handler is wired (headless),
+            # never because no project is active — project_name falls back to
+            # "(none)" exactly like the nudge card.
+            #
+            # SPEC-02 fix round (audit #2/#3): the WHOLE card block is
+            # best-effort. The original narrow try covered only the context
+            # lookup, so a non-dict `_crabcakes_context` attachment
+            # (AttributeError on `.get`) or a raising `add_card` (lock
+            # contention / mid-shutdown) escaped `_do_error` entirely — no card,
+            # and the `_on_agent_end_cb` lifecycle fire below never ran, leaving
+            # the activity drawer stuck on "running". Everything — metadata
+            # read, card construction, add_card — is now inside one guard;
+            # a failure logs and falls through to the lifecycle fire.
+            if self._fh is not None:
                 try:
+                    from agent.runtime import CANCEL_MESSAGE
+                    from models.feed_card import FeedCardData
+                    provider_meta = None
                     exc_obj = self._last_error_exception.get(session_key)
                     if exc_obj is not None:
                         ctx = getattr(exc_obj, "_crabcakes_context", None)
-                        if ctx:
-                            rendered += f"\nProvider: {ctx.get('provider')} | Model: {ctx.get('model')}"
+                        # Audit #2: the runtime attaches this as a dict, but a
+                        # truthy non-dict (corrupt attachment) must not escape —
+                        # treat anything but a dict as absent.
+                        provider_meta = ctx if isinstance(ctx, dict) else None
+                    # SPEC-02 fix round (audit #4): a deliberate user cancel is
+                    # not a turn-fatal provider error — no "Turn failed" card
+                    # (stop-all in SPEC-09 would otherwise spray one per agent).
+                    # Compared against the runtime's constant, never a bare
+                    # string, so the two sides can't drift.
+                    if display_msg != CANCEL_MESSAGE:
+                        card = FeedCardData(
+                            card_type="system",
+                            source="agent",
+                            title=f"Turn failed: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}",
+                            body=display_msg[:2000],
+                            author="Runtime",
+                            timestamp=datetime.now(timezone.utc),  # noqa: UP017 — same pattern as publish_cli_nudge_card (:565)
+                            project_name=self._active_project[0] if self._active_project else "(none)",
+                            metadata={
+                                "session_key": session_key,
+                                "kind": "turn_error",
+                                "provider": (provider_meta or {}).get("provider"),
+                                "model": (provider_meta or {}).get("model"),
+                                "exception_type": (provider_meta or {}).get("exception_type"),
+                            },
+                        )
+                        self._fh.add_card(card)
                 except Exception:
-                    pass
-                bubble = self._crh.render_sync(
-                    "Agent", rendered, session_key, agent_name=resolved_name or "Agent",
-                    mount_key=self._resolve_mount_key(session_key),
-                )
-                if bubble is not None:
-                    chat_box.append(bubble)
-                self._mc.scroll_chat_to_bottom()
-
-        # SPEC-02: turn-fatal errors surface in the Project Feed too, not just
-        # chat + stderr. Same guard pattern as publish_cli_nudge_card (:538):
-        # the card is skipped only when no feed handler is wired (headless),
-        # never because no project is active — project_name falls back to
-        # "(none)" exactly like the nudge card.
-        #
-        # SPEC-02 fix round (audit #2/#3): the WHOLE card block is
-        # best-effort. The original narrow try covered only the context
-        # lookup, so a non-dict `_crabcakes_context` attachment
-        # (AttributeError on `.get`) or a raising `add_card` (lock
-        # contention / mid-shutdown) escaped `_do_error` entirely — no card,
-        # and the `_on_agent_end_cb` lifecycle fire below never ran, leaving
-        # the activity drawer stuck on "running". Everything — metadata
-        # read, card construction, add_card — is now inside one guard;
-        # a failure logs and falls through to the lifecycle fire.
-        if self._fh is not None:
-            try:
-                from agent.runtime import CANCEL_MESSAGE
-                from models.feed_card import FeedCardData
-                provider_meta = None
-                exc_obj = self._last_error_exception.get(session_key)
-                if exc_obj is not None:
-                    ctx = getattr(exc_obj, "_crabcakes_context", None)
-                    # Audit #2: the runtime attaches this as a dict, but a
-                    # truthy non-dict (corrupt attachment) must not escape —
-                    # treat anything but a dict as absent.
-                    provider_meta = ctx if isinstance(ctx, dict) else None
-                # SPEC-02 fix round (audit #4): a deliberate user cancel is
-                # not a turn-fatal provider error — no "Turn failed" card
-                # (stop-all in SPEC-09 would otherwise spray one per agent).
-                # Compared against the runtime's constant, never a bare
-                # string, so the two sides can't drift.
-                if display_msg != CANCEL_MESSAGE:
-                    card = FeedCardData(
-                        card_type="system",
-                        source="agent",
-                        title=f"Turn failed: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}",
-                        body=display_msg[:2000],
-                        author="Runtime",
-                        timestamp=datetime.now(timezone.utc),  # noqa: UP017 — same pattern as publish_cli_nudge_card (:565)
-                        project_name=self._active_project[0] if self._active_project else "(none)",
-                        metadata={
-                            "session_key": session_key,
-                            "kind": "turn_error",
-                            "provider": (provider_meta or {}).get("provider"),
-                            "model": (provider_meta or {}).get("model"),
-                            "exception_type": (provider_meta or {}).get("exception_type"),
-                        },
+                    logger.exception(
+                        "turn-error feed card emission failed for %s (non-fatal)",
+                        session_key,
                     )
-                    self._fh.add_card(card)
-            except Exception:
-                logger.exception(
-                    "turn-error feed card emission failed for %s (non-fatal)",
-                    session_key,
-                )
 
-        # Fire lifecycle: agent finished (error) → ActivityHandler returns to idle
-        if self._on_agent_end_cb:
-            self._on_agent_end_cb(session_key)
-        # Phase 4 Part C: drain batched bubbles before the end separator
-        # (same ordering guarantee as in _do_response_complete).
-        self.flush_pending_activity_bubbles(session_key)
-        # NEW: drawer-lifecycle end → drawer separator (error path)
-        if self._on_drawer_lifecycle is not None:
-            agent_def_dl = self._agents.get(session_key)
-            agent_name_dl = agent_def_dl.display_name if agent_def_dl else "Agent"
-            self._on_drawer_lifecycle(session_key, agent_name_dl, "end")
-        # _ended_sessions is set at the TOP of _do_error (line 1778) for race-safety.
+            # Fire lifecycle: agent finished (error) → ActivityHandler returns to idle
+            if self._on_agent_end_cb:
+                self._on_agent_end_cb(session_key)
+            # Phase 4 Part C: drain batched bubbles before the end separator
+            # (same ordering guarantee as in _do_response_complete).
+            self.flush_pending_activity_bubbles(session_key)
+            # NEW: drawer-lifecycle end → drawer separator (error path)
+            if self._on_drawer_lifecycle is not None:
+                agent_def_dl = self._agents.get(session_key)
+                agent_name_dl = agent_def_dl.display_name if agent_def_dl else "Agent"
+                self._on_drawer_lifecycle(session_key, agent_name_dl, "end")
+            # _ended_sessions is set at the TOP of _do_error (line 1778) for race-safety.
+        finally:
+            # SP3b-audit BUG#1: pop ONLY this turn's slot (nested-send guard).
+            # SP3b-audit BUG#1 residual: None-token (legacy / guard-2 deferred)
+            # calls own no slot — do NOT pop.
+            if (error_token is not None
+                    and self._turn_tokens.get(session_key) is my_token):
+                self._turn_reply_target.pop(session_key, None)

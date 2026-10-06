@@ -6013,26 +6013,24 @@ class TestCrabcardTabStamping:
     # so only the routing branch and the `or session_key` fallback of
     # _resolve_mount_key (agent_runtime_handler.py:1364) are witnessed.
 
-    def test_streaming_direct_tab_branch_takes_precedence(self):
-        """Branch witness 1: a REAL chat box exists for the session's own key
-        (personal tab). _resolve_mount_key must return the session_key itself —
-        direct-tab precedence — so tab_key == session_key, NOT project:<name>.
-        Falsifier: drop the direct-tab branch of _resolve_mount_key → this
-        test fails (tab_key would become 'project:alpha')."""
-        handler, crh, mc = _make_handler()
+    def test_streaming_reply_key_uses_turn_target_over_routing(self):
+        """SPEC-12 R5 REV 3: a turn's reply key is the PER-SEND slot when set
+        (a private /ask), NOT the routing project. Here the slot = the agent
+        key (private), routing = project:alpha; the crabcard tab_key must be
+        the agent key. Falsifier: drop the slot read in _reply_key → tab_key
+        becomes project:alpha."""
+        handler, crh, _mc = _make_handler()
         _register_coder(handler)
-        mc.get_chat_box_for_session = lambda sk: (
-            object() if sk == "special:coder" else None)
-        # Routing ALSO points at a project: precedence, not absence, is the pin.
         handler._agent_to_project = unittest.mock.MagicMock()
         handler._agent_to_project.get_project = lambda sk: "alpha"
         handler._active_project = ["alpha"]
+        handler._turn_reply_target["special:coder"] = "special:coder"  # private
         fh = unittest.mock.MagicMock()
         handler.set_feed_handler(fh)
         crh.is_streaming.return_value = True
         crh.get_streaming_text.return_value = (
             "before\n\n```crabcard\ntype: diff\n"
-            "title: Direct tab card\nfile: x.py\n---\n+body\n```\n"
+            "title: Private card\nfile: x.py\n---\n+body\n```\n"
         )
 
         handler._do_response_complete("special:coder", "unused when streaming")
@@ -6041,37 +6039,34 @@ class TestCrabcardTabStamping:
         card = fh.add_cards_batch.call_args.args[0][0]
         assert card.metadata["session_key"] == "special:coder"
         assert card.metadata["tab_key"] == "special:coder", (
-            "direct-tab precedence: a mounted personal tab must stamp its OWN "
-            "session_key, not the routed project key"
+            "the turn-scoped slot (private) must win over routing"
         )
 
-    def test_streaming_fallback_branch_no_tab_no_routing(self):
-        """Branch witness 2: neither a direct tab nor a routing entry exists —
-        _resolve_mount_key returns None and the `or session_key` fallback is
-        the documented contract (bug #5 fix: linkage never lost).
-        Falsifier: remove the `or session_key` fallback → tab_key becomes
-        None and this test fails."""
+    def test_reply_key_falls_back_to_active_project(self):
+        """SPEC-12 R7: with no per-agent routing, the reply key is the ACTIVE
+        project (the unrouted-agent host — never dropped). Falsifier: drop
+        the active-project fallback → tab_key becomes the raw session key."""
         handler, crh, mc = _make_handler()
         _register_coder(handler)
         mc.get_chat_box_for_session = lambda sk: None
         handler._agent_to_project = None
-        handler._active_project = ["alpha"]
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_reply_target.clear()          # no per-send slot
         fh = unittest.mock.MagicMock()
         handler.set_feed_handler(fh)
         crh.is_streaming.return_value = True
         crh.get_streaming_text.return_value = (
             "before\n\n```crabcard\ntype: diff\n"
-            "title: Fallback card\nfile: x.py\n---\n+body\n```\n"
+            "title: R7 card\nfile: x.py\n---\n+body\n```\n"
         )
 
         handler._do_response_complete("special:coder", "unused when streaming")
 
         fh.add_cards_batch.assert_called_once()
         card = fh.add_cards_batch.call_args.args[0][0]
-        assert card.metadata["session_key"] == "special:coder"
-        assert card.metadata["tab_key"] == "special:coder", (
-            "`or session_key` fallback: with no tab and no routing the stamp "
-            "must degrade to the emitting session_key, never None"
+        assert card.metadata["tab_key"] == "project:alpha", (
+            "R7 active-project fallback: an unrouted agent with a project "
+            "open must stamp the project key, never the raw session key"
         )
 
     def test_multiproject_divergence_is_deliberate(self):
@@ -6115,6 +6110,148 @@ class TestCrabcardTabStamping:
             "rendered) — divergence is the pinned design, not a bug"
         )
         assert card.metadata["session_key"] == "special:coder"
+    # ── SPEC-12 SP3c: R7 unrouted render + turn-scoped slot + terminal clear ─
+
+    def test_unrouted_agent_renders_into_open_project(self):
+        """SPEC-12 R7/BUG#27: an agent with NO routing entry + NO direct tab,
+        but a project OPEN, resolves to the project (never dropped). Falsifier:
+        drop the active-project fallback in _resolve_mount_key AND
+        _resolve_chat_box → _reply_key is the raw session key and the box is
+        None."""
+        handler, _crh, mc = _make_handler()
+        _register_coder(handler)
+        handler._agent_to_project = None
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_reply_target.clear()
+        assert handler._reply_key("special:coder") == "project:alpha"
+        # _resolve_chat_box also carries the fallback (BUG#27).
+        project_box = object()
+        mc.get_chat_box_for_session = lambda sk: (
+            project_box if sk == "project:alpha" else None)
+        assert handler._resolve_chat_box("special:coder") is project_box
+
+    def test_turn_scoped_slot_group_then_private_then_group(self):
+        """SPEC-12 BUG#11/#19: the reply target is per-send, not a session
+        mark. A private /ask sets the agent key for THAT send; the member's
+        LATER group send (no reply_target) routes back to the project."""
+        handler, _crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._agent_to_project = unittest.mock.MagicMock()
+        handler._agent_to_project.get_project = lambda sk: "alpha"
+        handler._active_project = ["alpha", "/p"]
+        # Send 1: private /ask sets the slot to the agent key.
+        handler._turn_reply_target["special:coder"] = "special:coder"
+        assert handler._reply_key("special:coder") == "special:coder"  # private
+        # Send 2: a NON-targeting send normalizes the slot to the routing key
+        # (unit-level: the real send-path normalization is pinned by
+        # test_send_to_special_agent_normalizes_slot_every_send).
+        handler._turn_reply_target["special:coder"] = handler._resolve_mount_key(
+            "special:coder")
+        assert handler._reply_key("special:coder") == "project:alpha"  # group
+
+    def test_send_to_special_agent_normalizes_slot_every_send(self):
+        """SPEC-12 BUG#18/#26: the slot is set on ENTRY of EVERY send — an
+        explicit reply_target (private /ask) wins; a bare send normalizes to
+        the routing (project) key, so no stale private target survives.
+        Drives the REAL send path (falsifier: a conditional set — only when
+        reply_target given — leaves the bare-send slot stale → RED)."""
+        handler, _crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._get_runtime = unittest.mock.MagicMock(
+            return_value=unittest.mock.MagicMock())
+        # Keep the test hermetic — do not read providers.yaml.
+        handler._resolve_agent_model = unittest.mock.MagicMock(return_value=None)
+
+        # Send 1: explicit private target → slot = the agent key.
+        handler.send_to_special_agent(
+            "special:coder", "private", reply_target="special:coder")
+        assert handler._turn_reply_target["special:coder"] == "special:coder"
+
+        # Send 2: bare send → slot NORMALIZED to the routing project key.
+        handler.send_to_special_agent("special:coder", "group")
+        assert handler._turn_reply_target["special:coder"] == "project:alpha"
+
+    def test_response_complete_clears_own_slot(self):
+        """SPEC-12 SP3b: _do_response_complete clears the turn's slot."""
+        handler, crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_tokens["special:coder"] = tok = object()
+        handler._turn_reply_target["special:coder"] = "project:alpha"
+        crh.is_streaming.return_value = False
+        handler._do_response_complete("special:coder", "hi", complete_token=tok)
+        assert "special:coder" not in handler._turn_reply_target
+
+    def test_stale_token_leaves_slot_intact(self):
+        """SPEC-12 SP3b: a stale completion must NOT clear the current slot."""
+        handler, crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_tokens["special:coder"] = object()          # current
+        handler._turn_reply_target["special:coder"] = "special:coder"
+        crh.is_streaming.return_value = False
+        handler._do_response_complete(
+            "special:coder", "hi", complete_token=object())  # stale
+        assert handler._turn_reply_target.get("special:coder") == "special:coder"
+
+    def test_nested_send_slot_not_clobbered(self):
+        """SPEC-12 SP3b-audit BUG#1: a nested same-key send inside the turn
+        owns a NEWER token + slot; the outer finally must not pop it."""
+        handler, crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_tokens["special:coder"] = outer = object()
+        handler._turn_reply_target["special:coder"] = "project:alpha"
+        crh.is_streaming.return_value = False
+
+        def nested(sk, text, proj):
+            handler._turn_tokens[sk] = object()      # newer turn
+            handler._turn_reply_target[sk] = sk      # newer private slot
+        handler._on_agent_response = nested
+        handler._do_response_complete("special:coder", "outer", complete_token=outer)
+        assert handler._turn_reply_target.get("special:coder") == "special:coder", (
+            "outer finally clobbered the nested turn's slot"
+        )
+
+    def test_none_token_completion_leaves_slot_intact(self):
+        """SPEC-12 SP3b-audit BUG#1 residual: a None-token (legacy / deferred)
+        completion owns no slot — the terminal finally must NOT pop.
+        Falsifier: revert the None guard (unconditional pop) → RED."""
+        handler, crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_tokens["special:coder"] = object()  # a live token exists
+        handler._turn_reply_target["special:coder"] = "kept"
+        crh.is_streaming.return_value = False
+        handler._do_response_complete("special:coder", "hi", complete_token=None)
+        assert handler._turn_reply_target.get("special:coder") == "kept"
+
+    def test_none_token_error_leaves_slot_intact(self):
+        """SPEC-12 SP3b-audit BUG#1 residual: a None-token (guard-2 deferred /
+        legacy) error owns no slot — must NOT pop. Falsifier: unconditional
+        pop → RED."""
+        handler, _crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = ["alpha", "/p"]
+        handler._turn_tokens["special:coder"] = object()
+        handler._turn_reply_target["special:coder"] = "kept"
+        handler._do_error("special:coder", "boom", error_token=None)
+        assert handler._turn_reply_target.get("special:coder") == "kept"
+
+    def test_no_project_send_clears_stale_slot(self):
+        """SPEC-12 SP3a-audit BUG#1: the no-active-project guard POPS a stale
+        slot before dispatching its error (which is slot-consuming), so the
+        error resolves to the session's own tab. Falsifier: drop the guard's
+        pop → the stale slot survives → RED."""
+        handler, _crh, _mc = _make_handler()
+        _register_coder(handler)
+        handler._active_project = None
+        handler._turn_reply_target["special:coder"] = "stale:private"
+        handler.send_to_special_agent("special:coder", "x")
+        assert "special:coder" not in handler._turn_reply_target
+
+
 # ═══════════════ SPEC-09 SP2: writer worktree cwd (ARH integration) ═════════
 
 class _SP2FakeProjectHandler:
