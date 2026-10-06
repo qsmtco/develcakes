@@ -189,22 +189,14 @@ class MainWindow(Gtk.ApplicationWindow):
             review_handler=None,  # ReviewHandler created later in _build; Phase 1.5 will wire via setter
         )
         # Register built-in special agents from the registry
-        from agent.special_agents import get_special_agents, get_auto_open_agents
+        # SPEC-12 (R3): the launch-time auto-open is GONE — agent tabs are not
+        # created on boot; the Chat button opens the ACTIVE project's group
+        # tab, and the private /ask view is a command path. No launch-time
+        # project auto-open either (ProjectHandler._active_project_name starts
+        # None — there is nothing to open at boot).
+        from agent.special_agents import get_special_agents
         for agent_def in get_special_agents():
             self._agent_runtime_handler.add_special_agent(agent_def)
-
-        # Phase 4 — Auto-open agent tabs on every launch.
-        # Creates a tab for each agent with auto_open=True.
-        auto_open_agents = get_auto_open_agents()
-        if auto_open_agents:
-            for agent_def in auto_open_agents:
-                self._main_content.create_chat_tab(
-                    agent_def.conv_id_prefix, agent_def.display_name
-                )
-                logger.info(
-                    "Auto-opened agent tab: %s",
-                    agent_def.display_name,
-                )
 
         # Inject into dependents after _agent_runtime_handler is assigned
         self._chat_handler.set_agent_runtime_handler(self._agent_runtime_handler)
@@ -1448,8 +1440,23 @@ class MainWindow(Gtk.ApplicationWindow):
     # ── Agent selection callback ────────────────────────────────────────────
 
     def _on_agent_selected(self, session_key, agent_name):
-        """Called when an agent row is clicked — create/open chat tab."""
-        self._main_content.create_chat_tab(session_key, agent_name)
+        """Agent-list "Chat" click (SPEC-12 R3): open the ACTIVE project's
+        group tab when the agent is a member; otherwise no-op (the member
+        toggle '+' is the path to add it). The private /ask view is a command
+        path, not this button. getattr-guard: `_project_handler` is assigned
+        mid-`_build` (:377) — a click before that must not raise."""
+        project_handler = getattr(self, "_project_handler", None)
+        project_name = (
+            project_handler.get_active_project_name()
+            if project_handler is not None else None
+        )
+        if project_name is None:
+            return
+        members = project_handler.get_project_members(project_name)
+        if session_key not in members:
+            return
+        self._main_content.create_chat_tab(
+            f"project:{project_name}", project_name)
 
     # ── Auto-Accept warning dialog (Phase 5) ───────────────────────────────
 

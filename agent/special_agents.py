@@ -177,8 +177,11 @@ def unregister_special_agent(prefix: str) -> bool:
 def get_auto_open_agents() -> list[SpecialAgentDef]:
     """Return all agents with auto_open=True.
 
-    Used by window.py at startup to open tabs for agents that should
-    be present on every launch.
+    SPEC-12 SP5 (R3): the window.py startup caller was REMOVED — agent tabs
+    are no longer auto-opened at launch (the Chat button opens the active
+    project's group tab instead). This helper is retained as inert module
+    surface for a future caller; it currently has none (dead-export sweep
+    candidate — see the SP5 audit note).
     """
     return [agent for agent in get_special_agents() if agent.auto_open]
 
