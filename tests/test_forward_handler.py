@@ -313,9 +313,10 @@ class TestForwardToAgent:
             popover=popover,
         )
         handler._agent_runtime_handler.send_to_special_agent.assert_called_once_with(
-            "sk-qa", "forwarded text"
-        )
+            "sk-qa", "forwarded text", reply_target="sk-qa")
         # (SPEC-05 R1: no gateway path exists to assert against anymore.)
+        # SPEC-12 §2f: the forwarded send is PRIVATE — the reply renders in
+        # the target's own tab (reply_target = the target session key).
 
     def test_creates_new_tab_if_none_exists(self, handler):
         """If the target_session_key is not in _tab_sessions, create_chat_tab
@@ -372,6 +373,58 @@ class TestForwardToAgent:
         assert call.kwargs["agent_name"] == "You"
         # And the rendered bubble is appended to the target tab's chat box
         handler._main_content.get_chat_box.return_value.append.assert_called_once()
+
+    def test_forward_send_passes_reply_target(self):
+        """SPEC-12 §2f: the gateway-branch send ALSO passes
+        reply_target=target_session_key (same private-view rule as the
+        special branch)."""
+        h = make_handler(
+            special_agents={},
+            target_in_tabs=False, target_sk="sk-tabX", target_name="X",
+        )
+        # sk-tabX has a name only via AGENT_NAMES; give the gateway branch a
+        # resolvable name and no special-agent membership.
+        h.forward_to_agent(
+            target_session_key="sk-tabX", text="fwd",
+            source_session_key="sk-qa", popover=MagicMock(),
+        )
+        h._agent_runtime_handler.send_to_special_agent.assert_called_once_with(
+            "sk-tabX", "fwd", reply_target="sk-tabX")
+
+    def test_forward_tab_created_before_send(self):
+        """BUG#28 ordering: the target tab is created/selected BEFORE the
+        send runs (the reply must have a live box to render into)."""
+        order: list[str] = []
+        h = make_handler(
+            special_agents={"sk-tgt": "Target"}, target_in_tabs=False,
+            target_sk="sk-tgt",
+        )
+        h._main_content.create_chat_tab.side_effect = (
+            lambda sk, n: order.append("create") or 2)
+        h._agent_runtime_handler.send_to_special_agent.side_effect = (
+            lambda sk, t, reply_target=None: order.append("send"))
+
+        h.forward_to_agent(
+            target_session_key="sk-tgt", text="fwd",
+            source_session_key="sk-qa", popover=MagicMock(),
+        )
+
+        assert order == ["create", "send"], (
+            f"tab must be created before the send, got {order}")
+
+    def test_forward_existing_tab_selected_not_recreated(self):
+        """BUG#28: an existing target tab is SELECTED (set_current_page),
+        never recreated (create_chat_tab not called)."""
+        h = make_handler(
+            special_agents={"sk-qa": "QA Bot"}, target_in_tabs=True,
+            target_sk="sk-tab1",
+        )
+        h.forward_to_agent(
+            target_session_key="sk-tab1", text="fwd",
+            source_session_key="sk-qa", popover=MagicMock(),
+        )
+        h._main_content.create_chat_tab.assert_not_called()
+        h._main_content._chat_notebook.set_current_page.assert_called_once_with(0)
 
     def test_returns_early_when_text_empty(self, handler):
         """If text is empty (or falsy), forward_to_agent pops down the popover

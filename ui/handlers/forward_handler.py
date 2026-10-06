@@ -11,10 +11,14 @@ gateway-agent), the target's chat tab is created or selected, and a new
 
 The extraction moves the bodies of the former ``window._on_forward_clicked``
 and ``window._forward_to_agent`` (ui/window.py lines 684–784) into their own
-composition unit. The behavior is preserved verbatim — same order, same
-comment-free local variables, same popover + bubble-rendering path, same
-GLib.timeout_add scroll deferral, same latent "self._on_forward_message
-may be None at first call" edge case. See ARCHITECTURE.md §3.6 (window.py
+composition unit. The extraction preserved the popover + bubble-rendering
+path, the comment-free local variables, the GLib.timeout_add scroll deferral,
+and the latent "self._on_forward_message may be None at first call" edge case.
+
+SPEC-12 SP6 DELIBERATE DEVIATION (BUG#28): the tab creation/selection now
+precedes the send (the reply needs a live box), and both send sites pass
+``reply_target=target_session_key`` (a private, agent-keyed reply). This is NOT
+verbatim — the former order sent before creating the tab. See ARCHITECTURE.md §3.6 (window.py
 is the composition root) and §8.6 (handlers do not import each other).
 """
 
@@ -127,6 +131,16 @@ class ForwardHandler:
         popover.set_child(menu_box)
         popover.popup()
 
+    def _ensure_target_tab(self, session_key, name, existing_page):
+        """SPEC-12 BUG#28: create the private tab if absent (else select the
+        existing one); return its page index. Shared by both routing branches
+        so the create-or-select logic exists exactly once."""
+        if existing_page is None:
+            existing_page = self._main_content.create_chat_tab(session_key, name)
+        else:
+            self._main_content._chat_notebook.set_current_page(existing_page)
+        return existing_page
+
     def forward_to_agent(
         self,
         target_session_key: str,
@@ -136,11 +150,13 @@ class ForwardHandler:
     ) -> None:
         """Route forwarded text to target agent and show it in their tab.
 
-        Body preserved verbatim from window._forward_to_agent (the former
-        owner of this logic, ui/window.py lines 728–784). Same order, same
-        gateway vs. special routing, same tab-create-or-select behavior,
-        same latent ``self._chat_render_handler._on_forward_message``
-        access (None until ChatHandler.set_on_forward_message propagates).
+        Body extracted from window._forward_to_agent (the former owner of this
+        logic, ui/window.py lines 728–784): same gateway vs. special routing,
+        same latent ``self._chat_render_handler._on_forward_message`` access
+        (None until ChatHandler.set_on_forward_message propagates).
+
+        SPEC-12 SP6 DEVIATION (BUG#28): the tab create/select now precedes the
+        send, and both sends pass ``reply_target=target_session_key``.
         """
         popover.popdown()
         if not text:
@@ -164,6 +180,15 @@ class ForwardHandler:
             source_name = self._agent_runtime_handler.get_special_agents()[source_session_key]
         if not source_name and self._gateway_handler and self._gateway_handler.agent_mgr:
             source_name = self._gateway_handler.agent_mgr.get_name(source_session_key)
+        # SPEC-12 BUG#28: scan for the target's open tab FIRST — the tab is
+        # created/selected BEFORE the send below, so the reply (produced by
+        # the send) has a live box to render into.
+        target_tab_exists = None
+        for page_idx, sk in self._main_content._tab_sessions.items():
+            if sk == target_session_key:
+                target_tab_exists = page_idx
+                break
+
         # Route message to special or gateway agent
         is_special = (
             self._agent_runtime_handler is not None
@@ -171,28 +196,25 @@ class ForwardHandler:
         )
         if is_special:
             target_name = self._agent_runtime_handler.get_special_agents()[target_session_key]
-            self._agent_runtime_handler.send_to_special_agent(target_session_key, text)
+            target_tab_exists = self._ensure_target_tab(
+                target_session_key, target_name, target_tab_exists)
+            # SPEC-12 §2f: the forwarded message is a PRIVATE (agent-keyed)
+            # send — its reply renders in the target's own tab.
+            self._agent_runtime_handler.send_to_special_agent(
+                target_session_key, text, reply_target=target_session_key)
         else:
             target_name = (
                 self._gateway_handler.agent_mgr.get_name(target_session_key)
                 if self._gateway_handler and self._gateway_handler.agent_mgr
                 else "Agent"
             )
+            target_tab_exists = self._ensure_target_tab(
+                target_session_key, target_name, target_tab_exists)
             # Local path only (SPEC-05 R1); receiver no-ops for
-            # unregistered/remote keys.
-            self._agent_runtime_handler.send_to_special_agent(target_session_key, text)
-
-        # Check if target agent already has an open tab
-        target_tab_exists = None
-        for page_idx, sk in self._main_content._tab_sessions.items():
-            if sk == target_session_key:
-                target_tab_exists = page_idx
-                break
-
-        if target_tab_exists is None:
-            target_tab_exists = self._main_content.create_chat_tab(target_session_key, target_name)
-        else:
-            self._main_content._chat_notebook.set_current_page(target_tab_exists)
+            # unregistered/remote keys. Reply target = the target's own tab
+            # (same private-view rule as the is_special branch).
+            self._agent_runtime_handler.send_to_special_agent(
+                target_session_key, text, reply_target=target_session_key)
 
         # Append forwarded bubble to the target tab
         chat_box = self._main_content.get_chat_box(target_tab_exists)
