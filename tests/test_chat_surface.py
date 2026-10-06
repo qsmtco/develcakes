@@ -369,3 +369,150 @@ class TestImportTimeAlias:
             assert type(s) is cs.TextViewFallback
             s.destroy()
 
+
+# ── SPEC-12 SP1: grouped agent boxes (spec §2a) ──────────────────────────
+
+
+class TestGroupedAgentBoxes:
+    """SPEC-12 §2a: consecutive same-agent rows collapse under ONE
+    .agent-box with a single header; empty-agent rows render bare. All
+    assertions are count/substring pins on the composed document."""
+
+    def test_document_groups_consecutive_same_agent(self):
+        rows = [
+            {"role": "agent", "html": "<p>c1</p>", "agent": "Coder"},
+            {"role": "agent", "html": "<p>c2</p>", "agent": "Coder"},
+            {"role": "agent", "html": "<p>c3</p>", "agent": "Coder"},
+            {"role": "agent", "html": "<p>d1</p>", "agent": "Debugger"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 2  # Coder run + Debugger run
+        assert doc.count('agent-name">Coder<') == 1  # ONE header, not three
+        assert doc.count('agent-name">Debugger<') == 1
+        for frag in ("<p>c1</p>", "<p>c2</p>", "<p>c3</p>", "<p>d1</p>"):
+            assert frag in doc  # all four bodies survive the grouping
+
+    def test_document_repeated_agent_name_single_header(self):
+        rows = [
+            {"role": "agent", "html": "<p>a</p>", "agent": "Coder"},
+            {"role": "agent", "html": "<p>b</p>", "agent": "Coder"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 1
+        assert doc.count('agent-name">Coder<') == 1
+
+    def test_document_user_rows_group_and_class(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        rows = [
+            {"role": "user", "html": "<p>u1</p>", "agent": "You"},
+            {"role": "user", "html": "<p>u2</p>", "agent": "You"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 1
+        assert 'class="agent-box role-user"' in doc
+        # SP1-audit BUG#3 correction: the box element ITSELF carries
+        # role-user, so the header span is still a DESCENDANT and the OLD
+        # `.role-user .agent-name` rule still matches — the box-level rule
+        # is REDUNDANT (kept for explicitness/intent). It stays pinned here.
+        assert ".agent-box.role-user .agent-name" in _BASE_CSS
+
+    def test_document_no_agent_rows_render_bare(self):
+        # Single empty-agent row: bare message-row, no box, no name span.
+        doc = _document([{"role": "system", "html": "<p>w</p>", "agent": ""}])
+        assert doc.count('class="agent-box') == 0
+        assert 'class="message-row role-system"' in doc
+        # No name SPAN in the bare branch — assert the ELEMENT, not the bare
+        # literal: 'agent-name' also appears in _BASE_CSS selectors inside
+        # the <style> block, so a raw-string absence assert can never pass.
+        assert '<span class="agent-name">' not in doc
+        assert "<p>w</p>" in doc
+        # Run boundary: an empty-agent row BREAKS a Coder run — the two
+        # Coder rows around it must NOT merge into one box.
+        doc2 = _document([
+            {"role": "agent", "html": "<p>a</p>", "agent": "Coder"},
+            {"role": "system", "html": "<p>s</p>", "agent": ""},
+            {"role": "agent", "html": "<p>b</p>", "agent": "Coder"},
+        ])
+        assert doc2.count('class="agent-box') == 2
+        assert doc2.count('agent-name">Coder<') == 2
+        assert 'class="message-row role-system"' in doc2
+
+    def test_document_interleaved_agents_two_boxes(self):
+        """Name per spec §5 label; behavior per spec §5 body: Coder,
+        Debugger, Coder = THREE runs → three boxes, name order pinned."""
+        rows = [
+            {"role": "agent", "html": "<p>1</p>", "agent": "Coder"},
+            {"role": "agent", "html": "<p>2</p>", "agent": "Debugger"},
+            {"role": "agent", "html": "<p>3</p>", "agent": "Coder"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 3
+        assert doc.count('agent-name">Coder<') == 2
+        assert doc.count('agent-name">Debugger<') == 1
+        c1 = doc.index('agent-name">Coder<')
+        d = doc.index('agent-name">Debugger<')
+        c2 = doc.index('agent-name">Coder<', d + 1)
+        assert c1 < d < c2  # interleaved order preserved
+
+    def test_document_agent_name_escaped_still(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "<b>evil</b>"}]
+        doc = _document(rows)
+        assert "&lt;b&gt;evil&lt;/b&gt;" in doc  # header escaped in the box
+        assert "<b>evil</b>" not in doc
+        assert doc.count('class="agent-box') == 1  # still boxed
+
+    def test_document_you_named_agent_does_not_merge_with_user(self):
+        """SP1-audit BUG#1: an agent whose display name is literally "You"
+        (agent-builder does not reserve the name) must NOT merge with the
+        user's adjacent rows — grouping keys on (agent, role), and the box
+        class comes from the row's ROLE, not the name string."""
+        rows = [
+            {"role": "user", "html": "<p>q</p>", "agent": "You"},
+            {"role": "agent", "html": "<p>r</p>", "agent": "You"},
+        ]
+        doc = _document(rows)
+        # Two boxes: the user's run and the agent's run — never one merged box.
+        assert doc.count('class="agent-box') == 2
+        assert 'class="agent-box role-user"' in doc  # user run stays user
+        assert 'class="agent-box role-agent"' in doc  # agent run stays agent
+        assert "<p>q</p>" in doc and "<p>r</p>" in doc  # both bodies survive
+
+    def test_document_agent_run_pins_role_agent(self):
+        """SP1-audit BUG#2: role-agent was unpinned — a mutant emitting
+        role-user for every box passed the whole suite. Pin BOTH directions:
+        an agent run is role-agent and nothing else."""
+        rows = [{"role": "agent", "html": "<p>c</p>", "agent": "Coder"}]
+        doc = _document(rows)
+        assert 'class="agent-box role-agent"' in doc
+        assert 'class="agent-box role-user"' not in doc
+
+    def test_document_user_run_pins_role_user_only(self):
+        """SP1-audit BUG#2 (user side): a user run is role-user; role-agent
+        must be ABSENT (kills the always-role-agent / both-classes mutants)."""
+        rows = [
+            {"role": "user", "html": "<p>u1</p>", "agent": "You"},
+            {"role": "user", "html": "<p>u2</p>", "agent": "You"},
+        ]
+        doc = _document(rows)
+        assert 'class="agent-box role-user"' in doc
+        assert 'class="agent-box role-agent"' not in doc
+
+    def test_document_missing_role_defaults_to_system_no_crash(self):
+        """SP1 re-audit residual (defensive parity): a row lacking "role" (or
+        with role=None) must not raise KeyError nor leak a `role-None` class —
+        emission normalizes through `or "system"`, matching the run-key. Not
+        production-reachable (append_message always stores a normalized role),
+        but pins the defensive consistency."""
+        doc = _document([
+            {"html": "<p>a</p>", "agent": "Coder"},  # role key absent
+            {"role": None, "html": "<p>b</p>", "agent": "Coder"},  # role None
+        ])
+        # Both rows normalize to "system": they share one (agent, role) run.
+        assert doc.count('class="agent-box') == 1
+        assert 'role-None' not in doc
+        assert 'class="message-row role-system"' in doc
+        # A bare row (no agent) with no role must also not crash.
+        doc2 = _document([{"html": "<p>w</p>", "agent": ""}])
+        assert 'class="message-row role-system"' in doc2
+

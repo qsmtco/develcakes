@@ -71,6 +71,14 @@ body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
 .message-row { margin-bottom: 10px; }
 .agent-name { color: #7aa2f7; font-weight: bold; font-size: 12px; }
 .role-user .agent-name { color: #9ece6a; }
+.agent-box { border-left: 2px solid #3b4261; padding-left: 8px; margin-bottom: 12px; }
+/* SP1-audit BUG#3 correction: the box element ITSELF carries role-user, so the
+   header span.agent-name is still a DESCENDANT of a .role-user element and the
+   OLD `.role-user .agent-name` rule STILL matches. This box-level rule is
+   therefore REDUNDANT (kept for explicitness/intent; either rule styles the user
+   header green). The earlier "sibling / stops matching" rationale was a mis-model
+   of CSS ancestor matching. */
+.agent-box.role-user .agent-name { color: #9ece6a; }
 pre { background: #16161e; padding: 6px; border-radius: 4px; }
 code { font-family: monospace; }
 pre.terminal { color: #c0caf5; }
@@ -87,23 +95,48 @@ _TAG_STRIP_RE = re.compile(r"<[^>]*>")
 
 
 def _document(rows: list[dict]) -> str:
-    """Render the row list as one full HTML document."""
-    body = []
-    for row in rows:
-        name = (
-            f'<span class="agent-name">{html.escape(row["agent"])}</span>'
-            if row["agent"]
-            else ""
+    """Render rows as grouped agent boxes — consecutive rows with the same
+    agent collapse under ONE header (SPEC-12). Rows with no agent name render
+    bare (system/welcome)."""
+    blocks = []
+    i = 0
+    n = len(rows)
+    while i < n:
+        row = rows[i]
+        agent = row.get("agent") or ""
+        if not agent:
+            blocks.append(
+                f'<div class="message-row role-{row.get("role") or "system"}">'
+                f'<div class="msg-body">{row["html"]}</div></div>'
+            )
+            i += 1
+            continue
+        # collect the run of same-agent rows — key on (agent, role) so an
+        # agent displaying the literal name "You" (role "agent") can never
+        # merge with the user's own rows (role "user") (SP1-audit BUG#1).
+        role = row.get("role") or "system"
+        j = i
+        while (j < n and (rows[j].get("agent") or "") == agent
+               and (rows[j].get("role") or "system") == role):
+            j += 1
+        body = "".join(
+            f'<div class="message-row role-{rows[k].get("role") or "system"}">'
+            f'<div class="msg-body">{rows[k]["html"]}</div></div>'
+            for k in range(i, j)
         )
-        body.append(
-            f'<div class="message-row role-{row["role"]}">{name}'
-            f'<div class="msg-body">{row["html"]}</div></div>'
+        name = html.escape(agent)
+        # SP1-audit BUG#1: derive the box class from the row's ROLE, not the
+        # display-name string — the name is not a user/agent discriminator.
+        box_class = "role-user" if role == "user" else "role-agent"
+        blocks.append(
+            f'<div class="agent-box {box_class}">'
+            f'<span class="agent-name">{name}</span>{body}</div>'
         )
+        i = j
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<style>{_BASE_CSS}</style></head><body>"
-        + "".join(body)
-        + "</body></html>"
+        + "".join(blocks) + "</body></html>"
     )
 
 
