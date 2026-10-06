@@ -157,13 +157,18 @@ class ChatHandler:
         """Inject the live AgentManager after gateway connect. Called by window.py."""
         self._agent_mgr = agent_mgr
 
-    def _send_local(self, session_key: str, text: str) -> None:
+    def _send_local(self, session_key: str, text: str,
+                    reply_target: str | None = None) -> None:
         """Single local send entry point - ALL send sites route through here.
 
         FIX 7 (SPEC-05 SP2 audit BUG #7): ONE None-guard instead of eight
         scattered ones. If the AgentRuntimeHandler is not wired yet (early
         startup, partial construction), the send is dropped with a WARNING
         instead of raising AttributeError from inside a GTK callback.
+
+        SPEC-12 (B1): reply_target threads through to the runtime's
+        turn-scoped slot (R5 REV 3) — None (the default) leaves the routing
+        to R7, exactly like the pre-SP4 callers.
         """
         if self._agent_runtime_handler is None:
             _logger.warning(
@@ -173,7 +178,8 @@ class ChatHandler:
             return
         # Local path only (SPEC-05 R1); the receiver no-ops with a warning
         # for unregistered/remote keys.
-        self._agent_runtime_handler.send_to_special_agent(session_key, text)
+        self._agent_runtime_handler.send_to_special_agent(
+            session_key, text, reply_target=reply_target)
 
     def _show_forward_menu(self, text, anchor_widget):
         """
@@ -232,6 +238,7 @@ class ChatHandler:
                                     on_bubble_ready=_on_bubble,
                                     on_forward_click=self._on_forward_message,
                                     agent_name="You",
+                                    mount_key=result.forward_to,
                                 )
                         # SPEC-12 §2f (BUG#2/#11/#14): /ask + /delegate open a
                         # PRIVATE (agent-keyed) tab and route THIS send's reply
@@ -269,6 +276,7 @@ class ChatHandler:
                                     on_bubble_ready=_on_bubble,
                                     on_forward_click=self._on_forward_message,
                                     agent_name="You",
+                                    mount_key=session_key,
                                 )
                         for target in result.broadcast_targets:
                             # Local path only (SPEC-05 R1); receiver no-ops for
@@ -284,6 +292,15 @@ class ChatHandler:
         # ── Special agent check (Phase 1.4) ─────────────────────────────────────
         if (self._agent_runtime_handler is not None
                 and session_key in self._agent_runtime_handler.get_special_agents()):
+            # BUG#19: typing in an open private (agent-keyed) tab stays
+            # private; a project-tab special-agent send (no direct tab) passes
+            # None so the reply routes to the project (R7).
+            reply_target = (
+                session_key
+                if self._mc.get_chat_box_for_session(session_key) is not None
+                else None
+            )
+
             def _show_and_route_to_agent():
                 chat_box = self._mc.get_chat_box()
                 if chat_box is not None:
@@ -297,8 +314,9 @@ class ChatHandler:
                             on_bubble_ready=_on_bubble,
                             on_forward_click=self._on_forward_message,
                             agent_name="You",
+                            mount_key=session_key,
                         )
-                self._send_local(session_key, text)
+                self._send_local(session_key, text, reply_target=reply_target)
             self._dispatch(_show_and_route_to_agent)
             buf.set_text("")
             if self._on_send_initiated:
@@ -346,6 +364,7 @@ class ChatHandler:
                                 on_bubble_ready=_on_bubble,
                                 on_forward_click=self._on_forward_message,
                                 agent_name="You",
+                                mount_key=session_key,
                             )
                     # Special agents route through AgentRuntimeHandler, not gateway
                     # (they have no gateway session; gateway would silently drop the message)
@@ -374,6 +393,7 @@ class ChatHandler:
                                 on_bubble_ready=_on_bubble,
                                 on_forward_click=self._on_forward_message,
                                 agent_name="You",
+                                mount_key=session_key,
                             )
                     for target in resolution.broadcast_targets:
                         # Local path only (SPEC-05 R1); receiver no-ops for
@@ -401,6 +421,7 @@ class ChatHandler:
                         on_bubble_ready=_on_bubble,
                         on_forward_click=self._on_forward_message,
                         agent_name="You",
+                        mount_key=session_key,
                     )
             if session_key.startswith("project:"):
                 project_name = session_key.split(":", 1)[1]
@@ -415,7 +436,10 @@ class ChatHandler:
                     # Special agents route through AgentRuntimeHandler, not gateway
                     # Local path only (SPEC-05 R1); receiver no-ops for
                     # unregistered/remote keys.
-                    self._send_local(solo_target, text)
+                    # SPEC-12 BUG#11: the solo DM narrows the SEND fan-out only —
+                    # the reply still renders in the project's ONE group surface.
+                    self._send_local(
+                        solo_target, text, reply_target=f"project:{project_name}")
                 else:
                     # Group broadcast — fan out to all members
                     if self._project_handler:
@@ -427,7 +451,10 @@ class ChatHandler:
                     for member in members:
                         # Local path only (SPEC-05 R1); receiver no-ops for
                         # unregistered/remote keys.
-                        self._send_local(member, text)
+                        # SPEC-12 BUG#11: member replies land in the PROJECT
+                        # surface (one group chat), not per-agent surfaces.
+                        self._send_local(
+                            member, text, reply_target=f"project:{project_name}")
             else:
                 # Local path only (SPEC-05 R1); receiver no-ops for
                 # unregistered/remote keys.

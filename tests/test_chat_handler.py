@@ -790,7 +790,8 @@ class TestInlineMentionRouting:
         handler.on_send()
 
         # Must route through AgentRuntimeHandler
-        mock_arh.send_to_special_agent.assert_called_once_with("special:coder", "hello")
+        mock_arh.send_to_special_agent.assert_called_once_with(
+            "special:coder", "hello", reply_target=None)
         # Receiver spy got nothing — the send went via the injected ARH mock only
         assert gw.get_sent() == []
 
@@ -812,7 +813,8 @@ class TestInlineMentionRouting:
 
         # SPEC-05 R1: the gateway branch is gone — the receiver handles ALL
         # targets (its no-op for unregistered keys IS the former gateway path).
-        mock_arh.send_to_special_agent.assert_called_once_with("agent:qtr", "status")
+        mock_arh.send_to_special_agent.assert_called_once_with(
+            "agent:qtr", "status", reply_target=None)
         assert gw.get_sent() == []
 
     def test_inline_mention_broadcast_with_special_member_routes_to_runtime(self):
@@ -835,8 +837,13 @@ class TestInlineMentionRouting:
         # SPEC-05 R1: both targets route through the receiver — one call per
         # member (Coder a special agent, QTR handled by the receiver's no-op).
         assert mock_arh.send_to_special_agent.call_count == 2
-        mock_arh.send_to_special_agent.assert_any_call("special:coder", "hello")
-        mock_arh.send_to_special_agent.assert_any_call("agent:qtr", "hello")
+        # SPEC-12: the inline-mention broadcast send stays UN-targeted
+        # (reply_target=None → R7 routes the reply) — honest pin of the
+        # shipped shape (B2 targets the normal-send fan-out only).
+        mock_arh.send_to_special_agent.assert_any_call(
+            "special:coder", "hello", reply_target=None)
+        mock_arh.send_to_special_agent.assert_any_call(
+            "agent:qtr", "hello", reply_target=None)
         assert gw.get_sent() == []
 
     def test_inline_mention_to_special_agent_does_not_call_gw(self):
@@ -860,7 +867,8 @@ class TestInlineMentionRouting:
                 f"gw.send_message called with special:coder — should route via AgentRuntimeHandler instead"
             )
         # And runtime was called
-        mock_arh.send_to_special_agent.assert_called_once_with("special:coder", "hello")
+        mock_arh.send_to_special_agent.assert_called_once_with(
+            "special:coder", "hello", reply_target=None)
 
 
 # ── Tests: Slash commands in special agent tabs (BUG: /clear unreachable) ─────
@@ -949,7 +957,8 @@ class TestSlashCommandInSpecialAgentTab:
         # Command handler was consulted but didn't handle it
         mock_cmd.process_input.assert_called_once_with("special:supervisor", "hello supervisor")
         # Agent runtime received the text via the special-agent branch
-        mock_arh.send_to_special_agent.assert_called_once_with("special:supervisor", "hello supervisor")
+        mock_arh.send_to_special_agent.assert_called_once_with(
+            "special:supervisor", "hello supervisor", reply_target=None)
 
     def test_slash_clear_does_not_send_literal_text_to_agent(self):
         """REGRESSION GUARD: Under no circumstances should the literal string
@@ -1025,3 +1034,190 @@ class TestSlashCommandInSpecialAgentTab:
         assert mc.created_tabs == [("special:coder", "coder")], (
             "an existing private tab must not be recreated"
         )
+
+
+# ── SPEC-12 SP4b+SP4c: reply targets + mount_key threading ─────────────────
+
+class TestSpec12ReplyTargetsAndMountKey:
+    """SP4b (BUG#11/#19) + SP4c (BUG#4+#10): the send path threads reply
+    targets; the echo renders mount in the same surface the send targets."""
+
+    def test_group_send_passes_project_reply_target(self):
+        """B2: a project-tab group send fans out to members with
+        reply_target='project:<name>' (BUG#11: one group surface)."""
+        mc = FakeMainContent(session_key="project:alpha", input_text="hello")
+        mc._tab_sessions = {0: "project:alpha"}
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        handler._project_handler = MagicMock()
+        handler._project_handler.get_project_members.return_value = [
+            "agent:qaster:1", "agent:qaster:2"]
+        handler._project_handler.get_solo_target.return_value = None
+        mock_render = MagicMock()
+        handler.set_chat_render_handler(mock_render)
+
+        handler.on_send()
+
+        assert gw.get_reply_targets() == ["project:alpha", "project:alpha"]
+        # The echo rides the same display key (SP4c).
+        assert mock_render.render_async.call_args.kwargs.get(
+            "mount_key") == "project:alpha"
+
+    def test_special_agent_private_tab_send_stays_private(self):
+        """B4/BUG#19: an agent-keyed tab's send passes reply_target=session_key;
+        when no tab resolves, it passes None (project routing via R7)."""
+        mc = FakeMainContent(session_key="special:coder", input_text="hi")
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        mock_arh = MagicMock()
+        mock_arh.get_special_agents.return_value = {"special:coder": "Coder"}
+        handler.set_agent_runtime_handler(mock_arh)
+        handler.set_chat_render_handler(MagicMock())
+
+        def targets():
+            return [c.kwargs.get("reply_target")
+                    for c in mock_arh.send_to_special_agent.call_args_list]
+
+        handler.on_send()
+        # No tab registered in the fake → reply_target None (project routing).
+        assert targets() == [None]
+
+        mc._input_buffer.set_text("hi again")    # on_send cleared the buffer
+        mc._tab_sessions = {0: "special:coder"}  # the private tab EXISTS
+        handler.on_send()
+        assert targets() == [None, "special:coder"]  # BUG#19: stays private
+
+    def test_render_async_call_sites_pass_mount_key(self):
+        """SP4c: the normal-send echo renders with mount_key == the display
+        key (project tab → the project key)."""
+        mc = FakeMainContent(session_key="project:alpha", input_text="hello")
+        mc._tab_sessions = {0: "project:alpha"}
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        mock_render = MagicMock()
+        handler.set_chat_render_handler(mock_render)
+
+        handler.on_send()
+
+        assert mock_render.render_async.call_count == 1
+        kwargs = mock_render.render_async.call_args.kwargs
+        assert kwargs.get("mount_key") == "project:alpha"
+        assert kwargs.get("agent_name") == "You"
+
+
+    def test_solo_dm_send_targets_project_surface(self):
+        """B2/BUG#11: a solo-DM send (get_solo_target non-None) still renders
+        the reply in the project's ONE group surface (reply_target=project).
+        Falsifier: drop the solo branch's reply_target → RED."""
+        mc = FakeMainContent(session_key="project:alpha", input_text="hello")
+        mc._tab_sessions = {0: "project:alpha"}
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        handler._project_handler = MagicMock()
+        handler._project_handler.get_solo_target.return_value = "agent:q1"
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert gw.get_reply_targets() == ["project:alpha"]
+
+
+# ── SPEC-12 SP4b+c FIX ROUND: all 6 echo mount_key sites pinned ────────────
+
+class TestMountKeyPerSite:
+    """SP4c BUG#4+#10, fix round: EACH echo render_async site carries its
+    mount_key — removing any one site's kwarg turns exactly its test RED."""
+
+    def _render_kwargs(self, handler):
+        return handler._chat_render_handler.render_async.call_args.kwargs
+
+    def test_mount_key_forward_to_echo_is_private_tab(self):
+        """Site 1 (:241): the /ask echo rides the PRIVATE tab the reply
+        renders in (result.forward_to) — matches the SP4a send target."""
+        from models.command import CommandResult
+        mc = FakeMainContent(session_key="project:alpha",
+                             input_text='/ask @Coder "hi"')
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        result = CommandResult(handled=True, forward_to="special:coder",
+                               forward_text="hi")
+        mock_cmd = MagicMock()
+        mock_cmd.process_input.return_value = result
+        handler.set_command_handler(mock_cmd)
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert self._render_kwargs(handler).get("mount_key") == "special:coder"
+
+    def test_mount_key_broadcast_command_echo_is_session_key(self):
+        """Site 2 (:279): the /ask-all broadcast-command echo rides the
+        project display key (session_key)."""
+        from models.command import CommandResult
+        mc = FakeMainContent(session_key="project:alpha", input_text="/@all hi")
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        result = CommandResult(handled=True,
+                               broadcast_targets=["agent:a", "agent:b"],
+                               forward_text="hi")
+        mock_cmd = MagicMock()
+        mock_cmd.process_input.return_value = result
+        handler.set_command_handler(mock_cmd)
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert self._render_kwargs(handler).get("mount_key") == "project:alpha"
+
+    def test_mount_key_special_agent_echo_is_session_key(self):
+        """Site 3 (:317): the special-agent-tab echo rides the agent display
+        key (session_key — the private tab's own surface)."""
+        mc = FakeMainContent(session_key="special:coder", input_text="hi")
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        mock_arh = MagicMock()
+        mock_arh.get_special_agents.return_value = {"special:coder": "Coder"}
+        handler.set_agent_runtime_handler(mock_arh)
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert self._render_kwargs(handler).get("mount_key") == "special:coder"
+
+    def test_mount_key_inline_solo_echo_is_session_key(self):
+        """Site 4 (:367): the inline @solo echo rides the project display key
+        (the send's reply ALSO routes to the project via R7)."""
+        from models.command import MentionResolution
+        mc = FakeMainContent(session_key="project:alpha", input_text="@Coder hi")
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        mock_cmd = MagicMock()
+        mock_cmd.process_input.return_value = MagicMock(handled=False)
+        mock_cmd.resolve_inline_mention.return_value = MentionResolution(
+            target_session_key="special:coder", clean_text="hi")
+        handler.set_command_handler(mock_cmd)
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert self._render_kwargs(handler).get("mount_key") == "project:alpha"
+
+    def test_mount_key_inline_broadcast_echo_is_session_key(self):
+        """Site 5 (:396): the inline @all echo rides the project display key."""
+        from models.command import MentionResolution
+        mc = FakeMainContent(session_key="project:alpha", input_text="@all hi")
+        gw = FakeGatewayClient()
+        handler = make_handler(mc, gw)
+        mock_cmd = MagicMock()
+        mock_cmd.process_input.return_value = MagicMock(handled=False)
+        mock_cmd.resolve_inline_mention.return_value = MentionResolution(
+            is_broadcast=True, broadcast_targets=["agent:a", "agent:b"],
+            clean_text="hi")
+        handler.set_command_handler(mock_cmd)
+        handler.set_chat_render_handler(MagicMock())
+
+        handler.on_send()
+
+        assert self._render_kwargs(handler).get("mount_key") == "project:alpha"
+    # Site 6 (:424, normal send → session_key) is pinned by
+    # TestSpec12ReplyTargetsAndMountKey.test_render_async_call_sites_pass_mount_key.
