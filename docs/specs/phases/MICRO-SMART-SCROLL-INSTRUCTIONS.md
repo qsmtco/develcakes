@@ -1,6 +1,8 @@
 # MICRO-UNIT: Smart Scroll for the HTML Chat Surface
 
-**STATUS: IMPLEMENTED (2026-10-07)** — 1 build round + 1 fix round; audit CLEAN-with-required-fixes, all 7 required fixes landed and verified. Closes SPEC-06 register #8 WITHOUT the JS bridge (see non-goals).
+**STATUS: IMPLEMENTED (2026-10-07)** — 1 build round + 1 fix round + 1 re-audit + 1 micro-fix; closes SPEC-06 register #8 WITHOUT the JS bridge (see non-goals).
+
+**Re-audit record (2026-10-07):** v2 fixes verified (N=2 settle, collapse guard, forced-scroll sweep) — PASS with 4 net findings, all closed in the micro-fix: BUG#7 (deferred-follow user-grab race → live-tracker re-read guards in BOTH surfaces; 2 RED-first tests), BUG#10 (report filename drift — ack), BUG#11/BUG#12 (stale comments corrected). 194→201 tests across touched suites; 6+5 kill-proofs sha-verified.
 
 **Fix-round record (Debugger audit → all landed):**
 - BUG#1 (HIGH): intermediate `changed` consumed the capture → idle-deferred settle check (`_schedule_restore`/`_settle_restore`; upper must be stable across a frame). Test: `test_intermediate_height_does_not_consume_capture` (burst 0→200→1200, preserve=300).

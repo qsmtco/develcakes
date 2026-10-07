@@ -12,8 +12,8 @@ gateway-agent), the target's chat tab is created or selected, and a new
 The extraction moves the bodies of the former ``window._on_forward_clicked``
 and ``window._forward_to_agent`` (ui/window.py lines 684–784) into their own
 composition unit. The extraction preserved the popover + bubble-rendering
-path, the comment-free local variables, the GLib.timeout_add scroll deferral,
-and the latent "self._on_forward_message may be None at first call" edge case.
+path, the comment-free local variables, and the latent
+"self._on_forward_message may be None at first call" edge case.
 
 SPEC-12 SP6 DELIBERATE DEVIATION (BUG#28): the tab creation/selection now
 precedes the send (the reply needs a live box), and both send sites pass
@@ -27,7 +27,7 @@ import logging
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk  # noqa: E402  (gi.require_version must run first)
+from gi.repository import Gtk  # noqa: E402  (gi.require_version must run first)
 
 _logger = logging.getLogger(__name__)
 
@@ -40,9 +40,6 @@ class ForwardHandler:
           forwarded bubble rendering.
 
     Thread safety: called only on the main thread (button click handler).
-    The GLib.timeout_add call inside forward_to_agent is main-thread-only
-    by construction (timeout_add with a 16ms delay on the default main
-    loop context).
 
     Args:
         main_content:           MainContent — for create_chat_tab, get_chat_box,
@@ -227,5 +224,11 @@ class ForwardHandler:
             )
             if bubble is not None:
                 chat_box.append(bubble)
-                # Defer scroll to ensure GTK has laid out the new bubble first
-                GLib.timeout_add(16, lambda: (self._main_content.scroll_chat_to_bottom(target_tab_exists), False)[1])
+                # MICRO-SMART-SCROLL (BUG#1 scope-miss fix, 2026-10-07): the
+                # forced `GLib.timeout_add(16, scroll_chat_to_bottom)` was
+                # REMOVED — same class as the 18 calls dropped from the chat
+                # handlers. The surface owns its own scroll (single-scroll
+                # ruling): the WebKit surface self-heals via smart-scroll and
+                # the TextViewFallback follows/restores itself. A forced
+                # scroll here raced both, yanking a scrolled-up reader to the
+                # bottom ~16ms after a forward.

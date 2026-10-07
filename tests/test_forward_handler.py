@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 from ui.handlers.forward_handler import ForwardHandler  # noqa: E402
 
@@ -527,6 +527,45 @@ class TestForwardHandlerConstruction:
         assert h._chat_render_handler is chat_render_handler
         assert h._agent_runtime_handler is arh
         assert h._gateway_handler is gh
+
+
+class TestForwardNoForceScroll:
+    """MICRO-SMART-SCROLL BUG#1 (scope-miss fix): forward_to_agent used to
+    defer `scroll_chat_to_bottom` via GLib.timeout_add(16) — the same
+    forced-scroll class as the 18 calls dropped from the chat handlers. It
+    raced the surface's own smart-scroll (yanking a scrolled-up reader to the
+    bottom). The surface owns its scroll now; the bubble append must NOT
+    schedule a forced scroll.
+
+    Non-vacuous pin: the test pumps the REAL GLib main loop for >16ms of wall
+    clock. The old code scheduled a real 16ms timeout that WOULD fire during
+    the pump (RED); the fixed code schedules nothing (GREEN). A bare
+    assert_not_called without the pump would pass even with the bug."""
+
+    def test_forward_does_not_force_scroll(self, handler):
+        popover = MagicMock()
+        handler.forward_to_agent(
+            target_session_key="sk-qa",
+            text="forwarded text",
+            source_session_key="sk-coder",
+            popover=popover,
+        )
+        # The bubble still rendered + appended (behavior preserved)...
+        handler._chat_render_handler.render_sync.assert_called_once()
+        handler._main_content.get_chat_box.return_value.append.assert_called_once()
+
+        # Pump the real main loop well past the 16ms deferral window so any
+        # scheduled forced scroll would have run.
+        import time
+
+        ctx = GLib.MainContext.default()
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            while ctx.pending():
+                ctx.iteration(False)
+            time.sleep(0.005)
+        # ...but NO forced scroll was scheduled or run.
+        handler._main_content.scroll_chat_to_bottom.assert_not_called()
 
 
 class TestForwardARHNoneGuard:

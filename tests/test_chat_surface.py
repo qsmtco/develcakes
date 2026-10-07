@@ -813,6 +813,109 @@ class TestColorFrozenAtAppend:
         s.destroy()
 
 
+class TestFallbackAutoscroll:
+    """MICRO-SMART-SCROLL BUG#2 fix: TextViewFallback (the no-WebKit path) must
+    keep the SAME social-feed scroll contract as ChatSurface — follow new rows
+    only when at the bottom, preserve the reading position otherwise. The
+    18-site sweep removed the handler-side force-scroll that used to cover
+    this path; the surface owns its scroll now.
+
+    The fallback appends in place (no reload) so the follow is idle-deferred
+    (GTK updates `upper` a frame later) — tests drain idles with _pump_frame.
+    """
+
+    @staticmethod
+    def _pump_frames(n: int = 6) -> None:
+        ctx = GLib.MainContext.default()
+        for _ in range(n):
+            guard = 0
+            while ctx.pending() and guard < 50:
+                ctx.iteration(False)
+                guard += 1
+
+    def _fallback(self, monkeypatch):
+        """Real TextView surface with real (detached-widget) vadjustment.
+        NOTE: page_size stays 0 in a detached widget, so 'bottom' is
+        value == upper; we assert against the live upper, not a fabricated
+        page_size (the real GTK adjustment rejects made-up heights)."""
+        s = TextViewFallback()
+        vadj = s.get_vadjustment()
+        assert vadj is not None
+        # Seed enough content that the adjustment carries a real height.
+        for i in range(40):
+            s.append_message("agent", f"<p>seed {i} {'x' * 200}</p>", "Coder")
+        self._pump_frames()
+        return s, vadj
+
+    def test_fallback_autoscrolls_at_bottom(self, monkeypatch):
+        """At bottom → append follows the new row (value tracks the new
+        bottom after the deferred follow runs)."""
+        s, vadj = self._fallback(monkeypatch)
+        # Reader is at the bottom.
+        vadj.set_value(vadj.get_upper())
+        self._pump_frames()
+        assert s._was_at_bottom is True
+
+        s.append_message("agent", "<p>NEW ROW " + "y" * 200 + "</p>", "Coder")
+        self._pump_frames()
+        assert vadj.get_value() == vadj.get_upper(), (
+            "fallback must follow to the bottom when the reader was at bottom"
+        )
+        s.destroy()
+
+    def test_fallback_preserves_reading_position(self, monkeypatch):
+        """Scrolled up (not at bottom) → append preserves the reading
+        position: the value is unchanged by the append."""
+        s, vadj = self._fallback(monkeypatch)
+        vadj.set_value(50.0)  # reading, far from bottom
+        self._pump_frames()
+        assert s._was_at_bottom is False
+
+        s.append_message("agent", "<p>ANOTHER ROW " + "z" * 200 + "</p>", "Coder")
+        self._pump_frames()
+        assert vadj.get_value() == 50.0, (
+            "fallback must preserve the reading position when scrolled up"
+        )
+        s.destroy()
+
+    def test_fallback_at_bottom_user_grab_mid_gap_does_not_yank(self, monkeypatch):
+        """BUG#7: the deferred follow races a user grab. The reader was at the
+        bottom → append arms a deferred follow; the user scrolls UP during the
+        idle gap (set_value fires value-changed, re-arming _was_at_bottom=
+        False). The queued follow must NOT run unconditionally and yank them
+        back down — it must RE-READ the tracker right before driving the
+        vadjustment and abort when the at-bottom intent is stale."""
+        s, vadj = self._fallback(monkeypatch)
+        vadj.set_value(vadj.get_upper())  # reader at the bottom
+        self._pump_frames()
+        assert s._was_at_bottom is True
+
+        s.append_message("agent", "<p>NEW ROW " + "y" * 200 + "</p>", "Coder")
+        assert s._follow_source is not None  # follow queued, idle not yet run
+        # USER GRAB mid-gap: scroll up BEFORE the idle follow fires.
+        vadj.set_value(50.0)
+        assert s._was_at_bottom is False  # value-changed re-armed the tracker
+        self._pump_frames()  # the queued follow now runs
+
+        assert vadj.get_value() == 50.0, (
+            "deferred follow yanked the reader down despite a mid-gap grab"
+        )
+        s.destroy()
+
+    def test_fallback_destroy_cancels_pending_follow(self, monkeypatch):
+        """destroy() cancels a queued follow and disconnects the tracker — a
+        late height change must not scroll a dead surface."""
+        s, vadj = self._fallback(monkeypatch)
+        vadj.set_value(vadj.get_upper())  # at bottom
+        self._pump_frames()
+        s.append_message("agent", "<p>x</p>", "Coder")
+        assert s._follow_source is not None  # a follow is queued
+        hid = s._bottom_handler_id
+        s.destroy()
+        assert s._follow_source is None
+        assert not vadj.handler_is_connected(hid)
+
+
 class TestFallbackChromeParity:
     """SPEC-14 §2a.5: TextViewFallback accepts agent_color for signature
     parity; the value is stored on the row but INERT in plain-text mode."""
@@ -900,6 +1003,70 @@ class TestSmartScroll:
         while ctx.pending() and guard < 200:
             ctx.iteration(False)
             guard += 1
+
+    @staticmethod
+    def _frame():
+        """Run EXACTLY ONE idle frame (for cross-frame settle tests)."""
+        ctx = GLib.MainContext.default()
+        if ctx.pending():
+            ctx.iteration(False)
+
+    def test_cross_frame_intermediate_does_not_consume(self, monkeypatch):
+        """Finding 1 (priority fix): real WebKit layout lands ACROSS frames —
+        an intermediate scrollable height can be stable for one frame. With
+        N=1 the capture consumes at the intermediate (was_at_bottom=False →
+        set_value(min(300, upper-page=50)) ≈ top); the final height then has
+        nothing to restore. N=2 consecutive stable frames fixes it.
+        """
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        vadj.set_value(300.0)  # reading → capture intent = 300
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # capture = (False, 300); _fake_load collapses to 0
+        vadj.set_upper(150.0)   # intermediate: scrollable (max=50), NOT final
+        self._frame()           # ONE idle frame — must NOT consume here
+        vadj.set_upper(1200.0)  # FINAL height lands in a later frame
+        self._pump()
+        assert vadj.get_value() == 300.0, (
+            "capture consumed at the intermediate frame (cross-frame bug)"
+        )
+        s.destroy()
+
+    def test_two_consecutive_stable_frames_consumes(self, monkeypatch):
+        """Finding 1 (N=2) pinned BOTH ways: after ONE stable frame the capture
+        is NOT yet consumed; after the SECOND it is. (N=1 fails the interim
+        assert; N>2 fails the post-second assert.)"""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()  # capture = (True, 0)
+        vadj.set_upper(1000.0)
+        self._frame()  # stable frame #1 — must NOT consume yet
+        assert vadj.get_value() == 0.0, "consumed after only one stable frame"
+        self._frame()  # stable frame #2 — now consume
+        assert vadj.get_value() == 900.0, "did not consume after two stable frames"
+        s.destroy()
+
+    def test_collapse_does_not_rearm_at_bottom(self, monkeypatch):
+        """Finding 2 (priority fix): the load_html collapse clamps value→0 and
+        fires value-changed. Without a guard the tracker derives
+        was_at_bottom=True even when the user was reading up top — poisoning
+        the next render. The guard: upper <= page_size is a layout artifact,
+        not user intent."""
+        s, vadj = self._surface(monkeypatch)
+        vadj.set_upper(1000.0)
+        vadj.set_value(300.0)  # reading: (1000-100-300)=600 > 80 → False
+        assert s._was_at_bottom is False
+        # Collapse: upper shrinks below page_size; value clamps to 0.
+        vadj.set_upper(0.0)
+        vadj.set_value(0.0)  # value-changed fires with upper=0 (not scrollable)
+        assert s._was_at_bottom is False, (
+            "collapse re-armed was_at_bottom — tracker poisoned by layout"
+        )
+        s.destroy()
 
     def test_first_render_lands_at_bottom(self, monkeypatch):
         """Edge 4: a fresh surface with no prior content lands at bottom once
@@ -1087,6 +1254,32 @@ class TestSmartScroll:
         vadj.set_upper(1200.0)  # height lands → restore the pre-load intent
         self._pump()
         assert vadj.get_value() == 500.0
+        s.destroy()
+
+    def test_at_bottom_user_grab_during_settle_does_not_yank(self, monkeypatch):
+        """BUG#7 (ChatSurface mirror): the capture said at-bottom, but the user
+        grabs the scrollbar during the CROSS-FRAME settle window (before the
+        restore consumes). The at-bottom restore must RE-READ the live tracker
+        right before set_value and abort when a user-grab moved it off-bottom —
+        the queued restore must not yank the reader back down. (The reading-
+        position preserve path is unaffected: it already respects intent.)"""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        assert vadj.get_value() == 900.0  # settled at bottom, tracker True
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # capture = (True, 900); _fake_load collapses to 0
+        vadj.set_upper(1200.0)  # height lands → schedules the settle (N=2)
+        vadj.set_value(200.0)   # USER GRAB mid-settle → re-arms _was_at_bottom
+        assert s._was_at_bottom is False
+        self._pump()  # the settle now consumes the capture
+
+        assert vadj.get_value() == 200.0, (
+            "at-bottom restore yanked the reader down despite a mid-settle grab"
+        )
         s.destroy()
 
     def test_do_render_captures_before_load(self, monkeypatch):

@@ -1088,12 +1088,13 @@ class MainContent(Gtk.Box):
         if vadj is None:
             return
         # REGISTER (#8, SP5a round 2) → CLOSED by MICRO-SMART-SCROLL,
-        # 2026-10-07: the WebKit surface now self-heals its scroll position —
-        # ui/views/chat_surface.ChatSurface._on_adjustment_changed /
-        # _settle_restore track at-bottom and restore the user's intent after
-        # each full-document reload (no JS bridge; SPEC-06 register closed).
-        # The TextViewFallback path's autoscroll WORKS and is pinned by the
-        # scroll tests; this seam stays honest for non-surface children.
+        # 2026-10-07: the WebKit surface now self-heals its scroll position
+        # (ui/views/chat_surface.ChatSurface._on_adjustment_changed /
+        # _settle_restore track at-bottom and restore intent after each
+        # full-document reload — no JS bridge). Per the smart-scroll audit:
+        # For surface tabs the surface self-heals — this is the user-intent
+        # (button/API) seam. For non-surface children the existing deferred
+        # scroll is still used.
         # Defer scroll to next frame — widget layout must recalculate first
         def _do_scroll():
             vadj.set_value(vadj.get_upper() - vadj.get_page_size())
