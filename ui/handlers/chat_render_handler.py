@@ -876,8 +876,12 @@ class ChatRenderHandler:
             )
             self._append_to_surface(role, full_text, session_key, agent_name=resolved_name,
                                     mount_key=mount_key, agent_color=agent_color)
-            if self._main_content is not None:
-                self._main_content.scroll_chat_to_bottom()
+            # MICRO-SMART-SCROLL (priority fix): the auto scroll_chat_to_bottom
+            # call was REMOVED here. It fired a priority-0 timeout(16ms)
+            # forced-scroll that raced the surface's own smart-scroll restore
+            # (beat the idle render, set_value fired value-changed and re-armed
+            # the tracker). The surface now self-heals; scrolling is USER intent
+            # (button/API) only. scroll_chat_to_bottom itself is unchanged.
 
         self._dispatch(_finalize)
 
@@ -967,8 +971,10 @@ class ChatRenderHandler:
 
         def _append():
             container.append(card)
-            if self._main_content is not None:
-                self._main_content.scroll_chat_to_bottom()
+            # MICRO-SMART-SCROLL (priority fix, Finding 3 sibling): the
+            # forced scroll_chat_to_bottom was REMOVED — the surface now
+            # self-heals its own scroll; a forced scroll here races it.
+            # Scrolling is USER intent (button/API) only.
 
         self._dispatch(_append)
 

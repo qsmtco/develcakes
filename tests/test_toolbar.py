@@ -49,6 +49,28 @@ class TestSettingsClickCallback:
         assert True
 
 
+class TestConnectClickDoesNotClobberState:
+    """SPEC-15 SP2: _on_connect_click must not overwrite the label the
+    window's callback just set (the old unconditional '● No transport'
+    post-click markup clobbered the 'connecting' state)."""
+
+    def test_callback_state_survives_click(self):
+        def _on_connect():
+            t.set_telegram_bridge_state("connecting")
+
+        t = Toolbar(on_connect_clicked=_on_connect)
+        t._on_connect_click(None)
+        assert "Connecting" in t._connect_btn.get_label()
+        assert "Connecting" in t._status_label.get_text()
+
+    def test_click_delegates_and_no_callback_is_safe(self):
+        fired = []
+        t = Toolbar(on_connect_clicked=lambda: fired.append(True))
+        t._on_connect_click(None)
+        assert fired == [True]
+        Toolbar()._on_connect_click(None)  # must not raise
+
+
 class TestSetSettingsStatus:
     def test_unverified_shows_dot(self):
         t = Toolbar()
@@ -76,11 +98,6 @@ class TestExistingBehaviorPreserved:
     def test_connect_button_still_present(self):
         t = Toolbar()
         assert t._connect_btn.get_label() == "Connect"
-
-    def test_stream_button_still_present(self):
-        t = Toolbar()
-        assert hasattr(t, "_stream_btn")
-        assert "Stream" in t._stream_btn.get_label()
 
     def test_status_label_still_present(self):
         t = Toolbar()
@@ -116,3 +133,44 @@ class TestStopAllButton:
         t._on_settings_click(None)
         t._on_stop_all_click(None)
         assert fired == ["settings", "stop"]
+
+
+# ═══════════════ SPEC-15 SP2: Telegram bridge toolbar states ══════════════════
+
+class TestTelegramBridgeState:
+    """set_telegram_bridge_state drives the button label + status markup."""
+
+    def _label(self, t):
+        return t._connect_btn.get_label()
+
+    def test_unconfigured(self):
+        t = Toolbar()
+        t.set_telegram_bridge_state("unconfigured")
+        assert self._label(t) == "Connect"
+        assert "No transport" in t._status_label.get_text()
+        assert "suggested-action" in t._connect_btn.get_css_classes()
+
+    def test_connecting(self):
+        t = Toolbar()
+        t.set_telegram_bridge_state("connecting")
+        assert "Connecting" in self._label(t)
+
+    def test_connected(self):
+        t = Toolbar()
+        t.set_telegram_bridge_state("connected")
+        assert self._label(t) == "Disconnect"
+        assert "Telegram bridge" in t._status_label.get_text()
+        assert "destructive-action" in t._connect_btn.get_css_classes()
+
+    def test_error(self):
+        t = Toolbar()
+        t.set_telegram_bridge_state("connected")
+        t.set_telegram_bridge_state("error")
+        assert self._label(t) == "Connect"
+        assert "Offline" in t._status_label.get_text()
+        assert "destructive-action" not in t._connect_btn.get_css_classes()
+
+    def test_disconnected_default(self):
+        t = Toolbar()
+        t.set_telegram_bridge_state("disconnected")
+        assert self._label(t) == "Connect"

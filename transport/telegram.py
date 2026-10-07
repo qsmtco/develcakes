@@ -68,10 +68,13 @@ def redact_log_preview(raw: str) -> str:
 
     The token is embedded in the Telegram URL path as `/bot<token>` — replaced
     with `/bot***`. The openclaw key/qs/bearer scrubbing is mirrored so the
-    same helper shape serves both transports.
+    same helper shape serves both transports. YAML/plain `key: value` forms
+    (e.g. a PyYAML parse-error dump quoting the source file) are scrubbed too
+    — the error text can echo the raw file, token included.
     """
     out = _TOKEN_IN_PATH_RE.sub("/bot***", raw)
-    for key in ("apiKey", "apikey", "api_key", "token", "password", "secret"):
+    for key in ("apiKey", "apikey", "api_key", "token", "bot_token",
+                "password", "secret"):
         out = re.sub(
             rf'("{re.escape(key)}"\s*:\s*)"?[^"\s,}}=&]+',
             r'\1"***"', out, flags=re.IGNORECASE,
@@ -79,6 +82,11 @@ def redact_log_preview(raw: str) -> str:
         out = re.sub(
             rf'([?&]{re.escape(key)}=)[^&"\s]+',
             r'\1***', out, flags=re.IGNORECASE,
+        )
+        # YAML / bare `key: value` (incl. indented lines from error dumps).
+        out = re.sub(
+            rf'(^\s*{re.escape(key)}\s*:\s*)\S+',
+            r'\1***', out, flags=re.IGNORECASE | re.MULTILINE,
         )
     out = re.sub(r"(Bearer\s+)[^\s\"}]+", r"\1***", out, flags=re.IGNORECASE)
     return out

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-07
 **Author:** Supervisor (develcakes v2)
-**Status:** IN PROGRESS — SP1 DELIVERED + RE-AUDITED PASS (transport/telegram.py + 27-test battery; client-close, dispatch-guard, idempotent-disconnect hardened post-audit; REGISTER BUG#5 deferred to SP2/SP3 by design). SP2 (bridge handler + settings + Connect wiring) next.
+**Status:** IN PROGRESS — SP1 + SP2 DELIVERED, audit-PASS (transport + bridge handler + store + settings section + Connect wiring; audit findings BUG#1-#9 all closed: supervisor-registration guard, dir-perm hardening, pairing-identity warning, honest toolbar init). SP3 (outbound mirror + approvals) next.
 **Implements:** PM direction 2026-10-07 — "Connect button = a Telegram bridge session
 to the Supervisor. Click Connect → continue working remotely; click Disconnect →
 back at the desk." First post-MVP unit. PM has a bot token in hand.

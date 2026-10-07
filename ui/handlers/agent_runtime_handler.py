@@ -2625,7 +2625,6 @@ class AgentRuntimeHandler:
                     )
                     if bubble is not None:
                         chat_box.append(bubble)
-                    self._mc.scroll_chat_to_bottom()
 
             if not was_streaming and text:
                 if project_name and self._fh is not None:
@@ -2653,7 +2652,6 @@ class AgentRuntimeHandler:
                     )
                     if bubble is not None:
                         chat_box.append(bubble)
-                    self._mc.scroll_chat_to_bottom()
 
             # Agent command parsing hook (Phase 6.2) — fire after bubble render, before lifecycle
             if self._on_agent_response is not None and text:
@@ -2822,7 +2820,6 @@ class AgentRuntimeHandler:
         )
         if bubble is not None:
             chat_box.append(bubble)
-            self._mc.scroll_chat_to_bottom()
         else:
             logger.warning("[handler] _do_compaction_bubble: render_sync returned None")
 
@@ -2862,7 +2859,6 @@ class AgentRuntimeHandler:
             )
             if bubble is not None:
                 chat_box.append(bubble)
-                self._mc.scroll_chat_to_bottom()
 
     # ── Phase A: public API for the UI context meter ─────────────────────────
     def get_last_breakdown(self, session_key: str) -> dict | None:
@@ -2992,7 +2988,6 @@ class AgentRuntimeHandler:
                     )
                     if bubble is not None:
                         chat_box.append(bubble)
-                    self._mc.scroll_chat_to_bottom()
 
             # SPEC-02: turn-fatal errors surface in the Project Feed too, not just
             # chat + stderr. Same guard pattern as publish_cli_nudge_card (:538):

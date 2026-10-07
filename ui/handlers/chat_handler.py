@@ -16,8 +16,6 @@ from typing import Callable
 
 import logging
 
-import ui.constants
-
 _logger = logging.getLogger(__name__)
 
 
@@ -232,7 +230,6 @@ class ChatHandler:
                                 def _on_bubble(bubble):
                                     if bubble is not None:
                                         chat_box.append(bubble)
-                                    self._mc.scroll_chat_to_bottom()
                                 self._chat_render_handler.render_async(
                                     "You", echo_text, session_key,
                                     on_bubble_ready=_on_bubble,
@@ -270,7 +267,6 @@ class ChatHandler:
                                 def _on_bubble(bubble):
                                     if bubble is not None:
                                         chat_box.append(bubble)
-                                    self._mc.scroll_chat_to_bottom()
                                 self._chat_render_handler.render_async(
                                     "You", echo_text, session_key,
                                     on_bubble_ready=_on_bubble,
@@ -308,7 +304,6 @@ class ChatHandler:
                         def _on_bubble(bubble):
                             if bubble is not None:
                                 chat_box.append(bubble)
-                            self._mc.scroll_chat_to_bottom()
                         self._chat_render_handler.render_async(
                             "You", text, session_key,
                             on_bubble_ready=_on_bubble,
@@ -342,7 +337,6 @@ class ChatHandler:
                         bubble = self._chat_render_handler.render_sync("System", resolution.error, session_key)
                         if bubble is not None:
                             chat_box.append(bubble)
-                        self._mc.scroll_chat_to_bottom()
                 self._dispatch(_show_error)
                 return
             elif resolution.target_session_key:
@@ -358,7 +352,6 @@ class ChatHandler:
                             def _on_bubble(bubble):
                                 if bubble is not None:
                                     chat_box.append(bubble)
-                                self._mc.scroll_chat_to_bottom()
                             self._chat_render_handler.render_async(
                                 "You", echo_text, session_key,
                                 on_bubble_ready=_on_bubble,
@@ -387,7 +380,6 @@ class ChatHandler:
                             def _on_bubble(bubble):
                                 if bubble is not None:
                                     chat_box.append(bubble)
-                                self._mc.scroll_chat_to_bottom()
                             self._chat_render_handler.render_async(
                                 "You", echo_text, session_key,
                                 on_bubble_ready=_on_bubble,
@@ -415,7 +407,6 @@ class ChatHandler:
                     def _on_bubble(bubble):
                         if bubble is not None:
                             chat_box.append(bubble)
-                        self._mc.scroll_chat_to_bottom()
                     self._chat_render_handler.render_async(
                         "You", text, session_key,
                         on_bubble_ready=_on_bubble,
@@ -523,11 +514,16 @@ class ChatHandler:
         """
         Update the streaming bubble for session_key with the latest delta text.
 
-        Controlled by STREAMING_ENABLED. When disabled, delta events are ignored
-        and the message appears only when the final event arrives.
+        UNREACHABLE in the current app: the only caller chain is
+        on_chat_event (the gateway event path, stripped in SPEC-05 R1).
+        Local agent replies render via AgentRuntimeHandler's own buffer
+        path and never route here.
+
+        The old STREAMING_ENABLED gate (the Stream toolbar toggle, removed
+        2026-10-07) always returned early at the default False — so this
+        method has been a no-op in practice for the app's whole life.
         """
-        if not ui.constants.STREAMING_ENABLED:
-            return  # streaming disabled — wait for final event
+        return  # streaming disabled — the flag was removed with the toggle
         if self._chat_render_handler is None:
             return
         if not self._chat_render_handler.is_streaming(session_key):
@@ -576,7 +572,6 @@ class ChatHandler:
             bubble = self._chat_render_handler.render_sync("Agent", final_text, session_key, on_forward_click=self._on_forward_message, tab_key=tab)
             if bubble is not None and chat_box is not None:
                 chat_box.append(bubble)
-                self._mc.scroll_chat_to_bottom()
 
         # Agent command parsing hook (Phase 6.2) — fire after bubble render.
         # Resolve project from routing table (authoritative for this session),
@@ -676,7 +671,6 @@ class ChatHandler:
                 session_key=target_tab,
                 thought_text=msg_obj.get("thought_text", msg_obj.get("content", "")),
             )
-        self._mc.scroll_chat_to_bottom()
 
     def switch_to_tab(self, session_key: str):
         """

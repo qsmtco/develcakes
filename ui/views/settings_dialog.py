@@ -351,6 +351,11 @@ class SettingsDialog:
         parent: Parent Gtk.Window for transient setting.
         handler: SettingsHandler — the data gateway.
         on_close: Optional callback when the dialog is closed.
+        telegram_controller: Optional TelegramSettingsController — the data
+            gateway for the "Telegram Bridge" section (SPEC-15 SP2). Injected
+            (never imported by the view — layer rule) so the section stays
+            honest/inert when not wired. Source-compatible: an existing
+            `SettingsDialog(parent=..., handler=...)` call is unchanged.
     """
 
     def __init__(
@@ -359,9 +364,11 @@ class SettingsDialog:
         *,
         handler: SettingsHandler,
         on_close=None,
+        telegram_controller=None,
     ):
         self._handler = handler
         self._on_close = on_close
+        self._telegram = telegram_controller
         self._cards: list[_ProviderCard] = []
 
         # ── Window setup ──────────────────────────────────────────────
@@ -376,12 +383,26 @@ class SettingsDialog:
         # ── Build layout ──────────────────────────────────────────────
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
+        # Sectioned layout (SPEC-15 SP2): a Gtk.Stack switched by a
+        # Gtk.StackSwitcher placed in the header bar. Tab "providers" holds
+        # the byte-identical legacy provider content; tab "telegram" is the
+        # new Telegram Bridge section.
+        self._stack = Gtk.Stack()
+        self._stack.set_vexpand(True)
+        self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self._stack_switcher = Gtk.StackSwitcher()
+        self._stack_switcher.set_stack(self._stack)
+
         # Header bar
         header = Gtk.HeaderBar()
+        header.set_title_widget(self._stack_switcher)
         close_btn = Gtk.Button(label="Close")
         close_btn.connect("clicked", lambda *_: self.close())
         header.pack_end(close_btn)
         content.append(header)
+
+        # ── Providers page (existing content, byte-identical behavior) ─
+        providers_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         # Scrollable body
         self._scrolled = Gtk.ScrolledWindow()
@@ -403,7 +424,7 @@ class SettingsDialog:
         self._list_box.append(self._empty_state)
 
         self._scrolled.set_child(self._list_box)
-        content.append(self._scrolled)
+        providers_page.append(self._scrolled)
 
         # + Add Provider button (bottom)
         add_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -416,8 +437,15 @@ class SettingsDialog:
         self._add_btn.set_hexpand(True)
         self._add_btn.connect("clicked", self._on_add_provider_clicked)
         add_btn_box.append(self._add_btn)
-        content.append(add_btn_box)
+        providers_page.append(add_btn_box)
 
+        self._stack.add_titled(providers_page, "providers", "Providers")
+
+        # ── Telegram Bridge page (SPEC-15 SP2) ────────────────────────
+        telegram_page = self._build_telegram_page()
+        self._stack.add_titled(telegram_page, "telegram", "Telegram Bridge")
+
+        content.append(self._stack)
         self._window.set_child(content)
 
         # Populate from current handler state
@@ -500,7 +528,218 @@ class SettingsDialog:
         self._empty_state.set_visible(len(self._cards) == 0)
 
     def _on_close_request(self, *args) -> bool:
-        """Handle window close-request signal."""
+        """Handle window close-request signal.
+
+        SPEC-15 SP2: leaving the dialog tears down any in-flight pairing poll
+        (a throwaway transport must never outlive the settings window).
+        """
+        if self._telegram is not None:
+            try:
+                self._telegram.cancel_pairing()
+            except Exception as e:  # noqa: BLE001 — teardown must not block close
+                logger.warning("telegram pairing teardown on close failed: %s", e)
         if self._on_close is not None:
             self._on_close()
         return False  # allow close
+
+    # ── Telegram Bridge section (SPEC-15 SP2) ─────────────────────────
+
+    def _build_telegram_page(self) -> Gtk.Box:
+        """Build the "Telegram Bridge" section widgets.
+
+        Pure view: reads initial state from the injected controller and
+        delegates every action back to it. When no controller is wired, the
+        section renders inert (honest, no dead controls).
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "Bridge this project to Telegram so the Supervisor can reach you "
+            "while you're away. The bot token is a credential — it is stored "
+            "owner-only and never logged."
+        )
+        page.append(intro)
+
+        # Bot token (password + reveal toggle, cloned from _ProviderCard).
+        self._telegram_token_entry = Gtk.Entry()
+        self._telegram_token_entry.set_placeholder_text("123456:ABC-DEF…")
+        self._telegram_token_entry.set_hexpand(True)
+        self._telegram_token_entry.set_visibility(False)
+        self._telegram_token_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+
+        self._telegram_reveal_btn = Gtk.Button(label="👁")
+        self._telegram_reveal_btn.add_css_class("flat")
+        self._telegram_reveal_btn.set_size_request(36, -1)
+        self._telegram_reveal_btn.connect(
+            "clicked", self._on_telegram_reveal_clicked
+        )
+
+        token_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        token_box.append(self._telegram_token_entry)
+        token_box.append(self._telegram_reveal_btn)
+        page.append(self._labeled_row("Bot token", token_box))
+
+        # Paired-chat status row.
+        self._telegram_paired_label = Gtk.Label()
+        self._telegram_paired_label.set_xalign(0.0)
+        self._telegram_paired_label.set_wrap(True)
+        page.append(self._labeled_row("Paired chat", self._telegram_paired_label))
+
+        # Result / status line (Test + Pairing feedback).
+        self._telegram_status_label = Gtk.Label(label="")
+        self._telegram_status_label.set_xalign(0.0)
+        self._telegram_status_label.set_wrap(True)
+        page.append(self._telegram_status_label)
+
+        # Button row: Test | Save | Start Pairing
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._telegram_test_btn = Gtk.Button(label="Test")
+        self._telegram_test_btn.connect("clicked", self._on_telegram_test_clicked)
+        btn_row.append(self._telegram_test_btn)
+
+        self._telegram_save_btn = Gtk.Button(label="Save")
+        self._telegram_save_btn.add_css_class("suggested-action")
+        self._telegram_save_btn.connect("clicked", self._on_telegram_save_clicked)
+        btn_row.append(self._telegram_save_btn)
+
+        self._telegram_pair_btn = Gtk.Button(label="Start Pairing")
+        self._telegram_pair_btn.connect(
+            "clicked", self._on_telegram_pair_clicked
+        )
+        btn_row.append(self._telegram_pair_btn)
+        page.append(btn_row)
+
+        self._refresh_telegram_section()
+        return page
+
+    def _labeled_row(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
+        """Label + widget row (mirrors _ProviderCard._labeled)."""
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        label = Gtk.Label(label=text)
+        label.set_size_request(100, -1)
+        label.set_halign(Gtk.Align.START)
+        label.set_valign(Gtk.Align.CENTER)
+        row.append(label)
+        row.append(widget)
+        return row
+
+    def _refresh_telegram_section(self) -> None:
+        """Reload token + paired status from the controller and gate buttons."""
+        if self._telegram is None:
+            self._telegram_paired_label.set_text("Telegram bridge not wired.")
+            self._telegram_token_entry.set_sensitive(False)
+            self._telegram_test_btn.set_sensitive(False)
+            self._telegram_save_btn.set_sensitive(False)
+            self._telegram_pair_btn.set_sensitive(False)
+            return
+        data = self._telegram.load()
+        # Pre-fill the masked token field; the user must click reveal to view it.
+        self._telegram_token_entry.set_text(data.get("bot_token") or "")
+        self._telegram_paired_label.set_text(self._telegram.paired_label(data))
+        # Start Pairing is enabled only when a token is saved.
+        self._telegram_pair_btn.set_sensitive(self._telegram.has_saved_token(data))
+
+    def _telegram_set_status(self, text: str, *, ok: bool = False,
+                             fail: bool = False) -> None:
+        self._telegram_status_label.set_text(text)
+        self._telegram_status_label.remove_css_class("settings-status-ok")
+        self._telegram_status_label.remove_css_class("settings-status-fail")
+        self._telegram_status_label.remove_css_class("settings-status-untested")
+        if ok:
+            self._telegram_status_label.add_css_class("settings-status-ok")
+        elif fail:
+            self._telegram_status_label.add_css_class("settings-status-fail")
+        else:
+            self._telegram_status_label.add_css_class("settings-status-untested")
+
+    def _on_telegram_reveal_clicked(self, *args) -> None:
+        """Toggle bot-token visibility (clone of _ProviderCard reveal)."""
+        current = self._telegram_token_entry.get_visibility()
+        self._telegram_token_entry.set_visibility(not current)
+
+    def _on_telegram_save_clicked(self, *args) -> None:
+        """Persist the token (preserving any existing pairing)."""
+        if self._telegram is None:
+            return
+        token = self._telegram_token_entry.get_text().strip()
+        try:
+            self._telegram.save_token(token)
+        except Exception as e:  # noqa: BLE001 — surface save failures to the user
+            self._telegram_set_status(f"Save failed: {e}", fail=True)
+            return
+        self._telegram_set_status("Saved.", ok=True)
+        self._refresh_telegram_section()
+
+    def _on_telegram_test_clicked(self, *args) -> None:
+        """Validate the entered token via getMe (off-thread)."""
+        if self._telegram is None:
+            return
+        self._telegram_set_status("Testing…")
+        token = self._telegram_token_entry.get_text().strip()
+        self._telegram.test_token(token, self._on_telegram_test_result)
+
+    def _on_telegram_test_result(self, ok: bool, message: str) -> None:
+        """Main-thread callback: show the (redacted) Test result."""
+        self._telegram_set_status(message, ok=ok, fail=not ok)
+
+    def _on_telegram_pair_clicked(self, *args) -> None:
+        """Enter pairing mode: poll for the first inbound message."""
+        if self._telegram is None:
+            return
+        self._telegram_set_status("Pairing… send any message to the bot from your phone.")
+        self._telegram_pair_btn.set_sensitive(False)
+        self._telegram.start_pairing(
+            self._on_telegram_pair_candidate, self._on_telegram_pair_error
+        )
+
+    def _on_telegram_pair_error(self, message: str) -> None:
+        self._telegram_pair_btn.set_sensitive(True)
+        self._telegram_set_status(message, fail=True)
+
+    def _on_telegram_pair_candidate(self, chat_id: int, handle: str) -> None:
+        """Main-thread callback: offer the first message's chat as the pairing."""
+        if self._telegram is None:
+            return
+        shown = f"{handle} ({chat_id})" if handle else f"chat {chat_id}"
+        dialog = Gtk.MessageDialog(
+            transient_for=self._window,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f"Pair with {shown}?",
+        )
+        # BUG#4 (SP2 audit): pairing accepts the first message in the window —
+        # whoever messages first wins. Make the identity + exclusivity warning
+        # explicit so the human is a real gate, not a rubber stamp.
+        dialog.set_property(
+            "secondary-text",
+            f"Telegram will pair with {shown}. This will be the ONLY chat "
+            "allowed to reach the Supervisor. Confirm only if this is you.",
+        )
+
+        def on_response(dlg, response_id):
+            dlg.close()
+            if response_id == Gtk.ResponseType.YES:
+                if self._telegram.confirm_pairing(chat_id, handle):
+                    self._telegram_set_status(f"Paired with {shown}.", ok=True)
+                else:
+                    self._telegram_set_status(
+                        "Could not pair — save a bot token first.", fail=True
+                    )
+            else:
+                self._telegram_set_status("Pairing cancelled.")
+            self._refresh_telegram_section()
+            self._telegram_pair_btn.set_sensitive(
+                self._telegram.has_saved_token()
+            )
+
+        dialog.connect("response", on_response)
+        dialog.show()

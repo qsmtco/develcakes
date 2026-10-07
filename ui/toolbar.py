@@ -2,11 +2,10 @@
 # Top toolbar — horizontal bar across the top of the window
 
 import gi
-# Require GTK 4.0 — must be called before importing Gtk
+
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-import ui.constants
 
 class Toolbar(Gtk.Box):
     """
@@ -28,13 +27,6 @@ class Toolbar(Gtk.Box):
         # SPEC-09 SP3: stop-all — wired by window.py to the ARH aggregation
         # (lazy resolve via closure: the handler is built after the toolbar).
         self._on_stop_all_clicked = on_stop_all_clicked
-
-        # Stream toggle — left side of toolbar
-        self._stream_btn = Gtk.ToggleButton(label="Stream: OFF")
-        self._stream_btn.set_size_request(100, -1)
-        self._stream_btn.set_active(ui.constants.STREAMING_ENABLED)
-        self._update_stream_label()
-        self._stream_btn.connect("toggled", self._on_stream_toggled)
 
         # Spacer — expands to push everything after it to the right
         spacer = Gtk.Box()
@@ -75,9 +67,9 @@ class Toolbar(Gtk.Box):
         self._status_dot.set_visible(False)  # hidden until needed
         overlay.add_overlay(self._status_dot)
 
-        # Left-aligned box: Stream + Settings
+        # Left-aligned box: Settings (the Stream toggle was removed 2026-10-07 —
+        # its flag's only reader was the retired remote-event path)
         left_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        left_box.append(self._stream_btn)
         left_box.append(overlay)
 
         # Right-aligned box: status + Connect
@@ -105,24 +97,13 @@ class Toolbar(Gtk.Box):
     def _on_connect_click(self, *args):
         """Called when Connect button is clicked. Delegates to window's callback.
 
-        No transport is configured in MVP (SPEC-05 R1 strip; Telegram arrives
-        post-MVP) — surface the honest state instead of toggling.
+        SPEC-15 SP2: the window now drives the button label + status markup
+        from the bridge's state signals (set_telegram_bridge_state). The old
+        unconditional post-click label overwrite was removed — it clobbered
+        the 'connecting' state the callback had just set.
         """
         if self._on_connect_clicked is not None:
             self._on_connect_clicked()
-        self._status_label.set_markup(
-            '<span foreground="#6b6b7a" font_desc="Sans 10">● No transport</span>')
-
-    def _on_stream_toggled(self, button):
-        """Toggle streaming on/off and update the button label."""
-        ui.constants.STREAMING_ENABLED = button.get_active()
-        self._update_stream_label()
-
-    def _update_stream_label(self):
-        """Update stream button label to reflect current state."""
-        self._stream_btn.set_label(
-            "Stream: ON" if ui.constants.STREAMING_ENABLED else "Stream: OFF"
-        )
 
     def _on_settings_click(self, *args):
         """Called when ⚙ Settings button is clicked. Delegates to window's callback."""
@@ -138,6 +119,47 @@ class Toolbar(Gtk.Box):
     def set_settings_status(self, has_verified_provider: bool) -> None:
         """Show/hide the red dot. Window calls this on startup and after providers change."""
         self._status_dot.set_visible(not has_verified_provider)
+
+    def set_telegram_bridge_state(self, state: str) -> None:
+        """SPEC-15 Telegram bridge states (distinct from the legacy generic
+        transport states, which predate the bridge).
+
+        state: "unconfigured" | "disconnected" | "connecting" | "connected"
+               | "error"
+        """
+        if state == "unconfigured":
+            self._connect_btn.set_label("Connect")
+            self._connect_btn.remove_css_class("destructive-action")
+            self._connect_btn.add_css_class("suggested-action")
+            self._status_label.set_markup(
+                '<span foreground="#6b6b7a" font_desc="Sans 10">'
+                '● No transport (configure in Settings)</span>')
+        elif state == "connecting":
+            self._connect_btn.set_label("Connecting…")
+            self._status_label.set_markup(
+                '<span foreground="#f59e0b" font_desc="Sans 10">'
+                '● Connecting…</span>')
+        elif state == "connected":
+            self._connect_btn.set_label("Disconnect")
+            self._connect_btn.remove_css_class("suggested-action")
+            self._connect_btn.add_css_class("destructive-action")
+            self._status_label.set_markup(
+                '<span foreground="#22c55e" font_desc="Sans 10">'
+                '● Telegram bridge</span>')
+        elif state == "error":
+            self._connect_btn.set_label("Connect")
+            self._connect_btn.remove_css_class("destructive-action")
+            self._connect_btn.add_css_class("suggested-action")
+            self._status_label.set_markup(
+                '<span foreground="#ef4444" font_desc="Sans 10">'
+                '● Offline</span>')
+        else:  # "disconnected"
+            self._connect_btn.set_label("Connect")
+            self._connect_btn.remove_css_class("destructive-action")
+            self._connect_btn.add_css_class("suggested-action")
+            self._status_label.set_markup(
+                '<span foreground="#6b6b7a" font_desc="Sans 10">'
+                '● Telegram bridge off</span>')
 
     # ── State update methods ─────────────────────────────────────────────────
 

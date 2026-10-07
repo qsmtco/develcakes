@@ -1222,3 +1222,43 @@ class TestResolveAgentColorParity:
         h._main_content = mc
         assert h._resolve_agent_color("Coder") == "#abcdef"
 
+
+class TestEndStreamingDoesNotForceScroll:
+    """MICRO-SMART-SCROLL priority fix (Finding 3): end_streaming used to call
+    main_content.scroll_chat_to_bottom() — a priority-0 timeout(16ms) forced
+    scroll that raced the surface's own smart-scroll restore. The surface now
+    self-heals; end_streaming must NOT drive the adjustment. Scrolling is USER
+    intent (button/API) only."""
+
+    def test_end_streaming_does_not_call_scroll_chat_to_bottom(self):
+        from unittest.mock import MagicMock
+
+        h, spy = _spy_handler()
+        mc = MagicMock()
+        mc.scroll_chat_to_bottom = MagicMock()
+        h._main_content = mc
+        h.start_streaming("sk")
+        h.update_streaming("sk", "hello")
+        h.end_streaming("sk", agent_name="Coder")
+        assert spy.appended, "the final row must still be appended"
+        assert not mc.scroll_chat_to_bottom.called, (
+            "end_streaming must NOT force-scroll — the surface owns scrolling "
+            "now (smart-scroll); a forced scroll races it (Finding 3)"
+        )
+
+    def test_render_event_card_does_not_call_scroll_chat_to_bottom(self):
+        """Same finding, sibling site: event-card append must not force-scroll."""
+        from unittest.mock import MagicMock
+
+        from gi.repository import Gtk
+
+        h = ChatRenderHandler()
+        mc = MagicMock()
+        mc.scroll_chat_to_bottom = MagicMock()
+        h._main_content = mc
+        container = Gtk.Box()
+        h.render_event_card("error", container, error_msg="boom")
+        assert not mc.scroll_chat_to_bottom.called, (
+            "render_event_card must NOT force-scroll (Finding 3 sibling)"
+        )
+

@@ -134,6 +134,11 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self._toolbar = toolbar
         self._toolbar.update_connection_state("offline")
+        # SPEC-15 SP2 BUG#6: the Connect button must be honest BEFORE any
+        # click — 'unconfigured' when no bridge config exists, else
+        # 'disconnected'. Without this the toolbar showed the generic legacy
+        # offline label, which reads as "a transport is available".
+        self._init_bridge_toolbar_state()
 
         self._main_content = MainContent()
 
@@ -445,6 +450,19 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib_module=GLib,
             on_event=self._feed_handler.on_filesystem_event,
         )
+
+        # Telegram bridge handler (SPEC-15 SP2 part D). Constructed once here,
+        # like every other handler. The ARH reference is setter-injected
+        # (house pattern — this module never imports ARH, preserving handler
+        # isolation). State signals marshal to the main thread via GLib.idle_add;
+        # the toolbar + error feed cards are driven by them.
+        from ui.handlers.telegram_bridge_handler import TelegramBridgeHandler
+        self._bridge_handler = TelegramBridgeHandler(
+            dispatch=GLib.idle_add,
+            on_state_change=self._on_bridge_state_change,
+            on_feed_card=self._emit_bridge_notice_card,
+        )
+        self._bridge_handler.set_agent_runtime_handler(self._agent_runtime_handler)
 
         # FeedTab created here (once) — inject into LeftPanel's Projects "Feed" sub-tab
         from ui.views.feed_tab import FeedTab
@@ -887,7 +905,6 @@ class MainWindow(Gtk.ApplicationWindow):
         bubble = self._chat_render_handler.render_sync("DevelCakes", text, session_key)
         if bubble is not None:
             chat_box.append(bubble)
-            self._main_content.scroll_chat_to_bottom()
 
 
     # ── Review callbacks (owned by ReviewHandler) ──────────────────────────────
@@ -910,7 +927,6 @@ class MainWindow(Gtk.ApplicationWindow):
         if chat_box is None or self._chat_render_handler is None:
             return
         self._chat_render_handler.render_event_card(card["type"], chat_box, **card)
-        self._main_content.scroll_chat_to_bottom()
 
 
 
@@ -1002,17 +1018,129 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         if bubble is not None:
             chat_box.append(bubble)
-            self._main_content.scroll_chat_to_bottom()
 
     # ── Connect toggle ──────────────────────────────────────────────────────
 
-    def _on_connect_clicked(self, *args):
-        """Connect button — no-op in MVP (gateway strip; no transport configured).
+    def _init_bridge_toolbar_state(self) -> None:
+        """SPEC-15 SP2 BUG#6: honest toolbar bridge state at construction.
 
-        Kept alive as the future transport toggle (SPEC-05 SP3c wires the
-        transport on/off switch behind this button).
+        'unconfigured' when the store has no token+chat_id, else
+        'disconnected' (a ready-but-idle bridge). Runs before any click so the
+        button never advertises a transport that cannot exist.
         """
-        logger.info("Connect pressed — no transport configured (SPEC-05 SP3c wires the transport toggle)")
+        toolbar = getattr(self, "_toolbar", None)
+        if toolbar is None:
+            return
+        try:
+            from utils import telegram_store
+
+            configured = telegram_store.is_configured(
+                telegram_store.load_bridge_config()
+            )
+        except Exception:
+            logger.exception("failed to read Telegram bridge config at startup")
+            configured = False
+        toolbar.set_telegram_bridge_state(
+            "disconnected" if configured else "unconfigured"
+        )
+
+    def _on_connect_clicked(self, *args):
+        """Connect / Disconnect — toggles the Telegram bridge (SPEC-15 SP2).
+
+        Honest-state contract:
+          - not configured → gray 'No transport (configure in Settings)', no bridge
+          - configured + idle → start_bridge() (state signals drive the toolbar)
+          - connected/connecting → stop_bridge()
+        All state-driven label/markup changes come back through
+        _on_bridge_state_change (the bridge marshals to the main thread).
+        """
+        from utils import telegram_store
+        cfg = telegram_store.load_bridge_config()
+        if not telegram_store.is_configured(cfg):
+            self._toolbar.set_telegram_bridge_state("unconfigured")
+            logger.info(
+                "Connect pressed — Telegram bridge not configured "
+                "(set a token + pair in Settings)"
+            )
+            return
+
+        bridge = getattr(self, "_bridge_handler", None)
+        if bridge is None:
+            logger.warning("Connect pressed but no bridge handler wired")
+            return
+        # connected/connecting → stop; anything else → start.
+        if bridge.is_connected() or bridge.state == "connecting":
+            bridge.stop_bridge()
+        else:
+            bridge.start_bridge()
+
+    def _on_bridge_state_change(self, state: str) -> None:
+        """Drive the toolbar + honesty feed card from bridge state.
+
+        The bridge invokes this on the GTK main thread (its transport
+        callbacks are already dispatched via GLib.idle_add), so the toolbar
+        update is safe here.
+        """
+        toolbar = getattr(self, "_toolbar", None)
+        if toolbar is not None:
+            toolbar.set_telegram_bridge_state(state)
+        if state == "error":
+            # BUG#1 (SP2 audit): a bridge refusal that already emitted a
+            # SPECIFIC notice (e.g. "Supervisor agent not registered") must not
+            # ALSO emit the generic "check the bot token and pairing" card —
+            # that would misattribute the failure. Consume the pending flag.
+            if getattr(self, "_bridge_notice_pending", False):
+                self._bridge_notice_pending = False
+            else:
+                self._emit_bridge_error_card()
+
+    def _emit_bridge_error_card(self) -> None:
+        """SPEC-15 §4 honesty: a bridge failure surfaces a feed card."""
+        self._emit_bridge_card(
+            title="Telegram bridge offline",
+            body=(
+                "The Telegram bridge could not connect. Check the bot token "
+                "and pairing in Settings → Telegram Bridge."
+            ),
+        )
+
+    def _emit_bridge_notice_card(self, title: str, body: str) -> None:
+        """BUG#1 (SP2 audit): a SPECIFIC bridge notice (e.g. the Supervisor is
+        not registered). Distinct title/body so the reason is never
+        misattributed to a bad token by the generic offline card. Marks the
+        notice pending so the ERROR-state transition it triggers does not ALSO
+        emit the generic card.
+        """
+        self._bridge_notice_pending = True
+        self._emit_bridge_card(title=title, body=body)
+
+    def _emit_bridge_card(self, *, title: str, body: str) -> None:
+        """Build + add a telegram-bridge feed card (shared by both emitters)."""
+        try:
+            from datetime import UTC, datetime
+
+            from models.feed_card import FeedCardData
+
+            fh = getattr(self, "_feed_handler", None)
+            if fh is None:
+                return
+            project_name = "(none)"
+            ph = getattr(self, "_project_handler", None)
+            if ph is not None:
+                project_name = ph.get_active_project_name() or "(none)"
+            card = FeedCardData(
+                card_type="system",
+                source="system",
+                title=title,
+                body=body,
+                author="Telegram bridge",
+                timestamp=datetime.now(UTC),
+                project_name=project_name,
+                metadata={"origin": "telegram-bridge"},
+            )
+            fh.add_card(card)
+        except Exception:
+            logger.exception("failed to emit Telegram bridge feed card")
 
     def _on_stop_all_clicked(self, *args):
         """■ Stop All — confirm, then halt every agent (SPEC-09 SP3).
@@ -1057,6 +1185,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     arh.stop_all_agents()
                 else:
                     logger.warning("Stop All confirmed but no AgentRuntimeHandler — no-op")
+                # SPEC-15: stop-all drops the bridge.
+                bridge = getattr(self, "_bridge_handler", None)
+                if bridge is not None:
+                    bridge.stop_bridge()
             _dialog.close()
 
         dialog.connect("response", _on_response)
@@ -1331,7 +1463,6 @@ class MainWindow(Gtk.ApplicationWindow):
                     logger.exception(
                         "Failed to render project-created System bubble for %s", session_key
                     )
-                self._main_content.scroll_chat_to_bottom()
             except Exception:
                 logger.exception(
                     "Failed to process project-created System bubble for %s", session_key
@@ -1660,11 +1791,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _open_settings(self) -> None:
         """Open the Settings dialog (fresh instance each time)."""
+        from gi.repository import GLib
+
+        from ui.handlers.telegram_settings_controller import (
+            TelegramSettingsController,
+        )
         from ui.views.settings_dialog import SettingsDialog
         dialog = SettingsDialog(
             parent=self,
             handler=self._settings_handler,
             on_close=lambda: None,
+            telegram_controller=TelegramSettingsController(GLib_module=GLib),
         )
         dialog.show()
 

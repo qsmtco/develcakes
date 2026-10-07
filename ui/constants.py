@@ -10,7 +10,8 @@
 #   the handler need to read AND write it. For one-way state (handler-only or
 #   view-only), pass via constructor or setter from ui/window.py instead.
 
-# Streaming toggle: when True, the chat shows live token deltas as the agent
-# types. When False, only the final assembled message is shown. The toolbar's
-# stream button toggles this; ChatHandler reads it on every streaming event.
-STREAMING_ENABLED: bool = False
+# Streaming: the local agent runtime paints one row at turn end (the
+# AgentRuntimeHandler buffer path). The old STREAMING_ENABLED toggle + Stream
+# toolbar button were removed 2026-10-07 — the flag's only reader was the
+# dead gateway event path (on_chat_event, gateway stripped SPEC-05), so the
+# toggle never affected local-agent rendering.
