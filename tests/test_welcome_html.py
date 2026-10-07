@@ -34,9 +34,10 @@ class SpySurface(TextViewFallback):
         super().__init__(*a, **k)
         self.appended: list[dict] = []
 
-    def append_message(self, role, html_fragment, agent_name=None):
+    def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
         self.appended.append({"role": role, "html": html_fragment, "agent": agent_name})
-        super().append_message(role, html_fragment, agent_name=agent_name)
+        super().append_message(role, html_fragment, agent_name=agent_name,
+                               agent_color=agent_color)
 
 
 def _handler_with_spy() -> tuple[ChatRenderHandler, SpySurface]:

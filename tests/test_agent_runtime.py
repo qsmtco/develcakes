@@ -3350,7 +3350,7 @@ class TestEndStreamingExplicitNameTakesPriority:
         appended: list = []
 
         class _Spy:
-            def append_message(self, role, html_fragment, agent_name=None):
+            def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
                 appended.append(
                     {"role": role, "html": html_fragment, "agent": agent_name}
                 )
@@ -3403,7 +3403,7 @@ class TestEndStreamingFallbackForGatewayAgents:
         appended: list = []
 
         class _Spy:
-            def append_message(self, role, html_fragment, agent_name=None):
+            def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
                 appended.append(
                     {"role": role, "html": html_fragment, "agent": agent_name}
                 )

@@ -32,9 +32,10 @@ class SpySurface(TextViewFallback):
         super().__init__(*a, **k)
         self.appended: list[dict] = []
 
-    def append_message(self, role, html_fragment, agent_name=None):
+    def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
         self.appended.append(
-            {"role": role, "html": html_fragment, "agent": agent_name}
+            {"role": role, "html": html_fragment, "agent": agent_name,
+             "color": agent_color}
         )
         super().append_message(role, html_fragment, agent_name=agent_name)
 
@@ -1115,4 +1116,109 @@ class TestCloseFanOutProductionPath:
             assert handler._surfaces["project:alpha"].get_parent() is new_box
         finally:
             win.destroy()
+
+
+# ── SPEC-14 SP2: agent-color threading + resolver parity ─────────────────
+
+
+class TestAgentColorThreading:
+    """The three render paths resolve the agent color ONCE and pass it to
+    surface.append_message; "You" and None-name resolve to no color; the
+    escaped-raw fallback stays name-only (spec §2b)."""
+
+    def test_render_sync_threads_resolved_color(self):
+        h, spy = _spy_handler()
+        h._resolve_agent_color = lambda name: "#16a34a"  # type: ignore[method-assign]
+        h.render_sync("Agent", "hi", "sk", agent_name="Coder")
+        assert spy.appended[0]["color"] == "#16a34a"
+
+    def test_render_async_threads_resolved_color(self):
+        h, spy = _spy_handler()
+        h._resolve_agent_color = lambda name: "#16a34a"  # type: ignore[method-assign]
+        h.render_async("Agent", "hi", "sk", on_bubble_ready=lambda _b: None,
+                       agent_name="Coder")
+        assert spy.appended[0]["color"] == "#16a34a"
+
+    def test_end_streaming_threads_resolved_color(self):
+        h, spy = _spy_handler()
+        h._resolve_agent_color = lambda name: "#16a34a"  # type: ignore[method-assign]
+        h.start_streaming("sk")
+        h.update_streaming("sk", "hello")
+        h.end_streaming("sk", agent_name="Coder")
+        assert spy.appended[0]["color"] == "#16a34a"
+
+    def test_you_gets_no_color(self):
+        """User echoes carry CSS identity — resolve is SKIPPED for "You".
+        The named-agent render is the positive witness: the SAME doc yields a
+        colored agent row but an uncolored "You" row (reddens if resolves
+        are not role-gated)."""
+        h, spy = _spy_handler()
+        h._resolve_agent_color = lambda name: "#16a34a"  # type: ignore[method-assign]
+        h.render_sync("Agent", "hi", "sk", agent_name="Coder")
+        h.render_sync("You", "q", "sk", agent_name="You")
+        assert spy.appended[0]["color"] == "#16a34a"   # positive witness
+        assert spy.appended[1]["color"] is None        # "You" skipped
+
+    def test_none_name_gets_no_color(self):
+        h, spy = _spy_handler()
+        h._resolve_agent_color = lambda name: "#16a34a"  # type: ignore[method-assign]
+        h.render_sync("Agent", "hi", "sk", agent_name="Coder")  # witness
+        h.render_sync("Agent", "hi2", "sk")  # no agent_name
+        assert spy.appended[0]["color"] == "#16a34a"
+        assert spy.appended[1]["color"] is None
+
+    def test_resolve_called_exactly_once_per_render(self):
+        calls = []
+        h, _spy = _spy_handler()
+        h._resolve_agent_color = lambda name: calls.append(name) or "#16a34a"  # type: ignore[method-assign]
+        h.render_sync("Agent", "hi", "sk", agent_name="Coder")
+        assert calls == ["Coder"]
+
+
+class TestResolveAgentColorParity:
+    """SPEC-14 §2b.3 — the chat resolver must return the SAME color as the
+    agent-list resolver for every registered special agent (PM: header color
+    == agent-list avatar color in ALL tiers)."""
+
+    def test_special_agent_registry_nonempty(self):
+        from agent.special_agents import get_special_agents
+
+        assert get_special_agents(), "registry empty — parity pin would be vacuous"
+
+    def test_parity_over_registry(self):
+        from agent.special_agents import get_special_agents
+        from ui.handlers.agent_list_handler import AgentListHandler
+
+        h = ChatRenderHandler()  # no _main_content → Tier 1 skipped
+        alh = AgentListHandler()  # no agent_mgr → Tier 1 skipped
+        for agent_def in get_special_agents():
+            name = agent_def.display_name
+            assert h._resolve_agent_color(name) == alh.get_agent_color(name), (
+                f"tier divergence for {name!r}: chat="
+                f"{h._resolve_agent_color(name)!r} list={alh.get_agent_color(name)!r}"
+            )
+
+    def test_tier3_default_aligned(self):
+        """Unknown name → BOTH resolvers return the deterministic default."""
+        from ui.handlers.agent_list_handler import AgentListHandler
+
+        assert ChatRenderHandler()._resolve_agent_color("Nobody") == "#6366f1"
+        assert AgentListHandler().get_agent_color("Nobody") == "#6366f1"
+
+    def test_none_name_returns_none(self):
+        assert ChatRenderHandler()._resolve_agent_color("") is None
+
+    def test_tier1_agent_mgr_wins(self):
+        class _MC:
+            _agent_mgr = None
+
+        class _Mgr:
+            def get_color(self, name):
+                return "#abcdef"
+
+        mc = _MC()
+        mc._agent_mgr = _Mgr()
+        h = ChatRenderHandler()
+        h._main_content = mc
+        assert h._resolve_agent_color("Coder") == "#abcdef"
 

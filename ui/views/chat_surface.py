@@ -71,14 +71,27 @@ body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
 .message-row { margin-bottom: 10px; }
 .agent-name { color: #7aa2f7; font-weight: bold; font-size: 12px; }
 .role-user .agent-name { color: #9ece6a; }
-.agent-box { border-left: 2px solid #3b4261; padding-left: 8px; margin-bottom: 12px; }
-/* SP1-audit BUG#3 correction: the box element ITSELF carries role-user, so the
-   header span.agent-name is still a DESCENDANT of a .role-user element and the
-   OLD `.role-user .agent-name` rule STILL matches. This box-level rule is
-   therefore REDUNDANT (kept for explicitness/intent; either rule styles the user
-   header green). The earlier "sibling / stops matching" rationale was a mis-model
-   of CSS ancestor matching. */
+/* SPEC-14 §2a.4: the card frame replaces SPEC-12 SP1's border-left (now the
+   chrome + card border carry the visual identity). The old SPEC-12 comment
+   ("border-left becomes the card frame") is superseded here. */
+.agent-box { border-left: none; margin-bottom: 14px; }
+/* SP1-audit BUG#3 correction (SPEC-12): the box element ITSELF carries
+   role-user, so the header span.agent-name is still a DESCENDANT of a
+   .role-user element and the OLD `.role-user .agent-name` rule STILL matches.
+   This box-level rule is therefore REDUNDANT (kept for explicitness/intent;
+   either rule styles the user header green). */
 .agent-box.role-user .agent-name { color: #9ece6a; }
+/* SPEC-14 §2a.4 chrome defaults; an agent color overrides via inline style. */
+.agent-chrome { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+                background: #16161e; border-radius: 8px 8px 0 0; }
+.agent-avatar { width: 24px; height: 24px; border-radius: 50%;
+                background: #3b4261; color: #1a1b26; font-weight: bold;
+                font-size: 12px; text-align: center; line-height: 24px;
+                flex: none; }
+.agent-card { border: 1px solid #3b4261; border-top: none;
+              border-radius: 0 0 8px 8px; padding: 4px 10px 8px;
+              overflow: hidden; } /* SP1 audit: full-bleed payload bgs clip at the corners */
+.agent-box.role-user .agent-avatar { background: #9ece6a; }
 pre { background: #16161e; padding: 6px; border-radius: 4px; }
 code { font-family: monospace; }
 pre.terminal { color: #c0caf5; }
@@ -101,6 +114,29 @@ button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
 """
 
 _TAG_STRIP_RE = re.compile(r"<[^>]*>")
+
+# SPEC-14 §2a.2 security gate. NOTE the deviation: the spec writes the gate as
+# `^#[0-9a-fA-F]{6}$`, but Python's `$` also matches BEFORE a trailing newline,
+# so `"#16a34a\n"` would slip through a `.match()` + `$` form. The intent is
+# "ONLY an exact six-hex-digit value may reach a style attribute" — `fullmatch`
+# preserves that with no trailing-newline loophole.
+_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _sanitize_color(value) -> str:
+    """SPEC-14 §2a.2 — the color security gate.
+
+    ONLY an exact six-hex-digit color may ever reach a style attribute:
+    None/empty → "" ; ``#[0-9a-fA-F]{6}`` (whole string) → lowercased ;
+    anything else → "" (drops to the CSS default). Agent colors are platform
+    hex, but the surface must never embed an arbitrary attribute-sourced
+    string into HTML.
+    """
+    if not value:
+        return ""
+    if _COLOR_RE.fullmatch(value):
+        return value.lower()
+    return ""
 
 
 def _document(rows: list[dict]) -> str:
@@ -137,9 +173,28 @@ def _document(rows: list[dict]) -> str:
         # SP1-audit BUG#1: derive the box class from the row's ROLE, not the
         # display-name string — the name is not a user/agent discriminator.
         box_class = "role-user" if role == "user" else "role-agent"
+        # SPEC-14 §2a.3: the PLATFORM draws the card chrome (avatar + name
+        # header + card frame); the agent payload stays inside .agent-card.
+        # Color rides the group — first non-empty row color wins (defensive).
+        # User rows get NO inline color: `.role-user` supplies the green
+        # identity via _BASE_CSS (agent-gate color never touches user DOM).
+        color = ""
+        if role != "user":
+            for k in range(i, j):
+                if rows[k].get("color"):
+                    color = rows[k]["color"]
+                    break
+        initial = html.escape((agent[:1] or "?").upper())
+        card_style = f' style="border-bottom-color:{color}"' if color else ""
+        avatar_style = f' style="background-color:{color}"' if color else ""
+        name_style = f' style="color:{color}"' if color else ""
         blocks.append(
             f'<div class="agent-box {box_class}">'
-            f'<span class="agent-name">{name}</span>{body}</div>'
+            f'<div class="agent-chrome">'
+            f'<span class="agent-avatar"{avatar_style}>{initial}</span>'
+            f'<span class="agent-name"{name_style}>{name}</span>'
+            f'</div>'
+            f'<div class="agent-card"{card_style}>{body}</div></div>'
         )
         i = j
     return (
@@ -254,8 +309,14 @@ class ChatSurface(Gtk.Box):
             self._do_render()
 
     # ── public API ──
-    def append_message(self, role: str, html_fragment: str, agent_name: str | None = None) -> None:
-        """Append one rendered (sanitized) HTML row; schedules a re-render."""
+    def append_message(self, role: str, html_fragment: str, agent_name: str | None = None,
+                       agent_color: str | None = None) -> None:
+        """Append one rendered (sanitized) HTML row; schedules a re-render.
+
+        SPEC-14 §2a.1: `agent_color` is gated + FROZEN into the row at append
+        time (deque rows re-render verbatim; `_document` stays pure — no
+        color-map lookup at render time).
+        """
         if self._destroyed:
             return
         self._rows.append(
@@ -263,6 +324,7 @@ class ChatSurface(Gtk.Box):
                 "role": role if role in ("user", "agent", "system") else "system",
                 "html": _cap_row_html(html_fragment),
                 "agent": agent_name or "",
+                "color": _sanitize_color(agent_color),
             }
         )
         self._schedule_render()
@@ -351,8 +413,19 @@ class TextViewFallback(Gtk.Box):
             _, end = buf.get_iter_at_line(excess)
             buf.delete(start, end)
 
-    def append_message(self, role: str, html_fragment: str, agent_name: str | None = None) -> None:
-        self._rows.append({"role": role, "html": _cap_row_html(html_fragment), "agent": agent_name or ""})
+    def append_message(self, role: str, html_fragment: str, agent_name: str | None = None,
+                       agent_color: str | None = None) -> None:
+        """SPEC-14 §2a.5: color is accepted for signature parity and stored on
+        the row, but is INERT in plain-text mode (no text medium for color;
+        the `[name]` prefix is the fallback's identity marker)."""
+        self._rows.append(
+            {
+                "role": role,
+                "html": _cap_row_html(html_fragment),
+                "agent": agent_name or "",
+                "color": _sanitize_color(agent_color),
+            }
+        )
         plain = html.unescape(_TAG_STRIP_RE.sub("", _cap_row_html(html_fragment)))
         prefix = f"[{agent_name}] " if agent_name else ""
         self._append_line(f"{prefix}{plain}")

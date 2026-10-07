@@ -361,7 +361,7 @@ class TestRenderHandlerAppendsArePipelineSanitized:
             def get_parent(self):
                 return None
 
-            def append_message(self, role, html_fragment, agent_name=None):
+            def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
                 received["role"] = role
                 received["html"] = html_fragment
 

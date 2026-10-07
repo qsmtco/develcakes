@@ -640,3 +640,195 @@ class TestTextViewFallbackPayloadTagStrip:
         assert "Run" in text  # button label content survives as text
         s.destroy()
 
+
+# ── SPEC-14 SP1: system chrome for agent cards (spec §2a / §2d) ──────────
+
+
+class TestSanitizeColorGate:
+    """SPEC-14 §2a.2: the ONLY shapes that ever reach a style attribute are
+    exact six-hex-digit colors, lowercased. Everything else → '' (CSS
+    default). This is the security boundary, so the matrix is exhaustive."""
+
+    def test_valid_hex_survives_lowercased(self):
+        from ui.views.chat_surface import _sanitize_color
+
+        assert _sanitize_color("#16A34A") == "#16a34a"
+        assert _sanitize_color("#16a34a") == "#16a34a"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "javascript:alert(1)",
+            "url(x)",
+            "#16a34",       # five digits
+            "#16a34aa",     # eight digits
+            "red",          # named color
+            "expression(alert(1))",
+            "#16a34g",      # non-hex character
+            "16a34a",       # missing '#'
+            "#16a34a ",     # trailing space
+            "#16a34a\n",    # trailing newline ($-loophole probe)
+        ],
+    )
+    def test_illegitimate_colors_dropped(self, bad):
+        from ui.views.chat_surface import _sanitize_color
+
+        assert _sanitize_color(bad) == ""
+
+    def test_none_and_empty_dropped(self):
+        from ui.views.chat_surface import _sanitize_color
+
+        assert _sanitize_color(None) == ""
+        assert _sanitize_color("") == ""
+
+
+class TestChromeDom:
+    """SPEC-14 §2a.3: every agent row renders the system chrome — avatar +
+    name header + card body — with the color applied only when it passed the
+    gate."""
+
+    def test_agent_row_renders_chrome(self):
+        doc = _document([{"role": "agent", "html": "<p>hi</p>", "agent": "Coder"}])
+        assert 'class="agent-chrome"' in doc
+        assert 'class="agent-avatar"' in doc
+        assert ">C</span>" in doc  # initial = first letter, upper-cased
+        assert 'class="agent-name"' in doc
+        assert 'class="agent-card"' in doc
+        assert "<p>hi</p>" in doc  # payload lives inside the card
+
+    def test_initial_upper_and_escaped(self):
+        doc = _document([{"role": "agent", "html": "<p>x</p>", "agent": "coder"}])
+        assert ">C</span>" in doc
+
+    def test_chrome_color_applied_when_gate_passed(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder", "color": "#16a34a"}]
+        doc = _document(rows)
+        assert 'style="background-color:#16a34a"' in doc  # avatar
+        assert 'style="color:#16a34a"' in doc             # name
+        assert 'style="border-bottom-color:#16a34a"' in doc  # card frame
+
+    def test_no_color_no_inline_style(self):
+        doc = _document([{"role": "agent", "html": "<p>x</p>", "agent": "Coder", "color": ""}])
+        # Chrome must EXIST — otherwise the absence asserts below are vacuous
+        # (they held on pre-chrome code; RED-first requires the positive pin).
+        assert 'class="agent-chrome"' in doc
+        assert "background-color:" not in doc
+        assert 'class="agent-avatar" style=' not in doc
+        assert 'class="agent-name" style=' not in doc
+        assert 'class="agent-card" style=' not in doc
+
+    def test_group_color_first_nonempty_wins(self):
+        rows = [
+            {"role": "agent", "html": "<p>a</p>", "agent": "Coder", "color": ""},
+            {"role": "agent", "html": "<p>b</p>", "agent": "Coder", "color": "#16a34a"},
+            {"role": "agent", "html": "<p>c</p>", "agent": "Coder", "color": "#000000"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 1
+        assert "#16a34a" in doc
+        assert "#000000" not in doc  # first non-empty color in the run wins
+
+
+class TestChromeGroupingAndRoles:
+    def test_grouping_holds_with_color(self):
+        rows = [
+            {"role": "agent", "html": "<p>1</p>", "agent": "Coder", "color": "#16a34a"},
+            {"role": "agent", "html": "<p>2</p>", "agent": "Coder", "color": "#16a34a"},
+            {"role": "agent", "html": "<p>3</p>", "agent": "Debugger", "color": "#7aa2f7"},
+        ]
+        doc = _document(rows)
+        assert doc.count('class="agent-box') == 2
+        assert doc.count('class="agent-chrome"') == 2
+
+    def test_user_row_green_via_css_not_inline(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        rows = [{"role": "user", "html": "<p>q</p>", "agent": "You", "color": "#16a34a"}]
+        doc = _document(rows)
+        assert 'class="agent-box role-user"' in doc
+        assert 'class="agent-chrome"' in doc
+        assert "#16a34a" not in doc  # row color never reaches a user DOM
+        assert "background-color:" not in doc
+        assert ".agent-box.role-user .agent-name { color: #9ece6a; }" in _BASE_CSS
+
+    def test_no_agent_rows_stay_bare(self):
+        doc = _document([{"role": "system", "html": "<p>w</p>", "agent": ""}])
+        assert 'class="agent-box' not in doc
+        assert 'class="agent-chrome"' not in doc
+        assert 'class="message-row role-system"' in doc
+        # Positive anti-vacuous pin: a chrome-bearing row in the SAME doc
+        # proves the chrome exists — so the two absence asserts above redden
+        # at RED-time if chrome is not implemented (not merely "bare path
+        # untouched"). Guards the "bare rows stay bare" contract from a
+        # mutant that chrome-wraps EVERY row.
+        doc2 = _document([
+            {"role": "system", "html": "<p>w</p>", "agent": ""},
+            {"role": "agent", "html": "<p>a</p>", "agent": "Coder"},
+        ])
+        assert 'class="agent-chrome"' in doc2
+        assert 'class="message-row role-system"><div class="msg-body"><p>w</p></div></div>' in doc2
+
+    def test_markdown_payload_inside_chrome_unchanged(self):
+        rows = [{"role": "agent", "html": "<h2>H</h2><ul><li>a</li></ul>", "agent": "Coder"}]
+        doc = _document(rows)
+        assert "<h2>H</h2><ul><li>a</li></ul>" in doc  # payload byte-identical
+        assert 'class="agent-card"' in doc
+
+    def test_chrome_css_defaults_present(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert ".agent-chrome {" in _BASE_CSS
+        assert ".agent-avatar {" in _BASE_CSS
+        assert ".agent-card {" in _BASE_CSS
+        # SP1-audit suggestion applied: full-bleed payload backgrounds must
+        # clip at the card's rounded corners (cosmetic leak, auditor-fixed).
+        assert "overflow: hidden" in _BASE_CSS
+        assert ".agent-box.role-user .agent-avatar { background: #9ece6a; }" in _BASE_CSS
+        assert ".agent-box { border-left: none; margin-bottom: 14px; }" in _BASE_CSS
+        # The SPEC-12 border-left rule is gone (replaced by the card frame).
+        assert "border-left: 2px solid #3b4261" not in _BASE_CSS
+
+
+class TestColorFrozenAtAppend:
+    def test_surface_freezes_gated_color_on_row(self):
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        s.append_message("agent", "<p>x</p>", "Coder", agent_color="#16A34A")
+        assert s._rows[-1]["color"] == "#16a34a"  # gated + lowercased at append
+        s.append_message("agent", "<p>y</p>", "Coder", agent_color="red")
+        assert s._rows[-1]["color"] == ""
+        s.destroy()
+
+    def test_existing_callers_unaffected_by_new_kwarg(self):
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        s.append_message("agent", "<p>x</p>", "Coder")  # no agent_color
+        assert s._rows[-1]["color"] == ""
+        s.destroy()
+
+
+class TestFallbackChromeParity:
+    """SPEC-14 §2a.5: TextViewFallback accepts agent_color for signature
+    parity; the value is stored on the row but INERT in plain-text mode."""
+
+    def test_fallback_prefix_unchanged_and_color_inert(self):
+        s = TextViewFallback()
+        s.append_message("agent", "<p>hi</p>", "Coder", agent_color="#16a34a")
+        text = s._text()
+        assert "[Coder] hi" in text   # [name] prefix unchanged
+        assert "#16a34a" not in text  # color has no text medium
+        assert s._rows[-1]["color"] == "#16a34a"  # stored for symmetry
+        s.destroy()
+
+    def test_fallback_stores_sanitized_color(self):
+        s = TextViewFallback()
+        s.append_message("agent", "<p>hi</p>", "Coder", agent_color="javascript:x")
+        assert s._rows[-1]["color"] == ""
+        s.destroy()
+

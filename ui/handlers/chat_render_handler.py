@@ -465,7 +465,7 @@ class ChatRenderHandler:
         self._closed_sessions.pop(session_key, None)
 
     def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None,
-                           mount_key: str | None = None):
+                           mount_key: str | None = None, agent_color: str | None = None):
         """Compose (render_message: whole-message ```html fence → the
         agent-author policy; otherwise markdown → sanitized HTML) and append
         to the session surface. Sanitize is ALWAYS in the path here — SP6's
@@ -495,7 +495,8 @@ class ChatRenderHandler:
         if surface is None:
             _logger.debug("render dropped: surface evicted after mount misses display_key=%r", display_key)
             return
-        surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name)
+        surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name,
+                               agent_color=agent_color)
         # FIX 1 (r3): the round-2 parent re-read reset that lived here is
         # REMOVED — the _mount_surface bool contract (read inside
         # _surface_for) is now the SOLE miss-reset mechanism, per the audit's
@@ -589,8 +590,10 @@ class ChatRenderHandler:
 
         RULING R1: on_bubble_ready fires with None — the surface already
         displayed the message. Callers' existing None-guards are verified.
-        on_forward_click/agent_color are accepted for signature compat and
-        ignored (dropped for Phase A, ruling R2).
+        on_forward_click is accepted for signature compat and ignored
+        (dropped for Phase A, ruling R2). agent_color is accepted from the
+        caller and, when absent, resolved via _resolve_agent_color (SPEC-14
+        §2b.2 — revived).
 
         SPEC-12 BUG#4+#10: pass mount_key for any non-project caller; the
         surface cache is display-keyed (mount_key or session_key). SP4c
@@ -607,6 +610,10 @@ class ChatRenderHandler:
         """
         if not self._reentrancy.add(session_key):
             return  # render already in flight
+        # SPEC-14 §2b.2: resolve ONCE per render (main thread); "You"/None →
+        # no color. The resolved value is captured in the closure below.
+        if agent_color is None and agent_name and agent_name != "You":
+            agent_color = self._resolve_agent_color(agent_name)
 
         def _compose_off_thread():
             try:
@@ -628,7 +635,8 @@ class ChatRenderHandler:
                         if surface is None:
                             return
                         surface.append_message(
-                            _surface_role(role), html_fragment, agent_name=agent_name
+                            _surface_role(role), html_fragment, agent_name=agent_name,
+                            agent_color=agent_color,
                         )
                     except Exception:
                         _logger.exception("surface append failed — escaped raw text fallback")
@@ -687,9 +695,16 @@ class ChatRenderHandler:
     def _resolve_agent_color(self, agent_name: str) -> str | None:
         """Resolve hex color for an agent name (3-tier fallback).
 
-        SPEC-06 SP4: color tint is dropped for Phase A (ruling R2) — kept
-        only because set-signature callers may still probe it; no longer
-        used by the render paths."""
+        Tier 1: live agent (``_main_content._agent_mgr.get_color``).
+        Tier 2: special-agent role (``color_for_special_agent`` — the SAME
+                source the agent-list avatar uses; SPEC-14 §2b.3 parity).
+        Tier 3: deterministic default ``"#6366f1"`` (aligned with
+                ``AgentListHandler.get_agent_color``).
+
+        REVIVED by SPEC-14 (was inert after SPEC-06 SP4 dropped color tint);
+        no longer "unused" — render_sync / render_async / end_streaming all
+        resolve through it, skipping ``"You"`` (user echoes keep CSS identity).
+        """
         if not agent_name:
             return None
         # Tier 1: live agent
@@ -735,8 +750,14 @@ class ChatRenderHandler:
             agent_mgr = getattr(self._main_content, '_agent_mgr', None)
             if agent_mgr is not None:
                 agent_name = agent_mgr.get_name(session_key)
+        # SPEC-14 §2b.2: resolve ONCE per render; "You"/None-name → no color
+        # (user echoes keep CSS identity via the surface's role-user rules).
+        agent_color = (
+            self._resolve_agent_color(agent_name)
+            if agent_name and agent_name != "You" else None
+        )
         self._append_to_surface(role, text, session_key, agent_name=agent_name,
-                                mount_key=mount_key)
+                                mount_key=mount_key, agent_color=agent_color)
 
     # ── Streaming (SPEC-06 SP4) ────────────────────────────────────────
 
@@ -848,8 +869,13 @@ class ChatRenderHandler:
             # FIX 7: the mount_key threads into the shared append path so
             # the FINAL row's surface mounts in the project box exactly like
             # the render_sync path already did (round-1 FIX 2).
+            # SPEC-14 §2b.2: the RESOLVED name's color threads through too.
+            agent_color = (
+                self._resolve_agent_color(resolved_name)
+                if resolved_name and resolved_name != "You" else None
+            )
             self._append_to_surface(role, full_text, session_key, agent_name=resolved_name,
-                                    mount_key=mount_key)
+                                    mount_key=mount_key, agent_color=agent_color)
             if self._main_content is not None:
                 self._main_content.scroll_chat_to_bottom()
 
