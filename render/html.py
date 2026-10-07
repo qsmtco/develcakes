@@ -318,3 +318,71 @@ def render_document(text: str) -> str:
     from render.sanitize import sanitize_html
 
     return sanitize_html(markdown_to_html(text))
+
+
+# ── SPEC-13: agent-authored HTML payload (the Phosphor protocol) ─────────
+#
+# The PM's model (2026-10-06): the agent is the AUTHOR — a reply that IS
+# HTML renders as HTML. The protocol is explicit and fence-scoped so the
+# trust boundary moves without disappearing:
+#
+#   WHOLE-MESSAGE ```html fence  → sanitize_agent_html(payload)  (author policy)
+#   ANYTHING ELSE                → render_document(text)         (markdown, escape-first)
+#
+# A mixed prose+```html message therefore KEEPS the markdown path (the fence
+# stays a documentation code block) — load-bearing: "how to write a div" must
+# stay visible source. Untrusted text (tool results, fetched content, USER
+# rows) never enters render_message as an author payload; only agent turns do.
+
+# Whole-message fence: ^```html (optional trailing spaces) \r?\n payload
+# \r?\n? ```$  — re.DOTALL lets the payload span lines; the payload group is
+# NON-GREEDY ((.*?) per SPEC-13 §2b) so a trailing newline before the closing
+# fence is NOT captured into the payload (the optional \r?\n? consumes it).
+# The anchored closing fence means a stray inner ``` breaks the match → the
+# markdown path (safe fallback). Line endings are \r?\n at BOTH boundaries
+# (CRLF policy: agents on Windows/autocrlf must not lose HTML cards to a
+# line-ending artifact; the payload's internal newlines are legal in HTML).
+# re.IGNORECASE admits ```HTML.
+_WHOLE_MESSAGE_HTML_FENCE_RE = re.compile(
+    r"^```html[ \t]*\r?\n(.*?)\r?\n?```[ \t]*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _whole_message_html_fence(text: str) -> str | None:
+    """SPEC-13 protocol: the ENTIRE trimmed message is ONE ```html fenced
+    block → return the fence content (the agent's HTML payload). Any other
+    shape → None (markdown path, untouched).
+
+    Anchored at BOTH ends against text.strip(): leading/trailing whitespace
+    around the whole message is tolerated, but any prose (before OR after)
+    makes this None. An empty payload returns "" (distinct from None — it IS
+    a promoted, empty card).
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    m = _WHOLE_MESSAGE_HTML_FENCE_RE.match(stripped)
+    return m.group(1) if m else None
+
+
+def render_message(text: str) -> str:
+    """THE chat entry point (SPEC-13). ONE rule set:
+      1. whole-message ```html fence → sanitize_agent_html(payload)
+      2. otherwise → render_document(text)   (markdown, unchanged)
+    Fail-closed end-to-end: non-str input → "" (never reaches the markdown
+    branch, where extract_blocks would raise); sanitize_agent_html returns ""
+    on internal error; render_document already fails closed. An empty payload
+    renders as an empty message body (acceptable: an author's empty card).
+    """
+    if not isinstance(text, str):
+        # Public-entry fail-closed guard (BUG#2): a non-str must not reach
+        # either branch — sanitize_agent_html tolerates it, but
+        # render_document → markdown_to_html → extract_blocks does not.
+        return ""
+    payload = _whole_message_html_fence(text)
+    if payload is not None:
+        from render.sanitize import sanitize_agent_html
+
+        return sanitize_agent_html(payload)
+    return render_document(text)

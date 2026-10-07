@@ -116,6 +116,153 @@ def _attribute_filter_inner(element: str, attribute: str, value: str) -> str | N
     return None
 
 
+# ── Agent-author policy (SPEC-13): the agent is the AUTHOR ──────────────
+#
+# Rich vocabulary for agent-authored HTML payloads (whole-message ```html
+# fence). Security invariants UNCHANGED from sanitize_html: no
+# script/iframe/object/embed/form-action, no event handlers, href/src
+# http(s)-only, link_rel forced, fail-closed.
+#
+# <style> ELEMENT IS DELIBERATELY ABSENT (SP1 probe verdict, 2026-10-06,
+# nh3 0.3.7 / ammonia 4.1.4): passing "style" in `tags=` PANICS the process
+# unconditionally — ammonia has "style" in its default `clean_content_tags`
+# and asserts `style appears in clean_content_tags and in tags at the same
+# time` (pyo3_runtime.PanicException, NOT catchable as Exception). Leaving
+# "style" OUT of tags strips the element AND its CSS content cleanly (no
+# panic — probe-verified). Therefore per-message <style> blocks are a
+# REGISTER item: SP1 relies on inline `style=` (CSS property allowlist
+# below) + the surface's own classes. Do NOT add "style" here.
+_AGENT_AUTHOR_TAGS = _ALLOWED_TAGS | frozenset({
+    # containers
+    "div", "section", "article", "header", "footer", "main", "aside", "nav",
+    "figure", "figcaption", "details", "summary", "hgroup",
+    # text/inline
+    "b", "i", "u", "s", "small", "sub", "sup", "mark", "abbr", "cite", "q",
+    "time", "wbr", "font", "label",
+    # lists (def)
+    "dl", "dt", "dd",
+    # inert-without-JS interactive (Phosphor-style cards: details/summary
+    # toggles NATIVELY, no JS). No <form> — form submissions navigate; keep
+    # the surface non-navigating. No JS (webview JS stays off, SPEC-06 R2).
+    "button",
+    # media (src gated http(s) by the SAME url_schemes + attribute filter)
+    "img", "video", "audio", "source", "picture",
+    # vector (static; JS-off webview cannot script SVG events)
+    "svg", "path", "circle", "rect", "line", "polyline", "polygon", "g",
+    "defs", "stop", "use", "symbol",
+})
+
+# CSS properties an agent payload may set. Deny-by-omission kills every
+# url()-bearing property (background/background-image/list-style-image/
+# behavior/filter/…): nh3's filter_style_properties takes a SET of allowed
+# property names and strips all others (probe-verified nh3 0.3.7 — passing a
+# callable raises TypeError). A frozenset is accepted by nh3 (probe-verified);
+# we still hand it a set at the call site to be explicit.
+_AGENT_CSS_PROPERTIES = frozenset({
+    "color", "background-color", "font-size", "font-family", "font-weight",
+    "font-style", "line-height", "letter-spacing", "text-align",
+    "text-decoration", "text-transform", "text-shadow", "white-space",
+    "border", "border-color", "border-radius", "border-width", "border-style",
+    "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+    "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "width", "max-width", "min-width", "height", "max-height", "min-height",
+    "display", "flex-direction", "flex-wrap", "gap", "justify-content",
+    "align-items", "align-content", "opacity", "overflow", "box-sizing",
+    "box-shadow", "cursor", "border-collapse", "vertical-align", "float",
+})
+
+
+def _agent_attributes_map() -> dict[str, set[str]]:
+    """Per-tag attribute map for the agent-author policy.
+
+    DELTA (probe-verified, same as sanitize_html's BUG #6 note): passing
+    `attributes` REPLACES ammonia's entire default tag_attributes map, so
+    width/height/colspan/rowspan/name must be listed DELIBERATELY or they
+    are dropped. `rel` is NEVER listed — link_rel manages it (ammonia raises
+    on a managed attribute; the filter's rel gate is what survives author
+    overrides). `data-*` rides generic_attribute_prefixes, not this map.
+    """
+    admitted = {
+        "style", "class", "id", "title", "alt", "src", "href",
+        "width", "height", "colspan", "rowspan", "name",
+    }
+    return {tag: set(admitted) for tag in _AGENT_AUTHOR_TAGS}
+
+
+# Presentation/inert attributes the author policy admits VERBATIM, beyond the
+# markdown path's _SAFE_ATTRS (href/title/alt/src). width/height/colspan/
+# rowspan/name are inert (no URL, no script) — the deliberate re-admission the
+# attributes-map DELTA requires. href/src do NOT appear here: they stay behind
+# the http(s) gate in _attribute_filter_inner.
+#
+# `name` (BUG#6): on <a> this is an ANCHOR TARGET — a document-fragment id,
+# NOT a URL. URL-shaped values (e.g. name="foo") are therefore SAFE here:
+# `name` is never dereferenced by the browser (navigation rides `href`, which
+# IS gated); it only labels the fragment `#foo`. The one historical `<a
+# name>`/`<img name>` form is inert in a JS-off webview, so no scheme gate is
+# needed — admitting it verbatim cannot introduce a fetch or a navigation.
+_AGENT_INERT_ATTRS = frozenset({"title", "alt", "width", "height", "colspan", "rowspan", "name"})
+
+
+def _agent_attribute_filter(element: str, attribute: str, value: str) -> str | None:
+    """Agent-author gate. Self-fail-closed like _attribute_filter (FIX B):
+    pyo3 does not propagate filter exceptions — it retains the attribute —
+    so ANY internal failure converts to None (strip)."""
+    try:
+        return _agent_attribute_filter_inner(element, attribute, value)
+    except BaseException:  # noqa: BLE001 — fail-closed: strip, never retain
+        return None
+
+
+def _agent_attribute_filter_inner(element: str, attribute: str, value: str) -> str | None:
+    """Author additions first, then delegate to the markdown gate.
+
+    style  → admitted here; nh3 applies filter_style_properties (the CSS
+             property-name allowlist) AFTER this returns the value.
+    class/id → any value (author namespace — the author styles their own card).
+    data-*   → any value (generic_attribute_prefixes also admits the name).
+    inert presentation attrs → verbatim.
+    href/src/rel/everything else → _attribute_filter (http(s)-only, rel gate).
+    """
+    if attribute == "style":
+        return value
+    if attribute in ("class", "id"):
+        return value
+    if attribute.startswith("data-"):
+        return value
+    if attribute in _AGENT_INERT_ATTRS:
+        return value
+    return _attribute_filter(element, attribute, value)
+
+
+def sanitize_agent_html(html: str) -> str:
+    """Agent-authored HTML payload (SPEC-13): author vocabulary + CSS
+    property allowlist. Fail-closed identical to sanitize_html — ANY internal
+    error (including the Rust-side PanicException shape) returns "".
+
+    The agent is the AUTHOR here (untrusted TEXT does not travel this path —
+    tool results, fetched content and user rows keep sanitize_html).
+    """
+    try:
+        return nh3.clean(
+            html,
+            # sets (not tuples): nh3 requires set instances for these params
+            # (probe-verified — a tuple raises TypeError). frozenset works too.
+            tags=_AGENT_AUTHOR_TAGS,
+            attributes=_agent_attributes_map(),
+            attribute_filter=_agent_attribute_filter,
+            filter_style_properties=_AGENT_CSS_PROPERTIES,
+            generic_attribute_prefixes={"data-"},
+            link_rel="noopener noreferrer nofollow",
+            url_schemes={"http", "https"},
+        )
+    except BaseException:  # noqa: BLE001 — sanctioned fail-closed (see sanitize_html)
+        # Widest net: nh3 failure shapes include pyo3 PanicException (Rust
+        # assertion panics), which does NOT derive from Exception. "" on
+        # Ctrl-C is acceptable; raw passthrough is not.
+        return ""
+
+
 def sanitize_html(html: str) -> str:
     """Sanitize untrusted HTML. Fail-closed: returns "" on any internal error.
 

@@ -8,7 +8,7 @@
 import nh3
 import pytest
 
-from render.sanitize import sanitize_html
+from render.sanitize import sanitize_agent_html, sanitize_html
 
 # Raw probe inputs — also the idempotence corpus (test 18).
 _CORPUS = [
@@ -241,3 +241,319 @@ class TestFilterSelfFailClosed:
 
         out = san.sanitize_html('<a href="https://ok.example">click</a>')
         assert 'href="https://ok.example"' in out
+
+
+# ── SPEC-13 SP1: agent-author policy ─────────────────────────────────────
+#
+# The agent is the AUTHOR (Phosphor model): a whole-message ```html fence is
+# a rich payload — containers, inline text, inert interactive elements,
+# static SVG, and INLINE STYLE (through a CSS property-name allowlist).
+# Security invariants are UNCHANGED from sanitize_html: no script/iframe/
+# object/embed/form, no event handlers, href/src http(s)-only, link_rel
+# forced, fail-closed. The CSS allowlist is deny-by-omission: every
+# url()-bearing property is simply absent, so background/background-image/
+# list-style-image/filter/… die by not being named.
+
+class TestAgentAuthorSanitize:
+    """SPEC-13 §2a/§2g: the agent-author sanitize policy."""
+
+    # ── Dangerous constructs still die (same invariants as sanitize_html) ─
+
+    def test_script_dies(self):
+        out = sanitize_agent_html("<script>alert(1)</script>")
+        assert "<script" not in out.lower()
+        assert "alert" not in out.lower()
+
+    def test_iframe_dies(self):
+        out = sanitize_agent_html('<iframe src="https://evil.example"></iframe>')
+        assert "<iframe" not in out.lower()
+
+    def test_object_embed_die(self):
+        assert "<object" not in sanitize_agent_html(
+            '<object data="https://x"></object>'
+        ).lower()
+        assert "<embed" not in sanitize_agent_html('<embed src="https://x">').lower()
+
+    def test_event_handler_stripped_img_kept(self):
+        out = sanitize_agent_html('<img src="https://x/i.png" onerror="alert(1)">')
+        assert "<img" in out.lower()
+        assert "onerror" not in out.lower()
+        assert 'src="https://x/i.png"' in out
+
+    def test_onclick_stripped_button_kept(self):
+        out = sanitize_agent_html('<button onclick="a()">click</button>')
+        assert "<button" in out.lower()
+        assert "onclick" not in out.lower()
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "/relative/path",
+        ],
+    )
+    def test_bad_schemes_href_stripped_text_kept(self, href):
+        out = sanitize_agent_html(f'<a href="{href}">click</a>')
+        assert "href" not in out.lower(), f"href survived for {href!r}: {out!r}"
+        # The link TEXT survives (attribute stripped, element kept).
+        assert "click" in out
+
+    def test_form_dies(self):
+        out = sanitize_agent_html(
+            '<form action="/steal"><input type="text"></form>'
+        )
+        assert "<form" not in out.lower()
+        assert "<input" not in out.lower()
+
+    # ── Author vocabulary survives ────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        ("tag", "fragment"),
+        [
+            ("div", "<div>x</div>"),
+            ("span", "<span>x</span>"),
+            ("section", "<section>x</section>"),
+            ("article", "<article>x</article>"),
+            ("header", "<header>x</header>"),
+            ("footer", "<footer>x</footer>"),
+            ("main", "<main>x</main>"),
+            ("aside", "<aside>x</aside>"),
+            ("nav", "<nav>x</nav>"),
+            ("figure", "<figure><figcaption>c</figcaption></figure>"),
+            ("details", "<details><summary>t</summary>b</details>"),
+            ("hgroup", "<hgroup><h1>a</h1></hgroup>"),
+            ("b", "<b>x</b>"),
+            ("i", "<i>x</i>"),
+            ("u", "<u>x</u>"),
+            ("s", "<s>x</s>"),
+            ("small", "<small>x</small>"),
+            ("sub", "<sub>x</sub>"),
+            ("sup", "<sup>x</sup>"),
+            ("mark", "<mark>x</mark>"),
+            ("abbr", "<abbr>x</abbr>"),
+            ("cite", "<cite>x</cite>"),
+            ("q", "<q>x</q>"),
+            ("time", "<time>x</time>"),
+            ("label", "<label>x</label>"),
+            ("dl", "<dl><dt>t</dt><dd>d</dd></dl>"),
+            ("button", "<button>x</button>"),
+            ("svg", "<svg><circle r='1'></circle><path d='M0 0'></path></svg>"),
+            ("video", '<video src="https://x/v.mp4"></video>'),
+            ("audio", '<audio src="https://x/a.mp3"></audio>'),
+            ("source", '<video><source src="https://x/v.mp4"></video>'),
+        ],
+    )
+    def test_author_tag_survives(self, tag, fragment):
+        out = sanitize_agent_html(fragment)
+        assert f"<{tag}" in out.lower(), f"{tag} missing from: {out!r}"
+
+    def test_class_id_data_survive(self):
+        out = sanitize_agent_html(
+            '<section class="card" id="c1" data-k="v">x</section>'
+        )
+        assert 'class="card"' in out
+        assert 'id="c1"' in out
+        assert 'data-k="v"' in out
+
+    def test_class_id_values_not_restricted_to_alnum(self):
+        """The author namespace is ANY value — hyphens/spaces/underscores are
+        legal CSS class/id syntax and MUST survive. (This pin exists because a
+        foreign `value.isalnum()` gate on class/id slipped past the round-1
+        suite, which only used alnum values — see FIX ROUND 1 report.)"""
+        out = sanitize_agent_html(
+            '<div class="card wide" id="panel-1">x</div>'
+        )
+        assert 'class="card wide"' in out, f"non-alnum class stripped: {out!r}"
+        assert 'id="panel-1"' in out, f"hyphenated id stripped: {out!r}"
+
+    def test_width_height_attrs_survive(self):
+        out = sanitize_agent_html(
+            '<img src="https://x/i.png" width="10" height="20" alt="a">'
+        )
+        assert 'width="10"' in out
+        assert 'height="20"' in out
+
+    def test_colspan_rowspan_attrs_survive(self):
+        """BUG#3: the attributes-map DELTA (width/height/colspan/rowspan/name
+        re-admitted deliberately). colspan/rowspan must render ON the td."""
+        out = sanitize_agent_html(
+            '<table><tr><td colspan="2" rowspan="3">x</td></tr></table>'
+        )
+        assert 'colspan="2"' in out, f"colspan stripped: {out!r}"
+        assert 'rowspan="3"' in out, f"rowspan stripped: {out!r}"
+
+    def test_name_attr_survives(self):
+        """BUG#3: `name` is an ANCHOR TARGET, not a URL — inert, admitted."""
+        out = sanitize_agent_html('<a name="anchor1">x</a>')
+        assert 'name="anchor1"' in out, f"name stripped: {out!r}"
+
+    def test_alt_title_attrs_survive(self):
+        out = sanitize_agent_html(
+            '<img src="https://x/i.png" title="t" alt="a">'
+        )
+        assert 'title="t"' in out, f"title stripped: {out!r}"
+        assert 'alt="a"' in out, f"alt stripped: {out!r}"
+
+    def test_style_attr_color_survives(self):
+        out = sanitize_agent_html('<div style="color:red">hi</div>')
+        assert 'style="color:red"' in out
+
+    def test_style_attr_multiple_allowed_props_survive(self):
+        out = sanitize_agent_html(
+            '<div style="display:flex;opacity:0.5;border-radius:4px">hi</div>'
+        )
+        for prop in ("display:flex", "opacity:0.5", "border-radius:4px"):
+            assert prop in out, f"{prop} stripped from: {out!r}"
+
+    # ── CSS allowlist: deny-by-omission kills url()-bearing props ─────────
+
+    def test_css_background_url_stripped_property_wise(self):
+        """`background` is not on the allowlist → the url() property dies,
+        but the element (and any allowed proposal alongside) survives."""
+        out = sanitize_agent_html('<div style="background:url(http://x)">hi</div>')
+        assert "url(" not in out.lower()
+        assert "background" not in out.lower()
+        assert "<div" in out.lower()
+
+    def test_css_background_image_url_stripped(self):
+        out = sanitize_agent_html(
+            '<div style="background-image:url(http://x)">hi</div>'
+        )
+        assert "url(" not in out.lower()
+        assert "background-image" not in out.lower()
+
+    def test_css_list_style_image_url_stripped(self):
+        out = sanitize_agent_html(
+            '<div style="list-style-image:url(http://x)">hi</div>'
+        )
+        assert "url(" not in out.lower()
+
+    def test_css_allowed_and_denied_mixed(self):
+        """A single style attribute keeping an allowed prop while dropping a
+        url()-bearing one — the property-level gate, not all-or-nothing."""
+        out = sanitize_agent_html(
+            '<div style="color:red;background:url(http://x);display:flex">hi</div>'
+        )
+        assert "color:red" in out
+        assert "display:flex" in out
+        assert "url(" not in out.lower()
+        assert "background" not in out.lower()
+
+    # ── link_rel forced; style ELEMENT not admitted (probe verdict) ────────
+
+    def test_link_rel_forced_on_http_anchor(self):
+        out = sanitize_agent_html('<a href="https://ok.example">ok</a>')
+        assert 'href="https://ok.example"' in out
+        assert 'rel="noopener noreferrer nofollow"' in out
+
+    def test_author_rel_cannot_override(self):
+        out = sanitize_agent_html('<a href="https://ok.example" rel="opener">x</a>')
+        assert 'rel="opener"' not in out.lower()
+        assert 'rel="noopener noreferrer nofollow"' in out
+
+    def test_style_element_not_admitted(self):
+        """SP1 REQUIRED PROBE VERDICT (nh3 0.3.7 / ammonia 4.1.4):
+
+        `style` is in ammonia's default `clean_content_tags`; passing it in
+        `tags=` PANICS unconditionally — "`style` appears in
+        `clean_content_tags` and in `tags` at the same time"
+        (pyo3_runtime.PanicException, verified 2026-10-06). With `style`
+        LEFT OUT of tags, the element AND its CSS content are stripped.
+
+        Therefore <style> is NOT admitted; per-message <style> blocks are a
+        REGISTER item, and inline `style=` + surface classes carry SP1. This
+        test pins that decision: a payload carrying a <style> element yields
+        no <style> tag and no CSS text.
+        """
+        out = sanitize_agent_html(
+            "<style>body{background:url(http://x)}</style><p>hi</p>"
+        )
+        assert "<style" not in out.lower()
+        assert "background" not in out.lower()
+        assert "url(" not in out.lower()
+        assert "<p>hi</p>" in out
+
+    def test_style_tag_absent_from_author_tags(self):
+        """Source-level pin of the probe verdict: 'style' must never enter
+        _AGENT_AUTHOR_TAGS (it would panic nh3.clean)."""
+        from render.sanitize import _AGENT_AUTHOR_TAGS
+        assert "style" not in _AGENT_AUTHOR_TAGS
+
+    # ── agent filter gates (mirror of the markdown path's pins) ───────────
+
+    def test_agent_attribute_filter_self_fail_closed(self, monkeypatch):
+        """BUG#7: the agent filter is self-fail-closed like _attribute_filter
+        (pyo3 retains attributes when a filter raises). A raising internals
+        must convert to None (strip), never leak the value."""
+        from render import sanitize as san
+
+        def boom(element, attribute, value):
+            raise RuntimeError("agent filter internal failure")
+
+        monkeypatch.setattr(san, "_agent_attribute_filter_inner", boom)
+        assert san._agent_attribute_filter("div", "style", "color:red") is None
+
+    def test_agent_attribute_filter_href_stripped(self):
+        """BUG#8: the agent path's OWN href branch (before/through delegation)
+        strips javascript: — call the inner gate DIRECTLY with a js: value."""
+        from render.sanitize import _agent_attribute_filter_inner
+
+        assert _agent_attribute_filter_inner("a", "href", "javascript:alert(1)") is None
+        assert (
+            _agent_attribute_filter_inner("a", "href", "https://ok.example")
+            == "https://ok.example"
+        )
+
+    def test_agent_attribute_filter_src_stripped(self):
+        """BUG#8: same for src on the agent path, directly."""
+        from render.sanitize import _agent_attribute_filter_inner
+
+        assert _agent_attribute_filter_inner("img", "src", "javascript:alert(1)") is None
+        assert _agent_attribute_filter_inner("img", "src", "data:text/html,x") is None
+        assert (
+            _agent_attribute_filter_inner("img", "src", "https://x/i.png")
+            == "https://x/i.png"
+        )
+
+    # ── fail-closed contract (identical to sanitize_html) ─────────────────
+
+    def test_none_returns_empty(self):
+        assert sanitize_agent_html(None) == ""  # type: ignore[arg-type]
+
+    def test_non_string_garbage_returns_empty(self):
+        assert sanitize_agent_html(123) == ""  # type: ignore[arg-type]
+        assert sanitize_agent_html(["<div>x</div>"]) == ""  # type: ignore[arg-type]
+
+    def test_nh3_internal_error_returns_empty(self, monkeypatch):
+        """A Rust-side panic (or any raise) inside nh3.clean must yield "",
+        never raw passthrough — the SAME fail-closed contract."""
+        def boom(*a, **k):
+            raise RuntimeError("simulated sanitizer internal failure")
+
+        monkeypatch.setattr(nh3, "clean", boom)
+        assert sanitize_agent_html('<div style="color:red">x</div>') == ""
+
+    # ── idempotence (mutation-XSS resistance) ─────────────────────────────
+
+    def test_resanitize_is_identity(self):
+        corpus = [
+            '<div style="color:red">hi</div>',
+            '<section class="card" data-k="v">x</section>',
+            '<details><summary>t</summary>b</details>',
+            '<a href="https://ok.example">ok</a>',
+            '<img src="https://x/i.png" onerror="a()">',
+            '<div style="background:url(http://x)">x</div>',
+        ]
+        for raw in corpus:
+            once = sanitize_agent_html(raw)
+            assert sanitize_agent_html(once) == once, f"not idempotent: {raw!r}"
+
+    # ── markdown path UNCHANGED (no policy weakening) ─────────────────────
+
+    def test_sanitize_html_unchanged_by_author_policy(self):
+        """The markdown-path sanitizer keeps its strict policy: a style
+        attribute dies and a div element is stripped there."""
+        assert sanitize_html('<p style="color:red">hi</p>') == "<p>hi</p>"
+        assert "<div" not in sanitize_html("<div>x</div>")

@@ -6,7 +6,12 @@ import time
 
 import pytest
 
-from render.html import markdown_to_html, render_document
+from render.html import (
+    _whole_message_html_fence,
+    markdown_to_html,
+    render_document,
+    render_message,
+)
 from render.syntax_html import highlight_html
 
 
@@ -261,3 +266,156 @@ class TestFalsifierTarget:
         out = markdown_to_html("a < b && c > d")
         assert "&lt;" in out and "&amp;&amp;" in out
         assert "<b" not in out.replace("<b>", "")  # no live tag from raw <
+
+
+# ── SPEC-13 SP1: whole-message HTML fence promotion ──────────────────────
+#
+# Protocol: when the ENTIRE trimmed message is ONE ```html fenced block, the
+# fence content is the agent's HTML PAYLOAD — sanitized with the agent-author
+# policy and rendered as HTML (never escaped, never shown as source). Any
+# other shape (plain text, prose, non-html fences, an html fence MIXED into
+# prose) takes the markdown path (render_document) unchanged. The mixed rule
+# is load-bearing: "how to write a div" must stay a documentation code block.
+
+class TestRenderMessage:
+    """SPEC-13 §2b/§2g: the chat entry point."""
+
+    def test_whole_message_fence_renders_html_not_escaped(self):
+        out = render_message('```html\n<div style="color:red">hi</div>\n```')
+        assert "<div" in out, f"payload not promoted: {out!r}"
+        assert 'style="color:red"' in out
+        assert "&lt;div" not in out, "payload was escaped — fence not promoted"
+
+    def test_fence_rich_tags_survive(self):
+        out = render_message(
+            "```html\n"
+            '<section class="card"><h1>Title</h1>'
+            "<details><summary>more</summary>body</details>"
+            '<button>ok</button></section>\n'
+            "```"
+        )
+        for frag in ("<section", 'class="card"', "<h1>Title</h1>", "<details",
+                     "<summary>", "<button>"):
+            assert frag in out, f"{frag} missing: {out!r}"
+
+    def test_fence_script_still_stripped(self):
+        out = render_message("```html\n<script>alert(1)</script><div>safe</div>\n```")
+        assert "<script" not in out.lower()
+        assert "alert" not in out.lower()
+        assert "<div>safe</div>" in out
+
+    def test_prose_plus_fence_stays_code_block(self):
+        """Mixed-content rule (load-bearing): the fence is NOT the whole
+        message → markdown path → escaped/shielded code block."""
+        out = render_message(
+            "Here is how you write a div:\n```html\n<div>x</div>\n```"
+        )
+        # Escaped (never a live div) — documentation stays visible.
+        assert "<div>x</div>" not in out
+        assert "&lt;" in out
+
+    def test_prose_plus_fence_byte_identical_to_render_document(self):
+        text = "Here:\n```html\n<div>x</div>\n```"
+        assert render_message(text) == render_document(text)
+
+    def test_plain_markdown_byte_identical_to_render_document(self):
+        for text in [
+            "hello **world**",
+            "# Title\n\n- a\n- b",
+            "see https://example.com/page",
+            "",
+            "just plain text",
+        ]:
+            assert render_message(text) == render_document(text), (
+                f"markdown path diverged for {text!r}"
+            )
+
+    def test_non_html_fence_stays_code_block(self):
+        text = "```python\nx = 1\n```"
+        assert render_message(text) == render_document(text)
+
+    def test_empty_fence_is_empty_safe(self):
+        out = render_message("```html\n```")
+        assert "<script" not in out.lower()
+        # Empty payload → sanitized "" (an author's empty card). Guard the
+        # contract: never a raise, never raw source text.
+        assert out.strip() == ""
+
+    def test_unclosed_fence_falls_back_to_markdown(self):
+        text = "```html\n<div>x</div>"
+        assert render_message(text) == render_document(text)
+
+    def test_fence_with_leading_trailing_whitespace_promoted(self):
+        out = render_message('\n\n  ```html\n<div style="color:red">x</div>\n```  \n\n')
+        assert "<div" in out
+        assert "&lt;div" not in out
+
+    def test_fence_inner_leading_trailing_newlines_trimmed(self):
+        out = render_message("```html\n<div>x</div>\n```")
+        assert out == '<div>x</div>'
+
+    def test_uppercase_html_lang_tag_promoted(self):
+        out = render_message('```HTML\n<div>x</div>\n```')
+        assert "<div>x</div>" in out
+
+    # ── FIX ROUND 1: fail-closed entry + CRLF policy ─────────────────────
+
+    def test_render_message_non_str_returns_empty(self):
+        """BUG#2: the PUBLIC entry point is fail-closed for non-str. A
+        non-str must NOT reach the markdown branch — extract_blocks(123)
+        raises. int/list/bytes/None all → '' with no raise."""
+        for bad in (123, ["<div>x</div>"], b"<div>x</div>", None):
+            assert render_message(bad) == "", (  # type: ignore[arg-type]
+                f"non-str {bad!r} did not return ''"
+            )
+
+    def test_fence_crlf_line_endings_promoted(self):
+        """BUG#4 ruling: CRLF fences PROMOTE — agents on Windows/autocrlf must
+        not silently lose HTML cards to a line-ending artifact."""
+        out = render_message('```html\r\n<div style="color:red">x</div>\r\n```')
+        assert "<div" in out, f"CRLF fence not promoted: {out!r}"
+        assert "&lt;div" not in out, "CRLF payload was escaped"
+        assert 'style="color:red"' in out
+
+    def test_fence_crlf_internal_newlines_survive(self):
+        """The payload's internal CRLFs are legal inside HTML — the rendered
+        output carries the card structure, not the line endings as text."""
+        out = render_message("```html\r\n<section>a</section>\r\n<div>b</div>\r\n```")
+        assert "<section>a</section>" in out
+        assert "<div>b</div>" in out
+
+    def test_fence_crlf_trailing_newline_trimmed(self):
+        from render.html import _whole_message_html_fence
+        assert _whole_message_html_fence("```html\r\n<div>x</div>\r\n```") == "<div>x</div>"
+
+    def test_fence_lf_still_promoted(self):
+        """LF pin stays green alongside the CRLF fix (no regression)."""
+        out = render_message("```html\n<div>x</div>\n```")
+        assert "<div>x</div>" in out
+        assert _whole_message_html_fence("```html\n<div>x</div>\n```") == "<div>x</div>"
+
+    def test_whole_message_fence_detector_returns_payload(self):
+        from render.html import _whole_message_html_fence
+        assert _whole_message_html_fence('```html\n<div>x</div>\n```') == "<div>x</div>"
+        assert _whole_message_html_fence("plain") is None
+        assert _whole_message_html_fence("prose\n```html\nx\n```") is None
+
+    def test_fence_detector_rejects_trailing_prose(self):
+        from render.html import _whole_message_html_fence
+        assert _whole_message_html_fence("```html\n<div>x</div>\n```\ntrailing") is None
+
+    def test_empty_payload_fence_returns_empty_string(self):
+        from render.html import _whole_message_html_fence
+        assert _whole_message_html_fence("```html\n```") == ""
+
+    def test_fence_payload_fail_closed_on_sanitizer_panic(self, monkeypatch):
+        """End-to-end fail-closed: nh3.clean panicking inside the fence branch
+        yields "" (via sanitize_agent_html's own try/except) — never raw."""
+        import nh3
+
+        def boom(*a, **k):
+            raise RuntimeError("simulated ammonia panic")
+
+        monkeypatch.setattr(nh3, "clean", boom)
+        out = render_message("```html\n<div>raw</div>\n```")
+        assert out == ""
