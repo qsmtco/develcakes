@@ -238,7 +238,25 @@ message one ```html fenced block whose content is the markup. Inline styles
 and classes are allowed; <script>, iframes, and event handlers are stripped.
 Keep the HTML self-contained (no external assets). For plain conversation,
 write normal text — don't fence it.
+
+HTML protocol rules (hard edges — violating these shows your card as raw source):
+- The ENTIRE message must be ONE ```html fence — nothing before it, nothing after
+  it. Even one line of prose after the closing fence makes the whole message fall
+  back to markdown, and your card renders as source code.
+- Separate concerns = separate messages: send the card ALONE, then commentary as
+  a normal text message — or put the commentary INSIDE the card (a footer section).
+- Solid background-color works; gradients (bare `background`) are NOT on the
+  sanitizer's CSS allowlist and are stripped — do not rely on them.
+- Interactive pieces (details/summary toggles) work natively; there is no JS.
+
+The platform draws your name card (header + avatar) around every message — never
+draw your own header/name banner; style the content inside (SPEC-14).
 ```
+
+**PM-verified failure mode (2026-10-07):** a card + trailing prose message renders
+the ENTIRE card as source (the mixed-content rule at work). The protocol rules above
+were added to all 3 system prompts in response — sharp edges belong in prompts, not
+just in the pipeline's refusal behavior.
 
 ### 2f. Docs (PM requirement: ALL docs updated, no stale claims)
 
