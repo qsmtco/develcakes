@@ -1087,11 +1087,13 @@ class MainContent(Gtk.Box):
             vadj = scroll.get_vadjustment()
         if vadj is None:
             return
-        # REGISTER (#8, SP5a round 2): autoscroll is NO-OP on the WebKit
-        # surface — pending the SPEC-06 register decision (JS bridge vs
-        # surface-shape). The TextViewFallback path's autoscroll WORKS and is
-        # pinned by the scroll tests; this seam stays honest until that
-        # ruling lands.
+        # REGISTER (#8, SP5a round 2) → CLOSED by MICRO-SMART-SCROLL,
+        # 2026-10-07: the WebKit surface now self-heals its scroll position —
+        # ui/views/chat_surface.ChatSurface._on_adjustment_changed /
+        # _settle_restore track at-bottom and restore the user's intent after
+        # each full-document reload (no JS bridge; SPEC-06 register closed).
+        # The TextViewFallback path's autoscroll WORKS and is pinned by the
+        # scroll tests; this seam stays honest for non-surface children.
         # Defer scroll to next frame — widget layout must recalculate first
         def _do_scroll():
             vadj.set_value(vadj.get_upper() - vadj.get_page_size())

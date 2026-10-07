@@ -12,6 +12,20 @@
 # Known cost (accepted): full-document reload resets scroll; SP-later may
 # add scroll restore if the PM asks.
 #
+# MICRO smart-scroll (2026-10-07): implemented — at-bottom follow / reading-
+# position preserve. The restore is a PERMANENT `changed` handler gated on a
+# pending capture (not a blind one-shot), so a pane RESIZE that fires
+# `changed` with no render pending moves nothing (edge 2 rule); only a
+# genuinely scrollable (upper > page_size) height CONSUMES the capture, which
+# is what makes the mid-load collapse event harmless. Consumption is deferred
+# one idle frame while the height settles (BUG#1: WebKit fires several
+# `changed` events during layout; the first scrollable one is not final).
+#
+# Test fidelity note: the smart-scroll tests drive a REAL Gtk.Adjustment from
+# the surface ScrolledWindow (real set_upper/set_value signal semantics —
+# fires changed, never value-changed, no auto-clamp of value on set_upper).
+# Do not replace with a fake — the real-semantics divergence is load-bearing.
+#
 # WebKit 6.0 preferred, 4.1 fallback (spec §2 edge table); if neither
 # introspection namespace loads, TextViewFallback (same API, raw text) keeps
 # the app usable (spec §7). Call sites import ChatSurface — it is the WebKit
@@ -257,6 +271,32 @@ class ChatSurface(Gtk.Box):
         # FIX 3 (SP5a audit): the surface owns its scroll — when mounted
         # (directly, no wrapper) it must fill the pane.
         self._scroll = _make_owned_scroll()
+        # MICRO smart-scroll: social-feed scroll behavior. Full-document
+        # load_html collapses content height mid-load → the adjustment clamps
+        # → the view snaps to top on EVERY append (PM bug 2026-10-07; this
+        # closes SPEC-06 register #8 without a JS bridge). We track at-bottom
+        # on the surface's OWN adjustment and restore the user's intent once
+        # the new document's height lands.
+        self._was_at_bottom = True  # fresh surface: first render lands at bottom
+        self._pending_restore: tuple[bool, float] | None = None
+        # BUG#1 (fix round): WebKit fires MULTIPLE `changed` events as layout
+        # settles; the restore must wait for a STABLE height, so consumption is
+        # deferred one idle frame (see _on_adjustment_changed / _settle_restore).
+        self._restore_settle_source = None
+        self._restore_upper = 0.0
+        vadj = self._scroll.get_vadjustment()
+        if vadj is not None:
+            self._bottom_adj = vadj
+            self._bottom_handler_id = vadj.connect(
+                "value-changed", self._on_scroll_value_changed
+            )
+            self._restore_handler_id = vadj.connect(
+                "changed", self._on_adjustment_changed
+            )
+        else:  # pragma: no cover - Gtk.ScrolledWindow always has an adjustment
+            self._bottom_adj = None
+            self._bottom_handler_id = 0
+            self._restore_handler_id = 0
         self.set_vexpand(True)
         self.set_hexpand(True)
         self.append(self._scroll)
@@ -281,6 +321,86 @@ class ChatSurface(Gtk.Box):
         ruling: one active scroll per pane, owned by the surface)."""
         return self._scroll.get_vadjustment()
 
+    # ── smart-scroll (MICRO 2026-10-07) ──
+    _BOTTOM_THRESHOLD = 80.0  # px — same threshold as main_content's button
+
+    def _on_scroll_value_changed(self, vadj) -> None:
+        """Track whether the user is at/near the bottom (social-feed rule).
+
+        A user-driven value change (scrollbar drag, wheel, the scroll-to-
+        bottom button) re-arms the intent that the next restored render uses.
+        Programmatic set_value from the restore ALSO fires this — idempotent:
+        after a restore the value is at the restored spot, which re-derives
+        the SAME at-bottom verdict.
+        """
+        self._was_at_bottom = (
+            (vadj.get_upper() - vadj.get_page_size() - vadj.get_value())
+            <= self._BOTTOM_THRESHOLD
+        )
+
+    def _on_adjustment_changed(self, vadj) -> None:
+        """Fired when upper/page_size change — for a real load, this is the
+        new DOM height landing. Schedule the deferred restore.
+
+        BUG#1 (fix round): real WebKit fires MULTIPLE `changed` events as the
+        layout settles — the FIRST event with `upper > page_size` is NOT the
+        final height (audit Probe D: captured 300 → the premature consume read
+        100). So we do NOT consume here; we defer one idle frame and only
+        restore once `upper` is STABLE across that frame (see _settle_restore).
+
+        Guard 1 (edge 2): no pending capture (e.g. a pane resize) → nothing.
+        Guard 2 (load-bearing, kept): `upper <= page_size` is the mid-load
+        COLLAPSE — not scrollable yet, so leave the capture pending and do not
+        even schedule (the real height's own `changed` will).
+        """
+        pending = self._pending_restore
+        if pending is None or self._destroyed:
+            return
+        if vadj.get_upper() <= vadj.get_page_size():
+            return  # collapse / nothing to scroll yet — keep the capture
+        # Defer: a settled restore is applied on the next idle frame only if
+        # the height is unchanged across it (a still-changing height
+        # re-schedules itself from its own `changed`).
+        self._schedule_restore(vadj)
+
+    def _schedule_restore(self, vadj) -> None:
+        """Arm a one-frame settle check (idempotent — one pending at a time)."""
+        if self._restore_settle_source is not None:
+            return  # already scheduled; the running settle re-reads upper
+        self._restore_upper = vadj.get_upper()
+        self._restore_settle_source = GLib.idle_add(self._settle_restore)
+
+    def _settle_restore(self) -> bool:
+        """Idle callback: consume the capture only once `upper` is stable.
+
+        Stable == same `upper` as when this check was armed. If the height
+        changed again, re-arm (the next idle re-checks) instead of consuming.
+        """
+        self._restore_settle_source = None
+        if self._destroyed:
+            return GLib.SOURCE_REMOVE
+        pending = self._pending_restore
+        vadj = self._bottom_adj
+        if pending is None or vadj is None:
+            return GLib.SOURCE_REMOVE
+        current_upper = vadj.get_upper()
+        if current_upper != self._restore_upper:
+            # Height moved again during the frame — re-check, don't consume.
+            self._schedule_restore(vadj)
+            return GLib.SOURCE_REMOVE
+        if vadj.get_upper() <= vadj.get_page_size():
+            return GLib.SOURCE_REMOVE  # collapsed again — leave pending
+        self._pending_restore = None  # consume BEFORE set_value (see below)
+        was_at_bottom, captured_value = pending
+        if was_at_bottom:
+            vadj.set_value(vadj.get_upper() - vadj.get_page_size())
+        else:
+            vadj.set_value(captured_value)  # set_value clamps to [lower, max]
+        # NOTE: consume-before-set_value is deliberate — set_value fires
+        # `value-changed` (re-arming _was_at_bottom) but NOT `changed`, so it
+        # cannot re-trigger this handler.
+        return GLib.SOURCE_REMOVE
+
     def _do_render(self) -> bool:
         """Coalesced render — runs at most once per idle cycle."""
         self._render_pending = False
@@ -290,6 +410,13 @@ class ChatSurface(Gtk.Box):
         if self._dirty:
             self._dirty = False
             self._rebuild_count += 1
+            # MICRO smart-scroll: capture the intent BEFORE the load collapses
+            # content height. One slot — the LAST capture before a drain wins
+            # (rapid coalesced appends collapse to one render); a capture with
+            # no rows yet is the fresh-surface bottom-first case.
+            vadj = self._scroll.get_vadjustment()
+            if vadj is not None:
+                self._pending_restore = (self._was_at_bottom, vadj.get_value())
             self._load_html(_document(list(self._rows)))
         return GLib.SOURCE_REMOVE
 
@@ -367,6 +494,33 @@ class ChatSurface(Gtk.Box):
         self._dirty = False
         self._stream_buffers.clear()
         self._rows.clear()
+        # MICRO smart-scroll (edge 7): cancel any pending settle idle and
+        # disconnect the adjustment handlers so a height change landing AFTER
+        # destroy cannot restore on a dead surface (and no restore fires from
+        # a stale capture).
+        if self._restore_settle_source is not None:
+            try:
+                GLib.source_remove(self._restore_settle_source)
+            except RuntimeError:
+                logger.debug("settle source already fired — nothing to cancel")
+            self._restore_settle_source = None
+        if self._bottom_adj is not None:
+            try:
+                if self._bottom_handler_id:
+                    self._bottom_adj.disconnect(self._bottom_handler_id)
+                if self._restore_handler_id:
+                    self._bottom_adj.disconnect(self._restore_handler_id)
+            except (TypeError, ValueError):
+                # handler already gone / invalid id — non-fatal (idempotent
+                # destroy contract).
+                logger.debug("adjustment handler already disconnected")
+            self._bottom_adj = None
+            self._bottom_handler_id = 0
+            self._restore_handler_id = 0
+        # NOTE: `_pending_restore` is intentionally NOT cleared here — on a
+        # destroyed surface the capture is inert, and leaving it means the
+        # DISCONNECT is the sole guard (so test_destroy_mid_load_no_restore
+        # isolates disconnection; clearing it would mask a missing disconnect).
         if self._webview is not None:
             self._scroll.set_child(None)
             self._webview = None

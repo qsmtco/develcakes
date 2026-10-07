@@ -832,3 +832,271 @@ class TestFallbackChromeParity:
         assert s._rows[-1]["color"] == ""
         s.destroy()
 
+
+# ── MICRO smart-scroll: at-bottom follow / reading-position preserve ─────
+
+
+def _surface_supports_smart_scroll() -> bool:
+    """Runtime gate: on a WebKit-less box the import-time alias binds
+    ChatSurface = TextViewFallback (chat_surface.py module bottom), which has
+    no _load_html / smart-scroll. Gate on the CLASS CAPABILITY, not an env-var
+    name (survives future env renames)."""
+    from ui.views.chat_surface import ChatSurface
+
+    return hasattr(ChatSurface, "_load_html")
+
+
+@pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
+class TestSmartScroll:
+    """MICRO smart-scroll. The WebKit full-document reload collapses content
+    height mid-load → the vadjustment clamps → the view snaps to top on EVERY
+    append. The fix tracks at-bottom on the surface's OWN vadjustment and
+    restores after the new height lands.
+
+    Driving the real WebKit load is non-deterministic; per the established
+    pattern (TestAgentPayloadCss.test_defaults_present_in_loaded_document_
+    after_append) `_load_html` is monkeypatched. The test then simulates the
+    async height landing by `set_upper(...)` — which fires the `changed`
+    signal exactly as a real content-height change does (probe-verified).
+
+    Test fidelity (load-bearing): these tests drive a REAL Gtk.Adjustment
+    from the surface ScrolledWindow — real signal semantics (set_upper fires
+    `changed` and NOT `value-changed`; set_value clamps to [lower, max]).
+    Do not replace with a fake.
+
+    Consumption is idle-deferred (BUG#1): a height change schedules a settle
+    check; `_pump()` drains GLib idles so the deferred restore runs.
+    """
+
+    def _surface(self, monkeypatch, page_size=100.0):
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias (no smart-scroll)")
+        from ui.views.chat_surface import ChatSurface
+
+        s = ChatSurface()
+        vadj = s.get_vadjustment()
+        assert vadj is not None  # ScrolledWindow always has an adjustment
+        vadj.set_page_size(page_size)
+        loads: list[str] = []
+
+        def _fake_load(doc):
+            loads.append(doc)
+            # Reproduce the REAL failure mode: a full-document load collapses
+            # WebKit content height mid-load → upper drops and the view clamps
+            # to the top. Without this, the monkeypatch would not exercise the
+            # bug the fix targets (steelFramed: reproduce the failure).
+            vadj.set_upper(0.0)
+            vadj.set_value(0.0)
+
+        monkeypatch.setattr(s, "_load_html", _fake_load)
+        s._test_loads = loads  # test-visible record of loaded docs
+        return s, vadj
+
+    @staticmethod
+    def _pump():
+        """Drain pending GLib idle callbacks (the deferred settle restore)."""
+        ctx = GLib.MainContext.default()
+        guard = 0
+        while ctx.pending() and guard < 200:
+            ctx.iteration(False)
+            guard += 1
+
+    def test_first_render_lands_at_bottom(self, monkeypatch):
+        """Edge 4: a fresh surface with no prior content lands at bottom once
+        the first document's height arrives."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        assert s._test_loads  # the render happened
+        vadj.set_upper(500.0)  # content height lands
+        self._pump()  # deferred settle restore runs
+        assert vadj.get_value() == 400.0  # upper - page_size = bottom
+        s.destroy()
+
+    def test_at_bottom_follows_new_message(self, monkeypatch):
+        """At bottom + append → the view follows the new message."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        assert vadj.get_value() == 900.0  # settled at bottom
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1100.0)  # new, taller content
+        self._pump()
+        assert vadj.get_value() == 1000.0  # followed to the new bottom
+        s.destroy()
+
+    def test_reading_position_preserved(self, monkeypatch):
+        """Scrolled-up + append → the reading position is preserved."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+
+        vadj.set_value(300.0)  # user scrolls UP (away from bottom) → re-arms
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1200.0)  # taller content lands
+        self._pump()
+        assert vadj.get_value() == 300.0  # position preserved, not snapped
+        s.destroy()
+
+    def test_intermediate_height_does_not_consume_capture(self, monkeypatch):
+        """BUG#1 (fix round): real WebKit fires MULTIPLE `changed` events as
+        layout settles — the FIRST scrollable height is NOT final. A premature
+        consume would restore to the wrong offset (audit Probe D: captured
+        300 → got 100). Model the burst: set_upper(0) → 200 → 1200 with NO
+        idle between the height events (the main loop is not idle mid-burst),
+        then one drain; the capture must survive to the FINAL 1200.
+        """
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        vadj.set_value(300.0)  # reading → capture intent = 300
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # capture = (False, 300); _fake_load collapses to 0
+        # The burst: intermediate scrollable height, then the real one — all
+        # before the loop idles (no _pump between them).
+        vadj.set_upper(200.0)   # intermediate: scrollable, but NOT final
+        vadj.set_upper(1200.0)  # FINAL height lands in the same burst
+        self._pump()            # now the settle check runs
+        assert vadj.get_value() == 300.0  # captured value, not the interim 100
+        s.destroy()
+
+    def test_resize_does_not_scroll(self, monkeypatch):
+        """Edge 2: a pane resize (page_size change) with no render pending
+        must NOT move the view — the restore is gated on a pending capture.
+        Positive witness: the SAME value DOES move on a render+height."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        vadj.set_value(300.0)  # reading
+        # Positive witness: a real render + height lands restores the view.
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1200.0)
+        self._pump()
+        assert vadj.get_value() == 300.0  # restore moved it back from the
+        # collapse-to-0 that _fake_load induced — proving the mechanism runs.
+        vadj.set_page_size(200.0)  # RESIZE — `changed` fires, but no capture
+        self._pump()  # a resize with no capture must not move the view
+        assert vadj.get_value() == 300.0  # no scroll from resize alone
+        s.destroy()
+
+    def test_rapid_coalesced_renders_last_capture_wins(self, monkeypatch):
+        """Edge 1: appends coalesce into ONE render; the capture at drain
+        time reflects the LATEST scroll state (last capture wins)."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+
+        # Two appends before the coalesced render drains.
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        vadj.set_value(200.0)  # user is reading when the render drains
+        s._drain_renders()
+        vadj.set_upper(1400.0)
+        self._pump()
+        assert vadj.get_value() == 200.0  # preserve (latest capture), no snap
+        s.destroy()
+
+    def test_deque_shrink_clamps_gracefully(self, monkeypatch):
+        """Edge 3: content SHRINKS (rows dropped from the windowed deque)
+        while reading — position clamps gracefully, no crash, no snap."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(2000.0)
+        self._pump()
+        vadj.set_value(1500.0)  # reading deep in old content
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1800.0)  # content shrank; max = 1700
+        self._pump()
+        assert vadj.get_value() == 1500.0  # preserved within the new range
+
+        # Extreme shrink: the captured value now exceeds the new max.
+        vadj.set_value(1700.0)
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(600.0)  # max = 500 — captured 1700 is out of range
+        self._pump()
+        assert vadj.get_value() == 500.0  # clamped to the new bottom, no crash
+        s.destroy()
+
+    def test_destroy_mid_load_no_restore(self, monkeypatch):
+        """Edge 7: destroy() during an in-flight load disconnects — a later
+        height change must not fire a restore on the dead surface.
+        Positive witness: BEFORE destroy the same height change DOES restore
+        (proving the handler is the thing destroy disconnects)."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        vadj.set_value(400.0)  # reading
+        # Witness: a live surface restores on the height landing.
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1200.0)
+        self._pump()
+        assert vadj.get_value() == 400.0  # live → restore ran
+
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()
+        # Capture the handler ids so the DISCONNECT itself is pinned: the
+        # _destroyed guards are defense-in-depth and would mask a missing
+        # disconnect in a pure behavior assert (audit ISSUE#10).
+        hid_bottom = s._bottom_handler_id
+        hid_restore = s._restore_handler_id
+        s.destroy()  # before m3's height lands
+        assert not vadj.handler_is_connected(hid_bottom)
+        assert not vadj.handler_is_connected(hid_restore)
+        vadj.set_upper(1400.0)  # must not restore on the dead surface
+        self._pump()
+        # A capture (400) WAS pending at destroy; if the handlers were not
+        # disconnected, the settle restore would drive the value to 400.
+        assert vadj.get_value() == 0.0  # _fake_load's collapse value remains
+
+    def test_user_grab_mid_load_restore_applies(self, monkeypatch):
+        """Edge 6: the user grabs the scrollbar between capture and restore —
+        the restore still applies the pre-load intent; the NEXT scroll
+        re-arms tracking normally."""
+        s, vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        vadj.set_upper(1000.0)
+        self._pump()
+        vadj.set_value(500.0)  # reading → capture intent = 500
+
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        vadj.set_value(550.0)  # user grabs again mid-load (before height lands)
+        vadj.set_upper(1200.0)  # height lands → restore the pre-load intent
+        self._pump()
+        assert vadj.get_value() == 500.0
+        s.destroy()
+
+    def test_do_render_captures_before_load(self, monkeypatch):
+        """Structural pin: _do_render installs a pending restore BEFORE
+        calling _load_html (the capture must exist when the height lands)."""
+        s, _vadj = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        # A capture is pending until a `changed` consumes it.
+        assert s._pending_restore is not None
+        assert len(s._pending_restore) == 2  # (was_at_bottom, captured_value)
+        s.destroy()
+
