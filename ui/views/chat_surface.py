@@ -89,6 +89,15 @@ pre.terminal { color: #c0caf5; }
 .tok-op { color: #89ddff; }
 .tok-fn { color: #82aaff; }
 .tok-type { color: #ffcb6b; }
+/* SPEC-13 SP2: agent-payload defaults. The agent-author policy (§2a) admits
+   div/section/article/header/footer/aside/nav/figure, img/video, and button;
+   these defaults keep an UNSTYLED payload readable (block containers don't
+   collapse inline; media can't overflow the pane; buttons aren't black-on-
+   black). No JS: button/details are inert toggles only (surface JS stays off). */
+div, section, article, header, footer, aside, nav, figure { display: block; }
+img, video { max-width: 100%; height: auto; border-radius: 4px; }
+button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
+         border-radius: 6px; padding: 4px 10px; }
 """
 
 _TAG_STRIP_RE = re.compile(r"<[^>]*>")

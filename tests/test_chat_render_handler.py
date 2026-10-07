@@ -1,8 +1,9 @@
 # tests/test_chat_render_handler.py
 # Tests for ui/handlers/chat_render_handler.py — SPEC-06 SP4 surface repoint.
 #
-# SP4: append/stream paths route text → render_document (markdown → HTML →
-# nh3 sanitize, ALWAYS in path) → per-session ChatSurface. Ruling R1: the
+# SP4: append/stream paths route text → render_message (SPEC-13: whole-message
+# ```html fence → agent-author policy; otherwise markdown → HTML → nh3
+# sanitize, ALWAYS in path) → per-session ChatSurface. Ruling R1: the
 # surface owns the widget tree — render_sync returns None and
 # on_bubble_ready fires with None (callers' `if bubble is not None` guards
 # verified at chat_handler :228/:532 and agent_runtime_handler :2101/:2116/
@@ -67,7 +68,7 @@ def _spy_handler(**kw) -> tuple[ChatRenderHandler, SpySurface]:
 # ── SP4 core contract: surface append path ────────────────────────────────
 
 class TestSurfaceAppendContract:
-    """SP4: append/stream route through render_document → sanitized HTML."""
+    """SP4: append/stream route through render_message → sanitized HTML."""
 
     def setup_method(self):
         self.handler, self.spy = _spy_handler()
@@ -118,7 +119,7 @@ class TestSurfaceAppendContract:
         assert [a["role"] for a in self.spy.appended] == ["user", "agent", "system"]
         assert self.spy.appended[1]["agent"] == "Coder"
 
-    def test_render_document_failure_falls_back_to_escaped_text(self, monkeypatch):
+    def test_render_message_failure_falls_back_to_escaped_text(self, monkeypatch):
         """Test 6: composition raising must append ESCAPED raw text (still
         sanitized path — never raw markup, never a raise). Patches the
         HANDLER's binding (from-import copied the name at import time —
@@ -127,7 +128,7 @@ class TestSurfaceAppendContract:
         def boom(text):
             raise RuntimeError("composition failed")
 
-        monkeypatch.setattr(crh_module, "render_document", boom)
+        monkeypatch.setattr(crh_module, "render_message", boom)
         self.handler.render_sync("Agent", "<b>raw & dangerous</b>", "sk")
         html_arg = self.spy.appended[0]["html"]
         assert "&lt;b&gt;raw &amp; dangerous&lt;/b&gt;" in html_arg
@@ -331,13 +332,13 @@ class TestReentrancyGuard:
         import threading
 
         gate = threading.Event()
-        real_compose = crh_module.render_document  # capture BEFORE patching
+        real_compose = crh_module.render_message  # capture BEFORE patching
 
         def gated_compose(text):
             gate.wait(timeout=5)  # first render parks here — in-flight
             return real_compose(text)
 
-        monkeypatch.setattr(crh_module, "render_document", gated_compose)
+        monkeypatch.setattr(crh_module, "render_message", gated_compose)
         handler = ChatRenderHandler()  # REAL shared pool
         spy = SpySurface()
         handler._surfaces["sk"] = spy
@@ -432,7 +433,7 @@ class FakeChatBox:
 
 class TestEscapeUtil:
     """The escape util's own semantics are unchanged by SP4 (the surface
-    pipeline uses render_document; this pins the util for remaining Pango
+    pipeline uses render_message; this pins the util for remaining Pango
     sites — event cards and unconverted surfaces)."""
 
     def test_xss_prevention(self):

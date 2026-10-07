@@ -279,6 +279,64 @@ class TestRenderHandlerAppendsArePipelineSanitized:
             "composition-failure fallback no longer escapes text"
         )
 
+    def test_render_message_is_the_compose_entry(self):
+        """SPEC-13 §2c/§2g: the TWO transcript compose sites call
+        render_message (the chat entry that adds the whole-message ```html
+        fence branch); render_document is called ONLY by the welcome path
+        (render_welcome), which stays markdown-by-design.
+
+        AST pin, not a string scan: a Call node IS a call; the log string
+        ("render_document failed ...") and the `from render.html import
+        render_document` line are neither, so they can neither mask a stale
+        call site nor be mistaken for a live one.
+
+        Kill-proofs (each revert kills this pin):
+          - revert _append_to_surface's compose to render_document →
+            rd_calls gains "_append_to_surface" (fails the ==["render_welcome"]
+            assert) AND the render_message count drops to 1 (fails >=2);
+          - revert _compose_off_thread's compose → same shape;
+          - add any third render_document compose site → rd_calls !=
+            ["render_welcome"].
+        """
+        import ast as ast_mod
+        src = self._read(self.PATH)
+        tree = ast_mod.parse(src)
+        parents: dict = {}
+        for node in ast_mod.walk(tree):
+            for child in ast_mod.iter_child_nodes(node):
+                parents[child] = node
+
+        def _enclosing_func(node):
+            cur = parents.get(node)
+            while cur is not None:
+                if isinstance(cur, (ast_mod.FunctionDef, ast_mod.AsyncFunctionDef)):
+                    return cur.name
+                cur = parents.get(cur)
+            return None
+
+        rd_calls: list = []
+        rm_calls: list = []
+        for node in ast_mod.walk(tree):
+            if (isinstance(node, ast_mod.Call)
+                    and isinstance(node.func, ast_mod.Name)):
+                if node.func.id == "render_document":
+                    rd_calls.append(_enclosing_func(node) or "<module>")
+                elif node.func.id == "render_message":
+                    rm_calls.append(_enclosing_func(node) or "<module>")
+
+        assert rd_calls == ["render_welcome"], (
+            "render_document must be called ONLY by render_welcome (the "
+            f"markdown-by-design welcome path); found {rd_calls!r}"
+        )
+        assert len(rm_calls) >= 2, (
+            "expected the 2 transcript compose sites to call render_message; "
+            f"found {len(rm_calls)} in {rm_calls!r}"
+        )
+        assert set(rm_calls) >= {"_append_to_surface", "_compose_off_thread"}, (
+            "render_message must be the compose entry at BOTH transcript "
+            f"sites; found {rm_calls!r}"
+        )
+
     def test_welcome_re_sanitize_present(self):
         """The welcome row is composed AND passed through sanitize_html again
         (belt-and-braces — the site independently witnesses fail-closed)."""

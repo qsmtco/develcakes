@@ -3323,7 +3323,7 @@ class TestEndStreamingExplicitNameTakesPriority:
     explicitly passed agent_name over the agent_mgr lookup path (which
     returns '' for special: keys).
 
-    Patches crh_module.render_document (the SP4 composition seam — the
+    Patches crh_module.render_message (the SPEC-13 composition seam — the
     Pango build_role_bubble is retired) and asserts on a SPY SURFACE:
     surface.append_message must receive agent_name='Coder'. GTK-free.
 
@@ -3367,7 +3367,7 @@ class TestEndStreamingExplicitNameTakesPriority:
         crh._streaming.add("special:coder")
         crh._stream_text["special:coder"] = "hello"
 
-        with patch.object(crh_module, "render_document",
+        with patch.object(crh_module, "render_message",
                           return_value="<p>hello</p>") as rd:
             crh.end_streaming("special:coder", agent_name="Coder")
 
@@ -3418,7 +3418,7 @@ class TestEndStreamingFallbackForGatewayAgents:
         crh._streaming.add("agent:qaster:main")
         crh._stream_text["agent:qaster:main"] = "hello"
 
-        with patch.object(crh_module, "render_document",
+        with patch.object(crh_module, "render_message",
                           return_value="<p>hello</p>"):
             crh.end_streaming("agent:qaster:main")  # NO agent_name arg
 

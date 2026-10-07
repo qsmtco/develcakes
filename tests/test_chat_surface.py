@@ -516,3 +516,127 @@ class TestGroupedAgentBoxes:
         doc2 = _document([{"html": "<p>w</p>", "agent": ""}])
         assert 'class="message-row role-system"' in doc2
 
+
+# ── SPEC-13 SP2: agent-payload surface defaults + fallback parity ─────────
+
+
+class TestAgentPayloadCss:
+    """SPEC-13 §2d: the surface gains default CSS for the agent-author
+    vocabulary so an UNSTYLED payload (a bare <div>/<button>/<img>) does not
+    render as black-on-black or inline-collapsed. The three blocks are
+    REQUIRED defaults; absence is a real regression (agent cards without
+    their own style would be unreadable).
+
+    The append_message flow is exercised end-to-end: a payload row lands in
+    the surface deque, the COALESCED render hook (_drain_renders + a
+    _load_html monkeypatch, the established pattern in this file) emits the
+    document, and the CSS is asserted in the loaded document.
+    """
+
+    def test_default_block_element_display_in_base_css(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert (
+            "div, section, article, header, footer, aside, nav, figure "
+            "{ display: block; }"
+        ) in _BASE_CSS, "block-display default missing from _BASE_CSS"
+
+    def test_media_constraint_default_in_base_css(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert (
+            "img, video { max-width: 100%; height: auto; border-radius: 4px; }"
+        ) in _BASE_CSS, "media constraint default missing from _BASE_CSS"
+
+    def test_button_default_in_base_css(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert "button {" in _BASE_CSS
+        assert "background: #2f334d;" in _BASE_CSS
+        assert "color: #c0caf5;" in _BASE_CSS
+        assert "border: 1px solid #3b4261;" in _BASE_CSS
+        assert "border-radius: 6px;" in _BASE_CSS
+        assert "padding: 4px 10px;" in _BASE_CSS
+
+    def test_defaults_present_in_loaded_document_after_append(self, monkeypatch):
+        """THE flow pin: append_message → _drain_renders → the loaded
+        document carries all three default blocks. Kills a mutant that
+        moves the CSS out of the <style> it emits (e.g. appends it after
+        the closing tag) — the assertions read the ACTUAL loaded doc."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable — coalesced load path needs real loader")
+        s = ChatSurface()
+        loads: list[str] = []
+        monkeypatch.setattr(s, "_load_html", lambda doc: loads.append(doc))
+        s.append_message("agent", '<div class="card">hi</div>', "Coder")
+        s._drain_renders()
+        assert len(loads) == 1
+        doc = loads[0]
+        assert "div, section, article, header, footer, aside, nav, figure { display: block; }" in doc
+        assert "img, video { max-width: 100%; height: auto; border-radius: 4px; }" in doc
+        assert "button {" in doc and "background: #2f334d;" in doc
+        s.destroy()
+
+    def test_defaults_survive_fallback_document_source(self, monkeypatch):
+        """Environment-independent witness: _document() (what BOTH surface
+        classes re-render through) embeds _BASE_CSS, so the defaults reach
+        the fallback's document source too — no WebKit needed."""
+        from ui.views.chat_surface import ChatSurface
+
+        rows = [{"role": "agent", "html": '<div class="card">hi</div>', "agent": "Coder"}]
+        doc = _document(rows)
+        assert "div, section, article, header, footer, aside, nav, figure { display: block; }" in doc
+        assert "img, video { max-width: 100%; height: auto; border-radius: 4px; }" in doc
+        assert "background: #2f334d;" in doc
+        _ = ChatSurface  # keep the import honest (surface class owns _BASE_CSS)
+
+
+class TestTextViewFallbackPayloadTagStrip:
+    """SPEC-13 §2c degradation contract: an agent HTML PAYLOAD (sanitized
+    rich HTML — <div>/<span style>/<button>) fed to the WebKit-less
+    TextViewFallback must degrade to READABLE TEXT: the existing
+    `_TAG_STRIP_RE` path strips tags, html.unescape restores entities, and
+    no '<' survives into the buffer. No code change is required — this pins
+    the contract so a future tag-strip change cannot silently show source.
+    """
+
+    def test_sanitized_payload_strips_to_readable_text(self):
+        from render.html import render_message
+        from ui.views.chat_surface import TextViewFallback
+
+        # A whole-message ```html fence → the real sanitized payload an
+        # agent turn produces (exactly what append_message receives).
+        payload = render_message(
+            '```html\n<div class="card"><b>Status</b>: '
+            '<span style="color:red">green</span></div>\n```'
+        )
+        assert "<div" in payload  # precondition: rich HTML, not markdown
+
+        s = TextViewFallback()
+        s.append_message("agent", payload, "Coder")
+        text = s._text()
+        assert "<" not in text, f"tags leaked into fallback text: {text!r}"
+        assert "<div" not in text and "<span" not in text
+        assert "Status" in text and "green" in text  # readable content survives
+        assert "[Coder]" in text
+        s.destroy()
+
+    def test_payload_button_and_img_strip_to_text(self):
+        """The agent-author vocabulary (button/img) also degrades to text —
+        no tags, no leaked attribute source."""
+        from render.sanitize import sanitize_agent_html
+        from ui.views.chat_surface import TextViewFallback
+
+        payload = sanitize_agent_html(
+            '<div><button>Run</button>'
+            '<img src="https://x/y.png" alt="chart"></div>'
+        )
+        s = TextViewFallback()
+        s.append_message("agent", payload, "Coder")
+        text = s._text()
+        assert "<" not in text
+        assert "Run" in text  # button label content survives as text
+        s.destroy()
+

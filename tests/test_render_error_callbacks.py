@@ -1,8 +1,9 @@
 # tests/test_render_error_callbacks.py
 # Regression tests for A4/A5 (SPEC-AUDIT-CLEANUP-1 Class A), REPOINTED for
 # SPEC-06 SP4: the Pango builders (process_segments/build_role_bubble) are
-# retired from ChatRenderHandler — the composition seam is now
-# render_document (markdown → HTML → sanitize). The DEFERRED-error contract
+# retired from ChatRenderHandler — the composition seam is now render_message
+# (SPEC-13: whole-message ```html fence → agent-author policy; otherwise
+# markdown → HTML → sanitize). The DEFERRED-error contract
 # is unchanged: a composition failure on the worker thread must deliver the
 # error via on_error on the main loop (the original bug was a NameError from
 # a lambda closing over the bare except-variable `exc`, deleted at block
@@ -48,7 +49,7 @@ def _wait_until(cond, timeout=5.0, poll=0.01):
 
 
 class TestDeferredErrorCallbacks:
-    """A4/A5 repoint (SPEC-06 SP4): render_document raising on the worker
+    """A4/A5 repoint (SPEC-06 SP4): render_message raising on the worker
     thread must deliver the error via the deferred on_error callback on the
     main loop — not NameError, not silence.
 
@@ -60,12 +61,12 @@ class TestDeferredErrorCallbacks:
     """
 
     def test_render_async_compose_error_reaches_on_error(self):
-        """A4 (repointed): render_document() raising must deliver the error
+        """A4 (repointed): render_message() raising must deliver the error
         via the deferred on_error callback, not NameError."""
         glib = DeferredGLib()
         handler = ChatRenderHandler(GLib_module=glib)
         errors = []
-        with patch.object(crh_module, "render_document",
+        with patch.object(crh_module, "render_message",
                           side_effect=Exception("render exploded")):
             handler.render_async("Agent", "text", "sk-async",
                                  on_bubble_ready=lambda w: None,
@@ -85,7 +86,7 @@ class TestDeferredErrorCallbacks:
         glib = DeferredGLib()
         handler = ChatRenderHandler(GLib_module=glib)
         errors = []
-        with patch.object(crh_module, "render_document",
+        with patch.object(crh_module, "render_message",
                           side_effect=Exception("compose exploded")):
             handler.render("Agent", "text", "sk-sync",
                            on_bubble_ready=lambda w: None,

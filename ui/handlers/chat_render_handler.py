@@ -5,8 +5,10 @@
 #
 # SPEC-06 SP4 (R2A): the Pango bubble pipeline is RETIRED for the transcript
 # role. render_async/render_sync/streaming now route through
-# render/html.render_document (markdown → HTML → sanitize, ALWAYS in the
-# path) into a display-keyed ChatSurface (ui/views/chat_surface.py) — the
+# render/html.render_message (SPEC-13: a whole-message ```html fence → the
+# agent-author policy sanitize_agent_html; anything else → markdown → HTML →
+# sanitize — the sanitizer is ALWAYS in the path) into a display-keyed
+# ChatSurface (ui/views/chat_surface.py) — the
 # cache key is `mount_key or session_key`, so every agent rendering into one
 # project tab shares ONE surface. Per
 # ruling R1 the surface owns the widget tree: on_bubble_ready fires with
@@ -49,7 +51,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-from render.html import render_document
+from render.html import render_document, render_message
 from render.sanitize import sanitize_html
 from ui.views.chat_surface import create_chat_surface
 from utils.escaping import xml_template
@@ -58,7 +60,8 @@ from concurrent.futures import ThreadPoolExecutor
 _logger = logging.getLogger(__name__)
 
 # SPEC-06 SP5c-1 — the welcome content, carried through the SAME fail-closed
-# pipeline as agent text (render_document at emission; constraint 2). The
+# pipeline as agent text (welcome emission: render_document — markdown by
+# design; agent text: render_message, SPEC-13 — constraint 2). The
 # Pango bubble's logo is NOT rebuilt: survey verdict (2026-09-25) —
 # render/html emits no <img> at all (markdown images → "[alt]" text, register
 # ruling), and the sanitizer's src filter admits http(s) only, so a logo
@@ -117,9 +120,14 @@ class ChatRenderHandler:
     Routes chat transcript content to the display-keyed HTML chat surface
     (one surface per project box; SPEC-12).
 
-    SPEC-06 SP4 pipeline (replaces the Pango bubble pipeline):
-      text → render/html.render_document()   (markdown → HTML → nh3 sanitize,
-                                              fail-closed — ALWAYS in the path)
+    SPEC-06 SP4 pipeline (replaces the Pango bubble pipeline; SPEC-13 SP2
+    repoints it to the fence-aware entry):
+      text → render/html.render_message()   (SPEC-13: a whole-message
+                                              ```html fence → the agent-author
+                                              policy sanitize_agent_html;
+                                              anything else → markdown → HTML
+                                              → nh3 sanitize — fail-closed,
+                                              ALWAYS in the path)
            → ChatSurface.append_message()    (display-keyed, windowed deque)
 
     Feature parity (ruling R2 — dispositions):
@@ -458,17 +466,18 @@ class ChatRenderHandler:
 
     def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None,
                            mount_key: str | None = None):
-        """Compose (markdown → sanitized HTML) and append to the session
-        surface. Sanitize is ALWAYS in the path here — SP6's guard pins
-        this call site. Raw-HTML fallback only if composition itself
-        raises, and even that goes through html.escape (never raw).
+        """Compose (render_message: whole-message ```html fence → the
+        agent-author policy; otherwise markdown → sanitized HTML) and append
+        to the session surface. Sanitize is ALWAYS in the path here — SP6's
+        guard pins this call site. Raw-HTML fallback only if composition
+        itself raises, and even that goes through html.escape (never raw).
 
         FIX 2: mount_key threads through so a project-routed reply mounts
         its surface in the project tab's box (see _surface_for)."""
         try:
-            html_fragment = render_document(text)
+            html_fragment = render_message(text)
         except Exception:
-            _logger.exception("render_document failed — appending escaped raw text")
+            _logger.exception("render_message failed — appending escaped raw text")
             html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
         # FIX 10 (round 2): tombstone check BEFORE _surface_for — a closed
         # session's late render is DROPPED (an unmounted orphan surface must
@@ -602,7 +611,7 @@ class ChatRenderHandler:
         def _compose_off_thread():
             try:
                 # Heavy pure-Python work — no GTK calls. sanitize runs here.
-                html_fragment = render_document(text)
+                html_fragment = render_message(text)
 
                 def _append_on_main():
                     try:
