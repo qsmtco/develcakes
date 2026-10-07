@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-20
 **Author:** Supervisor (develcakes v2)
-**Status:** IMPLEMENTED 2026-09-25 — post-mortem: docs/post-mortems/2026-09-20-SPEC-06-R2A-HTML-CHAT-POST-MORTEM.md (chat_bubble.py retired to ui/views/event_cards.py; welcome is HTML-native; guard catalogs live)
+**Status:** IMPLEMENTED 2026-09-25 — post-mortem: docs/post-mortems/2026-09-20-SPEC-06-R2A-HTML-CHAT-POST-MORTEM.md (chat_bubble.py retired to ui/views/event_cards.py; welcome is HTML-native; guard catalogs live). **AMENDED by SPEC-13 (2026-10-06):** the escape-first contract no longer applies to agent-authored whole-message ` ```html ` payloads — those render through the agent-author policy (`sanitize_agent_html`, CSS property allowlist). Markdown path, sanitizer fail-closedness, and JS-off are unchanged.
 **Implements:** docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md §1.2/§5 R2 [SUP-REV staging];
 docs/proposals/WEBKIT-RENDER-SURFACE_PROPOSAL.md ("adopt or amend — do not re-invent")
 **Depends on:** SPEC-05 (R2 rides R1's consolidated send path), SPEC-03 (ratchet fixed first)

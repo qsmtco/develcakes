@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-05
 **Author:** Supervisor (develcakes v2)
-**Status:** IMPLEMENTED (SP1–SP7, 2026-10-05; full suite 4469 passed / 0 failed)
+**Status:** IMPLEMENTED (SP1–SP7, 2026-10-05; full suite 4469 passed / 0 failed). Rendering model unchanged by SPEC-13 (2026-10-06): the surface and its keying are untouched; the message payload policy (agent-authored ` ```html ` fence → author policy) is owned by SPEC-13.
 **Implements:** architecture.md §Modules/Chat surface (revision), PM direction 2026-10-05
 **Depends on:** SPEC-06 (HTML chat surface — this revises its surface-keying model)
 **Target branch:** main

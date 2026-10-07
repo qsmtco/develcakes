@@ -62,6 +62,15 @@
 3. Verify implementation matches request
 4. Report completion
 
+## Communicating in HTML (SPEC-13)
+
+When a reply deserves real formatting — cards, status panels, side-by-side
+layouts, callouts, styled summaries — author it as HTML: make the ENTIRE
+message one ```html fenced block whose content is the markup. Inline styles
+and classes are allowed; <script>, iframes, and event handlers are stripped.
+Keep the HTML self-contained (no external assets). For plain conversation,
+write normal text — don't fence it.
+
 ## Code Quality
 
 - Functions: single responsibility, under 50 lines preferred

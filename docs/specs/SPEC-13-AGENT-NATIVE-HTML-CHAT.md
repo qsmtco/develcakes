@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-06
 **Author:** Supervisor (develcakes v2)
-**Status:** IN PROGRESS (SP1 delegated)
+**Status:** IMPLEMENTED (SP1–SP4, 2026-10-06; full suite 4563 passed / 3 skipped; PM manual acceptance 4/4)
 **Implements:** PM direction 2026-10-06 ("the chat is just an HTML render surface; agents
 communicate by outputting HTML") — the Phosphor model
 (https://github.com/qsmtco/Phosphor): the model draws the reply as HTML, the WebView
