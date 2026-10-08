@@ -19,10 +19,10 @@
 
 from __future__ import annotations
 
-import html
 import logging
 import re
 from collections.abc import Callable
+from html.parser import HTMLParser
 from typing import Any
 
 from transport.telegram import TelegramAuthError, TelegramTransport, redact_log_preview
@@ -49,10 +49,95 @@ _WHOLE_MESSAGE_HTML_FENCE_RE = re.compile(
     r"^```html[ \t]*\r?\n(.*?)\r?\n?```[ \t]*$",
     re.DOTALL | re.IGNORECASE,
 )
-_TAG_RE = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>""")
-_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
-_P_CLOSE_RE = re.compile(r"</p\s*>", re.IGNORECASE)
 
+# R2/R3 (audit): the HTML→text flatten is LINEAR (HTMLParser), not a regex —
+# the old attribute-aware `<[^>]+>`-style regex was ~22–32x slower and O(N²)
+# on '<'-dense input, and a strip-after-unescape ate real decoded text
+# (`5 &lt; 6 &gt; 4` → `5  4`). The parser collects TEXT nodes (entities are
+# decoded there, so a decoded `<` in text is never re-read as a tag), and
+# block boundaries become newlines. A literal script/style element is dropped.
+_BLOCK_TAGS = frozenset({
+    "p", "div", "br", "li", "ul", "ol", "tr", "td", "th", "table",
+    "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "hr",
+    "section", "article", "header", "footer", "nav", "figure",
+})
+_SKIP_TAGS = frozenset({"script", "style"})
+
+
+class _TextExtractor(HTMLParser):
+    """Collect visible TEXT from an HTML fragment (R2/R3, linear).
+
+    ``convert_charrefs=True`` decodes entities in text nodes, so
+    ``&lt;script&gt;`` in TEXT stays a literal ``<script>`` and is NEVER
+    re-interpreted as markup. A literal ``<script>…</script>`` element's body
+    is dropped.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list) -> None:
+        if tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _SKIP_TAGS:
+            if self._skip_depth:
+                self._skip_depth -= 1
+        elif tag in _BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+def _strip_literal_tag_bodies(text: str) -> str:
+    """Drop the bodies of literal ``<script>``/``<style>`` elements (linear).
+
+    Runs on the DECODED text, so an entity-encoded ``&lt;script&gt;`` in TEXT
+    (now a literal ``<script>``) is removed as markup-ish — matching the
+    prior contract that an encoded script tag does not survive.
+    """
+    for tag in _SKIP_TAGS:
+        open_tok, close_tok = f"<{tag}", f"</{tag}>"
+        out: list[str] = []
+        i = 0
+        lower = text.lower()
+        while True:
+            j = lower.find(open_tok, i)
+            if j == -1:
+                out.append(text[i:])
+                break
+            k = lower.find(close_tok, j)
+            if k == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i:j])
+            i = k + len(close_tok)
+        text = "".join(out)
+    return text
+
+
+def _html_fragment_to_text(payload: str) -> str:
+    """HTML fragment → plain text (R2/R3). Linear; fail-safe at the caller."""
+    parser = _TextExtractor()
+    parser.feed(payload)
+    parser.close()
+    flat = _strip_literal_tag_bodies(parser.text())
+    # Collapse >2 blank lines the block-boundary newlines may leave behind.
+    return re.sub(r"\n{3,}", "\n\n", flat).strip()
 
 class BridgeState:
     """Bridge lifecycle states (string constants — the toolbar maps them)."""
@@ -101,6 +186,11 @@ class TelegramBridgeHandler:
         self._transport: Any | None = None
         self._state = BridgeState.DISCONNECTED
         self._chat_id: int | None = None
+        # R1 (audit): session GENERATION. A transport callback captured the
+        # generation live when it was built; every start/stop bumps it, so a
+        # SUPERSEDED transport's queued (deferred-dispatch) callback early-
+        # returns instead of clobbering the current session's state.
+        self._generation: int = 0
         # SPEC-15 SP3a: card_id → telegram message_id for approval cards with
         # inline buttons. FIFO cap 50 (review-queue discipline).
         self._approval_msgs: dict[str, int] = {}
@@ -166,6 +256,10 @@ class TelegramBridgeHandler:
         self._arh = arh
 
     def _set_state(self, state: str) -> None:
+        # R4 (audit): dedup — a flapping link must not re-fire on_state_change
+        # (window emits an "offline" card per error). No-op re-sets are silent.
+        if state == self._state:
+            return
         self._state = state
         if self._on_state_change is not None:
             try:
@@ -226,8 +320,14 @@ class TelegramBridgeHandler:
         leaves the old poll loop running; without this, start-after-error
         stacks a SECOND poll loop and the Supervisor receives every message
         twice. stop_bridge() is idempotent.
+
+        R1 (audit): bump the session GENERATION before teardown so the old
+        transport's (deferred) on_disconnect can never clobber this session's
+        state — each transport lambda captures the generation live when built.
         """
+        self._generation += 1  # R1: supersede any prior transport's callbacks
         self.stop_bridge()  # F1a: guarantee ONE live transport per session
+        gen = self._generation  # R1: the current session generation
 
         cfg = self._load_config()
         token = cfg.get("bot_token") or ""
@@ -283,9 +383,13 @@ class TelegramBridgeHandler:
         self._transport = self._transport_factory(
             token=token,
             chat_id=self._chat_id,
-            on_connect=lambda: self._dispatch(self._on_transport_connect),
-            on_disconnect=lambda r: self._dispatch(self._on_transport_disconnect, r),
-            on_error=lambda m: self._dispatch(self._on_transport_error, m),
+            # R1: capture the session generation; a superseded transport's
+            # deferred callback early-returns instead of clobbering state.
+            on_connect=lambda g=gen: self._dispatch(self._on_transport_connect, g),
+            on_disconnect=lambda r, g=gen: self._dispatch(
+                self._on_transport_disconnect, r, g),
+            on_error=lambda m, g=gen: self._dispatch(
+                self._on_transport_error, m, g),
             on_update=lambda u: self._dispatch(self._handle_update, u),
         )
         self._set_state(BridgeState.CONNECTING)
@@ -301,9 +405,14 @@ class TelegramBridgeHandler:
             self._set_state(BridgeState.ERROR)
 
     def stop_bridge(self) -> None:
-        """Stop the transport (idempotent) and go DISCONNECTED."""
+        """Stop the transport (idempotent) and go DISCONNECTED.
+
+        R1: bump the generation BEFORE disconnecting so any callback the
+        teardown queues (deferred dispatch) is recognized as stale.
+        """
         if self._state == BridgeState.DISCONNECTED and self._transport is None:
             return  # already stopped — no-op
+        self._generation += 1  # R1: supersede the outgoing transport's callbacks
         transport = self._transport
         if transport is not None:
             try:
@@ -319,10 +428,14 @@ class TelegramBridgeHandler:
 
     # ── transport-thread callbacks (already dispatched to main) ──────────
 
-    def _on_transport_connect(self) -> None:
+    def _on_transport_connect(self, gen: int | None = None) -> None:
+        if gen is not None and gen != self._generation:
+            return  # R1: superseded transport — ignore
         self._set_state(BridgeState.CONNECTED)
 
-    def _on_transport_disconnect(self, reason: str) -> None:
+    def _on_transport_disconnect(self, reason: str, gen: int | None = None) -> None:
+        if gen is not None and gen != self._generation:
+            return  # R1: a superseded transport's queued disconnect is ignored
         # SP3a §2.4: a stale card→message map must never drive an edit on a
         # dead session — clear it when the transport drops.
         self._clear_approval_msgs()
@@ -330,7 +443,10 @@ class TelegramBridgeHandler:
         self._clear_pending_stop()
         self._set_state(BridgeState.DISCONNECTED)
 
-    def _on_transport_error(self, message: str) -> None:
+    def _on_transport_error(self, message: str,
+                            gen: int | None = None) -> None:
+        if gen is not None and gen != self._generation:
+            return  # R1: superseded transport — ignore
         _logger.warning("bridge error: %s", redact_log_preview(str(message)))
         # F2 (audit): an armed /stop confirmation must not survive an
         # ERROR→reconnect — a later bare STOP would fire stop-all on a "later
@@ -665,8 +781,10 @@ class TelegramBridgeHandler:
 
         The whole-message ```html fence (SPEC-13) is flattened to its visible
         text — the card's content, never markup. Any other message passes
-        through unchanged. Dependency-light (regex; no html→text util exists);
-        a fail-safe: if anything raises, return the original text.
+        through unchanged. R2/R3 (audit): uses a LINEAR stdlib HTMLParser
+        (`_html_fragment_to_text`), so decoded `<`/`>` in TEXT is preserved
+        and angle-bracket-dense input cannot freeze the main thread. Fail-safe:
+        if anything raises, the original text is returned.
         """
         if not isinstance(text, str) or not text:
             return text if isinstance(text, str) else ""
@@ -674,20 +792,7 @@ class TelegramBridgeHandler:
             m = _WHOLE_MESSAGE_HTML_FENCE_RE.match(text.strip())
             if not m:
                 return text
-            payload = m.group(1)
-            # Block boundaries → newlines before tags vanish.
-            flat = _BR_RE.sub("\n", payload)
-            flat = _P_CLOSE_RE.sub("\n", flat)
-            # F5 (audit): strip tags, unescape entities, then strip AGAIN —
-            # the first pass is attribute-aware (a `>` inside a quoted value
-            # no longer truncates), the second catches entity-encoded tags
-            # (`&lt;script&gt;` → `<script>` → gone).
-            flat = _TAG_RE.sub("", flat)
-            flat = html.unescape(flat)
-            flat = _TAG_RE.sub("", flat)
-            # Collapse >2 blank lines the strip may have left behind.
-            flat = re.sub(r"\n{3,}", "\n\n", flat).strip()
-            return flat
+            return _html_fragment_to_text(m.group(1))
         except Exception as e:  # noqa: BLE001 — never lose a reply to a strip bug
             _logger.warning("html-card flatten failed: %s", redact_log_preview(str(e)))
             return text

@@ -39,7 +39,12 @@ class FakeTransport:
         pass
 
     async def disconnect(self):
-        pass
+        # Model the REAL transport: disconnect() fires on_disconnect (through
+        # the same dispatch seam). Under deferred dispatch this QUEUES — which
+        # is exactly the R1 stale-callback scenario.
+        cb = self.kw.get("on_disconnect")
+        if cb is not None:
+            cb("disconnected")
 
     def answer_callback_query(self, callback_query_id, text=None):
         self.answered.append({"id": callback_query_id, "text": text})
@@ -613,14 +618,50 @@ def test_foreign_refusal_targets_foreign_chat_not_paired():
 # ── F5/F6/F7 (audit suggestions) ────────────────────────────────────────
 
 
-def test_flatten_attribute_with_gt_and_entity_tags():
-    """F5: a '>' inside a quoted attribute must not truncate, and an
-    entity-encoded tag must not survive the flatten."""
+def test_flatten_strips_literal_and_encoded_script():
+    """R2/R3: a '>' inside a quoted attribute must not truncate, and BOTH a
+    literal and an entity-encoded `<script>` tag must be stripped (with the
+    specified bodies dropped)."""
     h, _t, _a = _connected()
     out = h._telegram_text('```html\n<div title="a > b">x</div>\n```')
     assert out == 'x'
-    out2 = h._telegram_text('```html\n&lt;script&gt;alert(1)&lt;/script&gt;ok\n```')
-    assert "<script>" not in out2 and "alert" in out2 and out2.endswith("ok")
+    # Literal script element → body dropped.
+    out2 = h._telegram_text('```html\n<script>alert(1)</script>ok\n```')
+    assert "<script>" not in out2 and "alert" not in out2 and out2.endswith("ok")
+    # Entity-encoded script tag → still stripped.
+    out3 = h._telegram_text('```html\n&lt;script&gt;alert(1)&lt;/script&gt;ok\n```')
+    assert "<script>" not in out3 and out3.endswith("ok")
+
+
+# ── R3: decoded angle-bracket TEXT must survive (audit) ─────────────────
+
+
+def test_flatten_preserves_decoded_angle_bracket_text():
+    """R3 (audit): entity-decoded `<` / `>` in TEXT must NOT be re-stripped as
+    markup — the old strip-after-unescape ate real content."""
+    h, _t, _a = _connected()
+    cases = {
+        '```html\n<p>5 &lt; 6 &gt; 4</p>\n```': "5 < 6 > 4",
+        '```html\n<p>use &lt;value&gt; here</p>\n```': "use <value> here",
+        '```html\n<p>git log &lt;branch&gt; --oneline</p>\n```':
+            "git log <branch> --oneline",
+    }
+    for src, expected in cases.items():
+        out = h._telegram_text(src)
+        assert expected in out, f"lost decoded text: {out!r} (want {expected!r})"
+
+
+def test_flatten_is_linear_on_angle_bracket_dense_input():
+    """R2 (audit): the flatten must be LINEAR — 16K '<' well under 100ms
+    (the old attribute-aware regex took ~4s at O(N²))."""
+    import time
+
+    h, _t, _a = _connected()
+    dense = "```html\n" + ("<" * 16000) + "\n```"
+    t0 = time.perf_counter()
+    h._telegram_text(dense)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.1, f"flatten too slow on 16K '<': {elapsed:.3f}s"
 
 
 def test_forward_whitespace_only_sends_nothing():
@@ -638,3 +679,117 @@ def test_start_bridge_non_int_chat_id_is_honest_error():
     h.start_bridge()  # must not raise
     assert h.state == "error"
     assert "t" not in t  # no transport constructed
+
+
+# ── R1: deferred-dispatch (production GLib.idle_add) stale-callback ──────
+
+
+class DeferredDispatch:
+    """Queues callbacks like GLib.idle_add; drain() runs them in order.
+
+    This is the harness the inline-dispatch fakes cannot emulate: a transport
+    teardown queues on_disconnect, and start_bridge's synchronous connect runs
+    BEFORE that queued callback drains.
+    """
+
+    def __init__(self):
+        self.queue: list = []
+
+    def __call__(self, fn, *args):
+        self.queue.append((fn, args))
+
+    def drain(self):
+        while self.queue:
+            fn, args = self.queue.pop(0)
+            fn(*args)
+
+
+def _deferred_handler(*, fail_connect=False):
+    holder = {}
+    disp = DeferredDispatch()
+
+    def factory(**tkw):
+        t = FakeTransport(**tkw)
+        holder["t"] = t
+        return t
+
+    class ARH:
+        def get_special_agents(self):
+            return {"special:supervisor": "special:supervisor"}
+
+    h = TelegramBridgeHandler(
+        arh=ARH(),
+        transport_factory=factory,
+        load_config=lambda: {"bot_token": "123:abc", "chat_id": 42,
+                             "paired_handle": "@me"},
+        dispatch=disp,
+        on_feed_card=lambda *a: None,
+    )
+    return h, holder, disp
+
+
+def test_deferred_stale_disconnect_does_not_clobber_error(monkeypatch):
+    """R1 RED (deferred dispatch): teardown of the OLD transport queues
+    on_disconnect; it drains AFTER a FAILED reconnect set ERROR — and must NOT
+    rewrite it to DISCONNECTED (toolbar would lie, no error card)."""
+    h, holder, disp = _deferred_handler()
+    h.start_bridge()
+    holder["t"].kw["on_connect"]()
+    disp.drain()
+    assert h.state == "connected"
+
+    # Reconnect whose connect() FAILS with an auth error.
+    def failing_connect(self):
+        raise ValueError("revoked token")
+
+    monkeypatch.setattr(type(holder["t"]), "connect", failing_connect, raising=False)
+    h.start_bridge()  # stop_bridge queues OLD on_disconnect, then CONNECTING→ERROR
+    assert h.state in ("connecting", "error")
+    disp.drain()  # the stale disconnect lands HERE
+    assert h.state == "error", (
+        "a superseded transport's queued disconnect must not clobber ERROR "
+        f"(got {h.state!r})"
+    )
+
+
+def test_deferred_stale_disconnect_never_observes_disconnected(monkeypatch):
+    """R1 RED (deferred dispatch): a HEALTHY reconnect must never observe
+    DISCONNECTED *between* CONNECTING and CONNECTED — the stale queued
+    disconnect must be ignored."""
+    h, holder, disp = _deferred_handler()
+    h.start_bridge()
+    holder["t"].kw["on_connect"]()
+    disp.drain()
+
+    seen: list = []
+    h._on_state_change = lambda s: seen.append(s)
+    h.start_bridge()  # queues OLD on_disconnect; sets CONNECTING synchronously
+    disp.drain()  # stale disconnect drains here — must be ignored
+    holder["t"].kw["on_connect"]()  # the NEW transport announces
+    disp.drain()
+
+    # The requirement: after CONNECTING is observed, the next state must be
+    # CONNECTED — never a stale DISCONNECTED.
+    assert "connecting" in seen, seen
+    after_connecting = seen[seen.index("connecting") + 1:]
+    assert "disconnected" not in after_connecting, (
+        f"stale disconnect leaked DISCONNECTED after CONNECTING: {seen}"
+    )
+    assert after_connecting and after_connecting[0] == "connected", seen
+    assert h.state == "connected"
+
+
+# ── R4: state-callback dedup ────────────────────────────────────────────
+
+
+def test_noop_state_reset_does_not_refire_callback():
+    """R4: re-setting the same state must not re-fire on_state_change (a
+    flapping link would otherwise spam 'offline' cards)."""
+    changes: list = []
+    h, _t, _a = _handler(on_state_change=lambda s: changes.append(s))
+    h._set_state(BridgeState.CONNECTED)
+    h._set_state(BridgeState.CONNECTED)  # no-op re-set
+    h._set_state(BridgeState.CONNECTED)
+    assert changes == [BridgeState.CONNECTED]
+    h._set_state(BridgeState.ERROR)
+    assert changes == [BridgeState.CONNECTED, BridgeState.ERROR]
