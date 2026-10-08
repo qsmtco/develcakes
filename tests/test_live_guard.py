@@ -444,3 +444,75 @@ class TestInjectionScroll:
         finally:
             win.close()
             s.destroy()
+
+
+# ── 4. Audit fix round: destroy hygiene + store-dir perms ────────────────
+
+
+class TestDestroyDetachesGuard:
+    """BUG#1 (audit): ChatSurface.destroy() must detach the LiveGuard — a
+    leaked decide-policy GObject handler against a freed WebView segfaults
+    (becomes a crash on every chat-tab close once SP2 flips the default ON)."""
+
+    def test_destroy_detaches_live_guard_handler(self, monkeypatch):
+        monkeypatch.setattr(cs_module, "_live_js_enabled", lambda: True)
+        s = ChatSurface()
+        win = _present(s)
+        try:
+            s.append_message("agent", "<p>x</p>", "Coder")
+            s._drain_renders()
+            _pump(1.0)
+            # The flag-ON path compiles + attaches the guard on first webview.
+            assert s._live_guard is not None, "guard not attached (flag gate?)"
+            # If the filter failed to compile on this box, attach never ran —
+            # force an explicit attach so the disconnect contract is exercised.
+            if s._live_guard._handler_id == 0 and s._webview is not None:
+                s._live_guard.attach(s._webview)
+            assert s._live_guard._handler_id != 0, "no decide-policy handler to leak"
+            view = s._webview
+            hid = s._live_guard._handler_id
+
+            s.destroy()
+
+            # Detach must have disconnected the handler (the leak under test).
+            assert not view.handler_is_connected(hid), (
+                "destroy did NOT disconnect the LiveGuard decide-policy handler "
+                "(leak → segfault on freed WebView)"
+            )
+            assert s._live_guard is None, "destroy did not clear _live_guard"
+        finally:
+            win.close()
+
+
+class TestStoreDirPermissions:
+    """BUG#3 (audit): makedirs(mode=0o700) does NOT chmod a PRE-EXISTING dir."""
+
+    def test_preexisting_store_dir_is_chmod_0700(self):
+        import os
+        import stat
+        import tempfile
+
+        # Pre-create the EXACT store dir world-readable (0755) — the audit's
+        # case (makedirs' mode only applies when it CREATES the dir).
+        d = tempfile.mkdtemp(prefix="lg-perm-")
+        store = os.path.join(d, "filters")
+        os.makedirs(store, exist_ok=True)
+        os.chmod(store, 0o755)
+        assert stat.S_IMODE(os.stat(store).st_mode) == 0o755
+
+        loop = GLib.MainLoop()
+        box = {}
+
+        g = LiveGuard(store_path=store)
+
+        def cb(f):
+            box["f"] = f
+            loop.quit()
+
+        g.compile(cb)
+        GLib.timeout_add_seconds(8, lambda: (loop.quit(), False)[1])
+        loop.run()
+
+        # The store path must end up 0700 regardless of pre-existence.
+        mode = stat.S_IMODE(os.stat(store).st_mode)
+        assert mode == 0o700, f"store dir not chmod 0700 (got {oct(mode)})"

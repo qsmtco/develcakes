@@ -121,6 +121,13 @@ class LiveGuard:
         WebKit = _load_webkit()
         GLib = _load_glib()
         os.makedirs(self._store_path, mode=0o700, exist_ok=True)
+        # BUG#3 (audit): makedirs' mode only applies when it CREATES the dir —
+        # a PRE-EXISTING world-readable store dir stayed 0755. chmod
+        # unconditionally so the credential-adjacent cache dir is always 0700.
+        try:
+            os.chmod(self._store_path, 0o700)
+        except OSError:
+            _logger.debug("live_guard: chmod store dir failed", exc_info=True)
         store = WebKit.UserContentFilterStore.new(self._store_path)
         self._store = store
         rules = GLib.Bytes.new(json.dumps(BLOCK_ALL_REMOTE_RULESET).encode("utf-8"))

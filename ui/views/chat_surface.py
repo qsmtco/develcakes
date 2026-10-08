@@ -1009,6 +1009,20 @@ class ChatSurface(Gtk.Box):
         # DISCONNECT is the sole guard (so test_destroy_mid_load_no_restore
         # isolates disconnection; clearing it would mask a missing disconnect).
         if self._webview is not None:
+            # SPEC-19 SP1 audit BUG#1: detach the LiveGuard BEFORE tearing the
+            # webview down. detach() removes the content filter + disconnects
+            # the decide-policy handler; a leaked GObject handler against a
+            # freed WebView segfaults (becomes a real crash on every chat-tab
+            # close once SP2 flips the live-JS default ON). getattr discipline:
+            # `_live_guard` may be absent on older/test instances.
+            _guard = getattr(self, "_live_guard", None)
+            if _guard is not None:
+                try:
+                    _guard.detach(self._webview)
+                except Exception:
+                    logger.debug("live_guard detach failed during destroy",
+                                 exc_info=True)
+                self._live_guard = None
             # SPEC-17 SP1.2: disconnect load-changed so a late FINISHED (mid-
             # load destroy) cannot issue a scroll script on a dead surface.
             if self._load_changed_handler_id:
