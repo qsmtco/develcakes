@@ -102,11 +102,23 @@ class MainWindow(Gtk.ApplicationWindow):
         self._setup_keyboard_shortcuts()
 
     def _on_close_request(self, *args) -> bool:
-        """Flush the background feed writer before the window destroys."""
+        """Flush the background feed writer and drop the bridge before the
+        window destroys."""
         try:
             self._feed_handler.shutdown_persist_writer()
         except Exception:
             logger.exception("close-request: feed writer shutdown failed")
+        # SPEC-15 §5: app quit with the bridge up → disconnect in the shutdown
+        # path. A clean teardown avoids a queued on_disconnect/on_error firing
+        # into a destroying window (the poll thread is a daemon, but an
+        # explicit stop is the spec contract). Lazy getattr: the bridge may be
+        # unwired in tests/short-lived windows. stop_bridge() is idempotent.
+        bridge = getattr(self, "_bridge_handler", None)
+        if bridge is not None:
+            try:
+                bridge.stop_bridge()
+            except Exception:
+                logger.exception("close-request: bridge shutdown failed")
         return False  # allow default close handling
 
     def _build(self):

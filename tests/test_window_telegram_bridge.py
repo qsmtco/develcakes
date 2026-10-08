@@ -320,6 +320,37 @@ class TestRemoteStopAll:
         assert "set_status_provider(self._remote_status_summary)" in src
 
 
+class TestCloseRequestStopsBridge:
+    """SPEC-15 §5: 'App quit with bridge up → disconnect in shutdown path'."""
+
+    def test_close_request_stops_bridge(self, win):
+        assert win._on_close_request() is False  # default close still allowed
+        win._feed_handler.shutdown_persist_writer.assert_called_once()
+        assert win._bridge_handler.stopped == 1
+
+    def test_close_request_without_bridge_is_safe(self, win):
+        win._bridge_handler = None
+        assert win._on_close_request() is False  # must not raise
+        win._feed_handler.shutdown_persist_writer.assert_called_once()
+
+    def test_close_request_bridge_fault_does_not_break_close(self, win):
+        win._bridge_handler.stop_bridge = MagicMock(side_effect=RuntimeError("boom"))
+        assert win._on_close_request() is False  # must not raise
+        win._feed_handler.shutdown_persist_writer.assert_called_once()
+
+    def test_build_wires_close_request_hook(self):
+        import pathlib
+
+        src = pathlib.Path("ui/window.py").read_text()
+        assert 'connect("close-request", self._on_close_request)' in src
+        # The close hook must stop the bridge (SPEC-15 §5).
+        idx = src.index("def _on_close_request")
+        body = src[idx:idx + 1200]
+        assert "stop_bridge()" in body, (
+            "_on_close_request must stop the bridge (SPEC-15 §5)"
+        )
+
+
 class TestRemoteStatusSummary:
     def test_no_active_project_is_honest(self, win):
         win._project_handler.get_active_project_name.return_value = None
