@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 # below routes to the fallback surface. Old CRABCAKES_ name rides the
 # one-release fallback (utils.config.get_env — D2).
 from utils.config import get_env
+from utils.live_guard import LiveGuard
 
 if get_env("NO_WEBKIT"):
     WebKit = None
@@ -75,6 +76,42 @@ else:
         # "4.1") import here; unsupported until one matters.
         WebKit = None
         _WEBKIT_VERSION = None
+
+# DEVELCAKES_LIVE_JS=1 (SPEC-19 SP1 prototype — DEFAULT OFF; flips on at SP2).
+# When ON: the transcript view runs with JS enabled + the LiveGuard enforcement
+# boundary attached, and appends become INCREMENTAL DOM injection via
+# evaluate_javascript (the F1 decision) instead of a full-document load_html.
+# When OFF (default): byte-identical to today (JS off, full-document rebuild).
+_LIVE_JS_FLAG = "LIVE_JS"
+
+
+def _live_js_enabled() -> bool:
+    """SPEC-19 SP1 kill-switch, INVERTED for the prototype phase (default
+    OFF; `DEVELCAKES_LIVE_JS=1` opts in). SP2 flips the default on once the
+    enforcement core is proven in the field."""
+    try:
+        return get_env(_LIVE_JS_FLAG) == "1"
+    except Exception:  # noqa: BLE001 — flag read must never break surface construction
+        return False
+
+
+# SPEC-19 §3 E3 (SP1 stub): the injection IIFE. `json.dumps(html)` guarantees
+# the payload is a SAFE JS string literal — markup is NEVER interpolated raw.
+_INJECT_TEMPLATE = (
+    "(function () {{"
+    "  var host = document.getElementById('transcript');"
+    "  if (!host) {{ host = document.documentElement; }}"
+    "  var tpl = document.createElement('template');"
+    "  tpl.innerHTML = {payload};"
+    "  host.appendChild(tpl.content);"
+    "}})();"
+)
+
+
+def _inject_script(row_html: str) -> str:
+    """Build the append-injection script for one row's HTML (json.dumps-safed)."""
+    return _INJECT_TEMPLATE.format(payload=json.dumps(row_html))
+
 
 # Spec §7 huge-message cap.
 _MAX_ROW_BYTES = 512 * 1024
@@ -179,10 +216,10 @@ def _sanitize_color(value) -> str:
     return ""
 
 
-def _document(rows: list[dict]) -> str:
-    """Render rows as grouped agent boxes — consecutive rows with the same
-    agent collapse under ONE header (SPEC-12). Rows with no agent name render
-    bare (system/welcome)."""
+def _blocks_html(rows: list[dict]) -> str:
+    """Render a row list to grouped agent-box HTML (the inner DOM of
+    #transcript). Shared by the full document build (`_document`) and the
+    SPEC-19 incremental injection path — one markup source, no fork."""
     blocks = []
     i = 0
     n = len(rows)
@@ -237,10 +274,16 @@ def _document(rows: list[dict]) -> str:
             f'<div class="agent-card"{card_style}>{body}</div></div>'
         )
         i = j
+    return "".join(blocks)
+
+
+def _document(rows: list[dict]) -> str:
+    """Render rows as one full HTML document (the full-load path). The inner
+    DOM is shared with the SPEC-19 injection path via `_blocks_html`."""
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<style>{_BASE_CSS}</style></head><body>"
-        + "".join(blocks) + "</body></html>"
+        "<div id=\"transcript\">" + _blocks_html(rows) + "</div></body></html>"
     )
 
 
@@ -294,6 +337,12 @@ class ChatSurface(Gtk.Box):
         self._rebuild_count = 0
         self._render_source = None
         self._destroyed = False
+        # SPEC-19 SP1: live-JS prototype state (default OFF — see _live_js_enabled).
+        self._live_js = _live_js_enabled()
+        self._live_guard = None
+        # Rows already injected into the live #transcript (incremental append);
+        # the full-document load_html path re-renders from scratch instead.
+        self._injected_count = 0
         # FIX 3 (SP5a audit): the surface owns its scroll — when mounted
         # (directly, no wrapper) it must fill the pane.
         self._scroll = _make_owned_scroll()
@@ -375,7 +424,14 @@ class ChatSurface(Gtk.Box):
         if self._webview is None:
             self._webview = WebKit.WebView()
             settings = self._webview.get_settings()
-            settings.set_enable_javascript(False)  # JS OFF (ruling R2)
+            # SPEC-19 SP1 (F1): with the live-JS flag ON the transcript runs
+            # with JS enabled + the enforcement boundary attached; OFF keeps
+            # the SPEC-06 ruling (JS off) byte-for-byte.
+            live = self._live_js
+            settings.set_enable_javascript(live)
+            if live:
+                self._live_guard = LiveGuard()
+                self._live_guard.compile(self._on_live_guard_compiled)
             # SPEC-17 SP1.2: connect `load-changed` ONCE, on this web view.
             # FINISHED is when the document is laid out and the post-load
             # scroll can be issued (SP1.2).
@@ -399,6 +455,26 @@ class ChatSurface(Gtk.Box):
             )
             self._scroll.set_child(self._webview)
         return self._webview
+
+    def _on_live_guard_compiled(self, content_filter) -> None:
+        """SPEC-19 SP1: attach the enforcement boundary once the compiled
+        filter is ready. FAIL-CLOSED: no filter → the guard refuses to attach;
+        we log and leave the surface with JS on but NO boundary — so we must
+        disable JS instead (never run live without the boundary)."""
+        if content_filter is None:
+            logger.error(
+                "live_guard: content-filter compile FAILED — disabling live JS "
+                "(never run the transcript without the enforcement boundary)"
+            )
+            if self._webview is not None:
+                try:
+                    self._webview.get_settings().set_enable_javascript(False)
+                except Exception:
+                    logger.debug("live_guard: could not disable JS", exc_info=True)
+            self._live_guard = None
+            return
+        if self._live_guard is not None and self._webview is not None:
+            self._live_guard.attach(self._webview)
 
     def _load_html(self, doc: str) -> None:
         """The single load path (monkeypatch target for tests)."""
@@ -548,16 +624,25 @@ class ChatSurface(Gtk.Box):
             return GLib.SOURCE_REMOVE
         self._dirty = False
         self._rebuild_count += 1
+        # SPEC-19 SP1 (F1): with live JS ON and a document ALREADY loaded,
+        # appends are INCREMENTAL — inject only the new row(s) via eval, no
+        # full-document reload (live state survives). The initial load and the
+        # compaction rebuild still use load_html (below / _on_scroll_read).
+        if (self._live_js and self._webview is not None
+                and self._injected_count < len(self._rows)):
+            self._inject_new_rows()
+            return GLib.SOURCE_REMOVE
         # Legacy GTK capture (MICRO smart-scroll, retained, NOT the fix):
         # capture the adjustment intent before the load collapses the height.
         vadj = self._scroll.get_vadjustment()
         if vadj is not None:
             self._pending_restore = (self._was_at_bottom, vadj.get_value())
         # SPEC-17 SP1.1: capture the DOCUMENT intent.
-        if self._webview is None:
-            # No web view yet — a fresh surface's first paint lands at the
-            # bottom. Store at-bottom and load (no document to read).
+        if self._webview is None or self._live_js:
+            # No web view yet, OR the live path's FIRST load — a fresh
+            # surface's first paint lands at the bottom; no document to read.
             self._pending_scroll = (True, 0.0)
+            self._injected_count = len(self._rows)
             self._issue_load(_document(list(self._rows)))
             return GLib.SOURCE_REMOVE
         # A document is already loaded — read its position FIRST; the read
@@ -600,6 +685,43 @@ class ChatSurface(Gtk.Box):
             if not self._load_retry_pending:
                 self._load_retry_pending = True
                 self._schedule_render()
+
+    def _inject_new_rows(self) -> None:
+        """SPEC-19 SP1 F1: append the not-yet-injected rows incrementally.
+
+        Only the delta (`_injected_count..len`) is injected; the document is
+        NOT reloaded, so live DOM state survives appends. HTML is passed as a
+        json.dumps string literal (never interpolated raw into JS). Injection
+        is in the MAIN world (the loaded document's world) — live scripts run.
+        """
+        rows = list(self._rows)
+        new_rows = rows[self._injected_count:]
+        if not new_rows:
+            return
+        html = _blocks_html(new_rows)
+        self._injected_count = len(rows)
+        self._document_eval_main(_inject_script(html), lambda _t: None)
+
+    def _document_eval_main(self, script: str, callback) -> None:
+        """Evaluate `script` in the document's MAIN world (live content world).
+        Distinct from `_document_eval`, which runs in the isolated scroll world.
+        """
+        def _finish(view, result, _data):
+            try:
+                text = view.evaluate_javascript_finish(result).to_string()
+            except Exception:  # noqa: BLE001 — any failure is a failed eval
+                text = None
+            callback(text)
+
+        try:
+            view = self._ensure_webview()
+            view.evaluate_javascript(
+                script, len(script.encode("utf-8")), None,
+                None, None, _finish, None,
+            )
+        except Exception:
+            logger.debug("chat surface: injection eval failed", exc_info=True)
+            callback(None)
 
     def _on_web_process_terminated(self, view, reason) -> None:
         """FIX ROUND 2 (BUG#1b, HIGH): a web-process crash/OOM-kill fires
