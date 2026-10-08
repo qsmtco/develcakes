@@ -4,6 +4,7 @@
 # captured, never a real poll loop); ARH is a fake with send_to_special_agent
 # recorded. No GTK (the handler marshals via an injected dispatch seam).
 
+from typing import ClassVar
 
 from ui.handlers.telegram_bridge_handler import (
     BridgeState,
@@ -13,7 +14,11 @@ from ui.handlers.telegram_bridge_handler import (
 
 class FakeTransport:
     """Records outbound calls; exposes captured signal callbacks so the test
-    can fire them the way the real transport thread would."""
+    can fire them the way the real transport thread would.
+
+    F3 (audit): ``send_message`` MODELS its target chat — each entry carries
+    ``chat_id`` (the paired chat unless overridden, e.g. a foreign refusal).
+    """
 
     def __init__(self, **kw):
         self.kw = kw
@@ -24,15 +29,17 @@ class FakeTransport:
         self.token = kw.get("token")
         self._on_update = kw.get("on_update")
 
-    def send_message(self, text, reply_markup=None):
-        self.sent.append({"text": text, "reply_markup": reply_markup})
+    def send_message(self, text, reply_markup=None, chat_id=None):
+        target = chat_id if chat_id is not None else self.chat_id
+        self.sent.append({"text": text, "reply_markup": reply_markup,
+                          "chat_id": target})
         return {"ok": True}
 
     async def connect(self):
-        return None
+        pass
 
     async def disconnect(self):
-        return None
+        pass
 
     def answer_callback_query(self, callback_query_id, text=None):
         self.answered.append({"id": callback_query_id, "text": text})
@@ -482,3 +489,152 @@ def test_pending_stop_cleared_on_disconnect():
     # A stale bare confirm after the drop must NOT fire stop-all.
     _send_text(h, t, "STOP")
     assert fired == []
+
+
+# ── F1: transport stacking on ERROR → reconnect (audit) ─────────────────
+
+
+class _TrackingFakeTransport(FakeTransport):
+    """FakeTransport that records its own disconnect (F1 lifecycle proof)."""
+
+    created: ClassVar[list] = []
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.disconnected = False
+        _TrackingFakeTransport.created.append(self)
+
+    async def disconnect(self):
+        self.disconnected = True
+
+
+def _tracking_handler():
+    _TrackingFakeTransport.created = []
+    holder = {}
+
+    def factory(**tkw):
+        t = _TrackingFakeTransport(**tkw)
+        holder["t"] = t
+        return t
+
+    h = TelegramBridgeHandler(
+        arh=FakeARH(),
+        transport_factory=factory,
+        load_config=lambda: {"bot_token": "123:abc", "chat_id": 42,
+                             "paired_handle": "@me"},
+        dispatch=lambda fn, *a: fn(*a),
+        on_feed_card=lambda *a: None,
+    )
+    return h, holder
+
+
+def test_restart_tears_down_previous_transport():
+    """F1a RED proof: a soft on_error leaves the old poll loop running;
+    start_bridge MUST tear it down or two poll loops deliver every message
+    twice. Assert exactly ONE live transport after restart."""
+    h, holder = _tracking_handler()
+    h.start_bridge()
+    first = holder["t"]
+    h._on_transport_error("soft failure")  # poll loop would keep running
+    h.start_bridge()  # reconnect
+    second = holder["t"]
+    assert first is not second, "a NEW transport must be constructed"
+    assert first.disconnected is True, (
+        "the previous transport must be torn down (else TWO poll loops)"
+    )
+    assert h._transport is second
+    assert sum(1 for t in _TrackingFakeTransport.created if not t.disconnected) == 1
+
+
+def test_restart_leaves_exactly_one_live_transport_delivering():
+    """F1a: after an ERROR→reconnect, exactly ONE transport is live — so a
+    phone message is delivered to the Supervisor exactly ONCE (two live poll
+    loops would deliver it twice)."""
+    h, holder = _tracking_handler()
+    h.start_bridge()
+    first = holder["t"]
+    h._on_transport_error("soft failure")
+    h.start_bridge()
+    live = [t for t in _TrackingFakeTransport.created if not t.disconnected]
+    assert len(live) == 1, "two live poll loops ⇒ every message delivered twice"
+    assert live[0] is holder["t"]
+    # The single live transport routes one message to the Supervisor once.
+    live[0].kw["on_update"]({"update_id": 1, "message": {
+        "chat": {"id": 42}, "text": "hi"}})
+    assert h._arh.calls.count({"session_key": "special:supervisor",
+                               "text": "hi", "reply_target": None}) == 1
+    assert first.disconnected is True
+
+
+def test_reconnect_after_soft_error_recovers_to_connected():
+    """F1b: on_connect re-fires after a soft error (transport latch reset), so
+    the handler recovers ERROR → CONNECTED instead of lying 'Offline' forever.
+    (Transport-level latch covered in test_telegram_transport; here the handler
+    responds to a re-fired on_connect.)"""
+    h, t, _a = _connected()
+    h._on_transport_error("soft failure")
+    assert h.state == "error"
+    t["t"].kw["on_connect"]()  # re-announced after recovery
+    assert h.state == "connected"
+
+
+# ── F2: armed /stop must not survive ERROR → reconnect (audit) ──────────
+
+
+def test_pending_stop_cleared_on_transport_error():
+    """F2 RED proof: an armed /stop confirmation surviving an ERROR→reconnect
+    would let a later bare STOP fire stop-all on a 'later session' (§SP4 B4)."""
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    assert h._pending_stop is True
+    t["t"].kw["on_error"]("soft failure")
+    assert h._pending_stop is False, "error must clear the armed confirmation"
+    t["t"].kw["on_connect"]()  # reconnect
+    _send_text(h, t, "STOP")  # stale bare confirm
+    assert fired == [], "stop-all must NOT fire from a pre-error confirmation"
+
+
+# ── F3: foreign-chat refusal targets the FOREIGN chat (audit) ─────────────
+
+
+def test_foreign_refusal_targets_foreign_chat_not_paired():
+    _h, t, _a = _connected()
+    t["t"].kw["on_update"]({"update_id": 9, "message": {
+        "chat": {"id": 999}, "text": "hack"}})
+    assert len(t["t"].sent) == 1
+    assert t["t"].sent[0]["chat_id"] == 999, (
+        "refusal must go to the FOREIGN chat, not the paired chat (42)"
+    )
+    assert all(s["chat_id"] != 42 for s in t["t"].sent)
+
+
+# ── F5/F6/F7 (audit suggestions) ────────────────────────────────────────
+
+
+def test_flatten_attribute_with_gt_and_entity_tags():
+    """F5: a '>' inside a quoted attribute must not truncate, and an
+    entity-encoded tag must not survive the flatten."""
+    h, _t, _a = _connected()
+    out = h._telegram_text('```html\n<div title="a > b">x</div>\n```')
+    assert out == 'x'
+    out2 = h._telegram_text('```html\n&lt;script&gt;alert(1)&lt;/script&gt;ok\n```')
+    assert "<script>" not in out2 and "alert" in out2 and out2.endswith("ok")
+
+
+def test_forward_whitespace_only_sends_nothing():
+    """F6: a whitespace-only / all-newline reply must produce ZERO sends."""
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:supervisor", " " * 5000)
+    h.on_supervisor_reply("special:supervisor", "\n" * 5000)
+    assert t["t"].sent == []
+
+
+def test_start_bridge_non_int_chat_id_is_honest_error():
+    """F7: an odd injected chat_id must ERROR, never raise into the caller."""
+    h, t, _a = _handler(store={"bot_token": "123:abc", "chat_id": "not-a-number",
+                               "paired_handle": "@me"})
+    h.start_bridge()  # must not raise
+    assert h.state == "error"
+    assert "t" not in t  # no transport constructed

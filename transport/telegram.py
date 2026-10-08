@@ -251,15 +251,20 @@ class TelegramTransport(Transport):
 
     # ── Send API surface (plain text; parse_mode NOT set) ────────────────
 
-    def send_message(self, text: str, reply_markup: dict | None = None) -> dict:
+    def send_message(self, text: str, reply_markup: dict | None = None,
+                     chat_id: int | None = None) -> dict:
         """sendMessage — plain text to the paired chat.
 
-        Raises ValueError if no chat is paired. reply_markup passes through
-        verbatim (inline-keyboard approvals are built by the SP3 bridge).
+        F3 (audit): ``chat_id`` optionally overrides the target chat so the
+        bridge can deliver a foreign-chat refusal to the FOREIGN id (None →
+        the paired chat, preserving every existing caller). Raises ValueError
+        when neither is available. reply_markup passes through verbatim
+        (inline-keyboard approvals are built by the SP3 bridge).
         """
-        if self.chat_id is None:
+        target = chat_id if chat_id is not None else self.chat_id
+        if target is None:
             raise ValueError("send_message: no chat_id paired")
-        params: dict = {"chat_id": self.chat_id, "text": text}
+        params: dict = {"chat_id": target, "text": text}
         if reply_markup is not None:
             params["reply_markup"] = reply_markup
         return self._api_call("sendMessage", params)
@@ -333,6 +338,10 @@ class TelegramTransport(Transport):
             try:
                 updates = self._get_updates()
             except _RetryAfter as ra:
+                # F1b (audit): a soft error means the link is DOWN; re-arm the
+                # announce latch so the next good getUpdates re-fires on_connect
+                # (otherwise the handler stays ERROR forever while we recover).
+                announced = False
                 self._dispatch(
                     self.on_error,
                     f"rate limited — retrying in {ra.seconds}s",
@@ -341,6 +350,7 @@ class TelegramTransport(Transport):
                 self._sleep(ra.seconds)
                 continue
             except Exception as e:  # noqa: BLE001 — poll loop must survive
+                announced = False  # F1b: link lost — re-announce on recovery
                 self._dispatch(
                     self.on_error,
                     f"poll error: {redact_log_preview(str(e))}",
@@ -351,6 +361,7 @@ class TelegramTransport(Transport):
                 continue
             if updates is None:
                 # 5xx / soft failure — back off, keep the loop alive.
+                announced = False  # F1b: link lost — re-announce on recovery
                 self._dispatch(
                     self.on_error,
                     "getUpdates soft failure — backing off",

@@ -272,6 +272,30 @@ def test_backoff_on_network_error():
         asyncio.run(t.disconnect())
 
 
+def test_on_connect_reannounced_after_soft_error():
+    """F1b (audit): a soft error drops the link; the next successful getUpdates
+    must RE-fire on_connect so the bridge recovers ERROR→CONNECTED instead of
+    being stuck 'Offline' forever behind a one-shot announce latch."""
+    calls = {"n": 0}
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        calls["n"] += 1
+        if calls["n"] == 2:  # first getUpdates is a soft 5xx, then recover
+            return FakeResponse(502, {"ok": False})
+        return _ok([])
+
+    t, _c, ev, _s = _make(handler)
+    asyncio.run(t.connect())
+    try:
+        # on_connect must fire TWICE: initial link + post-error recovery.
+        assert _wait(lambda: len(ev["connect"]) >= 2), ev["connect"]
+        assert ev["error"], "the soft error must still have fired on_error"
+    finally:
+        asyncio.run(t.disconnect())
+
+
 # ── send API surface ─────────────────────────────────────────────────────
 
 
@@ -291,6 +315,23 @@ def test_send_message_reply_markup_passthrough():
     t.send_message("q", reply_markup=markup)
     call = [c for c in client.calls if c["path"].endswith("/sendMessage")][-1]
     assert call["json"]["reply_markup"] == markup
+
+
+def test_send_message_chat_id_override_targets_other_chat():
+    """F3 (audit): the optional chat_id override lets the bridge deliver a
+    foreign-chat refusal to the FOREIGN id, not the paired chat."""
+    t, client, _ev, _s = _make(_getme_ok_handler())
+    t.send_message("nope", chat_id=999)
+    call = [c for c in client.calls if c["path"].endswith("/sendMessage")][-1]
+    assert call["json"]["chat_id"] == 999
+
+
+def test_send_message_default_targets_paired_chat():
+    """F3: no override → the paired chat (every existing caller unchanged)."""
+    t, client, _ev, _s = _make(_getme_ok_handler())
+    t.send_message("hi")
+    call = [c for c in client.calls if c["path"].endswith("/sendMessage")][-1]
+    assert call["json"]["chat_id"] == 42
 
 
 def test_send_message_requires_chat_id():

@@ -574,6 +574,9 @@ class SettingsDialog:
         self._telegram_token_entry.set_hexpand(True)
         self._telegram_token_entry.set_visibility(False)
         self._telegram_token_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self._telegram_token_entry.set_tooltip_text(
+            "Bot token from @BotFather (123456:ABC-DEF…). Stored owner-only, "
+            "never logged. Get one by messaging @BotFather on Telegram.")
 
         self._telegram_reveal_btn = Gtk.Button(label="👁")
         self._telegram_reveal_btn.add_css_class("flat")
@@ -602,6 +605,8 @@ class SettingsDialog:
         # Button row: Test | Save | Start Pairing
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self._telegram_test_btn = Gtk.Button(label="Test")
+        self._telegram_test_btn.set_tooltip_text(
+            "Verify the token with Telegram (getMe) without saving it.")
         self._telegram_test_btn.connect("clicked", self._on_telegram_test_clicked)
         btn_row.append(self._telegram_test_btn)
 
@@ -611,6 +616,9 @@ class SettingsDialog:
         btn_row.append(self._telegram_save_btn)
 
         self._telegram_pair_btn = Gtk.Button(label="Start Pairing")
+        self._telegram_pair_btn.set_tooltip_text(
+            "Pair this bot to ONE phone chat: send the shown code from "
+            "Telegram, then confirm. Binds the bridge to that chat only.")
         self._telegram_pair_btn.connect(
             "clicked", self._on_telegram_pair_clicked
         )

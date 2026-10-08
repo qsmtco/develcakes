@@ -49,7 +49,7 @@ _WHOLE_MESSAGE_HTML_FENCE_RE = re.compile(
     r"^```html[ \t]*\r?\n(.*?)\r?\n?```[ \t]*$",
     re.DOTALL | re.IGNORECASE,
 )
-_TAG_RE = re.compile(r"<[^>]+>")
+_TAG_RE = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>""")
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _P_CLOSE_RE = re.compile(r"</p\s*>", re.IGNORECASE)
 
@@ -221,7 +221,14 @@ class TelegramBridgeHandler:
         Fail-closed: no token or no paired chat_id → ERROR state, no transport.
         The connect() call runs on the transport's own thread; state advances
         to CONNECTING now and to CONNECTED on the on_connect signal.
+
+        F1a (audit): tear down any existing transport FIRST. A soft on_error
+        leaves the old poll loop running; without this, start-after-error
+        stacks a SECOND poll loop and the Supervisor receives every message
+        twice. stop_bridge() is idempotent.
         """
+        self.stop_bridge()  # F1a: guarantee ONE live transport per session
+
         cfg = self._load_config()
         token = cfg.get("bot_token") or ""
         chat_id = cfg.get("chat_id")
@@ -230,6 +237,18 @@ class TelegramBridgeHandler:
                 "start_bridge: not configured (token=%s, chat_id=%s) — error state",
                 "set" if token else "missing",
                 "set" if chat_id is not None else "missing",
+            )
+            self._set_state(BridgeState.ERROR)
+            return
+
+        # F7 (audit): an odd injected config could carry a non-numeric chat_id;
+        # int() must never raise into the GTK click handler.
+        try:
+            paired_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            _logger.warning(
+                "start_bridge: chat_id is not an integer (%s) — error state",
+                type(chat_id).__name__,
             )
             self._set_state(BridgeState.ERROR)
             return
@@ -260,7 +279,7 @@ class TelegramBridgeHandler:
             self._set_state(BridgeState.ERROR)
             return
 
-        self._chat_id = int(chat_id)
+        self._chat_id = paired_chat_id
         self._transport = self._transport_factory(
             token=token,
             chat_id=self._chat_id,
@@ -313,6 +332,10 @@ class TelegramBridgeHandler:
 
     def _on_transport_error(self, message: str) -> None:
         _logger.warning("bridge error: %s", redact_log_preview(str(message)))
+        # F2 (audit): an armed /stop confirmation must not survive an
+        # ERROR→reconnect — a later bare STOP would fire stop-all on a "later
+        # session" (the exact class §SP4 B4 forbids).
+        self._clear_pending_stop()
         self._set_state(BridgeState.ERROR)
 
     # ── inbound routing (phone → app) ────────────────────────────────────
@@ -600,9 +623,20 @@ class TelegramBridgeHandler:
         self._pending_stop = False
 
     def _send_refusal(self, chat_id: int | None) -> None:
-        """One polite refusal to a foreign chat; never processed."""
+        """One polite refusal to the FOREIGN chat; never processed.
+
+        F3 (audit): the refusal must reach the STRANGER, not the paired chat —
+        pass the foreign id through to send_message's chat_id override.
+        """
         _logger.info("foreign chat %s refused (redacted; not paired)", chat_id)
-        self._send("This bot is paired to another chat. Sorry.")
+        if self._transport is None or chat_id is None:
+            return
+        try:
+            self._transport.send_message(
+                "This bot is paired to another chat. Sorry.", chat_id=chat_id)
+        except Exception as e:  # noqa: BLE001
+            _logger.warning(
+                "foreign refusal send failed: %s", redact_log_preview(str(e)))
 
     def _send(self, text: str) -> None:
         if self._transport is None:
@@ -644,8 +678,13 @@ class TelegramBridgeHandler:
             # Block boundaries → newlines before tags vanish.
             flat = _BR_RE.sub("\n", payload)
             flat = _P_CLOSE_RE.sub("\n", flat)
+            # F5 (audit): strip tags, unescape entities, then strip AGAIN —
+            # the first pass is attribute-aware (a `>` inside a quoted value
+            # no longer truncates), the second catches entity-encoded tags
+            # (`&lt;script&gt;` → `<script>` → gone).
             flat = _TAG_RE.sub("", flat)
             flat = html.unescape(flat)
+            flat = _TAG_RE.sub("", flat)
             # Collapse >2 blank lines the strip may have left behind.
             flat = re.sub(r"\n{3,}", "\n\n", flat).strip()
             return flat
@@ -677,6 +716,8 @@ class TelegramBridgeHandler:
         if remaining:
             chunks.append(remaining)
         for chunk in chunks:
+            if not chunk.strip():
+                continue  # F6 (audit): never send an empty/whitespace chunk
             try:
                 self._transport.send_message(chunk)
             except Exception as e:  # noqa: BLE001 — keep mirroring later chunks

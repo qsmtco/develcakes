@@ -161,6 +161,16 @@ class TestSectionedLayout:
         assert d._telegram_test_btn.get_sensitive() is False
         assert "not wired" in d._telegram_paired_label.get_text().lower()
 
+    def test_telegram_controls_have_tooltips(self, tmp_config_dir):
+        """F4 (audit): the Telegram Bridge section must explain its controls —
+        token field + Test + Pairing all carry tooltips."""
+        d = SettingsDialog(parent=None, handler=SettingsHandler())
+        for widget in (d._telegram_token_entry, d._telegram_test_btn,
+                       d._telegram_pair_btn):
+            tip = widget.get_tooltip_text() or ""
+            assert tip.strip(), f"{widget} must carry a tooltip (F4)"
+        assert "BotFather" in (d._telegram_token_entry.get_tooltip_text() or "")
+
 
 # ── token save ───────────────────────────────────────────────────────────
 
