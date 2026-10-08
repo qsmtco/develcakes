@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-07
 **Author:** Supervisor (develcakes v2)
-**Status:** IN PROGRESS — SP1 + SP2 DELIVERED, audit-PASS (transport + bridge handler + store + settings section + Connect wiring; audit findings BUG#1-#9 all closed: supervisor-registration guard, dir-perm hardening, pairing-identity warning, honest toolbar init). SP3 (outbound mirror + approvals) next.
+**Status:** DONE (2026-10-07) — SP1 + SP2 + SP3a + SP3b + SP4 all landed (commits 4296bd3b, 58a33d77, c7cbb1cd, 9c1c179f; audit rounds 7915c669, 27a28cc4, bb74191c); adversarial audit CLEAN. Connect = real Telegram bridge (PM↔Supervisor chat + exec approvals + /status//stop allowlist). Post-mortem: docs/post-mortems/2026-10-07-SPEC-15-TELEGRAM-BRIDGE-POST-MORTEM.md.
 **Implements:** PM direction 2026-10-07 — "Connect button = a Telegram bridge session
 to the Supervisor. Click Connect → continue working remotely; click Disconnect →
 back at the desk." First post-MVP unit. PM has a bot token in hand.
@@ -133,17 +133,17 @@ auto-accepted writes).
 
 ## 4. Acceptance criteria
 
-- [ ] Connect with no token → honest state change, no crash, feed card
-- [ ] Token + pairing via Settings; token never in logs; file 0600
-- [ ] Connect → Telegram PM↔Supervisor conversation works both directions
-- [ ] Supervisor replies render in-app via the SPEC-13/14 pipeline (chrome intact)
-- [ ] Exec approval appears on the phone as buttons; tapping approves/denies;
+- [x] Connect with no token → honest state change, no crash, feed card
+- [x] Token + pairing via Settings; token never in logs; file 0600
+- [x] Connect → Telegram PM↔Supervisor conversation works both directions
+- [x] Supervisor replies render in-app via the SPEC-13/14 pipeline (chrome intact)
+- [x] Exec approval appears on the phone as buttons; tapping approves/denies;
       in-app card resolves identically; desk-first race handled
-- [ ] Foreign chat id: one refusal, never processed, logged redacted
-- [ ] Stop All (either surface) drops the bridge; button returns to Connect
-- [ ] Disconnect → clean teardown, no orphaned poll loop
-- [ ] Toolbar honest in all four states (unconfigured/off/connecting/connected)
-- [ ] ruff 0 new, pyright 0, full suite green; RED-first tests + kill-proofs
+- [x] Foreign chat id: one refusal, never processed, logged redacted
+- [x] Stop All (either surface) drops the bridge; button returns to Connect
+- [x] Disconnect → clean teardown, no orphaned poll loop
+- [x] Toolbar honest in all four states (unconfigured/off/connecting/connected)
+- [x] ruff 0 new, pyright 0, full suite green; RED-first tests + kill-proofs
 
 ## 5. Edge cases
 
