@@ -390,7 +390,7 @@ class TelegramBridgeHandler:
                 self._on_transport_disconnect, r, g),
             on_error=lambda m, g=gen: self._dispatch(
                 self._on_transport_error, m, g),
-            on_update=lambda u: self._dispatch(self._handle_update, u),
+            on_update=lambda u, g=gen: self._dispatch(self._handle_update, u, g),
         )
         self._set_state(BridgeState.CONNECTING)
         try:
@@ -456,8 +456,17 @@ class TelegramBridgeHandler:
 
     # ── inbound routing (phone → app) ────────────────────────────────────
 
-    def _handle_update(self, update: dict) -> None:
-        """Route one Telegram update. Runs on the main thread (dispatched)."""
+    def _handle_update(self, update: dict, gen: int | None = None) -> None:
+        """Route one Telegram update. Runs on the main thread (dispatched).
+
+        R1 (extended): a SUPERSEDED transport's queued on_update is ignored.
+        This closes the duplicate-delivery race — after a reconnect the new
+        transport re-fetches from offset=None, so without this guard one phone
+        message could reach the Supervisor twice. Safe (no loss): the
+        unconfirmed update is refetched by the new transport and routed once.
+        """
+        if gen is not None and gen != self._generation:
+            return  # R1: a superseded transport's queued update is ignored
         if not isinstance(update, dict):
             return
         msg = update.get("message")

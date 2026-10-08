@@ -714,8 +714,15 @@ def _deferred_handler(*, fail_connect=False):
         return t
 
     class ARH:
+        def __init__(self):
+            self.calls = []
+
         def get_special_agents(self):
             return {"special:supervisor": "special:supervisor"}
+
+        def send_to_special_agent(self, session_key, text, reply_target=None):
+            self.calls.append({"session_key": session_key, "text": text,
+                               "reply_target": reply_target})
 
     h = TelegramBridgeHandler(
         arh=ARH(),
@@ -777,6 +784,41 @@ def test_deferred_stale_disconnect_never_observes_disconnected(monkeypatch):
     )
     assert after_connecting and after_connecting[0] == "connected", seen
     assert h.state == "connected"
+
+
+def test_deferred_stale_update_not_routed_after_reconnect():
+    """R1 (extended): a superseded transport's QUEUED on_update must not route
+    — after a reconnect the new transport re-fetches from offset=None, so
+    without the guard one phone message reaches the Supervisor TWICE."""
+    h, holder, disp = _deferred_handler()
+    h.start_bridge()
+    t1 = holder["t"]
+    t1.kw["on_connect"]()
+    disp.drain()
+    assert t1 is holder["t"]
+
+    # Transport 1 fetches an update but its routing callback is QUEUED (not
+    # yet drained) — the reconnect race.
+    update = {"update_id": 7, "message": {"chat": {"id": 42}, "text": "deploy it"}}
+    t1.kw["on_update"](update)
+
+    # Reconnect BEFORE the queued update drains (supersedes transport 1).
+    h.start_bridge()
+    t2 = holder["t"]
+    assert t2 is not t1
+    t2.kw["on_connect"]()
+    disp.drain()  # transport 1's stale on_update drains here — must be ignored
+
+    # The NEW transport re-fetches the same update (offset=None) and routes it.
+    t2.kw["on_update"](update)
+    disp.drain()
+
+    routed = [c for c in h._arh.calls
+              if c["session_key"] == "special:supervisor"]
+    assert len(routed) == 1, (
+        f"the same update must reach the Supervisor exactly once, got {routed}"
+    )
+    assert routed[0]["text"] == "deploy it"
 
 
 # ── R4: state-callback dedup ────────────────────────────────────────────
