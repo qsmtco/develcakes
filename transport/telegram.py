@@ -60,6 +60,12 @@ _TELEGRAM_API_BASE = "https://api.telegram.org"
 # SPEC-15 §2: the bot token is a credential — it must NEVER appear in logs or
 # exceptions. It rides in the URL PATH (`/bot<token>/method`), which the
 # openclaw redactor does not know about, so we scrub it explicitly here.
+#
+# SPEC-15b A3: this helper scrubs APP-AUTHORED lines only. The httpx/httpcore
+# LIBRARIES log the request URL themselves at INFO/DEBUG (the raw-token leak
+# observed in a live session). That path is covered by utils/log_redaction
+# (a RedactingFilter attached to httpx/httpcore by main.py) plus main.py's
+# level floor for those loggers — so the §2 guarantee holds library-side too.
 _TOKEN_IN_PATH_RE = re.compile(r"/bot[^/\s]+")
 
 
@@ -337,6 +343,21 @@ class TelegramTransport(Transport):
         while self._running:
             try:
                 updates = self._get_updates()
+            except _Conflict:
+                # SPEC-15b B2: a second getUpdates consumer holds the bot.
+                # Surface it DISTINCTLY (the generic soft-failure path was
+                # silent → permanent "Connecting…"). Name the likely cause:
+                # a stale pairing poller or another app using the same token.
+                announced = False  # link is down — re-announce on recovery
+                self._dispatch(
+                    self.on_error,
+                    "getUpdates conflict (409) — another consumer is polling "
+                    "this bot; close other apps or a stale pairing poller",
+                    kind="on_error",
+                )
+                self._sleep(retry_delay)
+                retry_delay = min(retry_delay * _BACKOFF_MULTIPLIER, _BACKOFF_MAX_SEC)
+                continue
             except _RetryAfter as ra:
                 # F1b (audit): a soft error means the link is DOWN; re-arm the
                 # announce latch so the next good getUpdates re-fires on_connect
@@ -400,6 +421,11 @@ class TelegramTransport(Transport):
         if client is None:
             return None
         resp = client.post(f"/bot{self.token}/getUpdates", json=params)
+        if resp.status_code == 409:
+            # SPEC-15b B1: another getUpdates consumer holds this bot.
+            raise _Conflict(
+                "getUpdates 409 Conflict — another consumer is polling this bot"
+            )
         if resp.status_code == 429:
             body = resp.json()
             retry_after = (
@@ -411,6 +437,12 @@ class TelegramTransport(Transport):
             return None
         body = resp.json()
         if not isinstance(body, dict) or not body.get("ok"):
+            # SPEC-15b B1: a 200-wrapped conflict body (ok:false,
+            # error_code 409) is the same case as HTTP 409.
+            if isinstance(body, dict) and body.get("error_code") == 409:
+                raise _Conflict(
+                    "getUpdates 409 Conflict (body) — another consumer is polling"
+                )
             # REGISTER (SP2/SP3): stale offset + persistent 4xx could loop —
             # defer until error codes are modeled (BUG#5, theoretical only:
             # the offset is always int(update_id)+1, monotonically increasing).
@@ -425,3 +457,12 @@ class _RetryAfter(Exception):
     def __init__(self, seconds: float) -> None:
         super().__init__(f"retry_after={seconds}")
         self.seconds = seconds
+
+
+class _Conflict(Exception):
+    """Internal: getUpdates 409 — another consumer is polling this bot.
+
+    Telegram permits ONE getUpdates consumer per bot. A second poller gets
+    HTTP 409 (and/or a connection reset). Mirrors _RetryAfter: raised inside
+    _get_updates, surfaced distinctly by _poll_loop.
+    """

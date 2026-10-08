@@ -554,3 +554,121 @@ def test_send_on_response_raise_does_not_propagate():
     # Must not raise despite the consumer raising.
     asyncio.run(t.send({"method": "sendMessage", "params": {}},
                        on_response=raising_on_response))
+
+
+# ── SPEC-15b Part B: 409 Conflict surfacing ──────────────────────────────
+
+
+def test_get_updates_409_http_raises_conflict():
+    """HTTP 409 → internal _Conflict (mirrors _RetryAfter)."""
+    from transport.telegram import _Conflict
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        return FakeResponse(409, {
+            "ok": False, "error_code": 409,
+            "description": "Conflict: terminated by other getUpdates request",
+        })
+
+    t, _c, _ev, _s = _make(handler)
+    t._client = _c  # _get_updates reads self._client; connect() sets it in prod
+    with pytest.raises(_Conflict):
+        t._get_updates()
+
+
+def test_get_updates_ok_false_error_code_409_raises_conflict():
+    """200-wrapped ok:false with error_code 409 → _Conflict too."""
+    from transport.telegram import _Conflict
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        return _ok()  # unused; _get_updates called directly below
+    t, _c, _ev, _s = _make(handler)
+
+    class _Client:
+        def post(self, path, json=None, **kw):
+            return FakeResponse(200, {
+                "ok": False, "error_code": 409,
+                "description": "Conflict: terminated by other getUpdates request",
+            })
+
+    t._client = _Client()
+    with pytest.raises(_Conflict):
+        t._get_updates()
+
+
+def test_poll_loop_surfaces_conflict_distinctly():
+    """_poll_loop on _Conflict: fires on_error naming 409/conflict, backs off,
+    keeps the loop alive (does not spin at full rate)."""
+    calls = {"n": 0}
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(409, {
+                "ok": False, "error_code": 409,
+                "description": "Conflict: terminated by other getUpdates request",
+            })
+        return _ok([])
+
+    t, _c, ev, sleeps = _make(handler)
+    asyncio.run(t.connect())
+    try:
+        assert _wait(lambda: ev["error"]), ev
+        assert any("conflict" in m.lower() for m in ev["error"]), ev["error"]
+        assert any("409" in m for m in ev["error"]), ev["error"]
+        assert _wait(lambda: sleeps), sleeps
+        assert sleeps[0] >= 1.0  # backed off, not a hot spin
+    finally:
+        asyncio.run(t.disconnect())
+
+
+def test_conflict_then_recovery_reannounces_connect():
+    """409 clears → the F1b latch re-fires on_connect (link recovered)."""
+    calls = {"n": 0}
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResponse(409, {"ok": False, "error_code": 409})
+        return _ok([])
+
+    t, _c, ev, _s = _make(handler)
+    asyncio.run(t.connect())
+    try:
+        assert _wait(lambda: ev["connect"]), ev
+    finally:
+        asyncio.run(t.disconnect())
+
+
+def test_429_still_retry_after_unchanged():
+    """Regression: 429 behavior is UNCHANGED (still _RetryAfter)."""
+    from transport.telegram import _RetryAfter
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        return FakeResponse(429, {"ok": False, "parameters": {"retry_after": 3}})
+
+    t, _c, _ev, _s = _make(handler)
+    t._client = _c
+    with pytest.raises(_RetryAfter):
+        t._get_updates()
+
+
+def test_5xx_still_returns_none_unchanged():
+    """Regression: >=500 behavior is UNCHANGED (returns None, soft failure)."""
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            return _ok({"id": 1})
+        return FakeResponse(503, {"ok": False})
+
+    t, _c, _ev, _s = _make(handler)
+    t._client = _c
+    assert t._get_updates() is None

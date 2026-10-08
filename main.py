@@ -20,6 +20,21 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
+# SPEC-15b A1: floor the HTTP libraries. They log the request URL at
+# INFO/DEBUG, and the Telegram bot token rides in the URL path
+# (`/bot<token>/method`) — with DEBUG on, every poll would print the raw
+# token. These libraries carry no signal we need above WARNING.
+for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+# SPEC-15b A2: defense in depth — a RedactingFilter on the same loggers
+# rewrites record.msg/record.args through the token redactor, so a future
+# level change (or another transport logging a URL) still cannot leak it.
+# Imported here (not at module top) so it lands AFTER basicConfig is set up.
+from utils.log_redaction import install as _install_log_redaction
+
+_install_log_redaction()
+
 # SPEC-08 SP4A: store-mode load (agent/persistence.py) hydrates migrated
 # sessions from transcript.db, so renaming the legacy JSON away no longer
 # orphans a conversation — the one-time JSON→store migration sweep is safe
