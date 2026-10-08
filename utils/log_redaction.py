@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -78,7 +77,6 @@ def install() -> None:
         lg = logging.getLogger(name)
         if not any(isinstance(f, RedactingFilter) for f in lg.filters):
             lg.addFilter(RedactingFilter())
-    _ = Any  # typing import kept for downstream annotation use
 
 
 __all__ = ["RedactingFilter", "install"]

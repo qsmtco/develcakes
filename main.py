@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # main.py
 # Application entry point — creates and runs the DevelcakesApp
+#
+# NOTE (SPEC-15b, audit BUG#1): importing this module has a deliberate side
+# effect — it floors the httpx/httpcore loggers to WARNING and installs the
+# token-redaction filter (see utils/log_redaction). Do NOT import main from
+# tests; import utils.log_redaction directly if you need the filter.
 
 import sys
 import os
@@ -20,10 +25,11 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-# SPEC-15b A1: floor the HTTP libraries. They log the request URL at
+# SPEC-15b A1: floor the HTTP libraries. `httpx` logs the request URL at
 # INFO/DEBUG, and the Telegram bot token rides in the URL path
 # (`/bot<token>/method`) — with DEBUG on, every poll would print the raw
-# token. These libraries carry no signal we need above WARNING.
+# token. (httpcore's sub-loggers don't print the URL in observed traces;
+# they're floored too as cheap defense in depth.)
 for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
