@@ -1,4 +1,4 @@
-# ui/handlers/telegram_bridge_handler.py — Telegram remote bridge (SPEC-15 SP2).
+# ui/handlers/telegram_bridge_handler.py — Telegram remote bridge (SPEC-15 SP2/SP3/SP4).
 #
 # The phone is a thin client for the Supervisor. This handler owns the bridge
 # STATE MACHINE and the inbound (phone → app) routing. It is the ONLY writer
@@ -10,15 +10,18 @@
 # seam (production passes GLib.idle_add; tests pass an inline runner).
 #
 # Scope: inbound phone → Supervisor routing (SP2) + exec approvals via inline
-# callback buttons (SP3a) + app→phone reply mirror (SP3b, `forward_to_phone`).
+# callback buttons (SP3a) + app→phone reply mirror (SP3b) + remote command
+# allowlist / typed stop-all confirmation (SP4).
 # Foreign chat ⇒ one polite refusal, never processed.
 #
 # Trust boundary (binding): one paired chat_id; the phone gets conversation +
-# (later) approvals — NO shell, NO file access.
+# approvals + the /status // /stop commands — NO shell, NO file access.
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -27,6 +30,28 @@ from transport.telegram import TelegramAuthError, TelegramTransport, redact_log_
 _logger = logging.getLogger(__name__)
 
 SUPERVISOR_KEY = "special:supervisor"
+
+# SP4: the exact word a phone user types to confirm a destructive remote
+# stop-all (spec §SP4 "confirmation asymmetry" — the desk dialog is enough,
+# a phone tap is not).
+STOP_CONFIRM_WORD = "STOP"
+
+# SP4: refusal/help listing the remote allowlist (spec §5).
+_ALLOWLIST_HELP = (
+    "Remote commands: /status (project summary), /stop (halt all agents, "
+    "needs typed confirmation), /help. Any other message is forwarded to the "
+    "Supervisor.")
+
+# SP3b: a WHOLE-message ```html fence (SPEC-13 protocol) → the payload group.
+# Mirrors render/html.py's anchored, non-greedy contract; a stray inner fence
+# or any prose makes this None (the text is then sent unchanged).
+_WHOLE_MESSAGE_HTML_FENCE_RE = re.compile(
+    r"^```html[ \t]*\r?\n(.*?)\r?\n?```[ \t]*$",
+    re.DOTALL | re.IGNORECASE,
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_P_CLOSE_RE = re.compile(r"</p\s*>", re.IGNORECASE)
 
 
 class BridgeState:
@@ -81,6 +106,16 @@ class TelegramBridgeHandler:
         self._approval_msgs: dict[str, int] = {}
         self._approval_order: list[str] = []
         self._feed_handler: Any | None = None
+        # SPEC-15 SP4: remote stop-all. The bridge does NOT import window/ARH —
+        # the window injects a callback that runs stop_all_agents()+stop_bridge()
+        # without the GTK confirm dialog (the phone confirmed by typing the word).
+        self._stop_all_handler: Callable[[], None] | None = None
+        # SPEC-15 SP4: /status reads a compact summary from an injected provider
+        # (window builds it from the same project/work data cmd_status reads).
+        self._status_provider: Callable[[], str] | None = None
+        # Two-step confirmation: True after a bare /stop until the exact word
+        # arrives or any other reply aborts. Cleared on disconnect hygiene.
+        self._pending_stop: bool = False
 
     def set_feed_handler(self, feed_handler: Any) -> None:
         """Late-bind the FeedHandler (SP3a — card re-read after approve).
@@ -90,6 +125,25 @@ class TelegramBridgeHandler:
         Used to read an approval card's RESOLVED state after approve_exec.
         """
         self._feed_handler = feed_handler
+
+    def set_stop_all_handler(self, cb: Callable[[], None] | None) -> None:
+        """Late-bind the remote stop-all action (SPEC-15 SP4).
+
+        Setter injection (handler isolation — the bridge never imports
+        window/ARH). ``cb`` runs the SAME stop-all path the toolbar uses
+        (stop_all_agents() + stop_bridge()) WITHOUT the GTK confirm dialog:
+        the phone already confirmed by typing the exact word.
+        """
+        self._stop_all_handler = cb
+
+    def set_status_provider(self, cb: Callable[[], str] | None) -> None:
+        """Late-bind the /status text provider (SPEC-15 SP4).
+
+        Setter injection: window builds a compact phone summary from the same
+        project/work-unit data the in-app /status reads (single status model).
+        Returns a short multi-line string; the bridge sends it verbatim.
+        """
+        self._status_provider = cb
 
     # ── state ────────────────────────────────────────────────────────────
 
@@ -241,6 +295,7 @@ class TelegramBridgeHandler:
                 _logger.warning("bridge disconnect failed: %s", redact_log_preview(str(e)))
         self._transport = None
         self._clear_approval_msgs()
+        self._clear_pending_stop()
         self._set_state(BridgeState.DISCONNECTED)
 
     # ── transport-thread callbacks (already dispatched to main) ──────────
@@ -252,6 +307,8 @@ class TelegramBridgeHandler:
         # SP3a §2.4: a stale card→message map must never drive an edit on a
         # dead session — clear it when the transport drops.
         self._clear_approval_msgs()
+        # SP4: a stale stop confirmation must never fire on a later session.
+        self._clear_pending_stop()
         self._set_state(BridgeState.DISCONNECTED)
 
     def _on_transport_error(self, message: str) -> None:
@@ -296,6 +353,21 @@ class TelegramBridgeHandler:
         text = msg.get("text")
         if not text:
             return  # non-text (photo/sticker/etc.) — nothing to route in SP2
+        # SP4 allowlist: a leading "/" is a remote command; ONLY /status, /stop
+        # and /help are handled — anything else gets one refusal listing them.
+        # Plain chat text (no leading "/") still forwards to the Supervisor.
+        stripped = text.strip()
+        if stripped.startswith("/"):
+            self._handle_command(stripped)
+            return
+        if self._pending_stop:
+            # A reply while a stop confirmation is armed: ONLY the exact word
+            # proceeds; anything else aborts (spec §SP4).
+            if stripped == STOP_CONFIRM_WORD:
+                self._run_stop_all()
+            else:
+                self._abort_pending_stop()
+            return
         if self._arh is None:
             self._send("Bridge unavailable: no agent runtime wired.")
             return
@@ -304,6 +376,98 @@ class TelegramBridgeHandler:
         except Exception as e:  # noqa: BLE001 — never let routing kill the bridge
             _logger.error("route to supervisor failed: %s", redact_log_preview(str(e)))
             self._send("Bridge error: could not reach the Supervisor.")
+
+    def _handle_command(self, text: str) -> None:
+        """SP4 remote command allowlist — /status, /stop, /help.
+
+        The word after /stop may be the confirmation word (``/stop STOP``).
+        Everything else is refused with the allowlist; unknown /commands are
+        NEVER forwarded to the Supervisor.
+        """
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == "/status":
+            self._pending_stop = False
+            self._send_status()
+            return
+        if cmd == "/stop":
+            self._handle_stop_command(arg)
+            return
+        if cmd == "/help":
+            self._pending_stop = False
+            self._send(_ALLOWLIST_HELP)
+            return
+        # Unknown /command → one polite refusal listing the allowlist.
+        self._pending_stop = False
+        _logger.info("refused remote command: %s", redact_log_preview(str(text)))
+        self._send(
+            "Unknown command. Available: /status, /stop, /help — or just type "
+            "a message to reach the Supervisor.")
+
+    def _send_status(self) -> None:
+        """SP4 /status → compact phone-readable summary (≤ ~10 lines)."""
+        cb = self._status_provider
+        if cb is None:
+            self._send("Status unavailable: no project data wired.")
+            return
+        try:
+            summary = cb()
+        except Exception as e:  # noqa: BLE001 — a provider fault must not kill the bridge
+            _logger.warning("status provider failed: %s", redact_log_preview(str(e)))
+            self._send("Status unavailable right now.")
+            return
+        if not summary:
+            summary = "No active project."
+        self._send(str(summary))
+
+    def _handle_stop_command(self, arg: str) -> None:
+        """SP4 /stop — TYPED two-step confirmation, then the real stop-all.
+
+        ``/stop`` arms a confirmation and prompts for the exact word;
+        ``/stop <word>`` (or a bare ``<word>`` on the next message — the
+        ``_pending_stop`` branch in ``_handle_message``) runs it. Any other
+        reply aborts. Destructive → never a single tap (spec §SP4).
+        """
+        if arg == STOP_CONFIRM_WORD:
+            self._pending_stop = False
+            self._run_stop_all()
+            return
+        if arg:
+            # An explicit but wrong word never arms the confirmation.
+            self._pending_stop = False
+            self._send(
+                f"Stop-all NOT run — confirmation word did not match. "
+                f"Reply /stop {STOP_CONFIRM_WORD} to confirm.")
+            return
+        self._pending_stop = True
+        self._send(
+            f"⚠️ Stop ALL agents from your phone? This cancels every in-flight "
+            f"turn and drops the bridge — it cannot be undone. Reply /stop "
+            f"{STOP_CONFIRM_WORD} to confirm, or anything else to cancel.")
+
+    def _run_stop_all(self) -> None:
+        """Fire the injected stop-all action (window: stop_all_agents() +
+        stop_bridge()). No-ops honestly when unwired.
+
+        The ack is sent BEFORE the action because the action stops the bridge
+        (transport gone) — a post-hoc ack would never reach the phone.
+        """
+        self._pending_stop = False
+        cb = self._stop_all_handler
+        if cb is None:
+            self._send("Stop-all unavailable: not wired.")
+            return
+        self._send("■ Stop-all requested — every agent is being halted.")
+        try:
+            cb()
+        except Exception as e:  # noqa: BLE001 — a control fault must not crash the bridge
+            _logger.error("remote stop-all failed: %s", redact_log_preview(str(e)))
+
+    def _abort_pending_stop(self) -> None:
+        self._pending_stop = False
+        self._send("Stop-all cancelled.")
 
     def _handle_callback_query(self, cbq: dict) -> None:
         """SP3a: resolve an exec approval from the phone.
@@ -430,6 +594,11 @@ class TelegramBridgeHandler:
         self._approval_msgs.clear()
         self._approval_order.clear()
 
+    def _clear_pending_stop(self) -> None:
+        """SP4 disconnect hygiene: drop an armed stop confirmation SILENTLY
+        (no reply — there may be no live transport to carry one)."""
+        self._pending_stop = False
+
     def _send_refusal(self, chat_id: int | None) -> None:
         """One polite refusal to a foreign chat; never processed."""
         _logger.info("foreign chat %s refused (redacted; not paired)", chat_id)
@@ -443,7 +612,46 @@ class TelegramBridgeHandler:
         except Exception as e:  # noqa: BLE001
             _logger.warning("bridge send failed: %s", redact_log_preview(str(e)))
 
-    # ── app → phone (SP3 seam) ───────────────────────────────────────────
+    # ── app → phone (SP3b) ───────────────────────────────────────────────
+
+    def on_supervisor_reply(self, session_key: str, text: str) -> None:
+        """SP3b: forward a Supervisor turn's reply to the paired chat.
+
+        No-op for any other session_key — the bridge is a Supervisor thin
+        client only. An HTML-card reply is flattened to text first (Telegram
+        is a text surface: send the card's visible content, not markup).
+        """
+        if session_key != SUPERVISOR_KEY:
+            return
+        self.forward_to_phone(self._telegram_text(text))
+
+    @staticmethod
+    def _telegram_text(text: str) -> str:
+        """SP3b: flatten a Supervisor reply for a TEXT surface.
+
+        The whole-message ```html fence (SPEC-13) is flattened to its visible
+        text — the card's content, never markup. Any other message passes
+        through unchanged. Dependency-light (regex; no html→text util exists);
+        a fail-safe: if anything raises, return the original text.
+        """
+        if not isinstance(text, str) or not text:
+            return text if isinstance(text, str) else ""
+        try:
+            m = _WHOLE_MESSAGE_HTML_FENCE_RE.match(text.strip())
+            if not m:
+                return text
+            payload = m.group(1)
+            # Block boundaries → newlines before tags vanish.
+            flat = _BR_RE.sub("\n", payload)
+            flat = _P_CLOSE_RE.sub("\n", flat)
+            flat = _TAG_RE.sub("", flat)
+            flat = html.unescape(flat)
+            # Collapse >2 blank lines the strip may have left behind.
+            flat = re.sub(r"\n{3,}", "\n\n", flat).strip()
+            return flat
+        except Exception as e:  # noqa: BLE001 — never lose a reply to a strip bug
+            _logger.warning("html-card flatten failed: %s", redact_log_preview(str(e)))
+            return text
 
     def forward_to_phone(self, text: str) -> None:
         """SP3b: forward a Supervisor reply to the paired chat.

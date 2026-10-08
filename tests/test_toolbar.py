@@ -174,3 +174,11 @@ class TestTelegramBridgeState:
         t = Toolbar()
         t.set_telegram_bridge_state("disconnected")
         assert self._label(t) == "Connect"
+
+    def test_tooltip_describes_real_bridge_not_post_mvp(self):
+        """SPEC-15 SP4 B5: the Connect tooltip must describe the real Telegram
+        behavior, not the stale 'arrives post-MVP' placeholder."""
+        t = Toolbar()
+        tip = t._connect_btn.get_tooltip_text() or ""
+        assert "post-MVP" not in tip
+        assert "Telegram" in tip

@@ -256,3 +256,107 @@ class TestStopAllDropsBridge:
         stop_harness._bridge_handler = None
         stop_harness._on_stop_all_clicked()
         _find_dialog().emit("response", Gtk.ResponseType.OK)  # must not raise
+
+
+# ── SP3b: ARH response-slot composition ──────────────────────────────────
+
+class TestAgentResponseComposition:
+    def test_composes_command_handler_and_bridge(self, win):
+        """SP3b: the single ARH response slot must call BOTH the agent-command
+        handler AND the bridge's Supervisor mirror."""
+        win._agent_command_handler = MagicMock()
+        win._bridge_handler = MagicMock()
+        win._on_agent_response("special:supervisor", "hi", "Proj")
+        win._agent_command_handler.on_agent_response.assert_called_once_with(
+            "special:supervisor", "hi", "Proj")
+        win._bridge_handler.on_supervisor_reply.assert_called_once_with(
+            "special:supervisor", "hi")
+
+    def test_bridge_fault_never_breaks_pipeline(self, win):
+        win._agent_command_handler = MagicMock()
+        win._bridge_handler = MagicMock()
+        win._bridge_handler.on_supervisor_reply.side_effect = RuntimeError("boom")
+        win._on_agent_response("special:supervisor", "hi", "Proj")  # no raise
+        win._agent_command_handler.on_agent_response.assert_called_once()
+
+    def test_missing_bridge_is_safe(self, win):
+        win._agent_command_handler = MagicMock()
+        win._bridge_handler = None
+        win._on_agent_response("special:supervisor", "hi", "Proj")  # no raise
+        win._agent_command_handler.on_agent_response.assert_called_once()
+
+    def test_build_registers_composed_callback(self):
+        """Source-shape guard: _build must register _on_agent_response (not the
+        bare command handler) on the ARH — otherwise the phone mirror is dead."""
+        import pathlib
+
+        src = pathlib.Path("ui/window.py").read_text()
+        assert (
+            "self._agent_runtime_handler.set_on_agent_response(self._on_agent_response)"
+            in src
+        ), "ARH response slot must be composed via _on_agent_response (SPEC-15 SP3b)"
+        assert "def _on_agent_response(" in src
+
+
+# ── SP4: remote stop-all + status injection ──────────────────────────────
+
+class TestRemoteStopAll:
+    def test_runs_arh_and_stops_bridge(self, win):
+        win._agent_runtime_handler = MagicMock()
+        win._remote_stop_all()
+        win._agent_runtime_handler.stop_all_agents.assert_called_once()
+        assert win._bridge_handler.stopped == 1
+
+    def test_missing_arh_still_stops_bridge(self, win):
+        win._agent_runtime_handler = None
+        win._remote_stop_all()  # no raise
+        assert win._bridge_handler.stopped == 1
+
+    def test_build_injects_stop_all_and_status(self):
+        import pathlib
+
+        src = pathlib.Path("ui/window.py").read_text()
+        assert "set_stop_all_handler(self._remote_stop_all)" in src
+        assert "set_status_provider(self._remote_status_summary)" in src
+
+
+class TestRemoteStatusSummary:
+    def test_no_active_project_is_honest(self, win):
+        win._project_handler.get_active_project_name.return_value = None
+        assert "no active project" in win._remote_status_summary().lower()
+
+    def test_no_project_handler_is_honest(self, win):
+        win._project_handler = None
+        assert "no project data" in win._remote_status_summary().lower()
+
+    def test_summary_includes_project_and_buckets(self, win, monkeypatch):
+        win._project_handler.get_project_members.return_value = ["special:coder"]
+        monkeypatch.setattr("models.work_store.list_all", list)
+        out = win._remote_status_summary()
+        assert "Proj" in out
+        assert "Work units:" in out
+
+
+# ── SP4 B5: documentation presence (source-shape guards) ─────────────────
+
+class TestDocsPresence:
+    def test_architecture_documents_telegram(self):
+        import pathlib
+
+        src = pathlib.Path("docs/ARCHITECTURE.md").read_text()
+        assert "transport/telegram.py" in src
+        assert "TelegramBridgeHandler" in src
+
+    def test_spec05_register_closed(self):
+        import pathlib
+
+        src = pathlib.Path("docs/specs/SPEC-05-R1-GATEWAY-STRIP.md").read_text()
+        assert "CLOSED" in src
+        assert "SPEC-15" in src
+
+    def test_readme_has_remote_in_bullet(self):
+        import pathlib
+
+        src = pathlib.Path("README.md").read_text()
+        assert "Remote-In from Your Phone" in src
+        assert "thin client" in src

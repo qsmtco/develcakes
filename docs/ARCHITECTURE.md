@@ -335,6 +335,40 @@ client.send_message(session_key, text, on_sent=cb)
 
 
 
+### 3.2a `transport/` + Telegram bridge (develcakes v2, SPEC-05/SPEC-15)
+
+**Status:** the `gateway/` layer above is superseded by the v2 `transport/` package
+(SPEC-05 R1 strip). `transport/base.py` is the `Transport` ABC; `transport/openclaw.py`
+is the cleaned WebSocket core; **`transport/telegram.py`** is the ABC's first real
+second implementation — a long-poll HTTP client (`connect`/`disconnect`/`send_message`/
+`answer_callback_query`/`edit_message_text`), token in a 0600 store, token redacted
+from every log line. The Connect button is now REAL (it toggles the Telegram bridge),
+not a stub.
+
+**`ui/handlers/telegram_bridge_handler.py`** — `TelegramBridgeHandler`, the remote-in
+handler node. The phone is a **thin client for the Supervisor only**:
+
+- Inbound: paired-chat text → `ARH.send_to_special_agent("special:supervisor", …)`.
+- Allowlist: `/status` (compact project summary), `/stop` (typed two-step confirmation
+  → the SAME stop-all path the toolbar uses), `/help`; any other `/command` gets one
+  refusal listing the allowlist. Plain text still forwards.
+- Exec approvals: pending-approval cards mirror to the phone with inline ✅/❌ buttons;
+  a tap → `ARH.approve_exec` → the card is re-read and the message edited to the actual
+  state ("Already resolved in the app." for a desk-first race).
+- Outbound mirror (SP3b): Supervisor turn replies forward to the phone (4096-char
+  paragraph split); a whole-message ```html card is flattened to its visible TEXT
+  (Telegram is a text surface).
+- Trust boundary: one paired chat_id; NO shell, NO file access. Foreign chat ⇒ one
+  polite refusal, never processed.
+
+**Handler isolation:** the bridge never imports window/ARH; the composition root
+(`ui/window.py`) injects `set_agent_runtime_handler`, `set_feed_handler`,
+`set_stop_all_handler`, and `set_status_provider`. The app→phone reply mirror is wired
+by COMPOSING the ARH's single `set_on_agent_response` slot (window `_on_agent_response`
+calls both the agent-command handler and `bridge.on_supervisor_reply`).
+
+
+
 ### 3.3 `models/` — Data Layer
 
 **Responsibility:** Hold all application state and data structures. No UI code.

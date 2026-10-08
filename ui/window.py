@@ -466,6 +466,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # SPEC-15 SP3a: bridge needs the FeedHandler to re-read approval cards
         # after approve_exec (setter-injected; no handler-import).
         self._bridge_handler.set_feed_handler(self._feed_handler)
+        # SPEC-15 SP4: remote stop-all + /status — injected callbacks so the
+        # bridge never imports window/ARH (handler isolation). The stop-all
+        # action reuses the real halt path WITHOUT the GTK confirm dialog.
+        self._bridge_handler.set_stop_all_handler(self._remote_stop_all)
+        self._bridge_handler.set_status_provider(self._remote_status_summary)
         # SPEC-15 SP3b: pending approval cards mirror to the phone (inline
         # buttons). The bridge filters to its own allowlist internally.
         self._feed_handler.set_card_added_callback(
@@ -744,7 +749,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._agent_command_handler.set_agent_runtime_handler(self._agent_runtime_handler)
         # Wire callbacks into both agent response pipelines
         self._chat_handler.set_on_agent_response(self._agent_command_handler.on_agent_response)
-        self._agent_runtime_handler.set_on_agent_response(self._agent_command_handler.on_agent_response)
+        # SPEC-15 SP3b: COMPOSE the ARH's single response slot — keep the
+        # agent-command parsing AND mirror Supervisor replies to the phone.
+        # (The slot is not stolen; _on_agent_response calls both.)
+        self._agent_runtime_handler.set_on_agent_response(self._on_agent_response)
 
         # Forward handler — owns agent-to-agent message forwarding (Phase 3b extraction)
         from ui.handlers.forward_handler import ForwardHandler
@@ -1080,6 +1088,72 @@ class MainWindow(Gtk.ApplicationWindow):
             bridge.stop_bridge()
         else:
             bridge.start_bridge()
+
+    def _on_agent_response(self, session_key, text, project_name):
+        """SPEC-15 SP3b: composed ARH response callback.
+
+        The ARH exposes ONE set_on_agent_response slot (already used by the
+        agent-command handler). We compose here: keep that behavior, AND mirror
+        Supervisor replies to the phone. _bridge_handler is resolved lazily
+        (it is built after the ARH); a bridge fault must NEVER break the
+        response pipeline.
+        """
+        self._agent_command_handler.on_agent_response(session_key, text, project_name)
+        bridge = getattr(self, "_bridge_handler", None)
+        if bridge is not None:
+            try:
+                bridge.on_supervisor_reply(session_key, text)
+            except Exception:
+                logger.exception("Telegram bridge reply mirror failed (ignored)")
+
+    def _remote_stop_all(self) -> None:
+        """SPEC-15 SP4: the phone-confirmed stop-all action.
+
+        Runs the SAME halt the toolbar uses (stop_all_agents() + stop_bridge())
+        but WITHOUT the GTK confirm dialog — the phone already confirmed by
+        typing the exact word. Injected into the bridge via
+        set_stop_all_handler (no window import inside the bridge).
+        """
+        arh = getattr(self, "_agent_runtime_handler", None)
+        if arh is not None:
+            arh.stop_all_agents()
+        else:
+            logger.warning("Remote stop-all confirmed but no AgentRuntimeHandler")
+        bridge = getattr(self, "_bridge_handler", None)
+        if bridge is not None:
+            bridge.stop_bridge()
+
+    def _remote_status_summary(self) -> str:
+        """SPEC-15 SP4: compact /status text for the phone.
+
+        Built from the SAME project/work-unit data the in-app /status reads
+        (single status model — no second source of truth). Honest when no
+        project is open.
+        """
+        ph = getattr(self, "_project_handler", None)
+        if ph is None:
+            return "No project data available."
+        name = ph.get_active_project_name()
+        if not name:
+            return "No active project."
+        try:
+            from models import work_store
+
+            members = ph.get_project_members(name)
+            units = [u for u in work_store.list_all() if u.assigned_builder in members]
+            pending = sum(1 for u in units
+                          if u.status in ("draft", "spec-pending", "spec-ready"))
+            active = sum(1 for u in units if u.status in ("in-progress", "auditing"))
+            blocked = sum(1 for u in units
+                          if u.status != "cancelled" and u.blocked_reason)
+            done = sum(1 for u in units if u.status == "done")
+        except Exception:
+            logger.exception("remote status summary failed")
+            return f"Project: {name} (status unavailable)"
+        return (f"Project: {name}\n"
+                f"Members: {len(members)}\n"
+                f"Work units: {pending} pending, {active} active, "
+                f"{blocked} blocked, {done} done")
 
     def _on_bridge_state_change(self, state: str) -> None:
         """Drive the toolbar + honesty feed card from bridge state.

@@ -145,3 +145,9 @@ gateway object exists anywhere in the graph.
 (357 lines; backoff/correlation/redaction kept, auth/catalog/UI deleted). All send
 sites route through the local runtime; Connect button = honest no-transport stub
 (Telegram post-MVP). See the SPEC-05 post-mortem for the audit trail and register.
+
+**Status update (SPEC-15, 2026-10-07):** the "Telegram post-MVP" register above is
+**CLOSED**. Connect is now real: `transport/telegram.py` (long-poll HTTP, the ABC's
+first real second implementation) + `ui/handlers/telegram_bridge_handler.py` give
+the Supervisor a phone channel (PM↔Supervisor chat + exec approvals + a remote
+`/status`//`/stop` allowlist). The Connect button is no longer a stub.

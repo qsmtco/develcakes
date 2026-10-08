@@ -200,6 +200,10 @@ The **Memory server is verified working end-to-end** through the UI. Agents can 
 - **Membership toggles** — who do you need on this project? Add someone mid-sprint. Remove them when the work is done. Changes fan out immediately, no restart, no reconfigure.
 - **Agent Discovery** — connect to an OpenClaw gateway and Develcakes pulls the full agent roster. Remote agents blend seamlessly into project group chats alongside your local Coder and Debugger. The split between local and remote is invisible to the user.
 
+### <img src="icons/emoji/robot.png" width="80" height="80" alt="robot" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Remote-In from Your Phone
+
+Connect the **Supervisor to your phone over Telegram** — click Connect in the toolbar and pair a bot in Settings. Your phone becomes a thin client: chat back and forth with the Supervisor, receive **exec-approval prompts as inline ✅/❌ buttons**, and run a small remote allowlist (`/status`, `/stop` with a typed confirmation, `/help`). No shell, no file access — the phone sees conversation and approvals only.
+
 ### <img src="icons/emoji/construction.png" width="80" height="80" alt="construction" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Custom Agent Builder
 
 Coder and Debugger are just the starting point. Use the built-in **Agent Builder UI** to configure a new agent visually — pick a provider, model, system prompt role, emoji, color, tool set. Or drop a YAML file into `~/.config/develcakes/agents/`. **No code required. No fork needed.** Agents load at startup.

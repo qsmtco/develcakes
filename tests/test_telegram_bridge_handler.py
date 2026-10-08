@@ -298,9 +298,187 @@ def test_foreign_chat_callback_refused():
     assert t["t"].answered == []  # foreign → never answered
 
 
-def test_forward_to_phone_stub_registered():
-    """SP3 seam: the app→phone direction is a documented stub."""
-    h, _t, _a = _handler()
+# ── SP3b: app → phone reply mirror ───────────────────────────────────────
+
+
+def _connected(**kw):
+    h, t, a = _handler(**kw)
     h.start_bridge()
-    assert hasattr(h, "forward_to_phone")
-    h.forward_to_phone("reply")  # must not raise (stub)
+    t["t"].kw["on_connect"]()
+    return h, t, a
+
+
+def test_supervisor_reply_forwards_to_phone():
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:supervisor", "done — 3 files changed")
+    assert [s["text"] for s in t["t"].sent] == ["done — 3 files changed"]
+
+
+def test_non_supervisor_reply_is_not_forwarded():
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:coder", "coding…")
+    assert t["t"].sent == []  # thin client: only the Supervisor mirrors
+
+
+def test_supervisor_reply_when_disconnected_noop():
+    h, _t, _a = _handler()  # never started → no transport
+    h.on_supervisor_reply("special:supervisor", "hi")  # must not raise
+
+
+def test_reply_over_4096_hard_split():
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:supervisor", "x" * 9000)
+    chunks = [s["text"] for s in t["t"].sent]
+    assert len(chunks) >= 3
+    assert all(len(c) <= 4096 for c in chunks)
+    assert "".join(chunks) == "x" * 9000
+
+
+def test_reply_splits_on_paragraph_boundary():
+    h, t, _a = _connected()
+    para_a = "a" * 2000
+    para_b = "b" * 3000
+    h.on_supervisor_reply("special:supervisor", f"{para_a}\n\n{para_b}")
+    chunks = [s["text"] for s in t["t"].sent]
+    assert len(chunks) == 2
+    assert chunks[0] == para_a
+    assert chunks[1] == para_b
+
+
+def test_reply_empty_and_nonstr_no_send():
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:supervisor", "")
+    h.on_supervisor_reply("special:supervisor", None)
+    assert t["t"].sent == []
+
+
+def test_html_card_reply_flattened_to_text():
+    """SPEC-15 §5 last row: a whole-message ```html card → the phone gets the
+    card's TEXT, never markup."""
+    h, t, _a = _connected()
+    card = '```html\n<div><b>Build OK</b><br>line two</div>\n```'
+    h.on_supervisor_reply("special:supervisor", card)
+    sent = t["t"].sent[-1]["text"]
+    assert "Build OK" in sent
+    assert "line two" in sent
+    assert "<" not in sent and ">" not in sent
+
+
+def test_plain_text_reply_passes_through_unchanged():
+    h, t, _a = _connected()
+    h.on_supervisor_reply("special:supervisor", "just **markdown**, no fence")
+    assert t["t"].sent[-1]["text"] == "just **markdown**, no fence"
+
+
+# ── SP4: remote command allowlist ────────────────────────────────────────
+
+
+def _send_text(h, t, text):
+    t["t"].kw["on_update"]({"update_id": 100, "message": {
+        "chat": {"id": 42}, "text": text}})
+
+
+def test_plain_text_still_forwards():
+    h, t, arh = _connected()
+    _send_text(h, t, "how is the build going?")
+    assert arh.calls and arh.calls[-1]["text"] == "how is the build going?"
+
+
+def test_unknown_slash_command_refused_not_forwarded():
+    h, t, arh = _connected()
+    _send_text(h, t, "/deploy")
+    assert arh.calls == []
+    assert any("unknown" in s["text"].lower() for s in t["t"].sent)
+
+
+def test_status_command_handled_not_forwarded():
+    h, t, arh = _connected()
+    h.set_status_provider(lambda: "Project: demo\nWork units: 1 pending")
+    _send_text(h, t, "/status")
+    assert arh.calls == []
+    assert any("Project: demo" in s["text"] for s in t["t"].sent)
+
+
+def test_status_without_provider_is_honest():
+    h, t, _a = _connected()
+    _send_text(h, t, "/status")
+    assert any("unavailable" in s["text"].lower() for s in t["t"].sent)
+
+
+def test_help_lists_allowlist():
+    h, t, _a = _connected()
+    _send_text(h, t, "/help")
+    blob = " ".join(s["text"] for s in t["t"].sent)
+    assert "/status" in blob and "/stop" in blob
+
+
+# ── SP4: /stop typed two-step confirmation ───────────────────────────────
+
+
+def test_stop_prompts_and_does_not_fire_on_first_command():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    assert fired == []  # armed, NOT run
+    assert h._pending_stop is True
+    assert any("confirm" in s["text"].lower() for s in t["t"].sent)
+
+
+def test_stop_confirmed_by_inline_word_fires_once():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    _send_text(h, t, "/stop STOP")
+    assert fired == [True]
+    assert h._pending_stop is False
+
+
+def test_stop_confirmed_by_next_bare_word_fires_once():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    _send_text(h, t, "STOP")
+    assert fired == [True]
+
+
+def test_stop_wrong_word_aborts():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    _send_text(h, t, "nope")
+    assert fired == []
+    assert h._pending_stop is False
+    assert any("cancel" in s["text"].lower() for s in t["t"].sent)
+
+
+def test_stop_explicit_wrong_word_never_arms():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop yes")
+    assert fired == []
+    assert h._pending_stop is False
+
+
+def test_stop_unwired_is_honest_no_crash():
+    h, t, _a = _connected()
+    _send_text(h, t, "/stop")
+    _send_text(h, t, "/stop STOP")  # no handler wired → honest, no raise
+    assert any("unavailable" in s["text"].lower() for s in t["t"].sent)
+
+
+def test_pending_stop_cleared_on_disconnect():
+    h, t, _a = _connected()
+    fired = []
+    h.set_stop_all_handler(lambda: fired.append(True))
+    _send_text(h, t, "/stop")
+    assert h._pending_stop is True
+    t["t"].kw["on_disconnect"]("dropped")
+    assert h._pending_stop is False
+    # A stale bare confirm after the drop must NOT fire stop-all.
+    _send_text(h, t, "STOP")
+    assert fired == []

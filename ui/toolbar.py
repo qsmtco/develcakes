@@ -48,7 +48,8 @@ class Toolbar(Gtk.Box):
         self._connect_btn.add_css_class("suggested-action")
         self._connect_btn.set_size_request(90, -1)
         self._connect_btn.set_tooltip_text(
-            "Toggle remote transport (none configured — Telegram arrives post-MVP)")
+            "Connect the Supervisor to your phone over Telegram "
+            "(chat + exec approvals; configure a bot token in Settings)")
         self._connect_btn.connect("clicked", self._on_connect_click)
 
         # Settings button + red status dot
