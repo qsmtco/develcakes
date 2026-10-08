@@ -166,6 +166,34 @@ def test_stop_idempotent_when_disconnected():
     assert h.state == BridgeState.DISCONNECTED
 
 
+def test_stop_bridge_clears_approval_map():
+    """SP3a §2.4 (disconnect hygiene): stop_bridge drops the card→message map
+    so a stale map can never drive an edit against a dead session."""
+    h, t, _a = _handler()
+    h.start_bridge()
+    t["t"].kw["on_connect"]()
+    h._approval_msgs["old"] = 55
+    h.stop_bridge()
+    assert h._approval_msgs == {}
+
+
+def test_transport_disconnect_clears_approval_map():
+    """SP3a §2.4: a transport drop ALSO clears the map — the transport object
+    is still referenced, so without the clear a stale tap would edit a dead
+    message."""
+    h, t, _a = _handler()
+    h.start_bridge()
+    t["t"].kw["on_connect"]()
+    h._approval_msgs["old"] = 55
+    t["t"].kw["on_disconnect"]("dropped")
+    assert h._approval_msgs == {}
+    t["t"].kw["on_update"]({"update_id": 61, "callback_query": {
+        "id": "cbq-old2", "data": "deny:old",
+        "message": {"chat": {"id": 42}},
+    }})
+    assert t["t"].edited == [], t["t"].edited
+
+
 # ── inbound routing (phone → app) ────────────────────────────────────────
 
 
@@ -203,18 +231,60 @@ def test_routing_when_arh_missing_refuses():
                for s in t["t"].sent), t["t"].sent
 
 
-def test_callback_query_answered_not_wired():
-    h, t, _a = _handler()
+def test_callback_query_approve_resolves_and_edits():
+    """SP3a: a paired-chat approve callback resolves through ARH.approve_exec
+    and edits the Telegram message to the card's ACTUAL state (re-read via
+    the feed handler — the approve_exec return is None in all cases)."""
+    class RecordingARH:
+        def __init__(self):
+            self.approve_calls = []
+            self._special_agents = ("special:supervisor",)
+        def get_special_agents(self):
+            return {sk: sk for sk in self._special_agents}
+        def approve_exec(self, cid, approved):
+            self.approve_calls.append((cid, approved))
+
+    h, t, a = _handler(arh=RecordingARH())
+    h.set_feed_handler(type("FH", (), {
+        "get_card": staticmethod(lambda cid: type("C", (), {
+            "card_id": "1",
+            "metadata": {"status": "approved"},
+            "body": "$ ls",
+        })()),
+    })())
     h.start_bridge()
     t["t"].kw["on_connect"]()
+    h._approval_msgs["1"] = 77
     update = {"update_id": 4, "callback_query": {
         "id": "cbq-1", "data": "approve:1",
         "message": {"chat": {"id": 42}},
     }}
     t["t"].kw["on_update"](update)
+    assert a.approve_calls == [("1", True)], "approve_exec not called"
     assert len(t["t"].answered) == 1
     assert t["t"].answered[0]["id"] == "cbq-1"
-    assert "not yet wired" in (t["t"].answered[0]["text"] or "").lower()
+    assert any(e["id"] == 77 and "Approved" in e["text"]
+               for e in t["t"].edited), t["t"].edited
+
+
+def test_callback_query_unknown_state_says_already_resolved():
+    """SP3a desk-first race: card missing/resolved → the edit must say
+    'Already resolved in the app.' — never the tap's intent — and approve_exec
+    is still safe (pops-first no-op)."""
+    h, t, _a = _handler()
+    h.set_feed_handler(type("FH", (), {"get_card": staticmethod(lambda cid: None)})())
+    h.start_bridge()
+    t["t"].kw["on_connect"]()
+    # Desk-first race premise: the approval WAS surfaced to the phone first, so
+    # its message is registered — otherwise there is no message to edit.
+    h._approval_msgs["zz"] = 99
+    update = {"update_id": 41, "callback_query": {
+        "id": "cbq-9", "data": "approve:zz",
+        "message": {"chat": {"id": 42}},
+    }}
+    t["t"].kw["on_update"](update)
+    assert any("Already resolved" in e["text"]
+               for e in t["t"].edited), t["t"].edited
 
 
 def test_foreign_chat_callback_refused():

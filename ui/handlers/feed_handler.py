@@ -178,6 +178,12 @@ class FeedHandler:
         # warning dialog. See _emit_auto_accept_level_changed.
         self._on_auto_accept_level_changed: Callable[[str], None] | None = None
 
+    def set_card_added_callback(self, callback) -> None:
+        """Late-bind the card-added observer (SPEC-15 SP3b — the Telegram
+        bridge filters pending approvals from this seam). Overrides the ctor
+        arg when called; None clears."""
+        self._on_card_added = callback
+
     def set_feed_tab(self, feed_tab) -> None:
         """
         Set the FeedTab view instance.

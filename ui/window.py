@@ -463,6 +463,13 @@ class MainWindow(Gtk.ApplicationWindow):
             on_feed_card=self._emit_bridge_notice_card,
         )
         self._bridge_handler.set_agent_runtime_handler(self._agent_runtime_handler)
+        # SPEC-15 SP3a: bridge needs the FeedHandler to re-read approval cards
+        # after approve_exec (setter-injected; no handler-import).
+        self._bridge_handler.set_feed_handler(self._feed_handler)
+        # SPEC-15 SP3b: pending approval cards mirror to the phone (inline
+        # buttons). The bridge filters to its own allowlist internally.
+        self._feed_handler.set_card_added_callback(
+            self._bridge_handler.on_feed_card_added)
 
         # FeedTab created here (once) — inject into LeftPanel's Projects "Feed" sub-tab
         from ui.views.feed_tab import FeedTab
