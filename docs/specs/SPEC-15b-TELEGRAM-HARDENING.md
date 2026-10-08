@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-07
 **Author:** Supervisor
-**Status:** READY
+**Status:** DONE (2026-10-08) — implemented (1bf22f89), Debugger audit CLEAN on substance, three housekeeping notes applied (fed9f335).
 **Origin:** Real-user session 2026-10-07 — PM paired a bot; the transport token appeared in
 plaintext in terminal logs, and a getUpdates conflict would have been invisible.
 **Depends on:** SPEC-15 (Telegram Remote Bridge — DONE)
@@ -111,14 +111,14 @@ possible stale-pairing cause so the user can act.
 
 ## 4. Acceptance criteria
 
-- [ ] With `DEBUG` set, a simulated getUpdates cycle emits NO line containing the token
+- [x] With `DEBUG` set, a simulated getUpdates cycle emits NO line containing the token
       (test: capture logs from a fake client; assert `"/bot" + token` never appears).
-- [ ] The redacting filter scrubs a token embedded in `record.msg` AND in `record.args`.
-- [ ] `_get_updates` raises `_Conflict` on HTTP 409 and on an `ok:false` body with
+- [x] The redacting filter scrubs a token embedded in `record.msg` AND in `record.args`.
+- [x] `_get_updates` raises `_Conflict` on HTTP 409 and on an `ok:false` body with
       `error_code == 409`.
-- [ ] `_poll_loop` on `_Conflict`: fires `on_error` with a 409-naming message, keeps the
+- [x] `_poll_loop` on `_Conflict`: fires `on_error` with a 409-naming message, keeps the
       loop alive, backs off (does not spin at full rate).
-- [ ] Existing transport/bridge suites stay green; ruff 0 new; pyright 0.
+- [x] Existing transport/bridge suites stay green; ruff 0 new; pyright 0.
 
 ## 5. Edge cases
 
