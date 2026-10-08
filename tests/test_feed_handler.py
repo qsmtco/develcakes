@@ -84,6 +84,11 @@ class MockFeedTab:
         self.empty_shown = False
         # Fake scroll state for smart scroll tests
         self._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
+        # Reader intent for the smart-scroll gate. Default False: the default
+        # adjustment above (upper=1000, page=600, value=0) describes a reader
+        # sitting at the TOP of the feed, i.e. not following. Tests that want
+        # the following case set this True explicitly.
+        self._was_near_bottom = False
         # MEMRATCHET P3: eviction-pass surface (spec §2.6). Defaults chosen so
         # the eviction cases are permissive; individual tests override the
         # attributes to drive the guarded / non-guarded branches.
@@ -133,16 +138,19 @@ class MockFeedTab:
 
     def schedule_smart_scroll_to_bottom(self):
         """Mirror of FeedTab.schedule_smart_scroll_to_bottom() for test.
-        Proximity check + delegate to schedule_scroll_to_bottom."""
+
+        Follow state is the reader's intent (`_was_near_bottom`), matching the
+        real gate. An earlier version mirrored a live `upper - page_size -
+        value` distance with a `< 80` comparison — which both disagreed with
+        the real boundary (production used `<= 80`) and encoded the
+        growth-sensitivity bug: content growing after a completed scroll read
+        as "the reader scrolled away", stopping the follow.
+        """
         if self._vadjustment is None:
             return
-        vadj = self._vadjustment
-        current = vadj.get_value()
-        upper = vadj.get_upper()
-        page_size = vadj.get_page_size()
-        distance_from_bottom = upper - page_size - current
-        if distance_from_bottom < 80:
-            self.schedule_scroll_to_bottom()
+        if not self._was_near_bottom:
+            return
+        self.schedule_scroll_to_bottom()
 
     # Phase 5 batch bar mocks
     def update_batch_bar(self, pending_count: int):
@@ -1644,38 +1652,44 @@ class TestSmartScroll:
     preserved. schedule_scroll_to_bottom is the unconditional variant."""
 
     def test_smart_scroll_when_near_bottom(self):
-        """If user is within 80px of bottom, smart_scroll scrolls to bottom."""
+        """A caught-up reader is followed to the bottom."""
         mock_tab = MockFeedTab()
-        # Set user at upper-50 (50px from bottom, since page_size=600, upper=1000)
+        mock_tab._was_near_bottom = True   # reader is following
+        # Reader sitting at upper-50 (50px from bottom, page_size=600, upper=1000)
         mock_tab._vadjustment = MockVadjustment(value=950, upper=1000, page_size=600)
-        # distance_from_bottom = 1000 - 600 - 950 = -450 → < 80, scrolls
         mock_tab.schedule_smart_scroll_to_bottom()
         assert mock_tab._vadjustment.get_value() == 1000
 
-    def test_smart_scroll_when_exactly_80px_from_bottom(self):
-        """If user is exactly 80px from bottom, smart_scroll DOES NOT scroll (boundary: <80)."""
-        mock_tab = MockFeedTab()
-        # upper=1000, page_size=600, so being 80px from bottom means value=1000-600-80=320
-        mock_tab._vadjustment = MockVadjustment(value=320, upper=1000, page_size=600)
-        # distance_from_bottom = 1000 - 600 - 320 = 80 → NOT < 80, no scroll
-        mock_tab.schedule_smart_scroll_to_bottom()
-        assert mock_tab._vadjustment.get_value() == 320  # unchanged
+    # NOTE: `test_smart_scroll_when_exactly_80px_from_bottom` was removed here.
+    # It asserted the gate does NOT scroll at exactly 80px — a boundary that
+    # only ever existed in this mock's `< 80` comparison. Production used
+    # `<= 80`, and the real tab's own test asserts the follow DOES happen at
+    # exactly 80. The 80px boundary that still exists (the eviction slack in
+    # `is_near_bottom`) is pinned on the real tab by
+    # TestScheduleSmartScrollToBottom::test_exactly_80px_counts_as_near_bottom.
 
     def test_smart_scroll_when_far_from_bottom(self):
-        """If user is >80px from bottom, smart_scroll does nothing."""
+        """A reader who has scrolled away is not yanked to the bottom.
+
+        The old setup expressed "scrolled away" only as a 400px distance. The
+        gate does not read distance any more (content growth made it
+        unreliable), so the reader's intent is stated directly.
+        """
         mock_tab = MockFeedTab()
-        # User scrolled to top: value=0
+        mock_tab._was_near_bottom = False  # reader scrolled to the top: value=0
         mock_tab._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
-        # distance_from_bottom = 1000 - 600 - 0 = 400 → > 80, no scroll
         mock_tab.schedule_smart_scroll_to_bottom()
         assert mock_tab._vadjustment.get_value() == 0  # unchanged
 
     def test_smart_scroll_when_mid_feed(self):
-        """If user is mid-feed and >80px from bottom, smart_scroll does nothing."""
+        """A reader parked mid-feed is not yanked to the bottom.
+
+        As with the far-from-bottom case, "not following" is stated as intent
+        rather than inferred from distance.
+        """
         mock_tab = MockFeedTab()
-        # User scrolled halfway: value=200
+        mock_tab._was_near_bottom = False  # reader parked mid-feed: value=200
         mock_tab._vadjustment = MockVadjustment(value=200, upper=1000, page_size=600)
-        # distance_from_bottom = 1000 - 600 - 200 = 200 → > 80, no scroll
         mock_tab.schedule_smart_scroll_to_bottom()
         assert mock_tab._vadjustment.get_value() == 200  # unchanged
 
@@ -3262,11 +3276,12 @@ class TestScheduleSmartScrollToBottom:
     def test_schedule_smart_does_not_scroll_when_user_scrolled_up(
         self, real_feed_tab, monkeypatch
     ):
-        """When the user has scrolled up more than 80px from the bottom, the
-        method must NOT scroll at all — preserve the user's reading position.
+        """When the reader has scrolled away from the bottom, the method must
+        NOT scroll at all — preserve the reading position.
 
-        Setup: upper=2000, page_size=600, value=200.
-        distance_from_bottom = 2000 - 600 - 200 = 1200px (>> 80 → scrolled up).
+        Setup: upper=2000, page_size=600, value=200, then fire 'value-changed'
+        the way a real user scroll does. That signal is what records the
+        reader's intent (`_was_near_bottom=False`).
 
         After calling schedule_smart_scroll_to_bottom:
         - No 'changed' handler connected (no delegation)
@@ -3285,11 +3300,20 @@ class TestScheduleSmartScrollToBottom:
 
         tab = real_feed_tab
         adj = tab._feed_scroll.get_vadjustment()
+        # The fixture replaces the scroll AFTER __init__, so the tracker is not
+        # wired to the fake — connect it the way __init__ does.
+        adj.connect("value-changed", tab._on_scroll_value_changed)
 
-        # User has scrolled way up: distance = 2000 - 600 - 200 = 1200px
+        # Reader has scrolled way up: distance = 2000 - 600 - 200 = 1200px.
         adj.set_upper(2000.0)
         adj._value = 200.0
         adj._page_size = 600.0
+        # A real scroll emits 'value-changed', and that signal is what records
+        # the reader's intent. Writing the value directly bypasses it, which
+        # would leave the tracker on its default ("following") and make this
+        # test assert nothing about a reader who scrolled away.
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is False, "precondition: reader is away"
 
         tab.schedule_smart_scroll_to_bottom()
 
@@ -3311,22 +3335,22 @@ class TestScheduleSmartScrollToBottom:
             f"Expected no set_value calls, got {adj.set_value_calls}"
         )
 
-    def test_schedule_smart_uses_stale_upper_for_proximity_not_future(
+    def test_schedule_smart_follows_by_reader_intent_not_content_height(
         self, real_feed_tab, monkeypatch
     ):
-        """Pins the design decision: the proximity check intentionally uses the
-        pre-append (stale) upper because it measures the user's reading position,
-        not the future content height.
+        """Pins the follow-state design: the decision to follow uses the
+        reader's recorded intent, never the live content height.
 
-        Setup: upper=800, page_size=600, value=180.
-        distance_from_bottom = 800 - 600 - 180 = 20px (< 80 → near bottom).
+        This replaces an earlier test that pinned the same *purpose* ("measure
+        the reader's reading position, not the future content height") via the
+        mechanism of a stale-upper distance reading. That mechanism is what let
+        the feed stop following: content growing AFTER a completed scroll
+        raises upper without the reader moving, and the live reading then
+        reports the reader as having scrolled away.
 
-        If the method used some hypothetical post-layout upper (say 1500),
-        the distance would be 1500 - 600 - 180 = 720px (>> 80 → would NOT scroll).
-        The test proves the stale upper is used by asserting the scroll fires.
-
-        This test would FAIL if someone tried to be 'smart' and wait for the
-        post-layout upper before doing the proximity check.
+        Setup: reader caught up at upper=800, page=600, value=200 (distance 0),
+        recorded through 'value-changed'. Content then grows by 300px with no
+        reader movement. The follow must survive the growth.
         """
         import gi
         gi.require_version('Gtk', '4.0')
@@ -3337,29 +3361,80 @@ class TestScheduleSmartScrollToBottom:
 
         tab = real_feed_tab
         adj = tab._feed_scroll.get_vadjustment()
+        # The fixture replaces the scroll AFTER __init__, so the tracker is not
+        # wired to the fake — connect it the way __init__ does.
+        adj.connect("value-changed", tab._on_scroll_value_changed)
 
-        # Stale upper = 800. User at value=180, page=600.
-        # Stale distance = 800 - 600 - 180 = 20px (< 80 → near bottom).
         adj.set_upper(800.0)
-        adj._value = 180.0
         adj._page_size = 600.0
+        adj._value = 200.0
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is True, "precondition: reader is caught up"
+
+        # Content grows. No value change — the reader did not move.
+        adj.set_upper(1100.0)
 
         tab.schedule_smart_scroll_to_bottom()
 
-        # Delegation must have happened because stale distance < 80
         assert tab._scroll_handler_id is not None, (
-            "Expected delegation to schedule_scroll_to_bottom because "
-            "stale distance (20px) < 80px threshold. "
-            "If _scroll_handler_id is None, the method used a post-layout "
-            "upper for the proximity check, which is the wrong design."
+            "Content growth suppressed the follow: the decision read the grown "
+            "upper as the reader having scrolled away."
         )
 
-        adj.set_upper(1500.0)
+    def test_follow_survives_card_growth_between_cards(
+        self, real_feed_tab, monkeypatch
+    ):
+        """REGRESSION (reported): the feed stops following once a card grows.
+
+        Sequence reproduced: the reader is caught up; the one-shot scroll lands
+        on the bottom; that card then GROWS (a line wraps, a body arrives late)
+        so the scroll range moves while the position does not; a new card is
+        appended. The leftover gap must not be read as the reader having
+        scrolled away.
+
+        Figures from the report: position 566 against a bottom of 566, bottom
+        then moves to 756 (190px short), and the next card raises it again.
+        """
+        import gi
+        gi.require_version('Gtk', '4.0')
+        from gi.repository import GLib
+
+        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 77)
+        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
+
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        # The fixture replaces the scroll AFTER __init__, so the tracker is not
+        # wired to the fake — connect it the way __init__ does.
+        adj.connect("value-changed", tab._on_scroll_value_changed)
+
+        # Caught up: upper=756, page=600, value=156 → distance 0.
+        adj.set_upper(756.0)
+        adj._page_size = 600.0
+        adj._value = 156.0
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is True, "precondition: reader is caught up"
+
+        # The last card grows by 190px. Value does not move.
+        adj.set_upper(946.0)
+        assert tab.is_near_bottom() is False, (
+            "precondition: the growth opened a 190px gap"
+        )
+
+        # A new card arrives — following must not have stopped.
+        tab.schedule_smart_scroll_to_bottom()
+        assert tab._scroll_handler_id is not None, (
+            "Following stopped: the 190px growth gap was read as the reader "
+            "having scrolled away, so the new card was never scrolled to."
+        )
+
+        adj.set_upper(1044.0)          # the new card lands
         adj.emit_changed()
         _pump_feed_idles()
 
-        assert adj.set_value_calls == [900.0], (
-            f"Expected set_value(900.0) after settle, got {adj.set_value_calls}"
+        assert adj.set_value_calls == [444.0], (
+            f"Expected the follow to land on the new bottom (1044 - 600 = 444), "
+            f"got {adj.set_value_calls}"
         )
 
     def test_exactly_80px_counts_as_near_bottom(self, real_feed_tab, monkeypatch):

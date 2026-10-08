@@ -473,17 +473,29 @@ class FeedTab(Gtk.Box):
 
     def schedule_smart_scroll_to_bottom(self) -> None:
         """
-        Scroll to the bottom only if the reader is already within 80px.
+        Scroll to the bottom if the reader is still following the feed.
 
-        The proximity check uses the pre-append upper: it measures where
-        the reader is now, not where the new card will land.
+        Follow state is the reader's recorded intent (`_was_near_bottom`,
+        maintained by `_on_scroll_value_changed` on every value change), NOT a
+        live `upper - page_size - value` reading.
+
+        A live reading is wrong here because content can grow after a scroll
+        has already completed — a line wrapping, a card body arriving late —
+        which raises `upper` without the reader having moved anywhere. The
+        reading then reports "the reader scrolled away" and following stops
+        permanently: each later card lands below the fold with nothing left to
+        catch up. (Reported as: view stuck short of the bottom, each new card
+        leaving it further behind.)
+
+        Reading intent instead keeps following until the reader actually
+        scrolls away, which is the documented contract for this method.
         """
         if self._feed_scroll is None:
             return
         vadj = self._feed_scroll.get_vadjustment()
         if vadj is None:
             return
-        if self._distance_from_bottom(vadj) > self._BOTTOM_THRESHOLD:
+        if not self._was_near_bottom:
             return
         self.schedule_scroll_to_bottom()
 
