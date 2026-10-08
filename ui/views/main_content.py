@@ -1061,40 +1061,31 @@ class MainContent(Gtk.Box):
     def scroll_chat_to_bottom(self, page_index=None):
         """Scroll the active chat to the bottom.
 
-        SPEC-06 SP5a FIX 3 (single-scroll ruling): if the page's chat box
-        holds a mounted HTML chat surface, drive the SURFACE's own
-        vadjustment (the surface owns its ScrolledWindow — there is no
-        wrapper to drive, and the box-level chat_scroll is inert for
-        surface tabs). The old _tab_scrolls path stays for non-surface
-        children (plain Pango boxes).
+        SPEC-17 SP1.3: an HTML chat surface scrolls its DOCUMENT (the page
+        scrolls inside the web view, not the outer ScrolledWindow). When the
+        page's child is a surface, delegate to `surface.scroll_to_latest()`
+        and RETURN — do NOT also set the outer adjustment for that page.
+
+        Non-surface children (plain Pango boxes) keep the existing deferred
+        `vadj.set_value(upper - page_size)` path.
         """
         if page_index is None:
             page_index = self._chat_notebook.get_current_page()
-        scroll = self._tab_scrolls.get(page_index)
-        if scroll is None:
-            return
-        # FIX 3 (single-scroll): surface tabs drive the SURFACE's own
-        # vadjustment — the surface owns its ScrolledWindow, the box-level
-        # chat_scroll is inert for surface tabs (no wrapper exists to drive).
+        # SPEC-17 SP1.3: the surface is the authority for an HTML tab's scroll.
         chat_box = self._tab_chat_boxes.get(page_index)
-        surface = None
         crh = self._chat_render_handler
         if chat_box is not None and crh is not None:
             surface = crh.surface_for_box(chat_box)
-        if surface is not None:
-            vadj = surface.get_vadjustment()
-        else:
-            vadj = scroll.get_vadjustment()
+            if surface is not None:
+                surface.scroll_to_latest()
+                return
+        # Non-surface children: the legacy deferred outer-adjustment path.
+        scroll = self._tab_scrolls.get(page_index)
+        if scroll is None:
+            return
+        vadj = scroll.get_vadjustment()
         if vadj is None:
             return
-        # REGISTER (#8, SP5a round 2) → CLOSED by MICRO-SMART-SCROLL,
-        # 2026-10-07: the WebKit surface now self-heals its scroll position
-        # (ui/views/chat_surface.ChatSurface._on_adjustment_changed /
-        # _settle_restore track at-bottom and restore intent after each
-        # full-document reload — no JS bridge). Per the smart-scroll audit:
-        # For surface tabs the surface self-heals — this is the user-intent
-        # (button/API) seam. For non-surface children the existing deferred
-        # scroll is still used.
         # Defer scroll to next frame — widget layout must recalculate first
         def _do_scroll():
             vadj.set_value(vadj.get_upper() - vadj.get_page_size())

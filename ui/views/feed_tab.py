@@ -13,12 +13,16 @@
 #       is_near_bottom(slack: int = 80) -> bool
 #       is_above_viewport(widget) -> bool
 
+import logging
+
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 from typing import Callable
 
 from utils.gtk_containers import is_in_container
+
+logger = logging.getLogger(__name__)
 
 
 class FeedTab(Gtk.Box):
@@ -70,10 +74,17 @@ class FeedTab(Gtk.Box):
         # Phase 5 — Batch button label (read by tests for assertions; mirrors the actual
         # _batch_accept_button.get_label()).
         self._batch_button_label: str = ""
-        # One-shot scroll handler ID for deferred scroll-to-bottom (Bug A fix)
+        # Deferred scroll-to-bottom. The changed handler stays connected until
+        # the content height is stable; the timeout fires only if changed never does.
         self._scroll_handler_id: int | None = None
-        # Timeout source ID for scroll fallback; disarmed when 'changed' fires (4D-3)
         self._scroll_timeout_id: int | None = None
+        self._scroll_changed_seen: bool = False
+        self._settle_source: int | None = None
+        self._settle_upper: float | None = None
+        self._settle_stable_count: int = 0
+        # Reader intent across tab hide/show. True until the reader scrolls up.
+        self._was_near_bottom: bool = True
+        self._saved_value: float = 0.0
 
         # ── Build scrolled card list ────────────────────────────────────
         scroll = Gtk.ScrolledWindow()
@@ -172,11 +183,11 @@ class FeedTab(Gtk.Box):
 
         self.append(self._toolbar)
 
-        # When the feed tab becomes visible (mapped), scroll to the bottom so
-        # the newest card is shown. This handles the case where GTK4 resets
-        # the ScrolledWindow's vadjustment to 0 during page hide/show cycles
-        # (Notebook tab switching) — without this, switching to the Feed tab
-        # shows the top of the feed even if the user had been at the bottom.
+        # Track whether the reader is caught up. A hide/show can reset value
+        # to 0; the map handler uses this instead of jumping to the bottom.
+        vadj = scroll.get_vadjustment()
+        if vadj is not None:
+            vadj.connect("value-changed", self._on_scroll_value_changed)
         scroll.connect("map", self._on_scroll_mapped)
 
     # ── Public API ───────────────────────────────────────────────────────
@@ -308,21 +319,111 @@ class FeedTab(Gtk.Box):
             self._clear_widget_state_recursive(child)
             child = child.get_next_sibling()
 
+    _BOTTOM_THRESHOLD = 80.0
+    _SETTLE_STABLE_FRAMES = 2
+
+    def _bottom_value(self, adj) -> float:
+        """Last visible pixel. GTK clamps value to upper - page_size."""
+        lower = adj.get_lower() if hasattr(adj, "get_lower") else 0.0
+        return max(lower, adj.get_upper() - adj.get_page_size())
+
+    def _distance_from_bottom(self, adj) -> float:
+        return adj.get_upper() - adj.get_page_size() - adj.get_value()
+
+    def _on_scroll_value_changed(self, adj) -> None:
+        """Remember whether the reader is caught up.
+
+        A non-scrollable adjustment (upper <= page_size) is a layout
+        artifact, not the reader. Do not update the tracker from it.
+        """
+        if adj.get_upper() <= adj.get_page_size():
+            return
+        self._saved_value = adj.get_value()
+        self._was_near_bottom = (
+            self._distance_from_bottom(adj) <= self._BOTTOM_THRESHOLD
+        )
+
+    def _cancel_settle(self) -> None:
+        if self._settle_source is None:
+            return
+        from gi.repository import GLib
+        try:
+            GLib.source_remove(self._settle_source)
+        except Exception:  # noqa: BLE001 — source already fired: idempotent cleanup
+            logger.debug("settle source already removed (idempotent cancel)")
+        self._settle_source = None
+
+    def _disarm_scroll(self, adj) -> None:
+        """Drop the pending scroll after it has been consumed."""
+        from gi.repository import GLib
+        if self._scroll_timeout_id is not None:
+            try:
+                GLib.source_remove(self._scroll_timeout_id)
+            except Exception:
+                pass
+            self._scroll_timeout_id = None
+        if self._scroll_handler_id is not None:
+            try:
+                adj.disconnect(self._scroll_handler_id)
+            except Exception:
+                pass
+            self._scroll_handler_id = None
+        self._settle_stable_count = 0
+        self._settle_upper = None
+
+    def _arm_settle(self, adj) -> None:
+        """Restart the stable-height count and ensure one idle is queued."""
+        from gi.repository import GLib
+        self._settle_upper = adj.get_upper()
+        self._settle_stable_count = 0
+        if self._settle_source is not None:
+            return
+        self._settle_source = GLib.idle_add(self._settle_scroll)
+
+    def _settle_scroll(self) -> bool:
+        """Idle: scroll only after the content height stops changing."""
+        from gi.repository import GLib
+        self._settle_source = None
+        if self._scroll_handler_id is None or self._feed_scroll is None:
+            return GLib.SOURCE_REMOVE
+        adj = self._feed_scroll.get_vadjustment()
+        if adj is None:
+            return GLib.SOURCE_REMOVE
+        current = adj.get_upper()
+        if current != self._settle_upper:
+            self._settle_upper = current
+            self._settle_stable_count = 0
+            self._settle_source = GLib.idle_add(self._settle_scroll)
+            return GLib.SOURCE_REMOVE
+        if adj.get_upper() <= adj.get_page_size():
+            return GLib.SOURCE_REMOVE  # collapsed — leave the request pending
+        self._settle_stable_count += 1
+        if self._settle_stable_count < self._SETTLE_STABLE_FRAMES:
+            self._settle_source = GLib.idle_add(self._settle_scroll)
+            return GLib.SOURCE_REMOVE
+        adj.set_value(self._bottom_value(adj))
+        self._disarm_scroll(adj)
+        return GLib.SOURCE_REMOVE
+
+    def _on_adj_changed(self, adj) -> bool:
+        """Layout moved. Do not scroll yet — wait until upper is stable."""
+        self._scroll_changed_seen = True
+        if adj.get_upper() <= adj.get_page_size():
+            return False  # nothing to scroll yet; keep the request
+        self._arm_settle(adj)
+        return False
+
     def schedule_scroll_to_bottom(self) -> None:
         """
-        Schedule a one-shot scroll-to-bottom that fires AFTER GTK updates
-        the vadjustment upper following a layout pass.
+        Scroll to the bottom after the content height settles.
 
-        GTK4 does NOT recompute vadjustment.upper synchronously after
-        append_child — the upper reflects allocated content height which
-        happens during the next frame clock tick. Reading upper immediately
-        after appends returns a stale value and can cause the feed to snap
-        to the top.
+        GTK4 does not recompute vadjustment.upper synchronously after
+        append. The first `changed` is often an intermediate height.
+        Scrolling there and disconnecting leaves the newest card below
+        the fold. This waits for two idle frames at the same upper, then
+        sets value to upper - page_size.
 
-        We connect to the vadjustment's 'changed' signal (fired when
-        upper/lower/page-size change) and scroll once, then disconnect.
-        If 'changed' has already fired by the time we connect (unlikely
-        but safe), we also install a short timeout fallback.
+        The 150ms timeout scrolls only when `changed` never fires.
         """
         if self._feed_scroll is None:
             return
@@ -330,7 +431,8 @@ class FeedTab(Gtk.Box):
         if vadj is None:
             return
 
-        # Disconnect any prior one-shot handler to avoid double-firing
+        from gi.repository import GLib
+
         if self._scroll_handler_id is not None:
             try:
                 vadj.disconnect(self._scroll_handler_id)
@@ -338,96 +440,80 @@ class FeedTab(Gtk.Box):
                 pass
             self._scroll_handler_id = None
 
-        # Cancel any prior timeout (defensive — re-entrancy guard)
         if self._scroll_timeout_id is not None:
             try:
-                from gi.repository import GLib as _GLib
-                _GLib.source_remove(self._scroll_timeout_id)
+                GLib.source_remove(self._scroll_timeout_id)
             except Exception:
                 pass
             self._scroll_timeout_id = None
 
-        from gi.repository import GLib
+        self._cancel_settle()
+        self._scroll_changed_seen = False
+        self._settle_stable_count = 0
+        self._settle_upper = None
 
-        def _on_adj_changed(adj):
-            # Vadjustment upper has been updated — scroll to bottom now
-            adj.set_value(adj.get_upper())
-            # Disarm the timeout — success path wins (4D-3 fix)
-            if self._scroll_timeout_id is not None:
-                try:
-                    GLib.source_remove(self._scroll_timeout_id)
-                except Exception:
-                    pass
-                self._scroll_timeout_id = None
-            # Disconnect this one-shot handler
-            if self._scroll_handler_id is not None:
-                try:
-                    adj.disconnect(self._scroll_handler_id)
-                except Exception:
-                    pass
-                self._scroll_handler_id = None
-            return False  # not used for GObject signals
+        self._scroll_handler_id = vadj.connect("changed", self._on_adj_changed)
 
-        self._scroll_handler_id = vadj.connect("changed", _on_adj_changed)
-
-        # Safety net: if 'changed' doesn't fire within 150ms (e.g. zero
-        # cards added so no layout change), scroll directly and clean up.
         def _timeout_fallback():
-            # If we got here, 'changed' didn't fire in time. Scroll now.
+            self._scroll_timeout_id = None
+            # A changed signal owns the settle. Do not scroll and do not
+            # disconnect that settle from here.
+            if self._scroll_changed_seen:
+                return GLib.SOURCE_REMOVE
             if self._scroll_handler_id is not None:
-                vadj.set_value(vadj.get_upper())
+                vadj.set_value(self._bottom_value(vadj))
                 try:
                     vadj.disconnect(self._scroll_handler_id)
                 except Exception:
                     pass
                 self._scroll_handler_id = None
-            self._scroll_timeout_id = None
             return GLib.SOURCE_REMOVE
+
         self._scroll_timeout_id = GLib.timeout_add(150, _timeout_fallback)
 
     def schedule_smart_scroll_to_bottom(self) -> None:
         """
-        Deferred smart scroll: only scroll to bottom if the user is already
-        near the bottom (within 80px), BUT wait for the vadjustment 'changed'
-        signal before scrolling so we read the post-layout upper.
+        Scroll to the bottom only if the reader is already within 80px.
 
-        The proximity check uses the pre-append (stale) upper, which is fine:
-        we're measuring 'where is the user right now?' not 'where will the
-        new bottom be after layout?'. If the user was near the bottom before
-        the card was added, they want to see the new card.
+        The proximity check uses the pre-append upper: it measures where
+        the reader is now, not where the new card will land.
         """
         if self._feed_scroll is None:
             return
         vadj = self._feed_scroll.get_vadjustment()
         if vadj is None:
             return
-        current = vadj.get_value()
-        upper = vadj.get_upper()
-        page_size = vadj.get_page_size()
-        distance_from_bottom = upper - page_size - current
-        if distance_from_bottom >= 80:
-            # User has scrolled up to read old cards — don't auto-scroll.
+        if self._distance_from_bottom(vadj) > self._BOTTOM_THRESHOLD:
             return
-        # User is near the bottom — defer the actual scroll until layout settles.
         self.schedule_scroll_to_bottom()
 
     def _on_scroll_mapped(self, scroll_window):
         """
-        Handler for the ScrolledWindow's 'map' signal — fires when the widget
-        becomes visible. Used to scroll to the bottom whenever the Feed tab
-        is shown, including after a notebook tab switch.
+        Feed tab became visible.
 
-        Why this exists: GTK4 may reset the ScrolledWindow's vadjustment to 0
-        when the widget goes hidden→visible (e.g. switching tabs in the
-        parent Notebook). Without this handler, the user lands at the top
-        of the feed even though they were just at the bottom.
-
-        Implementation: schedule_scroll_to_bottom() defers the actual scroll
-        via the vadjustment 'changed' signal so we read the post-layout
-        upper. Returning False from a 'map' handler is a no-op — the signal
-        handler return value is ignored.
+        GTK may reset value to 0 while the tab is hidden. If the reader
+        was caught up, settle on the newest card. If they were reading
+        higher up, put the viewport back at the saved offset.
         """
-        self.schedule_scroll_to_bottom()
+        if self._was_near_bottom:
+            self.schedule_scroll_to_bottom()
+            return False
+        if self._feed_scroll is None:
+            return False
+        vadj = self._feed_scroll.get_vadjustment()
+        if vadj is None:
+            return False
+        # BUG#2 (audit fix): a settle armed BEFORE the tab was hidden (project-
+        # open smart scroll, eviction, or an earlier append) may still be
+        # pending. Restoring `_saved_value` alone is not enough — the stale
+        # settle later fires and yanks the reader to the bottom. Cancel it and
+        # disarm the changed handler BEFORE the restore. (The near-bottom branch
+        # is clean: schedule_scroll_to_bottom cancels prior settles internally.)
+        self._cancel_settle()
+        self._disarm_scroll(vadj)
+        lower = vadj.get_lower() if hasattr(vadj, "get_lower") else 0.0
+        restored = min(max(self._saved_value, lower), self._bottom_value(vadj))
+        vadj.set_value(restored)
         return False
 
     def get_vadjustment(self):
@@ -445,7 +531,7 @@ class FeedTab(Gtk.Box):
         vadj = self.get_vadjustment()
         if vadj is None:
             return True                       # nothing rendered: eviction is safe
-        return (vadj.get_upper() - vadj.get_page_size() - vadj.get_value()) < slack
+        return (vadj.get_upper() - vadj.get_page_size() - vadj.get_value()) <= slack
 
     def is_above_viewport(self, widget) -> bool:
         """True when `widget` lies entirely above the visible region.

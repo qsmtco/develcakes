@@ -9,6 +9,7 @@ GLib = pytest.importorskip("gi.repository.GLib")
 
 
 from ui.views.chat_surface import (
+    _BOTTOM_SCRIPT,
     TextViewFallback,
     _cap_row_html,
     _document,
@@ -915,6 +916,21 @@ class TestFallbackAutoscroll:
         assert s._follow_source is None
         assert not vadj.handler_is_connected(hid)
 
+    def test_fallback_scroll_to_latest_drives_to_bottom(self, monkeypatch):
+        """SPEC-17 SP1.3: the fallback's scroll_to_latest keeps today's
+        behavior — arm the follow intent and drive the adjustment to the
+        bottom, with NO document script (the fallback has no webview)."""
+        s, vadj = self._fallback(monkeypatch)
+        vadj.set_value(50.0)  # reading up top
+        self._pump_frames()
+        assert s._was_at_bottom is False
+        assert not hasattr(s, "_document_eval")  # no script path at all
+        s.scroll_to_latest()
+        assert s._was_at_bottom is True  # follow intent armed
+        self._pump_frames()              # deferred follow runs
+        assert vadj.get_value() == vadj.get_upper()
+        s.destroy()
+
 
 class TestFallbackChromeParity:
     """SPEC-14 §2a.5: TextViewFallback accepts agent_color for signature
@@ -950,11 +966,20 @@ def _surface_supports_smart_scroll() -> bool:
 
 
 @pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
-class TestSmartScroll:
-    """MICRO smart-scroll. The WebKit full-document reload collapses content
-    height mid-load → the vadjustment clamps → the view snaps to top on EVERY
-    append. The fix tracks at-bottom on the surface's OWN vadjustment and
-    restores after the new height lands.
+class TestGtkRestoreMachinery:
+    """MICRO smart-scroll: the legacy GTK-adjustment capture/restore.
+
+    SPEC-17 SP1 retained this machinery (it is NOT the fix; the DOCUMENT
+    script is — see the TestSmartScroll below). Its contracts (cross-frame
+    settle, collapse guard, stable-frame count) are NOT invalidated by
+    SPEC-17, so these tests stay verbatim and keep pinning the retained
+    GTK path. They no longer constitute the "smart scroll" proof: a green
+    run here says nothing about the document position (the original bug).
+
+    The WebKit full-document reload collapses content height mid-load → the
+    vadjustment clamps → the view snaps to top on EVERY append. This
+    machinery tracks at-bottom on the surface's OWN vadjustment and restores
+    after the new height lands.
 
     Driving the real WebKit load is non-deterministic; per the established
     pattern (TestAgentPayloadCss.test_defaults_present_in_loaded_document_
@@ -984,6 +1009,14 @@ class TestSmartScroll:
 
         def _fake_load(doc):
             loads.append(doc)
+            # BUG#1 (audit fix): the real load is async — `_issue_load` arms
+            # `_load_in_flight` and it clears on FINISHED/load-failed. These
+            # GTK-machinery tests bypass real WebKit (they monkeypatch
+            # `_load_html` and never drive the document signals), so model the
+            # load as SYNCHRONOUSLY COMPLETE here; otherwise the gate would
+            # never release and later renders would defer. (The document-path
+            # signal lifecycle is covered by TestSmartScroll.)
+            s._load_in_flight = False
             # Reproduce the REAL failure mode: a full-document load collapses
             # WebKit content height mid-load → upper drops and the view clamps
             # to the top. Without this, the monkeypatch would not exercise the
@@ -1293,3 +1326,677 @@ class TestSmartScroll:
         assert len(s._pending_restore) == 2  # (was_at_bottom, captured_value)
         s.destroy()
 
+
+# ── SPEC-17 SP1: document scroll via evaluate_javascript ─────────────────
+
+
+@pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
+class TestSmartScroll:
+    """SPEC-17 SP1: scroll the DOCUMENT, not the outer adjustment.
+
+    The old tests above (TestGtkRestoreMachinery) drove the ScrolledWindow's
+    vadjustment — the WRONG object (WebKit does not implement Gtk.Scrollable;
+    the page scrolls inside the web view). This class retargets the proof to
+    the DOCUMENT script: after each full-document reload, the FINISHED handler
+    issues an `evaluate_javascript` script that sets `el.scrollTop`.
+
+    Harness: monkeypatch the ONE WebKit C-API seam (`_document_eval`) — the
+    test records every issued script and feeds back the pre-load READ payload
+    (the JSON string a real document would return). The real load is bypassed
+    via a `_load_html` monkeypatch (established file pattern); FINISHED is
+    dispatched by calling `_on_load_changed` directly (probe-verified to
+    match the signal's own dispatch). Assertions watch the SCRIPT STRING —
+    the spec is explicit that `vadj.get_value()` is NOT the proof.
+    """
+
+    def _surface(self, monkeypatch, *, fresh=False, read='{"y": 0, "atBottom": true}'):
+        """Build a surface with the eval seam recorded.
+
+        fresh=True leaves `_webview` None (the no-document path); otherwise a
+        sentinel stands in for the web view so `_do_render` takes the READ
+        path (the seam is monkeypatched, so no real WebKit call happens).
+        """
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias (no document scroll)")
+        from ui.views.chat_surface import ChatSurface
+
+        s = ChatSurface()
+        reads: list[str] = []
+        applies: list[str] = []
+        loads: list[str] = []
+        read_box = {"text": read}
+
+        def _fake_eval(script, callback):
+            if "JSON.stringify" in script:  # the SP1.1 read script
+                reads.append(script)
+                callback(read_box["text"])
+            else:  # an SP1.2 apply script
+                applies.append(script)
+                callback(None)
+
+        monkeypatch.setattr(s, "_document_eval", _fake_eval)
+        monkeypatch.setattr(s, "_load_html", lambda doc: loads.append(doc))
+        if not fresh:
+            s._webview = object()  # sentinel: a document is "loaded"
+        s._test_reads = reads
+        s._test_applies = applies
+        s._test_loads = loads
+        s._test_read = read_box
+        return s
+
+    def _finish(self, s):
+        """Dispatch FINISHED the way WebKit does (probe-verified)."""
+        s._on_load_changed(s._webview, WebKit.LoadEvent.FINISHED)
+
+    def test_at_bottom_append_issues_bottom_script(self, monkeypatch):
+        """At bottom + append → FINISHED issues the scrollHeight script.
+        Fails if that script is NOT issued (the spec's required assertion)."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)  # seed the loaded document
+        s._test_applies.clear()
+        # Reader at bottom (y near max).
+        s._test_read["text"] = '{"y": 900, "atBottom": true}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # READ runs → load
+        self._finish(s)         # FINISHED → bottom script
+        assert s._test_applies == [_BOTTOM_SCRIPT], (
+            "FINISHED did not issue the bottom (scrollHeight) script"
+        )
+        assert "el.scrollTop = el.scrollHeight" in s._test_applies[-1]
+        s.destroy()
+
+    def test_reading_preserves_captured_y(self, monkeypatch):
+        """Reading (atBottom false, y captured) → FINISHED sets scrollTop to
+        that y, NOT to scrollHeight."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+        s._test_read["text"] = '{"y": 300, "atBottom": false}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        assert len(s._test_applies) == 1
+        script = s._test_applies[-1]
+        assert "el.scrollTop = 300.0" in script  # Python-formatted NUMBER
+        assert "scrollHeight" not in script       # NOT the bottom script
+        assert script != _BOTTOM_SCRIPT
+        s.destroy()
+
+    def test_load_reset_to_top_does_not_cancel_follow(self, monkeypatch):
+        """The load forces the document to the top (y=0). FINISHED must use
+        the PRE-load intent — it must NOT re-read the (now top) position and
+        conclude the reader left the bottom. No extra read at FINISHED."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+        s._test_read["text"] = '{"y": 900, "atBottom": true}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        reads_before = len(s._test_reads)
+        # The load has reset the document to y=0 by now — if FINISHED re-read,
+        # it would see atBottom=false and issue a scrollTop=0 script instead.
+        self._finish(s)
+        assert len(s._test_reads) == reads_before, (
+            "FINISHED re-read the document position (the bug)"
+        )
+        assert s._test_applies == [_BOTTOM_SCRIPT]
+        s.destroy()
+
+    def test_first_message_read_fails_lands_at_bottom(self, monkeypatch):
+        """First message on a fresh surface (no web view → no read) → intent
+        is at-bottom and FINISHED scrolls to scrollHeight."""
+        s = self._surface(monkeypatch, fresh=True)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        assert s._pending_scroll == (True, 0.0)  # armed before the load
+        assert s._test_reads == []               # no document to read
+        self._finish(s)
+        assert s._test_applies == [_BOTTOM_SCRIPT]
+        s.destroy()
+
+    def test_malformed_read_payload_falls_back_to_at_bottom(self, monkeypatch):
+        """A malformed/timed-out read → (True, 0.0) → FINISHED scrolls to the
+        bottom (fail-safe, never strands the reader at the top)."""
+        s = self._surface(monkeypatch, read="not-json{")
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        assert s._pending_scroll == (True, 0.0)  # parse failure → fail-safe
+        self._finish(s)
+        assert s._test_applies == [_BOTTOM_SCRIPT]
+        s.destroy()
+
+    def test_scroll_to_latest_issues_bottom_and_arms_follow(self, monkeypatch):
+        """scroll_to_latest: issues the bottom script NOW and arms the intent
+        (the next append follows)."""
+        s = self._surface(monkeypatch, read='{"y": 300, "atBottom": false}')
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+        s.scroll_to_latest()
+        assert s._test_applies == [_BOTTOM_SCRIPT]  # ran the bottom script now
+        assert s._pending_scroll == (True, 0.0)     # armed the follow intent
+        assert s._was_at_bottom is True
+        # After the "go to latest" script the document IS at the bottom, so
+        # the next read reports it → the next append follows.
+        s._test_read["text"] = '{"y": 1100, "atBottom": true}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        s._test_applies.clear()
+        self._finish(s)
+        assert s._test_applies == [_BOTTOM_SCRIPT]
+        s.destroy()
+
+    def test_scroll_to_latest_without_document_only_arms_intent(self, monkeypatch):
+        """No document yet → scroll_to_latest stores the intent only; the
+        next FINISHED lands at the bottom."""
+        s = self._surface(monkeypatch, fresh=True)
+        s.scroll_to_latest()
+        assert s._test_applies == []            # nothing to script yet
+        assert s._pending_scroll == (True, 0.0)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        assert s._test_applies == [_BOTTOM_SCRIPT]
+        s.destroy()
+
+    def test_dirty_row_mid_load_schedules_rerender(self, monkeypatch):
+        """A row that arrived while the load was in flight must not be
+        dropped — FINISHED schedules one more render."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()          # READ + load (in flight)
+        s._dirty = True             # a row arrived mid-load
+        s._render_pending = False
+        self._finish(s)                 # FINISHED must re-arm the render
+        assert s._render_pending is True
+        s.destroy()
+
+    def test_read_in_flight_coalesces_to_one_load(self, monkeypatch):
+        """SP1.1 coalescing: while a pre-load READ is in flight, a second
+        rendered append must NOT issue a second read+load — the in-flight
+        callback loads the CURRENT rows (one load, one slot)."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_reads.clear()
+        s._test_loads.clear()
+
+        # Issue the first read but DO NOT complete it (simulate in-flight):
+        # monkeypatch _document_eval to record and NOT call back yet.
+        pending = []
+        monkeypatch.setattr(s, "_document_eval", lambda script, cb: pending.append((script, cb)))
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()          # issues read #1, _read_in_flight=True
+        assert s._read_in_flight is True
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()          # must be swallowed by the in-flight guard
+        assert len(pending) == 1, "issued a second read while one was in flight"
+        # Completing the in-flight read loads the CURRENT rows (m2 + m3).
+        _script, cb = pending[0]
+        cb('{"y": 0, "atBottom": true}')
+        assert s._read_in_flight is False
+        assert len(s._test_loads) == 1
+        assert "m3" in s._test_loads[0]  # the row that arrived mid-read survives
+        s.destroy()
+
+    def test_second_append_during_load_defers_to_finished_kick(self, monkeypatch):
+        """BUG#1 (audit fix): while a LOAD is in flight (read completed, load
+        issued, FINISHED still pending), a second append must NOT issue a
+        second read+load. Doing so overwrites the single `_pending_scroll`
+        slot, so the first load's FINISHED consumes the SECOND's intent and
+        the second load's FINISHED finds `None` — the reader strands at the
+        top of the newest document. The append must instead stay dirty so the
+        FINISHED kick re-renders it."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)  # seed the loaded document
+        s._test_reads.clear()
+        s._test_loads.clear()
+        s._test_read["text"] = '{"y": 900, "atBottom": true}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # read 1 → load 1 issued (in flight)
+        assert len(s._test_loads) == 1
+        assert s._load_in_flight is True
+        reads_after_load1 = len(s._test_reads)
+
+        # A second append arrives while load 1 is in flight.
+        s._test_read["text"] = '{"y": 300, "atBottom": false}'
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()
+
+        # PRE-FIX these fail: a second read+load IS issued, overwriting intent.
+        assert len(s._test_reads) == reads_after_load1, "issued a second read mid-load"
+        assert len(s._test_loads) == 1, "issued a second load mid-load"
+        assert s._dirty is True, "the mid-load append must stay dirty for the kick"
+        s.destroy()
+
+    def test_finished_applies_original_intent_then_kicks_fresh_render(self, monkeypatch):
+        """BUG#1 continued: load 1's FINISHED applies READ-1's intent (not the
+        overwritten read-2 intent), then the dirty-kick issues a FRESH read+load
+        for the mid-load row. FINALLY both loads get an apply."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_reads.clear()
+        s._test_loads.clear()
+        s._test_applies.clear()
+
+        s._test_read["text"] = '{"y": 900, "atBottom": true}'   # read-1 intent
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()                                       # read 1 → load 1
+        s._test_read["text"] = '{"y": 300, "atBottom": false}'  # read-2 intent (fresh)
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()                                       # deferred (in flight)
+
+        # FINISHED load 1 → apply READ-1's intent (at-bottom), then kick.
+        self._finish(s)
+        assert s._test_applies == [_BOTTOM_SCRIPT], (
+            "load 1 must apply READ-1's intent, not the overwritten read-2 intent"
+        )
+        assert s._render_pending is True, "the dirty-kick must schedule a re-render"
+
+        s._drain_renders()  # the kick issues a FRESH read 2 + load 2
+        assert len(s._test_loads) == 2
+        assert len(s._test_reads) == 2
+        assert s._load_in_flight is True
+
+        # FINISHED load 2 → apply READ-2's intent (reading offset 300).
+        self._finish(s)
+        assert len(s._test_applies) == 2, "BOTH loads must get an apply"
+        assert "el.scrollTop = 300.0" in s._test_applies[-1]
+        s.destroy()
+
+    def test_load_failed_clears_in_flight_flag(self, monkeypatch):
+        """BUG#1 wedge guard: a load that fails never reaches FINISHED. Without
+        clearing the in-flight flag on the failure signal, every later render
+        defers forever. Adapted to the REAL API — WebKit 6.0 has no
+        `WebKit.LoadEvent.FAILED`; the failure signal is `load-failed`
+        (probe-verified)."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        assert s._load_in_flight is True
+        reads_before = len(s._test_reads)
+
+        # The real failure signal clears the flag.
+        s._on_load_failed(s._webview, WebKit.LoadEvent.STARTED, "about:blank", None)
+        assert s._load_in_flight is False
+
+        # A subsequent append is NOT wedged — its render issues a fresh load.
+        s._test_read["text"] = '{"y": 0, "atBottom": true}'
+        s.append_message("agent", "<p>m3</p>", "Coder")
+        s._drain_renders()
+        assert len(s._test_reads) == reads_before + 1, "render wedged after a failed load"
+        assert len(s._test_loads) == 3  # m1, m2, m3 — all three loaded
+        s.destroy()
+
+    def test_load_failed_signal_is_connected(self):
+        """BUG#1 wiring (Rule 5): `_ensure_webview` must actually connect the
+        `load-failed` signal, or the flag never clears on a real failure."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        s._ensure_webview()
+        assert s._load_failed_handler_id
+        assert s._webview.handler_is_connected(s._load_failed_handler_id)
+        s.destroy()
+
+    def test_finished_after_destroy_issues_nothing(self, monkeypatch):
+        """A late FINISHED on a destroyed surface must issue no script."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        s._test_applies.clear()
+        s.destroy()
+        s._on_load_changed(None, WebKit.LoadEvent.FINISHED)
+        assert s._test_applies == []
+
+    # ── FIX ROUND 2 (Debugger re-audit): wedge-guard hardening ───────────
+
+    def test_web_process_terminated_releases_gate_and_renders(self, monkeypatch):
+        """FIX ROUND 2 (BUG#1b, HIGH): a web-process crash (or OOM kill) fires
+        `web-process-terminated` and reaches NEITHER `load-failed` NOR FINISHED
+        — without a handler the gate stuck and every later render deferred
+        (auditor: 2/5 robust trials wedged). Drive the REAL signal
+        (`WebView.emit`, arity `(view, reason)` — probe-verified) on a real web
+        view whose handler `_ensure_webview` connected; assert the gate clears
+        AND a waiting dirty row re-renders (the WebView recovers on the fresh
+        load)."""
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        loads, reads, applies = [], [], []
+
+        def _fake_eval(script, callback):
+            if "JSON.stringify" in script:
+                reads.append(script)
+                callback('{"y": 0, "atBottom": true}')
+            else:
+                applies.append(script)
+                callback(None)
+
+        monkeypatch.setattr(s, "_document_eval", _fake_eval)
+        monkeypatch.setattr(s, "_load_html", lambda doc: loads.append(doc))
+        s._ensure_webview()  # REAL web view — connects web-process-terminated
+        assert s._web_process_handler_id
+        assert s._webview.handler_is_connected(s._web_process_handler_id)
+
+        s._load_in_flight = True  # a load is in flight (as after _issue_load)
+        s._dirty = True           # a row is waiting on the deferred render
+        s._render_pending = False
+
+        s._webview.emit(
+            "web-process-terminated",
+            WebKit.WebProcessTerminationReason.CRASHED,
+        )
+        assert s._load_in_flight is False, "gate not released on a web-process crash"
+        assert s._render_pending is True, "dirty row not re-rendered after the crash"
+
+        s._drain_renders()  # the kicked render issues a fresh load (recovery)
+        assert loads, "no fresh load issued after the crash kick"
+        s.destroy()
+
+    def test_raising_load_releases_gate(self, monkeypatch):
+        """FIX ROUND 2 (BUG#1a): `_load_html` can RAISE (probe: `load_html(None,
+        ...)` raises). The flag is armed BEFORE the call, so an escaping
+        exception left the gate set forever (deterministic wedge) and escaped
+        the idle callback. Assert: no exception escapes, the gate clears, and a
+        later append renders (not wedged)."""
+        s = self._surface(monkeypatch)
+        calls = {"n": 0}
+
+        def _load(doc):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("load_html failed")
+            s._test_loads.append(doc)
+
+        monkeypatch.setattr(s, "_load_html", _load)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()  # _issue_load → _load raises → must NOT escape
+        assert s._load_in_flight is False, "gate stuck after a raising load"
+
+        # A dirty row re-renders on the next drain (the surface is not wedged).
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        assert len(s._test_loads) == 1, "surface wedged after a raising load"
+        s.destroy()
+
+        # Direct pin of the kick-if-dirty branch: with a row already waiting, a
+        # raising load must re-arm the render instead of stranding it.
+        s2 = self._surface(monkeypatch)
+
+        def _boom(doc):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(s2, "_load_html", _boom)
+        s2._dirty = True
+        s2._render_pending = False
+        s2._issue_load("<doc>")  # must NOT raise
+        assert s2._load_in_flight is False
+        assert s2._render_pending is True, "raising load stranded a dirty row"
+        s2.destroy()
+
+    def test_load_failed_then_finished_still_applies_intent(self, monkeypatch):
+        """FIX ROUND 2 (BUG#1c): a failed NAVIGATION's `load-failed` is
+        immediately followed by FINISHED (probe CASE B). Clearing the intent in
+        `_on_load_failed` made that FINISHED apply NOTHING (probe D: intent
+        (True, 900) → applies=0). The gate must clear, the intent must SURVIVE,
+        and the trailing FINISHED must issue the apply script."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+
+        s._test_read["text"] = '{"y": 900, "atBottom": true}'
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # read → intent (True, 900.0) → load in flight
+        assert s._pending_scroll == (True, 900.0)
+
+        # Failed navigation: load-failed fires, then FINISHED (probe CASE B).
+        s._on_load_failed(s._webview, WebKit.LoadEvent.STARTED, "about:blank", None)
+        assert s._load_in_flight is False
+        assert s._pending_scroll == (True, 900.0), "load-failed clobbered the intent"
+
+        self._finish(s)  # the trailing FINISHED must still apply the intent
+        assert s._test_applies == [_BOTTOM_SCRIPT], (
+            "FINISHED after load-failed applied nothing (the intent was cleared)"
+        )
+        s.destroy()
+
+    def test_finished_with_no_pending_still_kicks_dirty(self, monkeypatch):
+        """FIX ROUND 2 (BUG#2, LOW): `_on_load_changed`'s `if pending is None:
+        return` ran BEFORE the dirty-kick — with pending=None, dirty=True the
+        row rendered only on a FUTURE append (delayed, not lost). The kick must
+        run regardless of the intent's presence."""
+        s = self._surface(monkeypatch)
+        s._load_in_flight = True
+        s._pending_scroll = None
+        s._dirty = True
+        s._render_pending = False
+        self._finish(s)
+        assert s._load_in_flight is False
+        assert s._render_pending is True, (
+            "FINISHED with no pending intent skipped the dirty-kick"
+        )
+        s.destroy()
+
+    def test_scroll_to_latest_wins_over_in_flight_read(self, monkeypatch):
+        """FIX ROUND 2 (Issue #3): `scroll_to_latest` while a pre-load READ is
+        in flight — the read's STALE position must not clobber the user's
+        "go to latest" intent (probe B: (False, 300.0)). The next FINISHED must
+        apply `_BOTTOM_SCRIPT` (the user is not left mid-document)."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+
+        # Start a read and DON'T complete it (in-flight); continue recording
+        # applies so the FINISHED assertion below reads the real script.
+        pending = []
+
+        def _record_eval(script, callback):
+            if "JSON.stringify" in script:
+                pending.append((script, callback))
+            else:
+                s._test_applies.append(script)
+                callback(None)
+
+        monkeypatch.setattr(s, "_document_eval", _record_eval)
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()  # read #1 issued, _read_in_flight=True
+        assert s._read_in_flight is True
+        assert len(pending) == 1
+
+        # User presses "go to latest" while the read is in flight.
+        s.scroll_to_latest()
+        assert s._pending_scroll == (True, 0.0)
+
+        # The stale read completes with a NON-bottom position.
+        _script, cb = pending[0]
+        cb('{"y": 300, "atBottom": false}')
+
+        # FINISHED must apply the BOTTOM script — not scrollTop=300.
+        self._finish(s)
+        assert s._test_applies and s._test_applies[-1] == _BOTTOM_SCRIPT, (
+            f"stale read clobbered the go-to-latest intent: {s._test_applies!r}"
+        )
+        s.destroy()
+
+    def test_scroll_override_survives_web_process_crash(self, monkeypatch):
+        """ROUND 3 (closure audit BUG#1, LOW): button intent armed while a read
+        is in flight, then the web process crashes — `_on_web_process_terminated`
+        clears the intent but left `_scroll_override` armed. The completing read
+        took the override branch and KEPT a None intent → FINISHED applied
+        NOTHING (the button's scroll silently dropped; probe-confirmed). The
+        override branch must self-heal to the bottom intent (the button wins,
+        SP1.3 ruling)."""
+        s = self._surface(monkeypatch)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()
+        self._finish(s)
+        s._test_applies.clear()
+
+        pending = []
+
+        def _record_eval(script, callback):
+            if "JSON.stringify" in script:
+                pending.append((script, callback))
+            else:
+                s._test_applies.append(script)
+                callback(None)
+
+        monkeypatch.setattr(s, "_document_eval", _record_eval)
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        assert len(pending) == 1
+
+        # "Go to latest" pressed while the read is in flight.
+        s.scroll_to_latest()
+        assert s._scroll_override is True
+
+        # Web-process crash mid-read: intent cleared, read still completes.
+        s._on_web_process_terminated(s._webview, None)
+        assert s._pending_scroll is None
+        _script, cb = pending[0]
+        cb('{"y": 300, "atBottom": false}')
+
+        # Self-heal: the override branch re-arms the bottom intent.
+        assert s._pending_scroll == (True, 0.0), (
+            "crash dropped the button's intent (override kept a None intent)"
+        )
+        self._finish(s)
+        assert s._test_applies and s._test_applies[-1] == _BOTTOM_SCRIPT
+        s.destroy()
+
+    def test_raising_load_on_render_path_requeues_the_row(self, monkeypatch):
+        """ROUND 3 (closure audit BUG#2, LOW): a raising `_load_html` on the
+        PRODUCTION `_do_render` path stranded the row — both call sites clear
+        `_dirty` BEFORE `_issue_load`, so the except-branch's `if self._dirty`
+        never fired (the old test set `_dirty` directly on the surface, a
+        state production callers never produce). The except branch must
+        re-queue UNCONDITIONALLY so the row renders on the next drain."""
+        s = self._surface(monkeypatch)
+        loads = s._test_loads
+        raised = []
+
+        def _raising_load(doc):
+            raised.append(doc)
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(s, "_load_html", _raising_load)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()  # read completes → _issue_load → raise
+        assert raised and s._load_in_flight is False
+        assert s._render_pending is True, (
+            "raising load left the row stranded — no re-queue on the render path"
+        )
+        # Recover with a sane load: the queued render must include the row.
+        monkeypatch.setattr(s, "_load_html", lambda doc: loads.append(doc))
+        s._drain_renders()
+        assert len(loads) == 1 and "<p>m1</p>" in loads[0]
+        s.destroy()
+
+    def test_persistent_raising_load_is_bounded(self, monkeypatch):
+        """ROUND 4 (spin latch): an UNCONDITIONALLY re-queued raising load is
+        a self-feeding idle loop — each iteration clears `_dirty`, calls
+        `_issue_load`, raises, re-queues (round-3 probe: ~4,500 attempts/sec,
+        unbounded). The one-shot latch caps self-triggered retries: a
+        persistent failure attempts the load at most TWICE, then waits. A
+        new append after a successful load clears the latch (recovery)."""
+        s = self._surface(monkeypatch)
+        loads = s._test_loads
+        state = {"raise": True, "attempts": 0}
+
+        def _flaky_load(doc):
+            state["attempts"] += 1
+            if state["raise"]:
+                raise RuntimeError("boom")
+            loads.append(doc)
+
+        monkeypatch.setattr(s, "_load_html", _flaky_load)
+        s.append_message("agent", "<p>m1</p>", "Coder")
+        s._drain_renders()  # attempt 1 raises → latch set → re-queued
+        assert state["attempts"] == 1
+        assert s._load_retry_pending is True
+
+        # The re-queued render: attempt 2 raises again — latch blocks the
+        # re-queue this time. NO further attempts, bounded.
+        s._drain_renders()
+        assert state["attempts"] == 2
+        assert s._load_retry_pending is True
+        assert s._render_pending is False, "latch failed — spin continues"
+
+        # PERSISTENT failure must stay bounded across many drains.
+        for _ in range(10):
+            s._drain_renders()
+        assert state["attempts"] == 2, "unbounded re-queue spin (latch broken)"
+
+        # Recovery: the raise clears → the NEXT append retries and succeeds,
+        # clearing the latch for future failures.
+        state["raise"] = False
+        s.append_message("agent", "<p>m2</p>", "Coder")
+        s._drain_renders()
+        assert state["attempts"] == 3 and len(loads) == 1
+        assert s._load_retry_pending is False
+        s.destroy()
+
+    def test_document_eval_runs_in_named_isolated_world(self, monkeypatch):
+        """The C-API deviation: with JS OFF, evaluate_javascript must target a
+        NAMED world (a None world is the disabled MAIN world, which raises
+        error 699). Pins `_DOC_WORLD` usage inside the real `_document_eval`."""
+        from ui.views import chat_surface as cs
+
+        calls = []
+        s = cs.ChatSurface()
+        fake_view = type("V", (), {
+            "evaluate_javascript": lambda self, *a: calls.append(a),
+        })()
+        monkeypatch.setattr(s, "_ensure_webview", lambda: fake_view)
+        # A multibyte script makes byte-length != char-length — a mutant that
+        # passes len(script) (chars) fails the byte-length assertion below.
+        script_in = "/* — · — */"
+        s._document_eval(script_in, lambda _t: None)
+        assert calls, "evaluate_javascript was not called"
+        script, length, world = calls[0][0], calls[0][1], calls[0][2]
+        assert script == script_in
+        assert length == len(script_in.encode("utf-8"))
+        assert length != len(script_in)  # non-tautological: proves bytes
+        assert world == cs._DOC_WORLD and world is not None
+        s.destroy()
+
+    def test_read_script_uses_bottom_threshold_constant(self, monkeypatch):
+        """SP1.1: the 80 MUST come from `_BOTTOM_THRESHOLD` (interpolated as
+        a number), never a second literal. Change the constant → the script
+        changes (kills a hardcoded-80 mutant)."""
+        from ui.views import chat_surface as cs
+
+        s = cs.ChatSurface()
+        assert f"<= {cs.ChatSurface._BOTTOM_THRESHOLD:g}" in s._read_scroll_script()
+        monkeypatch.setattr(cs.ChatSurface, "_BOTTOM_THRESHOLD", 123.0, raising=False)
+        assert "<= 123" in s._read_scroll_script()
+        assert "<= 80" not in s._read_scroll_script()
+        s.destroy()

@@ -37,6 +37,7 @@
 # ruling) allowlists exactly this vocabulary.
 
 import html
+import json
 import logging
 import re
 from collections import deque
@@ -128,6 +129,31 @@ button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
 """
 
 _TAG_STRIP_RE = re.compile(r"<[^>]*>")
+
+# ── SPEC-17 SP1: document scroll (app-side evaluate_javascript) ───────────
+#
+# C-API PROBE (2026-10-07, xvfb, WebKit 6.0/GI 3.48.2): with
+# `settings.set_enable_javascript(False)` (the ruling, kept), calling
+# `evaluate_javascript(script, len, world_name=None, ...)` raises
+# `WebKitJavascriptError: Cannot execute JavaScript in this document (699)`.
+# The spec's "world_name may be None" was WRONG on this box — a None world
+# resolves to the MAIN world, which is disabled. In a NAMED ISOLATED WORLD
+# the app-side script DOES run while page content stays non-scriptable: a
+# probe page with an inline `<script>window.__pwn=...</script>` reported
+# `{pwn: null}` and `el.scrollTop = el.scrollHeight` moved the shared DOM
+# (`{y:7408,max:7408}`). So the fix keeps JS off for CONTENT and evaluates in
+# this isolated world. (Deviation from spec §SP1.1 recorded in the report.)
+_DOC_WORLD = "develcakes-scroll"
+
+# SPEC-17 SP1.2: the at-bottom apply script. `scrollingElement` is the
+# document's scroll container; `scrollHeight` is its full height, so this
+# lands on the newest row (the LAST body element — order is unchanged).
+_BOTTOM_SCRIPT = (
+    "(function () {"
+    "  var el = document.scrollingElement || document.documentElement;"
+    "  el.scrollTop = el.scrollHeight;"
+    "})();"
+)
 
 # SPEC-14 §2a.2 security gate. NOTE the deviation: the spec writes the gate as
 # `^#[0-9a-fA-F]{6}$`, but Python's `$` also matches BEFORE a trailing newline,
@@ -301,6 +327,44 @@ class ChatSurface(Gtk.Box):
             self._bottom_adj = None
             self._bottom_handler_id = 0
             self._restore_handler_id = 0
+        # SPEC-17 SP1: the DOCUMENT-scroll pending intent (the fix). SINGLE
+        # slot — `(at_bottom: bool, y: float)`. Depends on the DOCUMENT
+        # position, captured by a pre-load READ (SP1.1) and consumed by the
+        # FINISHED handler (SP1.2) after each full-document reload. It is
+        # DELIBERATELY separate from `_pending_restore` above (the legacy GTK
+        # machinery, retained but not the fix).
+        self._pending_scroll: tuple[bool, float] | None = None
+        # SPEC-17 SP1.1 coalescing: True between issuing the pre-load READ and
+        # its callback. The load is deferred to the callback, so an append
+        # that arrives meanwhile must NOT issue a second read+load — it leaves
+        # `_dirty` set, and the callback's FINISHED kick re-renders ("coalesced
+        # appends still produce one load").
+        self._read_in_flight = False
+        # BUG#1 (audit fix, SPEC-17): True between issuing a full-document load
+        # and its terminal event (FINISHED, or the failure signal). While set,
+        # `_do_render` defers (sets `_dirty`) instead of issuing another
+        # read+load — the queued-load race: a second load's read overwrites the
+        # single `_pending_scroll` slot, so the FIRST load's FINISHED consumes
+        # the SECOND's intent and the SECOND's FINISHED finds None → the reader
+        # strands at the top of the newest document. Set in ONE place
+        # (`_issue_load`); cleared on FINISHED and on `load-failed`.
+        self._load_in_flight = False
+        # ROUND 4 (spin latch): one-shot retry latch for the raising-load
+        # re-queue (see `_issue_load`); cleared on a successful load, reset
+        # on destroy.
+        self._load_retry_pending = False
+        self._load_changed_handler_id = 0
+        self._load_failed_handler_id = 0
+        # FIX ROUND 2 (Issue #3): a `scroll_to_latest()` that lands while a
+        # pre-load READ is in flight must WIN over the stale position that read
+        # captured. Set only while `_read_in_flight`; consumed (cleared) by the
+        # read callback, which then keeps the (True, 0.0) bottom intent instead
+        # of the stale y. Cleared on destroy too. (O(1) override flag — no new
+        # state class.)
+        self._scroll_override = False
+        # FIX ROUND 2 (BUG#1b): `web-process-terminated` handler id (the crash
+        # signal — reaches NEITHER FINISHED nor load-failed).
+        self._web_process_handler_id = 0
         self.set_vexpand(True)
         self.set_hexpand(True)
         self.append(self._scroll)
@@ -312,6 +376,27 @@ class ChatSurface(Gtk.Box):
             self._webview = WebKit.WebView()
             settings = self._webview.get_settings()
             settings.set_enable_javascript(False)  # JS OFF (ruling R2)
+            # SPEC-17 SP1.2: connect `load-changed` ONCE, on this web view.
+            # FINISHED is when the document is laid out and the post-load
+            # scroll can be issued (SP1.2).
+            self._load_changed_handler_id = self._webview.connect(
+                "load-changed", self._on_load_changed
+            )
+            # BUG#1 (audit fix): the real failure signal clears the
+            # `_load_in_flight` gate (WebKit 6.0 has no LoadEvent.FAILED —
+            # probe-verified; `load-failed` is the failure mechanism).
+            self._load_failed_handler_id = self._webview.connect(
+                "load-failed", self._on_load_failed
+            )
+            # FIX ROUND 2 (BUG#1b): a web-process CRASH (or OOM kill) fires
+            # `web-process-terminated` and reaches NEITHER `load-failed` NOR
+            # FINISHED — without this handler `_load_in_flight` sticks True and
+            # the surface defers every later render forever. Signal arity is
+            # `(view, reason)` (probe-verified: WebKitWebView, reason is a
+            # WebKit.WebProcessTerminationReason).
+            self._web_process_handler_id = self._webview.connect(
+                "web-process-terminated", self._on_web_process_terminated
+            )
             self._scroll.set_child(self._webview)
         return self._webview
 
@@ -437,23 +522,268 @@ class ChatSurface(Gtk.Box):
         return GLib.SOURCE_REMOVE
 
     def _do_render(self) -> bool:
-        """Coalesced render — runs at most once per idle cycle."""
+        """Coalesced render — runs at most once per idle cycle.
+
+        SPEC-17 SP1.1: BEFORE the load, capture the reader's DOCUMENT intent
+        (at-bottom + y) into the single pending slot `_pending_scroll`, then
+        load. The legacy GTK capture (`_pending_restore`) is retained
+        unchanged — it is not the fix.
+        """
         self._render_pending = False
         if self._destroyed:
             self._dirty = False
             return GLib.SOURCE_REMOVE
-        if self._dirty:
-            self._dirty = False
-            self._rebuild_count += 1
-            # MICRO smart-scroll: capture the intent BEFORE the load collapses
-            # content height. One slot — the LAST capture before a drain wins
-            # (rapid coalesced appends collapse to one render); a capture with
-            # no rows yet is the fresh-surface bottom-first case.
-            vadj = self._scroll.get_vadjustment()
-            if vadj is not None:
-                self._pending_restore = (self._was_at_bottom, vadj.get_value())
-            self._load_html(_document(list(self._rows)))
+        if not self._dirty:
+            return GLib.SOURCE_REMOVE
+        if self._read_in_flight or self._load_in_flight:
+            # A read OR a load is already in flight; its completion re-renders
+            # this append:
+            #   - `_read_in_flight`: the read callback loads the CURRENT rows
+            #     (which include this append) and clears `_dirty`.
+            #   - `_load_in_flight` (BUG#1): the FINISHED handler's dirty-kick
+            #     re-renders. Issuing another read/load here would overwrite
+            #     the single `_pending_scroll` slot (the queued-load race).
+            # Leave `_dirty` set so this append is not dropped.
+            self._dirty = True
+            return GLib.SOURCE_REMOVE
+        self._dirty = False
+        self._rebuild_count += 1
+        # Legacy GTK capture (MICRO smart-scroll, retained, NOT the fix):
+        # capture the adjustment intent before the load collapses the height.
+        vadj = self._scroll.get_vadjustment()
+        if vadj is not None:
+            self._pending_restore = (self._was_at_bottom, vadj.get_value())
+        # SPEC-17 SP1.1: capture the DOCUMENT intent.
+        if self._webview is None:
+            # No web view yet — a fresh surface's first paint lands at the
+            # bottom. Store at-bottom and load (no document to read).
+            self._pending_scroll = (True, 0.0)
+            self._issue_load(_document(list(self._rows)))
+            return GLib.SOURCE_REMOVE
+        # A document is already loaded — read its position FIRST; the read
+        # callback stores the intent and THEN loads (spec: do not load until
+        # the read finishes or fails).
+        self._read_in_flight = True
+        self._document_eval(self._read_scroll_script(), self._on_scroll_read)
         return GLib.SOURCE_REMOVE
+
+    def _issue_load(self, doc: str) -> None:
+        """BUG#1 (audit fix): the ONE place that arms `_load_in_flight` before
+        a REAL load. Set here, NOT inside `_load_html` (the test monkeypatch
+        seam), so the flag semantics survive monkeypatching. Every document
+        load routes through this method.
+
+        FIX ROUND 2 (BUG#1a): `_load_html` can RAISE (probe: `load_html(None,
+        ...)` raises). The flag is armed BEFORE the call, so an escaping
+        exception would leave it set forever → deterministic wedge. Catch it,
+        clear the gate, log (house idle-callback discipline: an exception here
+        would otherwise kill the render loop), and kick a re-render if a row is
+        waiting so the append is not stranded.
+        """
+        self._load_in_flight = True
+        try:
+            self._load_html(doc)
+            # ROUND 4 (spin latch): success clears the one-shot retry latch,
+            # so the NEXT failure gets its own single retry.
+            self._load_retry_pending = False
+        except Exception:
+            logger.exception("chat surface: document load raised")
+            self._load_in_flight = False
+            # ROUND 4 (spin latch): the re-queue is a ONE-SHOT retry. Round 3
+            # re-queued UNCONDITIONALLY — a persistently-raising load re-fed
+            # itself (~4,500 idle iterations/sec, probe-verified). Round 2's
+            # `if self._dirty` never fired (call sites clear `_dirty` before
+            # this call) and STRANDED the row instead. Both wrong. The latch
+            # caps self-triggered retries at one; NEW rows arriving later
+            # still re-queue normally (the latch only gates the except
+            # branch's own kick).
+            if not self._load_retry_pending:
+                self._load_retry_pending = True
+                self._schedule_render()
+
+    def _on_web_process_terminated(self, view, reason) -> None:
+        """FIX ROUND 2 (BUG#1b, HIGH): a web-process crash/OOM-kill fires
+        `web-process-terminated`, which reaches NEITHER `load-failed` NOR
+        FINISHED (probe-verified: 2/5 robust trials wedged). Clear the gate so
+        later renders are not deferred forever, and clear the stale intent — a
+        crashed web process consumed nothing. Kick a re-render if a row is
+        waiting (the WebView recovers on the next fresh load — probe-verified).
+
+        Signal arity `(view, reason)`; `reason` is a
+        `WebKit.WebProcessTerminationReason` (unused here).
+        """
+        self._load_in_flight = False
+        self._pending_scroll = None
+        if self._destroyed:
+            return
+        if self._dirty:
+            self._schedule_render()
+
+    # ── SPEC-17 SP1: document scroll ──
+    def _read_scroll_script(self) -> str:
+        """SP1.1 pre-load read. The threshold is `_BOTTOM_THRESHOLD`,
+        interpolated as a NUMBER (`:g` → "80") — never a second literal."""
+        return (
+            "(function () {"
+            "  var el = document.scrollingElement || document.documentElement;"
+            "  var y = el.scrollTop || 0;"
+            "  var max = Math.max(0, el.scrollHeight - el.clientHeight);"
+            f"  var atBottom = (max - y) <= {self._BOTTOM_THRESHOLD:g};"
+            "  return JSON.stringify({y: y, atBottom: atBottom});"
+            "})();"
+        )
+
+    def _scroll_to_script(self, y: float) -> str:
+        """SP1.2 reading-preserve apply. `y` is formatted by PYTHON as a
+        number — never a string interpolated from the page."""
+        return (
+            "(function () {"
+            "  var el = document.scrollingElement || document.documentElement;"
+            f"  el.scrollTop = {y!r};"
+            "})();"
+        )
+
+    @staticmethod
+    def _parse_scroll_read(text) -> tuple[bool, float]:
+        """SP1.1: parse the read payload. ANY exception, timeout (missing
+        callback → text None), or malformed payload → (True, 0.0)."""
+        try:
+            data = json.loads(text)
+            return (bool(data["atBottom"]), float(data["y"]))
+        except (TypeError, ValueError, KeyError):
+            return (True, 0.0)
+
+    def _on_scroll_read(self, value_text) -> None:
+        """Read callback (SP1.1): store the intent, THEN load.
+
+        Clears `_dirty` at LOAD time (mirroring `_do_render`'s synchronous
+        path): the load below includes every row currently in `self._rows`,
+        including any appended during the async read gap. Only an append
+        AFTER this load (before FINISHED) re-sets `_dirty` and gets the
+        SP1.2 re-render kick — so a coalesced batch still produces one load.
+
+        FIX ROUND 2 (Issue #3): if `scroll_to_latest()` was pressed while this
+        read was in flight, the read's (stale) position must NOT clobber the
+        user's "go to latest" intent — honour the override and keep the armed
+        `(True, 0.0)` bottom intent (the next FINISHED then applies
+        `_BOTTOM_SCRIPT`).
+        """
+        self._read_in_flight = False
+        if self._scroll_override:
+            self._scroll_override = False  # consumed — keep the armed intent
+            # ROUND 3 (closure audit BUG#1): the override protects an intent
+            # that a crash may have cleared (`_on_web_process_terminated`
+            # clears `_pending_scroll` but not the override). Self-heal to the
+            # bottom intent — the button always wins (SP1.3 ruling).
+            if self._pending_scroll is None:
+                self._pending_scroll = (True, 0.0)
+        else:
+            self._pending_scroll = self._parse_scroll_read(value_text)
+        if self._destroyed:
+            return
+        self._dirty = False
+        self._issue_load(_document(list(self._rows)))
+
+    def _on_load_changed(self, view, event) -> None:
+        """SP1.2: apply the captured intent when the load FINISHES.
+
+        We use the intent CAPTURED BEFORE the load — never the position read
+        now (the load has already forced the document to the top; reading it
+        here is exactly the bug).
+        """
+        if event != WebKit.LoadEvent.FINISHED:
+            return
+        if self._destroyed:
+            return
+        # BUG#1: the load reached its terminal event — release the gate so a
+        # deferred append can re-render. Cleared BEFORE the dirty-kick so the
+        # kicked render is not itself gated.
+        self._load_in_flight = False
+        pending = self._pending_scroll
+        if pending is not None:
+            at_bottom, y = pending
+            script = _BOTTOM_SCRIPT if at_bottom else self._scroll_to_script(y)
+            self._document_eval(script, lambda _text: None)
+            self._pending_scroll = None
+        # BUG#2 (audit fix round 2): the dirty-kick must run REGARDLESS of the
+        # intent's presence — with `pending=None, dirty=True` (e.g. a
+        # load-failed that never applied an intent) the row would otherwise
+        # render only on a FUTURE append (delayed, not lost).
+        if self._dirty:
+            self._schedule_render()
+
+    def _on_load_failed(self, view, event, uri, error) -> None:
+        """BUG#1 wedge guard: a load that FAILS never reaches FINISHED.
+
+        Without releasing the gate here, one load error leaves `_load_in_flight`
+        True forever and every later render defers → the surface wedges (no new
+        content ever renders).
+
+        NOTE (deviation from the phase instructions): the instructions name
+        `WebKit.LoadEvent.FAILED`, but WebKit 6.0 has NO such LoadEvent member
+        (only STARTED/REDIRECTED/COMMITTED/FINISHED — probe-verified). The real
+        failure mechanism is this `load-failed` SIGNAL, connected once in
+        `_ensure_webview`.
+
+        FIX ROUND 2 (BUG#1c): do NOT clear `_pending_scroll` here. On the real
+        API a failed *navigation*'s `load-failed` is immediately followed by
+        FINISHED (probe CASE B), which must still consume the pre-load intent;
+        clearing it here made that FINISHED apply NOTHING (probe D: intent
+        `(True, 900)` → applies=0). The gate is still cleared (harmless, and
+        correct for a load that genuinely never finishes).
+        """
+        self._load_in_flight = False
+        if self._destroyed:
+            return
+        if self._dirty:
+            self._schedule_render()
+
+    def _document_eval(self, script: str, callback) -> None:
+        """SP1 seam — the ONE place that touches the WebKit C API.
+
+        Runs `script` in a NAMED ISOLATED WORLD (`_DOC_WORLD`) and hands
+        `callback` the value's string form, or None on any failure. Page
+        JavaScript stays OFF (`set_enable_javascript(False)`); the isolated
+        world is what makes app-side evaluation legal (C-API probe note at
+        the top of this module). Tests monkeypatch THIS method.
+        """
+        def _finish(view, result, _data):
+            try:
+                text = view.evaluate_javascript_finish(result).to_string()
+            except Exception:  # noqa: BLE001 — any failure is a failed read
+                text = None
+            callback(text)
+
+        try:
+            view = self._ensure_webview()
+            view.evaluate_javascript(
+                script, len(script.encode("utf-8")), _DOC_WORLD,
+                None, None, _finish, None,
+            )
+        except Exception:
+            logger.debug("evaluate_javascript failed", exc_info=True)
+            callback(None)
+
+    def scroll_to_latest(self) -> None:
+        """SP1.3: the scroll-to-bottom button/API seam.
+
+        ALWAYS arms the follow intent (the user pressed "go to latest" — the
+        next append follows; a reader who wants to stop follows by scrolling
+        up, which re-arms the tracker non-follow). Runs the bottom script now
+        if a document is loaded; otherwise only stores the intent so the next
+        FINISHED lands at the bottom.
+        """
+        self._was_at_bottom = True
+        self._pending_scroll = (True, 0.0)
+        if self._read_in_flight:
+            # FIX ROUND 2 (Issue #3): a pre-load READ is in flight and will
+            # overwrite `_pending_scroll` with the STALE position it captured
+            # when it completes. Arm the override so that callback keeps the
+            # (True, 0.0) intent instead — the next FINISHED then applies
+            # `_BOTTOM_SCRIPT` (the user's "go to latest" wins).
+            self._scroll_override = True
+        if self._webview is not None:
+            self._document_eval(_BOTTOM_SCRIPT, lambda _text: None)
 
     def _schedule_render(self) -> None:
         """Coalesce: at most one pending render at any time."""
@@ -557,8 +887,38 @@ class ChatSurface(Gtk.Box):
         # DISCONNECT is the sole guard (so test_destroy_mid_load_no_restore
         # isolates disconnection; clearing it would mask a missing disconnect).
         if self._webview is not None:
+            # SPEC-17 SP1.2: disconnect load-changed so a late FINISHED (mid-
+            # load destroy) cannot issue a scroll script on a dead surface.
+            if self._load_changed_handler_id:
+                try:
+                    self._webview.disconnect(self._load_changed_handler_id)
+                except (TypeError, ValueError):  # already gone — non-fatal
+                    logger.debug("load-changed handler already disconnected")
+                self._load_changed_handler_id = 0
+            # BUG#1: likewise disconnect load-failed.
+            if self._load_failed_handler_id:
+                try:
+                    self._webview.disconnect(self._load_failed_handler_id)
+                except (TypeError, ValueError):  # already gone — non-fatal
+                    logger.debug("load-failed handler already disconnected")
+                self._load_failed_handler_id = 0
+            # FIX ROUND 2 (BUG#1b): disconnect web-process-terminated too — a
+            # late crash signal on a dead surface must not schedule a render.
+            if self._web_process_handler_id:
+                try:
+                    self._webview.disconnect(self._web_process_handler_id)
+                except (TypeError, ValueError):  # already gone — non-fatal
+                    logger.debug("web-process-terminated handler already disconnected")
+                self._web_process_handler_id = 0
             self._scroll.set_child(None)
             self._webview = None
+        # SPEC-17 SP1: the pending document intent is inert on a destroyed
+        # surface (all its consumers guard on _destroyed) — clear for hygiene.
+        self._pending_scroll = None
+        self._read_in_flight = False
+        self._load_in_flight = False
+        self._scroll_override = False
+        self._load_retry_pending = False
 
 
 class TextViewFallback(Gtk.Box):
@@ -692,6 +1052,18 @@ class TextViewFallback(Gtk.Box):
             return GLib.SOURCE_REMOVE
         vadj.set_value(vadj.get_upper() - vadj.get_page_size())
         return GLib.SOURCE_REMOVE
+
+    def scroll_to_latest(self) -> None:
+        """SPEC-17 SP1.3: parity with ChatSurface.scroll_to_latest.
+
+        The fallback appends in place (no document), so there is no script
+        to run: arm the follow intent and drive the adjustment to the bottom.
+        As with append, the drive is idle-deferred ("today's behavior" — GTK
+        updates `upper` a frame after the layout, so a synchronous read would
+        stop short); `_schedule_follow_bottom` is the existing one-place
+        mechanism and re-reads the (True) intent before moving."""
+        self._was_at_bottom = True
+        self._schedule_follow_bottom()
 
     def stream_delta(self, session_key: str, text: str, agent_name: str | None = None) -> None:
         self._stream_buffers.setdefault(session_key, []).append(text)

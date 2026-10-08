@@ -2049,12 +2049,12 @@ class _FakeAdjustment:
         self.disconnect_calls: list[int] = []
 
     def connect(self, signal: str, callback) -> int:
-        assert signal == "changed", (
+        assert signal in ("changed", "value-changed"), (
             f"_FakeAdjustment.connect: unexpected signal {signal!r}"
         )
         handler_id = self._next_id
         self._next_id += 1
-        self._handlers[handler_id] = callback
+        self._handlers[handler_id] = (signal, callback)
         return handler_id
 
     def disconnect(self, handler_id: int):
@@ -2064,8 +2064,24 @@ class _FakeAdjustment:
     def emit_changed(self):
         """Manually fire the 'changed' signal to all connected handlers."""
         # Copy the list because handlers may disconnect during iteration
-        for cb in list(self._handlers.values()):
-            cb(self)
+        for signal, cb in list(self._handlers.values()):
+            if signal == "changed":
+                cb(self)
+
+    def emit_value_changed(self):
+        """Manually fire the 'value-changed' signal to all connected handlers.
+
+        Ride-along (auditor Issue #4): the FeedTab reader-intent tracker
+        (`_on_scroll_value_changed`) hangs off this signal; without a way to
+        fire it, the tracker logic was never directly tested (which is how
+        BUG#2 hid). Mirrors `emit_changed` above.
+        """
+        for signal, cb in list(self._handlers.values()):
+            if signal == "value-changed":
+                cb(self)
+
+    def get_lower(self) -> float:
+        return 0.0
 
     def get_upper(self) -> float:
         return self._upper
@@ -2631,6 +2647,17 @@ class TestLoadPathSentinelsAndOrphans:
             )
 
 
+def _pump_feed_idles(limit: int = 20) -> None:
+    """Run queued GLib idles so FeedTab's height settle can finish."""
+    from gi.repository import GLib
+
+    ctx = GLib.MainContext.default()
+    for _ in range(limit):
+        if not ctx.pending():
+            break
+        ctx.iteration(False)
+
+
 class TestScheduleScrollToBottom:
     """
     Phase 4D-1: Test the real schedule_scroll_to_bottom mechanism.
@@ -2644,15 +2671,9 @@ class TestScheduleScrollToBottom:
         self, real_feed_tab
     ):
         """Bug A regression: when upper is stale (0) at connect time, the scroll
-        must NOT happen synchronously. It must wait for 'changed' to fire after
-        GTK updates upper during the layout pass.
+        must NOT happen synchronously. It must wait for a stable height.
 
-        Steps:
-        1. FakeAdjustment starts with upper=0 (stale, pre-layout).
-        2. Call schedule_scroll_to_bottom().
-        3. Assert set_value was NOT called yet (stale upper would scroll to top).
-        4. Simulate layout pass: set upper to 1000, then emit 'changed'.
-        5. Assert set_value(1000) was called.
+        page_size defaults to 600, so the bottom is upper - 600.
         """
         tab = real_feed_tab
         adj = tab._feed_scroll.get_vadjustment()
@@ -2667,9 +2688,16 @@ class TestScheduleScrollToBottom:
         # Simulate layout pass updating upper
         adj.set_upper(1000.0)
         adj.emit_changed()
+        assert adj.set_value_calls == [], (
+            f"First changed must not scroll, got {adj.set_value_calls}"
+        )
+        assert tab._scroll_handler_id is not None
 
-        assert adj.set_value_calls == [1000.0], (
-            f"Expected set_value(1000.0) after 'changed', got {adj.set_value_calls}"
+        _pump_feed_idles()
+
+        assert adj.set_value_calls == [400.0], (
+            f"Expected set_value(upper - page_size = 400) after settle, "
+            f"got {adj.set_value_calls}"
         )
 
     def test_schedule_scroll_fires_via_timeout_fallback_when_changed_never_fires(
@@ -2714,21 +2742,21 @@ class TestScheduleScrollToBottom:
         assert result == GLib.SOURCE_REMOVE, (
             f"Expected SOURCE_REMOVE, got {result}"
         )
-        assert adj.set_value_calls == [800.0], (
-            f"Expected set_value(800.0) from timeout, got {adj.set_value_calls}"
+        assert adj.set_value_calls == [200.0], (
+            f"Expected set_value(upper - page_size = 200) from timeout, "
+            f"got {adj.set_value_calls}"
         )
 
-    def test_schedule_scroll_disconnects_changed_handler_after_fire(
+    def test_schedule_scroll_uses_later_upper_before_settle(
         self, real_feed_tab, monkeypatch
     ):
-        """One-shot verification: after 'changed' fires, the handler must be
-        disconnected. A second emit of 'changed' must NOT trigger another scroll.
+        """An intermediate changed must not consume the scroll. The settle
+        uses the later upper, and the handler is still connected after the first.
         """
         import gi
         gi.require_version('Gtk', '4.0')
         from gi.repository import GLib
 
-        # Monkeypatch timeout_add and source_remove to avoid real GLib timers
         monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 99)
         monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
 
@@ -2737,31 +2765,28 @@ class TestScheduleScrollToBottom:
 
         tab.schedule_scroll_to_bottom()
 
-        # First emit — should scroll
         adj.set_upper(1000.0)
         adj.emit_changed()
-        assert len(adj.set_value_calls) == 1, (
-            f"Expected 1 set_value after first 'changed', got {len(adj.set_value_calls)}"
+        assert adj.set_value_calls == [], (
+            f"Expected no scroll after the first changed, got {adj.set_value_calls}"
         )
+        assert tab._scroll_handler_id is not None
 
-        # Second emit — should NOT scroll (handler was disconnected)
         adj.set_upper(2000.0)
         adj.emit_changed()
-        assert len(adj.set_value_calls) == 1, (
-            f"Expected still 1 set_value after second 'changed', got {len(adj.set_value_calls)}"
+        _pump_feed_idles()
+
+        # page_size is 600, so the bottom of 2000 is 1400.
+        assert adj.set_value_calls == [1400.0], (
+            f"Expected set_value(1400.0) from the later upper, got {adj.set_value_calls}"
         )
 
     def test_schedule_scroll_disarms_timeout_after_changed_fires(
         self, real_feed_tab, monkeypatch
     ):
-        """4D-3 cleanup-race regression test.
-
-        When 'changed' fires (success path), the timeout must be disarmed via
-        GLib.source_remove. This prevents the timeout from firing 150ms later
-        and re-scrolling the feed if the user has already scrolled away.
-
-        Without the 4D-3 fix, the success path did NOT call source_remove —
-        the timeout fired unconditionally and could re-scroll.
+        """The timeout must not scroll once `changed` has fired, and it must
+        not cancel the settle. The settle itself removes the timeout when it
+        consumes the scroll.
         """
         import gi
         gi.require_version('Gtk', '4.0')
@@ -2796,28 +2821,23 @@ class TestScheduleScrollToBottom:
             f"got {tab._scroll_timeout_id}"
         )
 
-        # 'changed' fires — success path should disarm the timeout
         adj.set_upper(1000.0)
         adj.emit_changed()
 
-        # Timeout must have been disarmed via source_remove
-        assert timeout_source_id in removed_sources, (
-            f"Expected source_remove({timeout_source_id}), "
-            f"got removed_sources={removed_sources}"
+        assert timeout_source_id not in removed_sources, (
+            f"First changed must not cancel the timeout, removed={removed_sources}"
         )
-        assert tab._scroll_timeout_id is None, (
-            f"Expected _scroll_timeout_id=None after 'changed', "
-            f"got {tab._scroll_timeout_id}"
+        assert adj.set_value_calls == []
+
+        _pump_feed_idles()
+        assert adj.set_value_calls == [400.0], (
+            f"Expected settled bottom 400, got {adj.set_value_calls}"
         )
+        assert timeout_source_id in removed_sources
 
-        # Invoke the timeout callback manually — it should NOT scroll again
-        # because _scroll_handler_id is None (already cleared by success path)
-        adj.set_upper(5000.0)  # different value to detect re-scroll
-        result = timeout_callback()
-
-        # set_value_calls should still be [1000.0] from the 'changed' path
-        assert adj.set_value_calls == [1000.0], (
-            f"Timeout re-scrolled after disarm! set_value_calls={adj.set_value_calls}"
+        timeout_callback()
+        assert adj.set_value_calls == [400.0], (
+            f"Late timeout scrolled again: {adj.set_value_calls}"
         )
 
     def test_schedule_scroll_handles_disconnect_exception(
@@ -2847,13 +2867,12 @@ class TestScheduleScrollToBottom:
 
         tab.schedule_scroll_to_bottom()
 
-        # 'changed' fires — disconnect will raise, but the try/except must catch it
         adj.set_upper(1000.0)
-        adj.emit_changed()  # must not propagate
+        adj.emit_changed()
+        _pump_feed_idles()  # settle calls disconnect; the raise must not escape
 
-        # set_value must still have been called (scroll happened before disconnect)
-        assert 1000.0 in adj.set_value_calls, (
-            f"Expected set_value(1000.0) despite disconnect exception, "
+        assert 400.0 in adj.set_value_calls, (
+            f"Expected set_value(400.0) despite disconnect exception, "
             f"got {adj.set_value_calls}"
         )
 
@@ -3231,13 +3250,13 @@ class TestScheduleSmartScrollToBottom:
             f"Expected no set_value before 'changed', got {adj.set_value_calls}"
         )
 
-        # Simulate layout pass: upper grows to 1500 (new card appended)
         adj.set_upper(1500.0)
         adj.emit_changed()
+        _pump_feed_idles()
 
-        # Scroll must fire to the post-layout upper, not the stale 1000
-        assert adj.set_value_calls == [1500.0], (
-            f"Expected set_value(1500.0) after layout, got {adj.set_value_calls}"
+        # page_size is 600, so the bottom of the post-layout upper is 900.
+        assert adj.set_value_calls == [900.0], (
+            f"Expected set_value(900.0) after settle, got {adj.set_value_calls}"
         )
 
     def test_schedule_smart_does_not_scroll_when_user_scrolled_up(
@@ -3335,14 +3354,151 @@ class TestScheduleSmartScrollToBottom:
             "upper for the proximity check, which is the wrong design."
         )
 
-        # Now simulate layout: upper grows to 1500 (card was appended)
         adj.set_upper(1500.0)
         adj.emit_changed()
+        _pump_feed_idles()
 
-        # Scroll fires to post-layout upper
-        assert adj.set_value_calls == [1500.0], (
-            f"Expected set_value(1500.0) after layout, got {adj.set_value_calls}"
+        assert adj.set_value_calls == [900.0], (
+            f"Expected set_value(900.0) after settle, got {adj.set_value_calls}"
         )
+
+    def test_exactly_80px_counts_as_near_bottom(self, real_feed_tab, monkeypatch):
+        """Distance of exactly 80px follows. is_near_bottom agrees."""
+        from gi.repository import GLib
+
+        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 61)
+        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
+
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        # 1000 - 600 - 320 = 80
+        adj.set_upper(1000.0)
+        adj._value = 320.0
+        adj._page_size = 600.0
+
+        assert tab.is_near_bottom() is True
+        tab.schedule_smart_scroll_to_bottom()
+        assert tab._scroll_handler_id is not None
+
+    def test_map_restores_reading_offset(self, real_feed_tab):
+        """A hidden tab that the reader had scrolled up restores that offset."""
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        tab._was_near_bottom = False
+        tab._saved_value = 120.0
+        adj.set_upper(2000.0)
+        adj._page_size = 600.0
+        adj._value = 0.0
+
+        tab._on_scroll_mapped(None)
+
+        assert adj.set_value_calls == [120.0]
+        assert tab._scroll_handler_id is None
+
+    def test_map_cancels_pending_settle_before_restore(self, real_feed_tab, monkeypatch):
+        """BUG#2 (audit fix): a settle armed BEFORE the tab was hidden is still
+        pending when the user (now scrolled up) shows the tab. The map restores
+        `_saved_value`, but the stale settle later fires and yanks them to the
+        bottom. The map must `_cancel_settle()` + `_disarm_scroll(vadj)` BEFORE
+        the restore."""
+        from gi.repository import GLib
+
+        removed: list[int] = []
+        monkeypatch.setattr(GLib, "source_remove", lambda sid: removed.append(sid))
+
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        adj.set_upper(2000.0)
+        adj._page_size = 600.0
+        adj._value = 0.0
+
+        # Pre-arm a stale settle + a connected changed handler (an earlier
+        # project-open smart scroll left them pending).
+        tab._scroll_handler_id = adj.connect("changed", tab._on_adj_changed)
+        tab._arm_settle(adj)  # real idle queued; _settle_source set
+        settled_id = tab._settle_source
+        assert settled_id is not None
+
+        # The reader has since scrolled up.
+        tab._was_near_bottom = False
+        tab._saved_value = 120.0
+
+        tab._on_scroll_mapped(None)
+
+        assert adj.set_value_calls == [120.0]        # restored
+        assert tab._settle_source is None            # stale settle cancelled
+        assert tab._scroll_handler_id is None        # changed handler disarmed
+        assert settled_id in removed                 # the idle was actually removed
+
+        # Fire a layout change + drain idles: the stale settle must NOT yank.
+        adj.emit_changed()
+        _pump_feed_idles()
+        assert adj.set_value_calls == [120.0], (
+            "a stale settle yanked the reader to the bottom after the map restore"
+        )
+
+    def test_tracker_direct_value_changed_updates_intent(self, real_feed_tab):
+        """Ride-along (auditor Issue #4): drive the reader-intent tracker
+        DIRECTLY through the `value-changed` signal (via the new
+        `emit_value_changed`) — a real scroll-up flips the tracker False and
+        saves the offset. This closes the gap that let BUG#2 hide (the tracker
+        was never exercised directly)."""
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        # The fixture replaces the scroll AFTER __init__, so the tracker is not
+        # wired to the fake — connect it the way __init__ does.
+        adj.connect("value-changed", tab._on_scroll_value_changed)
+
+        # Real scrollable height; reader scrolled UP away from the bottom.
+        adj.set_upper(2000.0)
+        adj._page_size = 600.0
+        adj._value = 120.0
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is False
+        assert tab._saved_value == 120.0
+
+        # Reader returns to the bottom → tracker flips True again.
+        adj._value = 1400.0  # upper - page_size == bottom
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is True
+
+    def test_tracker_value_changed_ignores_layout_artifact(self, real_feed_tab):
+        """Ride-along (auditor Issue #4), guard half: when the adjustment is
+        not scrollable (`upper <= page_size`) a value change is a LAYOUT
+        artifact, not the reader — the tracker must not move. Drives the real
+        `value-changed` signal via `emit_value_changed`."""
+        tab = real_feed_tab
+        adj = tab._feed_scroll.get_vadjustment()
+        adj.connect("value-changed", tab._on_scroll_value_changed)
+
+        # Establish a non-default intent so an accidental update is visible.
+        adj.set_upper(2000.0)
+        adj._page_size = 600.0
+        adj._value = 120.0
+        adj.emit_value_changed()
+        assert tab._was_near_bottom is False
+        before = (tab._was_near_bottom, tab._saved_value)
+
+        # Artifact: not scrollable (upper <= page_size) → tracker UNCHANGED.
+        adj.set_upper(100.0)
+        adj._page_size = 600.0
+        adj._value = 0.0
+        adj.emit_value_changed()
+        assert (tab._was_near_bottom, tab._saved_value) == before, (
+            "the upper<=page_size layout artifact must not update the tracker"
+        )
+
+    def test_map_follows_when_caught_up(self, real_feed_tab, monkeypatch):
+        """Showing the tab while caught up schedules a settle to the bottom."""
+        from gi.repository import GLib
+
+        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 62)
+        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
+
+        tab = real_feed_tab
+        tab._was_near_bottom = True
+        tab._on_scroll_mapped(None)
+        assert tab._scroll_handler_id is not None
 
 
 # ═══════════════════════════════════════════════════════════════════

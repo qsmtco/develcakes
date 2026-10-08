@@ -148,3 +148,56 @@ class TestSurfaceScrollOwnership:
         mc._tab_chat_boxes = {0: Gtk.Box()}
         mc._chat_render_handler = handler
         mc.scroll_chat_to_bottom(0)  # must not raise
+
+    def test_scroll_delegates_to_surface_scroll_to_latest(self, monkeypatch):
+        """SPEC-17 SP1.3: a surface tab delegates to `scroll_to_latest()` and
+        RETURNS — the outer _tab_scrolls adjustment is NOT also driven."""
+        from ui.views.main_content import MainContent
+
+        box = Gtk.Box()
+        handler = self._make(monkeypatch)
+        handler.set_chat_container_getter(lambda sk: box)
+        handler.render_sync("Agent", "line1", "sk")
+        surface = handler._surfaces["sk"]
+
+        calls: list[str] = []
+        monkeypatch.setattr(surface, "scroll_to_latest", lambda: calls.append("latest"))
+
+        outer = Gtk.ScrolledWindow()
+        outer_vadj = outer.get_vadjustment()
+        outer_vadj.set_upper(500.0)
+        outer_vadj.set_page_size(50.0)
+        outer_driven: list[float] = []
+        orig = outer_vadj.set_value
+
+        def _cap(v):
+            orig(v)
+            outer_driven.append(v)
+
+        outer_vadj.set_value = _cap  # type: ignore[method-assign]
+
+        mc = MainContent.__new__(MainContent)
+        mc._chat_notebook = type("NB", (), {"get_current_page": lambda self: 0})()
+        mc._tab_scrolls = {0: outer}
+        mc._tab_chat_boxes = {0: box}
+        mc._chat_render_handler = handler
+        mc.scroll_chat_to_bottom(0)
+
+        assert calls == ["latest"]  # delegated
+        # The outer adjustment must NOT be driven for a surface tab — pump a
+        # generous frame budget; the deferred path would have fired by now.
+        import time
+
+        from gi.repository import GLib
+
+        ctx = GLib.MainContext.default()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            while ctx.pending():
+                ctx.iteration(False)
+            time.sleep(0.005)
+            ctx.iteration(False)
+        assert outer_driven == [], (
+            "surface tab also drove the outer adjustment (double-scroll)"
+        )
+
