@@ -183,7 +183,7 @@ object → runtime. Render hydration → `tail(sk, 200)`.
 |---|---|
 | DB file corrupt | Store refuses to open → runtime falls back to JSON path (wrapper keeps legacy code path for one release) + feed card |
 | Very long content (>1 MB message) | Stored fine (SQLite TEXT); render truncates (SPEC-06 cap) |
-| Session cleared (/clear) | **Post-MVP** (pre-flight: no runtime clear/delete API exists today — no production trigger). Store keeps rows (audit trail); `delete_session()` (D2) is the manual surface; seq-epoch reset rides group chat |
+| Session cleared (/clear) | **WIRED (2026-10-08 /clear-store fix)**: /clear deletes the JSON AND calls `delete_session_rows()` (D2) — the SP4A store-mode load made a JSON-only clear insufficient (rows resurrected cleared history). Audit-ledger trade-off accepted: /clear semantics over row retention |
 | Project moved (path change) | DB is per-project relative — moves with the repo |
 | Concurrent append + tail from render thread | Lock-serialized; tail sees committed state only |
 

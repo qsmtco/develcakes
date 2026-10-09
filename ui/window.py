@@ -220,6 +220,21 @@ class MainWindow(Gtk.ApplicationWindow):
         self._left_panel.set_special_agents(self._agent_runtime_handler)
         self._main_content.set_agent_runtime_handler(self._agent_runtime_handler)
 
+        # SPEC-19 SP4 Part C: wire the live-bridge approver/resolver. MUST run
+        # AFTER the ARH is constructed above — before this point in _build the
+        # attribute is None (wiring it earlier crashed every launch with
+        # AttributeError: 'NoneType' object has no attribute
+        # 'request_live_bridge_approval').
+        # Approver: a consequential page call → the EXISTING exec-approval card
+        # (ARH.request_live_bridge_approval — same card machinery, same
+        # _pending_approvals registry). Resolver: when the PM answers the card,
+        # ARH.approve_exec calls back here → the surface resolves the page's
+        # Promise. Setter-injection both ways; no cross-module imports.
+        self._chat_render_handler.set_live_bridge_approver(
+            self._agent_runtime_handler.request_live_bridge_approval)
+        self._agent_runtime_handler.set_live_bridge_resolver(
+            self._resolve_live_bridge_call)
+
         # Agent builder handler — manages create/edit/delete for user-defined agents
         from ui.handlers.agent_builder_handler import AgentBuilderHandler
         self._agent_builder_handler = AgentBuilderHandler(
@@ -995,31 +1010,27 @@ class MainWindow(Gtk.ApplicationWindow):
         self._main_content.show_diff_viewer(viewer)
 
     def _clear_chat_box(self, session_key: str) -> None:
-        """Empty the chat box for a session. /clear UI side effect.
+        """Empty the chat surface for a session. /clear UI side effect.
 
-        Handoff: .crabcakes/handoffs/clear-ui-fix.md.
-
-        Resolves the chat box via _main_content.get_chat_box_for_session
-        and removes all its children. No-ops if the session has no open
-        tab (the user may have closed the tab before /clear ran, or the
-        session is for an agent whose tab was never created).
+        SPEC-19 SP4 follow-up (the /clear UI plane): the surface clears
+        ITSELF in place — ChatRenderHandler.clear_surface resets the
+        surface's rows/live-sections/stream state and reloads an empty
+        document. The old behavior (stripping the chat box's GTK children)
+        only UNMOUNTED the cached surface; the very next render re-mounted
+        the SAME surface with every old bubble still in it, so the cleared
+        conversation never visually left. A session with no open tab still
+        no-ops (nothing to clear — the data plane already deleted history).
 
         Runs on the main thread (the caller is cmd_clear, dispatched via
         CommandHandler which is on the main thread when called from the
-        chat input). GTK widget removal is safe here.
+        chat input).
         """
         chat_box = self._main_content.get_chat_box_for_session(session_key)
         if chat_box is None:
             logger.debug("_clear_chat_box: no chat box for session %s", session_key)
             return
-        # Gtk.Box children iteration: get_first_child() returns the first
-        # child or None when empty. Remove until None.
-        while True:
-            child = chat_box.get_first_child()
-            if child is None:
-                break
-            chat_box.remove(child)
-        logger.info("Cleared chat box for session %s", session_key)
+        self._chat_render_handler.clear_surface(session_key)
+        logger.info("Cleared chat surface for session %s", session_key)
 
     def _show_compact_bubble(self, session_key: str, result: dict) -> None:
         """Render a "🧹 Compacted" bubble into the session's chat box.
@@ -1100,6 +1111,16 @@ class MainWindow(Gtk.ApplicationWindow):
             bridge.stop_bridge()
         else:
             bridge.start_bridge()
+
+    def _resolve_live_bridge_call(self, call_id: str, approved: bool) -> None:
+        """SPEC-19 SP4 Part C: forward a card answer to the live surface's
+        bridge (resolves the page's pending Promise). Runs on the main thread
+        (approve_exec's caller). Fault-tolerant: a missing/unwired surface
+        logs and drops — the page Promise simply never resolves (safe)."""
+        try:
+            self._chat_render_handler.resolve_bridge_call(call_id, approved)
+        except Exception:
+            logger.exception("live-bridge resolve failed for %s", call_id)
 
     def _on_agent_response(self, session_key, text, project_name):
         """SPEC-15 SP3b: composed ARH response callback.

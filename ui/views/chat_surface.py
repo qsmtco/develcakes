@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 # below routes to the fallback surface. Old CRABCAKES_ name rides the
 # one-release fallback (utils.config.get_env — D2).
 from utils.config import get_env
+from utils.live_bridge import LiveBridge
 from utils.live_guard import LiveGuard
 
 if get_env("NO_WEBKIT"):
@@ -204,7 +205,45 @@ _LIVE_SHIM_JS = (
     "}"
 )
 
-# E3 resurrection, SCOPED to the given live ids. Never resurrects a script
+# SPEC-19 SP4: the page-side bridge API, installed ONCE per document (window-
+# guarded, same init slot as the timer shims). `call(method, params)` returns a
+# Promise that resolves ONLY when the native side resolves the call after human
+# approval (F6: no timeout — approvals take minutes). Native picks calls up by
+# polling __dcBridgeQueue (see _LIVE_BRIDGE_POLL_MS + the surface's poll);
+# resolution arrives as a `develcakes:result` CustomEvent.
+_LIVE_BRIDGE_INIT_JS = (
+    "if (!window.develcakes) {"
+    "  window.develcakes = {"
+    "    _pending: {},"
+    "    _seq: 0,"
+    "    call: function (method, params) {"
+    "      window.develcakes._seq++;"
+    "      var id = 'dc' + window.develcakes._seq;"
+    "      var p = new Promise(function (resolve) {"
+    "        window.develcakes._pending[id] = resolve;"
+    "      });"
+    "      window.__dcBridgeQueue = window.__dcBridgeQueue || [];"
+    "      window.__dcBridgeQueue.push({method: method, params: params || {}, id: id});"
+    "      return p;"
+    "    }"
+    "  };"
+    "}"
+)
+
+# Native-side resolution: resolve the page Promise for `ID` with `STATUS`.
+# __DC_RESOLVE__ is replaced with a json.dumps payload (id/status/data) — never
+# interpolated raw (json.dumps makes it a safe JS literal).
+_LIVE_BRIDGE_RESOLVE_JS = (
+    "(function () {"
+    "  var msg = __DC_RESOLVE__;"
+    "  var resolve = window.develcakes && window.develcakes._pending[msg.id];"
+    "  if (!resolve) { return; }"
+    "  delete window.develcakes._pending[msg.id];"
+    "  try { resolve(msg); } catch (e) {}"
+    "  document.dispatchEvent(new CustomEvent('develcakes:result',"
+    "    {detail: msg}));"
+    "})();"
+)
 # with `src` (removed — never appended); preserves `type`; IIFE-wraps the body
 # so a section's top-level declarations cannot collide with another's.
 _LIVE_RESURRECT_JS = (
@@ -293,7 +332,9 @@ def _live_ids_js(ids) -> str:
 
 
 def _live_resurrect_js(ids) -> str:
-    return _LIVE_RESURRECT_JS.replace("__SHIMS__", _LIVE_SHIM_JS).replace(
+    return _LIVE_RESURRECT_JS.replace(
+        "__SHIMS__", _LIVE_SHIM_JS + _LIVE_BRIDGE_INIT_JS
+    ).replace(
         "__IDS__", _live_ids_js(ids)
     )
 
@@ -613,7 +654,8 @@ class ChatSurface(Gtk.Box):
     deviation).
     """
 
-    def __init__(self, window_max: int = 500) -> None:
+    def __init__(self, window_max: int = 500,
+                 live_bridge_approver=None) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self._window_max = window_max
         self._rows: deque = deque(maxlen=window_max)
@@ -630,6 +672,13 @@ class ChatSurface(Gtk.Box):
         # SPEC-19 SP1: live-JS prototype state (default OFF — see _live_js_enabled).
         self._live_js = _live_js_enabled()
         self._live_guard = None
+        # SPEC-19 SP4: the two-phase action bridge. `_live_bridge` is the pure
+        # LiveBridge (approver = the injected callback → window wires it to the
+        # exec-approval card). The bridge itself never executes anything.
+        self._live_bridge = LiveBridge(approver=live_bridge_approver)
+        # id → (was the call still pending?) used to route disk-backed results
+        # to the page. The poll drains __dcBridgeQueue.
+        self._bridge_poll_source = None
         # Rows already injected into the live #transcript (incremental append);
         # the full-document load_html path re-renders from scratch instead.
         # Monotonic (SP2): `_row_seq` counts ALL rows ever appended; the deque
@@ -1055,6 +1104,10 @@ class ChatSurface(Gtk.Box):
             if live_ids and not self._destroyed:
                 self._document_eval_main(
                     _live_resurrect_js(live_ids), lambda _x: None)
+                # SPEC-19 SP4: a live section exists → start the bounded poll
+                # (and drain immediately in case the section already called).
+                self._schedule_bridge_poll()
+                self._drain_bridge_queue()
 
         self._document_eval_main(_inject_script(html), _after_inject)
 
@@ -1079,6 +1132,90 @@ class ChatSurface(Gtk.Box):
         except Exception:
             logger.debug("chat surface: injection eval failed", exc_info=True)
             callback(None)
+
+    # ── SPEC-19 SP4: the two-phase action bridge ──
+    _LIVE_BRIDGE_POLL_MS = 500  # bounded poll while live sections exist
+
+    def _drain_bridge_queue(self, _text=None) -> None:
+        """Pull page-initiated bridge calls and dispatch them (no execution).
+
+        Runs after each injection/resurrection eval AND on a bounded idle poll
+        (500ms) while a live section exists. Polling (not a script-message
+        handler) is chosen deliberately: no new WebKit surface is needed, and
+        the queue is tiny (page-driven).
+        """
+        if not self._live_js or self._webview is None or self._destroyed:
+            return
+
+        def _got(text):
+            if self._destroyed:
+                return
+            ids = []
+            try:
+                queued = json.loads(text) if text else []
+            except (TypeError, ValueError):
+                queued = []
+            if not isinstance(queued, list):
+                queued = []
+            for item in queued:
+                if not isinstance(item, dict):
+                    continue
+                method = item.get("method")
+                params = item.get("params") or {}
+                call_id = item.get("id")
+                if not isinstance(method, str) or not isinstance(call_id, str):
+                    continue
+                # The bridge returns {status, id}; the PAGE Promise stays pending.
+                # Nothing is executed — the injected approver routes to the card.
+                self._live_bridge.dispatch(method, params)
+                ids.append(call_id)
+            if ids:
+                self._schedule_bridge_poll()
+
+        self._document_eval_main(
+            "JSON.stringify(window.__dcBridgeQueue ? "
+            "(function(){var q=window.__dcBridgeQueue;window.__dcBridgeQueue=[];"
+            "return q;})() : [])",
+            _got,
+        )
+
+    def _schedule_bridge_poll(self) -> None:
+        """One bounded idle poll (idempotent — one pending at a time)."""
+        if self._bridge_poll_source is not None or self._destroyed:
+            return
+        self._bridge_poll_source = GLib.timeout_add(
+            self._LIVE_BRIDGE_POLL_MS, self._bridge_poll_tick
+        )
+
+    def _bridge_poll_tick(self) -> bool:
+        self._bridge_poll_source = None
+        if self._destroyed or not self._live_js:
+            return GLib.SOURCE_REMOVE
+        if not self._live_sections:
+            return GLib.SOURCE_REMOVE  # no live sections → stop polling
+        self._drain_bridge_queue()
+        # Re-arm only while sections remain (self-limiting).
+        if self._live_sections and not self._destroyed:
+            self._schedule_bridge_poll()
+        return GLib.SOURCE_REMOVE
+
+    def resolve_bridge_call(self, call_id: str, ok: bool, data=None) -> None:
+        """SPEC-19 SP4 resolution path: called by the window when the human
+        resolves the approval card. Records the outcome and dispatches the
+        `develcakes:result` event so the page's Promise resolves."""
+        def _on_result(result):
+            self._dispatch_bridge_result(result)
+
+        self._live_bridge.resolve(call_id, ok, data, on_result=_on_result)
+
+    def _dispatch_bridge_result(self, result: dict) -> None:
+        """Eval the resolution into the page (CustomEvent + Promise resolve)."""
+        if self._webview is None or self._destroyed:
+            return
+        script = _LIVE_BRIDGE_RESOLVE_JS.replace(
+            "__DC_RESOLVE__", json.dumps(result)
+        )
+        self._document_eval_main(script, lambda _t: None)
 
     def _on_web_process_terminated(self, view, reason) -> None:
         """FIX ROUND 2 (BUG#1b, HIGH): a web-process crash/OOM-kill fires
@@ -1187,6 +1324,8 @@ class ChatSurface(Gtk.Box):
                 _live_resurrect_js(list(self._live_sections.keys())),
                 lambda _t: None,
             )
+            # SPEC-19 SP4: live sections present after reload → keep polling.
+            self._schedule_bridge_poll()
         pending = self._pending_scroll
         if pending is not None:
             at_bottom, y = pending
@@ -1471,6 +1610,43 @@ class ChatSurface(Gtk.Box):
             "color": "",
         })
 
+    def clear(self) -> None:
+        """SPEC-19 SP4 follow-up (the /clear UI plane): empty the transcript
+        in place — the surface STAYS mounted and renderable.
+
+        Resets every content state: rows, live sections (timers cleared via
+        the flatten path's registry — a dropped section must not tick), the
+        two stream buffers, the injected-seq watermark and DOM counter (the
+        incremental-injection bookkeeping), then issues a fresh empty
+        document load. Deliberately NOT `close_session`-style: no tombstone,
+        the tab keeps rendering (the "Cleared…" confirmation appends after).
+
+        Idempotent; safe on a destroyed surface (no webview → state reset
+        only, no eval).
+        """
+        if self._destroyed:
+            return
+        self._rows.clear()
+        self._stream_buffers.clear()
+        self._stream_placeholders.clear()
+        # Live sections: drop their timers + registry (the DOM is about to be
+        # replaced wholesale, but the TIMER REGISTRY is window-global — clear
+        # it so no orphaned interval keeps ticking against a dead section id).
+        if self._webview is not None and not self._destroyed and self._live_sections:
+            self._document_eval_main(
+                _live_flatten_js(list(self._live_sections.keys())),
+                lambda _t: None,
+            )
+        self._live_sections.clear()
+        self._next_live_id = 1
+        self._injected_seq = 0
+        self._dom_row_count = 0
+        self._pending_scroll = None
+        self._dirty = False
+        # Fresh empty document (a real load, not an injection — the
+        # incremental path can only append; from zero we must rebuild).
+        self._issue_load(_document(list(self._rows)))
+
     def destroy(self) -> None:
         """Drop the webview (idempotent — twice-safe).
 
@@ -1483,6 +1659,12 @@ class ChatSurface(Gtk.Box):
         try/except below is belt-and-braces, not a RuntimeError shield.
         """
         self._destroyed = True
+        if self._bridge_poll_source is not None:
+            try:
+                GLib.source_remove(self._bridge_poll_source)
+            except RuntimeError:
+                logger.debug("bridge poll source already fired — nothing to cancel")
+            self._bridge_poll_source = None
         if self._render_source is not None:
             try:
                 GLib.source_remove(self._render_source)
@@ -1575,11 +1757,15 @@ class TextViewFallback(Gtk.Box):
     """Spec §7: plain-text fallback with the same API — app stays usable
     without WebKit (raw text, no HTML rendering)."""
 
-    def __init__(self, window_max: int = 500) -> None:
+    def __init__(self, window_max: int = 500,
+                 live_bridge_approver=None) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self._window_max = window_max
         self._rows: deque = deque(maxlen=window_max)
         self._stream_buffers: dict[str, list[str]] = {}
+        # SPEC-19 SP4: signature parity with ChatSurface (the live bridge is a
+        # no-op here — the fallback has no JS/document).
+        self._live_bridge_approver = live_bridge_approver
         # FIX 3 (SP5a audit): scroll parity with the WebKit class — the
         # surface owns its ScrolledWindow; TextView goes inside it.
         self._scroll = _make_owned_scroll()
@@ -1724,6 +1910,18 @@ class TextViewFallback(Gtk.Box):
             return
         self.append_message("agent", "".join(chunks), agent_name=agent_name)
 
+    def clear(self) -> None:
+        """SPEC-19 SP4 follow-up (the /clear UI plane): parity with
+        ChatSurface.clear — reset rows + stream buffers, keep the surface
+        mounted and renderable. The TextView IS the document; clearing the
+        buffer empties it (no reload step needed). Idempotent post-destroy
+        (same guard contract as ChatSurface.clear)."""
+        if self._destroyed:
+            return
+        self._stream_buffers.clear()
+        self._rows.clear()
+        self._view.get_buffer().set_text("")
+
     def destroy(self) -> None:
         self._stream_buffers.clear()
         self._rows.clear()
@@ -1753,13 +1951,17 @@ if WebKit is None:
     ChatSurface = TextViewFallback  # deliberate module-level alias
 
 
-def create_chat_surface(window_max: int = 500):
+def create_chat_surface(window_max: int = 500, live_bridge_approver=None):
     """Call-site factory: resolves the surface class at CALL time (tests
     monkeypatch the module's WebKit binding; the import-time alias above
     covers genuinely WebKit-less boxes). This is the PRODUCTION entry:
     chat_render_handler._finalize mounts a surface through here. It is also
     a supported test monkeypatch seam (tests patch this symbol to inject a
-    fake surface)."""
+    fake surface).
+
+    SPEC-19 SP4: `live_bridge_approver` is threaded to the surface's
+    LiveBridge (window wires it to the exec-approval card).
+    """
     if WebKit is None:
-        return TextViewFallback(window_max)
-    return ChatSurface(window_max)
+        return TextViewFallback(window_max, live_bridge_approver=live_bridge_approver)
+    return ChatSurface(window_max, live_bridge_approver=live_bridge_approver)

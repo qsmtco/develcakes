@@ -44,10 +44,11 @@ def _get_store() -> "TranscriptStore":
     utils.config.get_config_dir, so the store (which resolves its default DB
     path at construction) must not be imported or built at module top.
 
-    D4 epoch note: this release NEVER calls bump_epoch — the wrapper has no
-    /clear trigger (no runtime delete API exists pre-group-chat). SP3+ must
-    not reinvent epoch bumping here; delete_session/bump_epoch stay
-    store-level surfaces (exercised by store tests, not by this wrapper).
+    D4 epoch note (UPDATED by the /clear-store fix, 2026-10-08): the wrapper
+    NOW exposes delete_session_rows() for /clear — the SP4A store-mode load
+    made a JSON-only clear insufficient (the store re-hydrates cleared
+    history when the JSON is absent). bump_epoch stays store-level
+    (load_all reads ALL epochs, so a bump alone cannot empty a session).
     """
     global _store_singleton
     if _store_override is not None:
@@ -508,6 +509,21 @@ def resolve_api_key_for_conversation(data: dict) -> str | None:
     except Exception:
         logger.exception("[persistence] failed to resolve api_key for conversation")
         return None
+
+
+def delete_session_rows(session_key: str) -> int:
+    """Delete a session's transcript-store rows + metadata (SPEC-08 D2).
+
+    The /clear data-plane contract: the SP4A store-mode load hydrates any
+    session whose JSON is absent from `transcript.db` rows — a JSON-only
+    clear leaves the store to resurrect the cleared history on the next
+    load. /clear calls this AFTER deleting the JSON so "cleared" means
+    cleared in BOTH stores.
+
+    Returns the number of turn rows removed. Raises on store failure —
+    the caller (/clear) owns the best-effort tolerance.
+    """
+    return _get_store().delete_session(session_key)
 
 
 def load_conversation_from_disk(session_key: str) -> tuple["Conversation", dict] | None:

@@ -181,6 +181,10 @@ class ChatRenderHandler:
         # created; destroy via close_session.
         self._surfaces: dict = {}
         self._on_forward_message = None   # set via set_on_forward_message()
+        # SPEC-19 SP4: the live-bridge approver, threaded into every surface
+        # created by the factory. None until window wires it (setter-injection
+        # — no ARH/feed import here).
+        self._live_bridge_approver = None
         self._main_content = None
         # SPEC-06 SP4: streaming pending buffers. Handler-side REPLACEMENT
         # buffer (not surface.stream_delta) because set_streaming_text — a
@@ -329,6 +333,23 @@ class ChatRenderHandler:
         """
         return self._surfaces.get(session_key)
 
+    def clear_surface(self, session_key: str) -> bool:
+        """SPEC-19 SP4 follow-up (the /clear UI plane): empty the session's
+        chat surface IN PLACE — no unmount, no tombstone; the tab stays live
+        and renderable (the "Cleared…" confirmation appends after).
+
+        Returns True when a surface was found and cleared. A miss (tab never
+        opened) returns False — nothing to clear, not an error.
+        """
+        surface = self._surfaces.get(session_key)
+        if surface is None:
+            return False
+        clear = getattr(surface, "clear", None)
+        if not callable(clear):
+            return False  # TextViewFallback or a legacy surface without clear
+        clear()
+        return True
+
     def _surface_for(self, session_key: str, mount_key: str | None = None):
         """Lazy per-PROJECT surface (SPEC-12: display-keyed).
 
@@ -348,7 +369,8 @@ class ChatRenderHandler:
         display_key = mount_key or session_key
         surface = self._surfaces.get(display_key)
         if surface is None:
-            surface = create_chat_surface()
+            surface = create_chat_surface(
+                live_bridge_approver=self._live_bridge_approver)
             self._surfaces[display_key] = surface
         # SP5a FIX 1: retry — idempotent on every call (parent guard).
         mounted = self._mount_surface(display_key, surface, display_key)
@@ -709,6 +731,25 @@ class ChatRenderHandler:
         Kept: the FORWARD toolbar button still works in Phase A (ruling R2
         disposition (b)) even though per-row forward buttons are dropped."""
         self._on_forward_message = cb
+
+    def set_live_bridge_approver(self, approver) -> None:
+        """SPEC-19 SP4: late-bind the live-bridge approver (house setter-
+        injection — this handler never imports ARH/feed). The approver is the
+        window's callback that raises the EXISTING exec-approval card; the
+        ChatSurface's LiveBridge hands consequential page calls to it and NEVER
+        executes anything itself."""
+        self._live_bridge_approver = approver
+
+    def resolve_bridge_call(self, call_id: str, approved: bool) -> None:
+        """SPEC-19 SP4: forward a card answer to every live surface's bridge.
+        The bridge registry is per-surface (the Promise lives in that
+        surface's DOM); ask each surface to resolve, ignore ones that don't
+        know the call_id (bounded surfaces — cheap fan-out)."""
+        for surface in self._surfaces.values():
+            try:
+                surface.resolve_bridge_call(call_id, approved)
+            except Exception:
+                _logger.debug("surface bridge resolve failed", exc_info=True)
 
     # set_on_crabcard_extracted deleted (SP5c-3): storage-only setter, zero
     # callers — lineage: extraction wiring died with SP5c-2 B.2's window

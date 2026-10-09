@@ -215,6 +215,8 @@ class AgentRuntimeHandler:
         # SSE hardening Phase 1: capture exception objects from _on_error
         # so _do_error can enrich the displayed message with provider/model context.
         self._last_error_exception: dict[str, "BaseException | None"] = {}
+        # SPEC-19 SP4: window-registered live-bridge Promise resolver (late-bound).
+        self._live_bridge_resolver = None
 
         # Phase A — Context UI state.
         # _last_breakdown: session_key → most recent breakdown dict.
@@ -819,6 +821,25 @@ class AgentRuntimeHandler:
                 session_key, exc,
             )
 
+        # SPEC-08 store-mode load (SP4A): the JSON's absence makes the store
+        # the sole arbiter of history — without this, the next load
+        # resurrects the cleared conversation from transcript.db rows (the
+        # D2 delete_session is the store's designed surface for this).
+        # Best-effort, mirroring the JSON-delete tolerance: a store failure
+        # logs but does not fail the whole clear (in-memory is already reset).
+        try:
+            from agent.persistence import delete_session_rows
+            removed = delete_session_rows(session_key)
+            logger.info(
+                "clear_conversation: deleted %d transcript-store rows for %s",
+                removed, session_key,
+            )
+        except Exception as exc:  # noqa: BLE001 — clear must not fail wholesale
+            logger.warning(
+                "clear_conversation: could not delete store rows for %s: %s",
+                session_key, exc,
+            )
+
         return True
 
     def compact_conversation(
@@ -965,6 +986,12 @@ class AgentRuntimeHandler:
         tool_name = pending["tool_name"]
         args = pending["args"]
 
+        # SPEC-19 SP4 Part C: a live-bridge approval resolves the page's
+        # Promise (the runtime forward below is a no-op for bridge calls —
+        # no runtime owns "special:live-bridge"). The window registers the
+        # resolver seam; late-bound so ARH never imports the render handler.
+        bridge_call_id = pending.get("live_bridge_call_id")
+
         # Find the runtime that owns this session and forward the approval
         for name, rt in self._runtimes.items():
             if rt.get_conversation(session_key) is not None:
@@ -985,6 +1012,19 @@ class AgentRuntimeHandler:
                 new_metadata["status"] = "approved" if approved else "denied"
                 resolved = replace(card, metadata=new_metadata, accepted=approved)
                 self._fh.update_card(approval_id, resolved)
+
+        # SPEC-19 SP4: resolve the live-bridge Promise if this was a bridge card
+        if bridge_call_id and self._live_bridge_resolver is not None:
+            try:
+                self._live_bridge_resolver(bridge_call_id, approved)
+            except Exception:
+                logger.exception("live-bridge resolver raised for %s", bridge_call_id)
+
+    def set_live_bridge_resolver(self, cb) -> None:
+        """SPEC-19 SP4: window registers the callback that resolves a live
+        page's pending Promise when its approval card is answered. cb(call_id,
+        approved: bool). Late-bound; ARH never imports the render handler."""
+        self._live_bridge_resolver = cb
 
     # ── AgentRuntime lifecycle ────────────────────────────────────────────────
 
@@ -2293,6 +2333,55 @@ class AgentRuntimeHandler:
             self._GLib.idle_add(self._do_approval_needed, session_key, tool_name, args)
         else:
             self._do_approval_needed(session_key, tool_name, args)
+
+    def request_live_bridge_approval(self, method: str, params: dict,
+                                     call_id: str) -> None:
+        """SPEC-19 SP4 Part C: raise the EXISTING exec-approval card for a
+        consequential live-bridge call (windowed pages can never approve
+        themselves — the card is the only path).
+
+        Same card shape + the same ``_pending_approvals`` registry as
+        ``_do_approval_needed``; the resolution path is the PM clicking
+        Approve/Deny on the card → ``approve_exec(card_id, ok)`` → the window
+        observes the card resolution and forwards it to the bridge via
+        ``set_live_bridge_resolver``. Method/params travel in ``args`` so
+        ``approve_exec``'s existing card bookkeeping works unchanged; the
+        runtime forward is a NO-OP for bridge calls (there is no in-flight
+        runtime tool call) — the window's card-resolution hook is what
+        resolves the bridge Promise.
+        """
+        if self._active_project is None or self._fh is None:
+            logger.info(
+                "live-bridge approval requested with no project/feed for %s",
+                call_id)
+            return
+        project_name, _ = self._active_project
+        preview = ", ".join(
+            f"{k}={str(v)[:40]}" for k, v in list(params.items())[:3])
+        card = FeedCardData(
+            card_type="agent_action",
+            source="agent",
+            title=f"🖱️ Live page requests approval: {method}",
+            body=f"{method}({preview}) — call {call_id}",
+            author="Live section",
+            timestamp=datetime.now(timezone.utc),
+            project_name=project_name,
+            metadata={
+                "tool_name": method,
+                "tool_args": params,
+                "session_key": "special:live-bridge",
+                "status": "pending_approval",
+                "needs_approval": True,
+                "live_bridge_call_id": call_id,
+            },
+        )
+        card_id = self._fh.add_card(card)
+        self._pending_approvals[card_id] = {
+            "session_key": "special:live-bridge",
+            "tool_name": method,
+            "args": params,
+            "live_bridge_call_id": call_id,
+        }
 
     def _do_approval_needed(self, session_key: str, tool_name: str, args: dict) -> None:
         """Main-thread portion of _on_tool_call_approval_needed.

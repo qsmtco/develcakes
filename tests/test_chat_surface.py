@@ -2223,3 +2223,47 @@ class TestLiveHandlerTierDecision:
         _append_composed(_Surface(), "Agent", None, "<p>md</p>", "Coder", None)
         assert "live" not in calls
         assert calls["static"] == "<p>md</p>"
+
+
+class TestSurfaceClear:
+    """SPEC-19 SP4 follow-up (the /clear UI plane): the surface clears
+    itself in place — rows/live sections/stream state reset, empty
+    document reloaded, no tombstone (the tab stays renderable).
+
+    Uses the TextViewFallback where the state contract overlaps (rows/
+    buffers) and skips WebKit-only internals headless."""
+
+    def test_clear_resets_all_content_state(self, surface):
+        if not hasattr(surface, "_live_sections"):
+            pytest.skip("headless fallback — WebKit-only internals")
+        surface._rows.append({"role": "user", "html": "<p>old</p>", "agent": "", "color": ""})
+        surface._stream_buffers["sk"] = ["partial"]
+        surface._stream_placeholders["sk"] = {"role": "agent"}
+        surface._live_sections[7] = {"row": {"html": "x"}, "payload": "x"}
+        surface._next_live_id = 8
+        surface._injected_seq = 99
+        surface._dom_row_count = 120
+        surface.clear()
+        assert not surface._rows
+        assert not surface._stream_buffers
+        assert not surface._stream_placeholders
+        assert not surface._live_sections
+        assert surface._next_live_id == 1
+        assert surface._injected_seq == 0
+        assert surface._dom_row_count == 0
+
+    def test_clear_is_idempotent_on_destroyed_surface(self, surface):
+        surface._destroyed = True
+        surface._rows.append({"role": "user", "html": "x", "agent": "", "color": ""})
+        surface.clear()
+        assert len(surface._rows) == 1  # untouched — destroy guard holds
+
+    def test_clear_schedules_empty_document_load(self, surface, monkeypatch):
+        if not hasattr(surface, "_issue_load"):
+            pytest.skip("headless fallback — WebKit-only internals")
+        loads = []
+        monkeypatch.setattr(surface, "_issue_load", lambda doc: loads.append(doc))
+        surface._rows.append({"role": "user", "html": "<p>old</p>", "agent": "", "color": ""})
+        surface.clear()
+        assert len(loads) == 1
+        assert "old" not in loads[0]
