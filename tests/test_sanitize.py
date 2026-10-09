@@ -669,3 +669,38 @@ class TestT2CssAllowlistExtension:
         )
         assert "<style" not in out.lower()
         assert "<p>hi</p>" in out
+
+
+class TestLocalImageDataGate:
+    """SPEC-20: only the sibling sanitizer admits a local image data: URI."""
+
+    def test_png_data_uri_kept(self):
+        from render.sanitize import sanitize_with_local_images
+
+        src = "data:image/png;base64,iVBORw0KGgo="
+        out = sanitize_with_local_images(f'<img src="{src}" alt="pie_chart.png">')
+        assert f'src="{src}"' in out
+
+    def test_refused_schemes(self):
+        from render.sanitize import sanitize_with_local_images
+
+        refused = [
+            "data:text/html;base64,PGh0bWw+",
+            "data:image/svg+xml;base64,PHN2Zz4=",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ]
+        for src in refused:
+            out = sanitize_with_local_images(f'<img src="{src}">')
+            assert "src=" not in out, src
+
+    def test_https_still_kept(self):
+        from render.sanitize import sanitize_with_local_images
+
+        out = sanitize_with_local_images('<img src="https://ok.example/a.png">')
+        assert 'src="https://ok.example/a.png"' in out
+
+    def test_sanitize_html_still_strips_data_image(self):
+        src = "data:image/png;base64,iVBORw0KGgo="
+        out = sanitize_html(f'<img src="{src}">')
+        assert "data:" not in out

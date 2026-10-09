@@ -15,13 +15,16 @@
 # href="..." attributes to double-link; anchors are still shielded so the
 # autolink pass can't re-link URLs inside freshly emitted href attributes.)
 #
-# NO img is ever emitted (register ruling): markdown images render as
-# "[alt]" text. js/data/file/relative link URLs render as plain text —
-# the sanitizer would strip their href downstream; don't emit what dies.
+# Markdown images (![alt](url)) render as "[alt]" text (SPEC-06 register
+# ruling, narrowed by SPEC-20). A ```image fence is different: the app
+# reads a local file and emits an inline data: image. js/file/relative
+# link URLs still render as plain text.
 #
 # Pure functions; zero UI imports.
 
+import base64
 import html
+import os
 import re
 
 from render.syntax_html import highlight_html
@@ -54,6 +57,46 @@ _ALLOWED_LINK_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
 _ORDERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
+
+# SPEC-20: the local-image fence. The path is the fence body; the tag is
+# `image` (the SAME tag the Pango path already honours).
+_IMAGE_EXTS: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — a 6 MB PNG ≈ 8 MB base64 body
+
+
+def _local_image_uri(path: str) -> str | None:
+    """SPEC-20: resolve a fence-supplied path to an inline `data:` URI.
+
+    Returns None (the caller drops the segment) when the path is empty, not a
+    regular file, outside the LOW-7 allowed roots, has a non-image extension,
+    or exceeds `_MAX_IMAGE_BYTES`. NEVER raises — fail-closed on any error.
+    """
+    try:
+        if not path:
+            return None
+        candidate = os.path.expanduser(path.strip())
+        from utils.image_paths import is_path_in_allowed_roots
+        if not is_path_in_allowed_roots(candidate):
+            return None
+        if not os.path.isfile(candidate):
+            return None
+        ext = os.path.splitext(candidate)[1].lower()
+        mime = _IMAGE_EXTS.get(ext)
+        if mime is None:
+            return None
+        if os.path.getsize(candidate) > _MAX_IMAGE_BYTES:
+            return None
+        with open(candidate, "rb") as fh:
+            raw = fh.read()
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    except Exception:  # noqa: BLE001 — fail-closed: a broken image must never break a message
+        return None
 
 
 def _link_scheme_ok(url: str) -> bool:
@@ -266,6 +309,16 @@ def _emit_block(seg: dict) -> str:
     btype = seg["type"]
     if btype == "code":
         lang = seg.get("lang", "")
+        if lang.strip().lower() == "image":
+            # SPEC-20: the local-image fence. Emitted as an inline data: URI
+            # (app-side read — the webview fetches nothing, E1 stays blanket).
+            # Fail-closed: an unusable path emits NOTHING (the segment drops),
+            # never a raw path and never a broken <img>.
+            uri = _local_image_uri(seg.get("content", ""))
+            if uri is None:
+                return ""
+            alt = html.escape(os.path.basename(seg.get("content", "").strip()))
+            return f'<img src="{uri}" alt="{alt}">'
         body = highlight_html(seg["content"], lang)
         cls = f' class="lang-{lang}"' if lang else ""
         return f"<pre><code{cls}>{body}</code></pre>"
@@ -311,13 +364,15 @@ def markdown_to_html(text: str) -> str:
 
 
 def render_document(text: str) -> str:
-    """THE composition entry point: markdown_to_html → sanitize_html.
+    """THE composition entry point: markdown_to_html → sanitize_with_local_images.
 
     Every chat-surface call site uses this one function (SP4's guard pins it).
+    SPEC-20: the sibling sanitizer is what lets an ```image fence survive as
+    an inline data: URI. sanitize_html itself is unchanged.
     """
-    from render.sanitize import sanitize_html
+    from render.sanitize import sanitize_with_local_images
 
-    return sanitize_html(markdown_to_html(text))
+    return sanitize_with_local_images(markdown_to_html(text))
 
 
 # ── SPEC-13: agent-authored HTML payload (the Phosphor protocol) ─────────

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-09
 **Author:** Supervisor
-**Status:** READY — PM-ratified 2026-10-09 (§7 R3 resolved: images gate on path + extension only, no author gating)
+**Status:** IMPLEMENTED 2026-10-09 — image fence emits an inline data: URI via `sanitize_with_local_images`. §7 R3: no author gating.
 **Implements:** PM direction 2026-10-09 ("the chat surface must show images; that is
 the kill feature — rich expression"). Amends the SPEC-06 register ruling "NO img is
 ever emitted" for the AGENT-AUTHOR path only.

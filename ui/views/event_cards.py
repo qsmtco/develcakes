@@ -33,8 +33,9 @@ gi.require_version('Pango', '1.0')
 from gi.repository import Gtk, Pango, Gdk
 
 from utils.escaping import escape_for_pango, xml_escape_text, xml_template
-from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 from utils.config import get_project_root
+from utils.image_paths import get_allowed_roots as _get_allowed_roots_impl
+from utils.image_paths import is_path_in_allowed_roots as _is_path_in_allowed_roots_impl
 from utils.markdown import format_markdown
 from utils.block_parser import extract_blocks
 from utils.gtk_safe_link import make_safe_label, on_activate_link  # HIGH-6: activate-link guard
@@ -48,54 +49,14 @@ from utils.syntax_highlight import highlight
 import shutil
 import subprocess
 
-# LOW-7: paths outside these roots are rejected to prevent the LLM from
-# tricking the user into opening /etc/passwd or similar sensitive files.
-_ALLOWED_ROOTS_FALLBACK = (
-    os.path.expanduser("~"),
-    "/tmp",
-)
-
-
 def _get_allowed_roots() -> tuple[str, ...]:
-    """LOW-7: compute the set of allowed root paths for the image viewer.
-
-    Reads the active project root env var (DEVELCAKES_ACTIVE_PROJECT_PATH;
-    old CRABCAKES_ name rides the one-release fallback via
-    utils.config.get_env) if set, plus the fallback roots (home + /tmp). The
-    active project path is passed by the handler that owns the chat bubble,
-    via os.environ (ui/handlers/ sets this when a project is active).
-    """
-    roots: list[str] = []
-    project = (get_env("ACTIVE_PROJECT_PATH") or "").strip()
-    if project:
-        roots.append(project)
-    roots.extend(_ALLOWED_ROOTS_FALLBACK)
-    return tuple(roots)
+    """LOW-7: allowed roots for the image viewer. Policy lives in utils.image_paths."""
+    return _get_allowed_roots_impl()
 
 
 def _is_path_in_allowed_roots(file_path: str) -> bool:
-    """LOW-7: return True if file_path is under one of the allowed roots.
-
-    Resolves symlinks via realpath. If the resolved path is not under any
-    allowed root, returns False.
-    """
-    try:
-        resolved = os.path.realpath(file_path)
-    except OSError:
-        return False
-    for root in _get_allowed_roots():
-        try:
-            root_resolved = os.path.realpath(root)
-        except OSError:
-            continue
-        try:
-            common = os.path.commonpath([resolved, root_resolved])
-        except ValueError:
-            # Different drives on Windows
-            continue
-        if common == root_resolved:
-            return True
-    return False
+    """LOW-7: True if file_path is under one of the allowed roots."""
+    return _is_path_in_allowed_roots_impl(file_path)
 
 
 def _open_in_viewer(file_path: str) -> None:

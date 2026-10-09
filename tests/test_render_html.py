@@ -1,6 +1,7 @@
 # tests/test_render_html.py — SPEC-06 SP2 battery for render/html.py +
 # render/syntax_html.py. Pure functions, zero UI.
 
+import os
 import re
 import time
 
@@ -419,3 +420,67 @@ class TestRenderMessage:
         monkeypatch.setattr(nh3, "clean", boom)
         out = render_message("```html\n<div>raw</div>\n```")
         assert out == ""
+
+
+class TestLocalImageFence:
+    """SPEC-20: a ```image fence becomes an inline data: image."""
+
+    def _png(self, directory, name="chart.png") -> str:
+        path = os.path.join(directory, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        return path
+
+    def test_valid_fence_emits_data_uri(self, tmp_path):
+        path = self._png(str(tmp_path))
+        out = render_document(f"Here is the chart:\n\n```image\n{path}\n```")
+        assert '<img src="data:image/png;base64,' in out
+        assert "lang-image" not in out
+        assert os.path.basename(path) in out
+
+    def test_real_pie_chart(self):
+        path = "/home/mushy/projects/develcakes/pie_chart.png"
+        if not os.path.isfile(path):
+            pytest.skip("pie_chart.png not present")
+        out = render_document(f"```image\n{path}\n```")
+        assert out.startswith('<img src="data:image/png;base64,')
+        assert "lang-image" not in out
+
+    def test_refused_paths_emit_no_img(self, tmp_path, monkeypatch):
+        import render.html as html_mod
+
+        missing = str(tmp_path / "nope.png")
+        textfile = str(tmp_path / "notes.txt")
+        with open(textfile, "w", encoding="utf-8") as fh:
+            fh.write("hi")
+        big = self._png(str(tmp_path), "big.png")
+        monkeypatch.setattr(html_mod, "_MAX_IMAGE_BYTES", 4)
+        cases = [
+            "/etc/passwd",
+            "../../etc/shadow",
+            missing,
+            textfile,
+            big,
+            "",
+        ]
+        for path in cases:
+            out = render_document(f"```image\n{path}\n```")
+            assert "<img" not in out, path
+
+    def test_data_text_html_stays_escaped_text(self):
+        """Escape-first: a pasted <img> is text, not an element the sanitizer could admit."""
+        raw = '<img src="data:text/html;base64,PGh0bWw+">'
+        out = render_document(raw)
+        assert "<img" not in out
+        assert "&lt;img" in out
+
+    def test_uppercase_tag_and_two_fences(self, tmp_path):
+        a = self._png(str(tmp_path), "a.png")
+        b = self._png(str(tmp_path), "b.PNG")
+        out = render_document(f"```IMAGE\n{a}\n```\n\n```image\n{b}\n```")
+        assert out.count("<img ") == 2
+
+    def test_markdown_image_still_alt_only(self):
+        out = render_document("![alt text](https://x.example/i.png)")
+        assert "<img" not in out
+        assert "[alt text]" in out

@@ -267,6 +267,8 @@ crabcakes/
 
 **Critical rule:** `gateway/` and `models/` must NEVER import from `ui/`. They are the foundation that the UI depends on — not the other way around.
 
+**Chat images (SPEC-20).** Local images render as inline `data:` URIs, app-read (the webview fetches nothing; E1 stays blanket). `sanitize_with_local_images` admits exactly `data:image/(png|jpeg|gif|webp);base64`. The "NO img" ruling now applies to markdown `![alt](url)` and to untrusted echo. Tool results stay plain text on the feed card. The path check lives in `utils/image_paths.py` (LOW-7), shared with the Pango viewer.
+
 **`utils/` GTK carve-out (documented exceptions):** Four files in `utils/`
 import `gi.repository` despite the "no GTK" rule above. These are
 narrowly-scoped exceptions that have been reviewed and accepted:

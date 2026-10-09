@@ -62,7 +62,7 @@ Every member — you, Coder, Debugger, your remote agents — shares a single co
 - **@mentions** that resolve to specific agents or broadcast to the whole project
 - **Threaded conversation history** persisted per project
 - **Streaming responses** with typewriter-style incremental rendering
-- **HTML-native chat** — agents author replies as HTML (a whole-message ```html fenced block renders through a fail-closed agent-author policy: styled cards, flex layouts, details toggles); everything else renders markdown → sanitized HTML in the WebKit surface. No escaping theater for agent content, no raw-HTML risk for tool results.
+- **HTML-native chat** — agents author replies as HTML (a whole-message ```html fenced block renders through a fail-closed agent-author policy: styled cards, flex layouts, details toggles); everything else renders markdown → sanitized HTML in the WebKit surface. A ```image fence with a local png/jpeg/gif/webp path shows the picture inline. No escaping theater for agent content, no raw-HTML risk for tool results.
 
 ### <img src="icons/emoji/robot.png" width="80" height="80" alt="robot" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Built-In Coding Agents
 

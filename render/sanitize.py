@@ -65,6 +65,12 @@ _CLASS_TOKEN_RE = re.compile(r"^(?:terminal|task-list|task-checked|welcome-row|(
 
 _SAFE_ATTRS = frozenset({"href", "title", "alt", "src"})
 
+# SPEC-20: the ONLY data: shape a local image may use. Anchored + strict:
+# base64 payload only, no SVG, no text/html, no remote.
+_LOCAL_IMAGE_URI_RE = re.compile(
+    r"^data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$"
+)
+
 
 def _attribute_filter(element: str, attribute: str, value: str) -> str | None:
     """Per-(element, attribute, value) gate — nh3 0.3.7 API (no url_policy).
@@ -291,6 +297,41 @@ def sanitize_agent_html(html: str) -> str:
         # Widest net: nh3 failure shapes include pyo3 PanicException (Rust
         # assertion panics), which does NOT derive from Exception. "" on
         # Ctrl-C is acceptable; raw passthrough is not.
+        return ""
+
+
+def _image_attribute_filter(element: str, attribute: str, value: str) -> str | None:
+    """Markdown-path gate + SPEC-20's inline local-image src.
+
+    Self-fail-closed: pyo3 does not propagate filter exceptions — it
+    RETAINS the attribute — so ANY internal failure converts to None (strip).
+    """
+    try:
+        if element == "img" and attribute == "src" and _LOCAL_IMAGE_URI_RE.match(value):
+            return value
+        return _attribute_filter_inner(element, attribute, value)
+    except BaseException:  # noqa: BLE001 — fail-closed: strip, never retain
+        return None
+
+
+def sanitize_with_local_images(html: str) -> str:
+    """sanitize_html policy + inline local-image data: URIs (SPEC-20).
+
+    IDENTICAL tag/attr/class policy to sanitize_html, with ONE addition: an
+    <img src> may be a data:image/(png|jpeg|gif|webp);base64 URI. `data` is
+    added to url_schemes because nh3 gates the scheme BEFORE the attribute
+    filter. Fail-closed identical to sanitize_html.
+    """
+    try:
+        return nh3.clean(
+            html,
+            tags=_ALLOWED_TAGS,
+            attributes=_ATTRIBUTES,
+            attribute_filter=_image_attribute_filter,
+            link_rel="noopener noreferrer nofollow",
+            url_schemes={"http", "https", "data"},
+        )
+    except BaseException:  # noqa: BLE001 — sanctioned fail-closed
         return ""
 
 
