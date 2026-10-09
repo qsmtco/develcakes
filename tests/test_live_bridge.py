@@ -291,7 +291,6 @@ def test_clear_conversation_deletes_store_rows(tmp_path, monkeypatch):
     from agent import persistence
     real = TranscriptStore(str(db))
     monkeypatch.setattr(persistence, "_get_store", lambda: real)
-    assert len(persistence.load_conversation_from_disk.__globals__["_get_store"]().__class__.__mro__) >= 1
     assert real.load_all("special:t"), "precondition: rows present"
     n = persistence.delete_session_rows("special:t")
     assert n == 5
@@ -299,15 +298,50 @@ def test_clear_conversation_deletes_store_rows(tmp_path, monkeypatch):
     real.close()
 
 
-def test_arh_clear_conversation_calls_store_delete(tmp_path, monkeypatch):
-    """clear_conversation routes through delete_session_rows (best-effort)."""
-    import ui.handlers.agent_runtime_handler as arh_mod
-    calls = []
-    monkeypatch.setattr(arh_mod, "delete_session_rows", None, raising=False)
-    # We cannot easily import ARH's method without the module import graph;
-    # the behavioral pin is the data-plane test above plus a source-shape
-    # guard on the /clear body:
-    import pathlib
-    src = pathlib.Path("ui/handlers/agent_runtime_handler.py").read_text()
-    assert "delete_session_rows" in src, "/clear must delete store rows"
-    assert "from agent.persistence import delete_session_rows" in src
+def test_arh_clear_conversation_deletes_store_rows_behaviorally(tmp_path, monkeypatch):
+    """BEHAVIORAL: /clear (clear_conversation) must call delete_session_rows —
+    rows deleted on success; on store refusal the in-memory reset still lands
+    (best-effort tolerance) and the rows stay intact."""
+    import sqlite3, types
+    from utils.transcript_store import TranscriptStore
+
+    db = tmp_path / "t.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE turns (id INTEGER PRIMARY KEY, session_key TEXT, seq INTEGER, epoch INTEGER DEFAULT 0, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, tokens_used INTEGER DEFAULT 0, timestamp TEXT)")
+    con.execute("CREATE TABLE sessions (session_key TEXT PRIMARY KEY, watermark INTEGER, epoch INTEGER DEFAULT 0, updated_at TEXT)")
+    for i in range(3):
+        con.execute("INSERT INTO turns (session_key, seq, role, content) VALUES ('special:sk', ?, 'user', 'x')", (i,))
+    con.commit(); con.close()
+    store = TranscriptStore(str(db))
+
+    from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+    arh = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
+    # minimal attrs clear_conversation touches
+    arh._agents = {"special:sk": types.SimpleNamespace(display_name="T")}
+    arh._turn_attr = {}
+    arh._runtimes = {}
+    arh._fh = None
+
+    conv = types.SimpleNamespace(messages=[1, 2, 3], step_count=2, total_tokens=9,
+                                 total_cost=1.0, _token_estimate_cache=None)
+    rt = types.SimpleNamespace(
+        is_loop_active=lambda sk: False,
+        get_conversation=lambda sk: conv)
+    arh._runtimes = {"T": rt}
+
+    monkeypatch.setattr("agent.persistence._get_store", lambda: store)
+    monkeypatch.setattr(
+        "utils.config.get_config_dir", lambda: str(tmp_path))  # no JSON file → FileNotFoundError path
+
+    assert arh.clear_conversation("special:sk") is True
+    assert conv.messages == [] and conv.step_count == 0
+    assert store.load_all("special:sk") == []  # THE regression pin: store rows GONE
+
+    # refusal path: active loop → rows INTACT (best-effort tolerance)
+    rt.is_loop_active = lambda sk: True
+    conv.messages = [1]
+    store.append_turn("special:sk", "user", "keepme")
+    assert arh.clear_conversation("special:sk") is False
+    assert conv.messages == [1]
+    assert store.load_all("special:sk"), "refusal must not delete rows"
+    store.close()
