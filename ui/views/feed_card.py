@@ -5,7 +5,6 @@
 #
 # Public API:
 #   build_feed_card(card_data, on_review, on_accept, on_reject, on_copy) -> Gtk.Widget
-#   build_feed_reference_widget(card_data, on_click) -> Gtk.Widget
 #   build_empty_feed_widget() -> Gtk.Widget
 
 import gi
@@ -677,49 +676,6 @@ def build_feed_card(
     card._context_panel = context_panel
 
     return card
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Feed reference widget (inline in chat bubbles)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_feed_reference_widget(
-    card_data: FeedCardData,
-    *,
-    on_click: Callable[[], None],
-) -> Gtk.Widget:
-    """
-    Build a small inline widget that replaces a crabcard block in chat bubbles.
-
-    Returns a Gtk.Box containing:
-      - 📋 icon
-      - Card title text
-      - Clickable — on_click switches to Project Feed tab
-
-    CSS class: .feed-reference
-    """
-    ref = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-    ref.add_css_class("feed-reference")
-    ref.set_spacing(4)
-
-    icon = Gtk.Label(label="📋")
-    icon.set_valign(Gtk.Align.CENTER)
-
-    title = Gtk.Label()
-    title.set_text(card_data.title)
-    title.set_halign(Gtk.Align.START)
-    title.set_valign(Gtk.Align.CENTER)
-    title.add_css_class("feed-ref-title")
-
-    ref.append(icon)
-    ref.append(title)
-
-    # Make the whole box clickable
-    click = Gtk.GestureClick()
-    ref.add_controller(click)
-    click.connect("pressed", lambda _, n, x, y: on_click())
-
-    return ref
 
 
 # ─────────────────────────────────────────────────────────────────────────────

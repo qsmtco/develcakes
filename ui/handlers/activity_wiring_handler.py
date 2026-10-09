@@ -1,6 +1,6 @@
 # ui/handlers/activity_wiring_handler.py
 """
-Owns all ActivityDrawer event wiring — gateway AND local, online AND offline.
+Owns ActivityDrawer event wiring for local agent turns.
 
 Per ARCHITECTURE.md §8.6 this is a handler (not window.py logic). Per §3.21y
 the wiring must NOT live in connection_sync_handler.sync() (post-connect only).
@@ -9,14 +9,8 @@ unconditionally at startup, so the drawer receives events from the first
 local-agent tool call onward — no gateway required.
 
 === Dedup Invariant ===
-Local bridges fire ONLY for special-agent sessions (session keys like
-'special:coder'). Gateway bridges fire for gateway sessions. These namespaces
-are naturally disjoint — local special agents route through AgentRuntimeHandler
-and never hit the gateway (ARCHITECTURE.md §3.21v). Gateway agents have
-gateway-assigned session keys and route through on_gateway_event.
-No explicit dedup code is needed. If a future architecture change violates
-this invariant, the drawer's existing counter-collapse will visually merge
-duplicates.
+Local agents route through AgentRuntimeHandler. The drawer receives command
+output, tool bubbles, and start/end separators from that handler.
 """
 from __future__ import annotations
 
@@ -59,32 +53,12 @@ class ActivityWiringHandler:
             return
         self._wired = True
 
-        # 1. Gateway bubbles → drawer
-        self._activity_handler.set_on_activity_bubble(self._on_activity_bubble)
-        # 2. Gateway lifecycle separators → drawer
-        self._activity_handler.set_on_agent_lifecycle(self._on_agent_lifecycle)
-        # 3. Local exec_command output → drawer
+        # Local exec_command output → drawer
         self._agent_runtime_handler.set_on_command_output(self._on_local_command_output)
         # 4. NEW: local tool lifecycle → drawer
         self._agent_runtime_handler.set_on_activity_bubble(self._on_local_activity_bubble)
         # 5. NEW: local agent start/end → drawer separators
         self._agent_runtime_handler.set_on_drawer_lifecycle(self._on_local_drawer_lifecycle)
-
-    # ── Gateway path adapters ───────────────────────────────────────────
-
-    def _on_activity_bubble(self, bubble) -> None:
-        """Gateway ActivityBubble → drawer row."""
-        if self._drawer is not None:
-            self._drawer.append_event(bubble.to_drawer_row())
-
-    def _on_agent_lifecycle(self, session_key: str, agent_name: str, phase: str) -> None:
-        """Gateway lifecycle start/end → drawer separator."""
-        if self._drawer is None:
-            return
-        if phase == "start":
-            self._drawer.on_agent_start(session_key, agent_name)
-        elif phase == "end":
-            self._drawer.on_agent_end(session_key, agent_name)
 
     # ── Local path adapters ─────────────────────────────────────────────
 

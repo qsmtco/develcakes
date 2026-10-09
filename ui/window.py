@@ -129,6 +129,12 @@ class MainWindow(Gtk.ApplicationWindow):
         their dependencies here. See ARCHITECTURE.md §3.6 for the pattern.
         """
         # Chat render handler — owns text→bubble pipeline (Phase 2 refactor)
+        toolbar = self._wire_chat()
+        left_panel = self._wire_projects()
+        self._wire_agents(left_panel)
+        self._wire_feed(toolbar, left_panel)
+
+    def _wire_chat(self):
         # Created here and injected into both MainContent and ChatHandler so neither
         # instantiates it directly. window.py is the composition root.
         from gi.repository import GLib
@@ -173,6 +179,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Wire Send button
         self._main_content.send_button.connect("clicked", self._chat_handler.on_send_clicked)
+        return toolbar
+
+    def _wire_projects(self):
 
         # Left panel — FileTreeHandler must be
         # built first: it is injected into LeftPanel, which wires sort/git-status
@@ -187,6 +196,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._left_panel = left_panel
         self._left_panel.set_main_content(self._main_content)
 
+        return left_panel
+
+    def _wire_agents(self, left_panel):
         # Agent card handler — agent_mgr stays None in MVP (no gateway agents;
         # AgentListHandler falls back to the local special-agent registry)
         from ui.handlers.agent_list_handler import AgentListHandler
@@ -439,6 +451,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Wire feed bar — updates when project opens or members change
         self._main_content.set_on_project_settings_update(self._on_feed_bar_update)
 
+
+    def _wire_feed(self, toolbar, left_panel):
         # ── Feed handler + feed tab (Phase 2) ────────────────────────────────
         # ── Feed handler + feed tab (Phase 2 — Project Feed) ─────────────────────
         #
@@ -720,6 +734,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._agent_runtime_handler.set_on_agent_end(
             lambda sk: self._activity_handler.on_agent_end(sk)
         )
+        # SPEC-16 SP2: local text slices and tool starts drive the pill.
+        # on_chat_delta(delta_text, session_key); on_tool_use(tool_name, session_key).
+        self._agent_runtime_handler.set_on_stream_delta(
+            lambda sk, delta: self._activity_handler.on_chat_delta(delta, sk)
+        )
+        self._agent_runtime_handler.set_on_tool_start(
+            lambda sk, name: self._activity_handler.on_tool_use(name, sk)
+        )
 
         # Phase A — Wire the context-meter callback via the
         # set_on_token_breakdown_extra() slot. The existing
@@ -745,10 +767,13 @@ class MainWindow(Gtk.ApplicationWindow):
             return agent_name, agent_color
 
         def _update_agent_display(sk: str):
-            """Update context meter avatar/name for a session key."""
+            """Update context meter avatar/name and the status-bar agent label."""
             agent_name, agent_color = _resolve_agent_info(sk)
             if agent_name:
                 self._main_content.update_agent_context_display(agent_name, agent_color or "#6366f1")
+                self.update_agent_id_display(agent_name)
+            else:
+                self.update_agent_id_display("—")
 
         def _on_context_meter(sk: str, breakdown: dict) -> None:
             usage_pct = breakdown.get("usage_percent", 0.0)
@@ -884,6 +909,7 @@ class MainWindow(Gtk.ApplicationWindow):
         right_box.remove(self._main_content)
         self._activity_paned.set_start_child(self._main_content)
         right_box.append(self._activity_paned)
+
 
     # ── Keyboard shortcuts ───────────────────────────────────────────────────
 

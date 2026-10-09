@@ -1,7 +1,7 @@
 # SPEC-16: Priority Fixes from the Maintainability Audit
 
 **Date:** 2026-10-07
-**Status:** READY — not started
+**Status:** IMPLEMENTED — SP1 through SP7 landed. `test_utils_gtk_imports_are_documented` still fails on the pre-existing `utils/live_guard.py` GTK import; that file was not part of this spec.
 **Implements:** The ordered fix list from the 2026-10-07 read-only audit
 (status bar, activity pill, dead helpers, gateway ingress, `_build` split,
 `_run_loop` tool-batch extract, then the three large classes).

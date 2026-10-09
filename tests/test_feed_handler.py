@@ -2320,9 +2320,9 @@ class TestBacklogDiscipline:
         import ast
         import inspect
 
-        import ui.handlers.feed_handler as fh
+        import ui.feed.load as load_mod
 
-        tree = ast.parse(inspect.getsource(fh))
+        tree = ast.parse(inspect.getsource(load_mod))
         method = next(
             n for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef) and n.name == "_load_and_render"

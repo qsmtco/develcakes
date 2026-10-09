@@ -38,9 +38,6 @@ class TestActivityWiringHandler:
 
         handler.wire()
 
-        # Gateway path
-        activity_handler.set_on_activity_bubble.assert_called_once()
-        activity_handler.set_on_agent_lifecycle.assert_called_once()
         # Local path
         agent_runtime.set_on_command_output.assert_called_once()
         agent_runtime.set_on_activity_bubble.assert_called_once()
@@ -53,42 +50,9 @@ class TestActivityWiringHandler:
         handler.wire()
         handler.wire()
 
-        # Each callback registered exactly once
-        activity_handler.set_on_activity_bubble.assert_called_once()
+        # Each local callback registered exactly once
+        agent_runtime.set_on_command_output.assert_called_once()
         agent_runtime.set_on_drawer_lifecycle.assert_called_once()
-
-    # ── Gateway path adapters ────────────────────────────────────────────
-
-    def test_on_activity_bubble_routes_to_drawer_append_event(self):
-        """Gateway ActivityBubble → drawer.append_event(bubble.to_drawer_row())."""
-        handler, _, _, drawer = self._make_handler()
-
-        bubble = ActivityBubble(type="tool_start", session_key="s1", tool_name="ls")
-        row_dict = bubble.to_drawer_row()
-
-        handler._on_activity_bubble(bubble)
-
-        drawer.append_event.assert_called_once()
-        # The dict should match what to_drawer_row() returns (spot-check keys)
-        call_arg = drawer.append_event.call_args[0][0]
-        assert call_arg["activity_type"] == "tool_start"
-        assert call_arg["session_key"] == "s1"
-
-    def test_on_agent_lifecycle_start_calls_drawer_on_agent_start(self):
-        """Lifecycle 'start' phase → drawer.on_agent_start()."""
-        handler, _, _, drawer = self._make_handler()
-
-        handler._on_agent_lifecycle("sk1", "Coder", "start")
-
-        drawer.on_agent_start.assert_called_once_with("sk1", "Coder")
-
-    def test_on_agent_lifecycle_end_calls_drawer_on_agent_end(self):
-        """Lifecycle 'end' phase → drawer.on_agent_end()."""
-        handler, _, _, drawer = self._make_handler()
-
-        handler._on_agent_lifecycle("sk1", "Coder", "end")
-
-        drawer.on_agent_end.assert_called_once_with("sk1", "Coder")
 
     # ── Local path adapters ──────────────────────────────────────────────
 
@@ -183,8 +147,6 @@ class TestActivityWiringHandler:
         )
 
         # Must not crash
-        handler._on_activity_bubble(ActivityBubble(type="tool_start", session_key="s1"))
-        handler._on_agent_lifecycle("s1", "Coder", "start")
         handler._on_local_command_output("s1", "ls", "", 0, 0)
         handler._on_local_activity_bubble(ActivityBubble(type="tool_end", session_key="s1"))
         handler._on_local_drawer_lifecycle("s1", "Coder", "end")

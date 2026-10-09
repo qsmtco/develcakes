@@ -1909,155 +1909,15 @@ class AgentRuntime:
                         ))
                         return
 
-                    # Tool calls — execute each
-                    logger.debug("[tool-loop] sk=%s executing %d tool calls", session_key, len(tool_calls_raw))
-                    from models.conversation import ToolCall
-                    from agent.tools import execute_tool
-
-                    # Create assistant message once, attach all tool calls — fixes data corruption
-                    # (was: conv.messages[-1].tool_calls.append(tc) — appended to USER message)
-                    tool_call_objects = [
-                        ToolCall(call_id=call_id, tool_name=tool_name, arguments=args)
-                        for call_id, tool_name, args in tool_calls_raw
-                    ]
-
-                    # BUG #3 sweep: tool-call response with empty/whitespace text_content.
-                    # OpenAI spec allows content=null with tool_calls, but strict providers
-                    # (Cohere, Anthropic strict mode) require non-empty content even when
-                    # tool_calls are present. If a model returns tool_calls with empty
-                    # content (e.g. provider bug, malformed streaming response), substitute
-                    # a meaningful placeholder so the next LLM call doesn't 400.
-                    # The read-side filter at models/conversation.py:262 already handles
-                    # the no-content-no-tool_calls case; this fills the gap for the
-                    # tool_calls-present-but-content-empty case.
-                    if _is_empty_content(text_content):
-                        logger.warning(
-                            "[tool-loop] sk=%s tool-call response has empty content "
-                            "(tool_calls=%d) — substituting placeholder for strict-provider safety",
-                            session_key, len(tool_call_objects),
-                        )
-                        text_content = "[calling tools]"
-
-                    conv.add_assistant_message(text_content, tool_call_objects)
-
-                    # Import once per loop iteration (avoid repeated import overhead)
-                    import agent.tools as agent_tools_module
-
-                    for call_id, tool_name, args in tool_calls_raw:
-                        tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
-
-                        # Approval gating for exec_command — fires BEFORE tool_call_start
-                        # so the approval card appears first. Non-approval tools skip this.
-                        if tool_name == "exec_command":
-                            approved = self._dispatch_approval(session_key, tool_name, args)
-                            logger.debug("[tool-loop] sk=%s exec_command approval: %s", session_key, approved)
-                            if approved is False or approved is None:  # None = timeout = denial
-                                tc.mark_failed("exec_command requires PM approval — request denied or timed out")
-                                conv.add_tool_result(call_id, tc.result or "denied")
-                                self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
-                                self._audit_log.record(tool_name, args, approved=False,
-                                                        user=getattr(self._config, "user_id", ""),
-                                                        result="denied")  # A-4
-                                continue
-
-                        # HIGH-1: Sensitive-path write/edit also requires PM approval.
-                        # Fires before tool_call_start so the PM sees the card.
-                        if tool_name in ("write_file", "edit_file"):
-                            path_arg = args.get("path", "")
-                            if agent_tools_module.is_sensitive_path(path_arg):
-                                approved = self._dispatch_approval(session_key, tool_name, args)
-                                logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
-                                             session_key, tool_name, approved)
-                                if approved is False or approved is None:
-                                    tc.mark_failed(
-                                        f"{tool_name} blocked: {path_arg} is a sensitive path\n"
-                                        "PM approval denied or timed out."
-                                    )
-                                    conv.add_tool_result(call_id, tc.result or "denied")
-                                    self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
-                                    self._audit_log.record(tool_name, args, approved=False,
-                                                            user=getattr(self._config, "user_id", ""),
-                                                            result="denied")  # A-4
-                                    continue
-
-                        # Tool call start — fires AFTER approval (for exec_command and sensitive write/edit)
-                        # so the "running" card is truthful: the tool is actually about to run.
-                        self._dispatch(self._on_tool_call_start, session_key, tool_name, args)
-                        tc.mark_executing()
-
-                        # Execute tool
-                        logger.debug("[tool-loop] sk=%s executing tool: %s args_keys=%s",
-                                     session_key, tool_name, list(args.keys()))
-                        # Bypass exec_command's internal approval check — the runtime already
-                        # confirmed PM approval via _dispatch_approval above (returned True).
-                        # HIGH-1: write_file/edit_file with sensitive paths — runtime already
-                        # dispatched to PM above, so bypass the tool's internal check.
-                        # MED-1: Use per-call approval_callback (bypass = lambda True, normal = None).
-                        bypass_approval = (tool_name == "exec_command" or
-                                           (tool_name in ("write_file", "edit_file") and
-                                            agent_tools_module.is_sensitive_path(args.get("path", ""))))
-                        per_call_cb = (lambda *a: True) if bypass_approval else None
-                        # LOW-2: validate the session workspace. The return value
-                        # is unread (dead binding removed) — the required side
-                        # effects are the LOW-2 validation (raises ValueError if
-                        # project_path is empty or session_key is malformed) and
-                        # the per-session scratch-dir creation with 0o700
-                        # permissions (.crabcakes/tmp/<session>/).
-                        resolve_session_workspace(conv.project_path, session_key)
-                        # project_path is the sandbox base for all tools AND exec_command cwd.
-                        # The scratch dir above exists for future use but no longer
-                        # overrides exec_command CWD — see exec-cwd-fix spec.
-                        # Allowed-tools enforcement gate (§3.21n).
-                        # Forward conv.allowed_tools so execute_tool can deny tools the agent
-                        # was configured without. conv.allowed_tools is the single source of
-                        # truth — set in create_conversation() from agent_def["tools"] and
-                        # persisted on the conversation object.
-                        #
-                        # Execute through the tool middleware chain.
-                        # The chain wraps execute_tool with EnforcementMiddleware
-                        # (post-write verification) and StuckDetectionMiddleware
-                        # (loop detection). Approval was already resolved inline
-                        # above (before on_tool_call_start) per spec §A.2.4.
-                        ctx = ToolContext(
-                            session_key=session_key,
-                            project_path=conv.project_path,
-                            iteration=iteration,
-                            bypass_approval=bypass_approval,
-                            audit_log=self._audit_log,
-                            user_id=getattr(self._config, "user_id", ""),
-                            enforcement_config=self._config.enforcement,
-                            si_enforcement=conv.si_enforcement,
-                        )
-                        result = self._tool_chain.run(
-                            tool_name=tool_name,
-                            args=args,
-                            ctx=ctx,
-                            executor=lambda: execute_tool(
-                                tool_name, args, conv.project_path, session_key,
-                                approval_callback=per_call_cb,
-                                allowed_tools=conv.allowed_tools,
-                            ),
-                        )
-                        logger.debug("[tool-loop] sk=%s tool %s result: success=%s output_len=%d",
-                                     session_key, tool_name, result.success, len(result.output or ""))
-
-                        # Record tool result — ToolResult dataclass stays clean
-                        tc.mark_completed(result.output if result.success else result.error or "")
-                        tool_result_text = tc.result or ""
-
-                        conv.add_tool_result(call_id, tool_result_text)
-                        self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
-
-                        # A-4: Record in audit log
-                        _audit_user = getattr(self._config, "user_id", "")
-                        self._audit_log.record(
-                            tool_name=tool_name,
-                            args=args,
-                            approved=True if bypass_approval else None,
-                            user=_audit_user,
-                            result=tool_result_text,
-                            exit_code=result.exit_code,
-                        )
+                    if self._execute_tool_batch(
+                        session_key,
+                        turn_token,
+                        conv,
+                        text_content,
+                        tool_calls_raw,
+                        iteration,
+                    ):
+                        return
 
                     # Check cost/step limits after tool execution
                     # Phase 2b Edit D.7: _check_and_stop_on_limit is now a pure
@@ -2157,6 +2017,174 @@ class AgentRuntime:
             # /clear for this session permanently.
             with self._lock:
                 self._active_loops.discard(session_key)
+
+    def _execute_tool_batch(
+        self,
+        session_key: str,
+        turn_token: object,
+        conv,
+        text_content: str,
+        tool_calls_raw,
+        iteration: int,
+    ) -> bool:
+        """Run one iteration's tool calls.
+
+        Returns True if the turn was terminated and the caller must return
+        immediately. Returns False if the caller should continue with the
+        post-tool limit check.
+        """
+        del turn_token  # part of the turn identity; this batch does not end the turn
+        # Tool calls — execute each
+        logger.debug("[tool-loop] sk=%s executing %d tool calls", session_key, len(tool_calls_raw))
+        from models.conversation import ToolCall
+        from agent.tools import execute_tool
+
+        # Create assistant message once, attach all tool calls — fixes data corruption
+        # (was: conv.messages[-1].tool_calls.append(tc) — appended to USER message)
+        tool_call_objects = [
+            ToolCall(call_id=call_id, tool_name=tool_name, arguments=args)
+            for call_id, tool_name, args in tool_calls_raw
+        ]
+
+        # BUG #3 sweep: tool-call response with empty/whitespace text_content.
+        # OpenAI spec allows content=null with tool_calls, but strict providers
+        # (Cohere, Anthropic strict mode) require non-empty content even when
+        # tool_calls are present. If a model returns tool_calls with empty
+        # content (e.g. provider bug, malformed streaming response), substitute
+        # a meaningful placeholder so the next LLM call doesn't 400.
+        # The read-side filter at models/conversation.py:262 already handles
+        # the no-content-no-tool_calls case; this fills the gap for the
+        # tool_calls-present-but-content-empty case.
+        if _is_empty_content(text_content):
+            logger.warning(
+                "[tool-loop] sk=%s tool-call response has empty content "
+                "(tool_calls=%d) — substituting placeholder for strict-provider safety",
+                session_key, len(tool_call_objects),
+            )
+            text_content = "[calling tools]"
+
+        conv.add_assistant_message(text_content, tool_call_objects)
+
+        # Import once per loop iteration (avoid repeated import overhead)
+        import agent.tools as agent_tools_module
+
+        for call_id, tool_name, args in tool_calls_raw:
+            tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
+
+            # Approval gating for exec_command — fires BEFORE tool_call_start
+            # so the approval card appears first. Non-approval tools skip this.
+            if tool_name == "exec_command":
+                approved = self._dispatch_approval(session_key, tool_name, args)
+                logger.debug("[tool-loop] sk=%s exec_command approval: %s", session_key, approved)
+                if approved is False or approved is None:  # None = timeout = denial
+                    tc.mark_failed("exec_command requires PM approval — request denied or timed out")
+                    conv.add_tool_result(call_id, tc.result or "denied")
+                    self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
+                    self._audit_log.record(tool_name, args, approved=False,
+                                            user=getattr(self._config, "user_id", ""),
+                                            result="denied")  # A-4
+                    continue
+
+            # HIGH-1: Sensitive-path write/edit also requires PM approval.
+            # Fires before tool_call_start so the PM sees the card.
+            if tool_name in ("write_file", "edit_file"):
+                path_arg = args.get("path", "")
+                if agent_tools_module.is_sensitive_path(path_arg):
+                    approved = self._dispatch_approval(session_key, tool_name, args)
+                    logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
+                                 session_key, tool_name, approved)
+                    if approved is False or approved is None:
+                        tc.mark_failed(
+                            f"{tool_name} blocked: {path_arg} is a sensitive path\n"
+                            "PM approval denied or timed out."
+                        )
+                        conv.add_tool_result(call_id, tc.result or "denied")
+                        self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
+                        self._audit_log.record(tool_name, args, approved=False,
+                                                user=getattr(self._config, "user_id", ""),
+                                                result="denied")  # A-4
+                        continue
+
+            # Tool call start — fires AFTER approval (for exec_command and sensitive write/edit)
+            # so the "running" card is truthful: the tool is actually about to run.
+            self._dispatch(self._on_tool_call_start, session_key, tool_name, args)
+            tc.mark_executing()
+
+            # Execute tool
+            logger.debug("[tool-loop] sk=%s executing tool: %s args_keys=%s",
+                         session_key, tool_name, list(args.keys()))
+            # Bypass exec_command's internal approval check — the runtime already
+            # confirmed PM approval via _dispatch_approval above (returned True).
+            # HIGH-1: write_file/edit_file with sensitive paths — runtime already
+            # dispatched to PM above, so bypass the tool's internal check.
+            # MED-1: Use per-call approval_callback (bypass = lambda True, normal = None).
+            bypass_approval = (tool_name == "exec_command" or
+                               (tool_name in ("write_file", "edit_file") and
+                                agent_tools_module.is_sensitive_path(args.get("path", ""))))
+            per_call_cb = (lambda *a: True) if bypass_approval else None
+            # LOW-2: validate the session workspace. The return value
+            # is unread (dead binding removed) — the required side
+            # effects are the LOW-2 validation (raises ValueError if
+            # project_path is empty or session_key is malformed) and
+            # the per-session scratch-dir creation with 0o700
+            # permissions (.crabcakes/tmp/<session>/).
+            resolve_session_workspace(conv.project_path, session_key)
+            # project_path is the sandbox base for all tools AND exec_command cwd.
+            # The scratch dir above exists for future use but no longer
+            # overrides exec_command CWD — see exec-cwd-fix spec.
+            # Allowed-tools enforcement gate (§3.21n).
+            # Forward conv.allowed_tools so execute_tool can deny tools the agent
+            # was configured without. conv.allowed_tools is the single source of
+            # truth — set in create_conversation() from agent_def["tools"] and
+            # persisted on the conversation object.
+            #
+            # Execute through the tool middleware chain.
+            # The chain wraps execute_tool with EnforcementMiddleware
+            # (post-write verification) and StuckDetectionMiddleware
+            # (loop detection). Approval was already resolved inline
+            # above (before on_tool_call_start) per spec §A.2.4.
+            ctx = ToolContext(
+                session_key=session_key,
+                project_path=conv.project_path,
+                iteration=iteration,
+                bypass_approval=bypass_approval,
+                audit_log=self._audit_log,
+                user_id=getattr(self._config, "user_id", ""),
+                enforcement_config=self._config.enforcement,
+                si_enforcement=conv.si_enforcement,
+            )
+            result = self._tool_chain.run(
+                tool_name=tool_name,
+                args=args,
+                ctx=ctx,
+                executor=lambda: execute_tool(
+                    tool_name, args, conv.project_path, session_key,
+                    approval_callback=per_call_cb,
+                    allowed_tools=conv.allowed_tools,
+                ),
+            )
+            logger.debug("[tool-loop] sk=%s tool %s result: success=%s output_len=%d",
+                         session_key, tool_name, result.success, len(result.output or ""))
+
+            # Record tool result — ToolResult dataclass stays clean
+            tc.mark_completed(result.output if result.success else result.error or "")
+            tool_result_text = tc.result or ""
+
+            conv.add_tool_result(call_id, tool_result_text)
+            self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
+
+            # A-4: Record in audit log
+            _audit_user = getattr(self._config, "user_id", "")
+            self._audit_log.record(
+                tool_name=tool_name,
+                args=args,
+                approved=True if bypass_approval else None,
+                user=_audit_user,
+                result=tool_result_text,
+                exit_code=result.exit_code,
+            )
+
+        return False
 
     def is_loop_active(self, session_key: str) -> bool:
         """Return True if a _run_loop thread is currently active for this session.

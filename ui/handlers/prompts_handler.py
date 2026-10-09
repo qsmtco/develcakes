@@ -65,10 +65,6 @@ class PromptsHandler:
         self._prompts = self._scan_prompts()
         return self._sorted_filtered()
 
-    def scan_prompts(self) -> list[dict]:
-        """Alias for load_prompts — returns sorted/filtered list."""
-        return self.load_prompts()
-
     def toggle_favorite(self, filepath: str) -> bool:
         """
         Toggle star on a prompt. Returns True if now favorited.

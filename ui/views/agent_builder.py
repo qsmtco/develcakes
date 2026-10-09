@@ -242,22 +242,6 @@ class AgentBuilderDialog:
 
     # ── Form helpers ──────────────────────────────────────────────────
 
-    def _add_field(
-        self,
-        parent: Gtk.Box,
-        label_text: str,
-        entry: Gtk.Entry,
-        placeholder: str = "",
-        max_width: int = 0,
-    ) -> Gtk.Entry:
-        """Add a labeled entry field to the form."""
-        entry.set_placeholder_text(placeholder)
-        entry.set_hexpand(True)
-        if max_width:
-            entry.set_max_width_chars(6)
-        self._add_labeled(parent, label_text, entry)
-        return entry
-
     def _labeled_box(self, label_text: str, widget: Gtk.Widget, expand: bool = False) -> Gtk.Box:
         """Create a labeled vertical box (label above widget). Does NOT append to parent."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)

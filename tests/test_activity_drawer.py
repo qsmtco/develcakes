@@ -4,12 +4,11 @@
 # Architecture:
 #   ActivityBubble.to_drawer_row() — pure-Python dict builder
 #   ActivityDrawer — pure GTK view; receives dicts via append_event()
-#   ActivityHandler.set_on_agent_lifecycle — fires (sk, agent_name, phase)
+#   Local drawer rows arrive through ActivityWiringHandler.
 #
 # These tests cover:
-#   1. TestToDrawerRow — 5 tests on ActivityBubble.to_drawer_row()
-#   2. TestActivityDrawer — 6 tests on drawer state mutation
-#   3. TestActivityHandlerLifecycleCallback — 3 tests on lifecycle firing
+#   1. TestToDrawerRow — ActivityBubble.to_drawer_row()
+#   2. TestActivityDrawer — drawer state mutation
 #
 # GTK initialization: the ActivityDrawer test class patches
 # _build_header and _build_list to no-ops so the drawer can be
@@ -970,111 +969,3 @@ class TestActivityDrawerTrim:
         assert drawer._last_row_key == ("Coder", "tool_start")
 
 
-# ── Class 4: TestActivityHandlerLifecycleCallback ───────────────
-
-
-class TestActivityHandlerLifecycleCallback:
-    """ActivityHandler fires set_on_agent_lifecycle on lifecycle events.
-
-    Callback signature: cb(session_key, agent_name, phase) where phase
-    is "start" or "end". agent_name comes from payload.data.agentName,
-    defaulting to "" if the gateway doesn't supply it.
-    """
-
-    def test_lifecycle_start_fires_callback(self, fake_glib):
-        """stream=lifecycle phase=start → cb(sk, agent_name, "start")."""
-        from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(
-            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
-        )
-        cb = MagicMock()
-        handler.set_on_agent_lifecycle(cb)
-
-        handler.on_gateway_event("agent", {
-            "stream": "lifecycle",
-            "sessionKey": "sk-1",
-            "runId": "run-1",
-            "data": {"phase": "start", "startedAt": 12345, "agentName": "Coder"},
-        })
-
-        cb.assert_called_once()
-        args = cb.call_args[0]
-        assert args == ("sk-1", "Coder", "start")
-
-    def test_lifecycle_end_fires_callback(self, fake_glib):
-        """stream=lifecycle phase=end → cb(sk, agent_name, "end")."""
-        from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(
-            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
-        )
-        cb = MagicMock()
-        handler.set_on_agent_lifecycle(cb)
-
-        handler.on_gateway_event("agent", {
-            "stream": "lifecycle",
-            "sessionKey": "sk-1",
-            "runId": "run-1",
-            "data": {"phase": "end", "agentName": "Debugger"},
-        })
-
-        cb.assert_called_once()
-        args = cb.call_args[0]
-        assert args == ("sk-1", "Debugger", "end")
-
-    def test_lifecycle_end_without_agent_name(self, fake_glib):
-        """When payload has no agentName, cb is called with empty string for agent_name."""
-        from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(
-            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
-        )
-        cb = MagicMock()
-        handler.set_on_agent_lifecycle(cb)
-
-        handler.on_gateway_event("agent", {
-            "stream": "lifecycle",
-            "sessionKey": "sk-1",
-            "runId": "run-1",
-            "data": {"phase": "end"},  # no agentName field
-        })
-
-        cb.assert_called_once()
-        args = cb.call_args[0]
-        # agent_name defaults to "" — drawer will show "[Agent]" for unknown agents
-        assert args == ("sk-1", "", "end")
-
-    def test_lifecycle_error_fires_end_callback(self, fake_glib):
-        """stream=lifecycle phase=error → cb(sk, agent_name, "end") (error reuses end path)."""
-        from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(
-            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
-        )
-        cb = MagicMock()
-        handler.set_on_agent_lifecycle(cb)
-
-        handler.on_gateway_event("agent", {
-            "stream": "lifecycle",
-            "sessionKey": "sk-1",
-            "runId": "run-1",
-            "data": {"phase": "error", "agentName": "Coder"},
-        })
-
-        cb.assert_called_once()
-        args = cb.call_args[0]
-        assert args == ("sk-1", "Coder", "end")
-
-    def test_lifecycle_callback_not_set_does_not_crash(self, fake_glib):
-        """If set_on_agent_lifecycle was never called, lifecycle events must not raise."""
-        from ui.handlers.activity_handler import ActivityHandler
-        handler = ActivityHandler(
-            status_target=MagicMock(), main_content=MagicMock(), GLib_module=fake_glib,
-        )
-        # No set_on_agent_lifecycle call
-        try:
-            handler.on_gateway_event("agent", {
-                "stream": "lifecycle",
-                "sessionKey": "sk-1",
-                "runId": "run-1",
-                "data": {"phase": "start", "agentName": "Coder"},
-            })
-        except Exception as e:
-            pytest.fail(f"lifecycle event crashed when callback unset: {e}")

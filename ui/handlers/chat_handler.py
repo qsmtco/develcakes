@@ -50,7 +50,6 @@ class ChatHandler:
         self._chat_render_handler = None  # injected via set_chat_render_handler()
         self._on_forward_message = None   # injected via set_on_forward_message()
         self._command_handler = None     # injected via set_command_handler() — for slash commands
-        self._on_send_initiated = None    # injected via set_on_send_initiated()
         self._pending_req_id: str | None = None  # tracks last sent req_id for res correlation
         self._on_agent_response: Callable[[str, str, str | None], None] | None = None  # agent response hook (Phase 6.2)
         self._on_res_confirmed: Callable[[str], None] | None = None  # pre-flight confirm via res
@@ -76,10 +75,6 @@ class ChatHandler:
         # Propagate to render handler so streaming final bubbles also get the button
         if self._chat_render_handler is not None:
             self._chat_render_handler.set_on_forward_message(cb)
-
-    def set_on_send_initiated(self, cb):
-        """Set callback for send-initiated: cb(session_key). Called before message is sent."""
-        self._on_send_initiated = cb
 
     def set_on_agent_response(self, cb: Callable[[str, str, str | None], None]) -> None:
         """Set callback for agent response command parsing hook (Phase 6.2).
@@ -178,14 +173,6 @@ class ChatHandler:
         # for unregistered/remote keys.
         self._agent_runtime_handler.send_to_special_agent(
             session_key, text, reply_target=reply_target)
-
-    def _show_forward_menu(self, text, anchor_widget):
-        """
-        Show a popover listing other agents to forward text to.
-        Called by bubble forward button via set_on_forward_message.
-        """
-        if self._on_forward_message:
-            self._on_forward_message(text, anchor_widget)
 
     def on_send_clicked(self, _btn=None):
         """GTK signal handler for the Send button. Delegates to on_send."""
@@ -314,8 +301,6 @@ class ChatHandler:
                 self._send_local(session_key, text, reply_target=reply_target)
             self._dispatch(_show_and_route_to_agent)
             buf.set_text("")
-            if self._on_send_initiated:
-                self._on_send_initiated(session_key)
             return
 
         # ── (SPEC-05 R6): gateway-availability guard removed — the local
@@ -365,8 +350,6 @@ class ChatHandler:
                     # unregistered/remote keys.
                     self._send_local(resolution.target_session_key, forward_text)
                 self._dispatch(_show_and_route_solo)
-                if self._on_send_initiated:
-                    self._on_send_initiated(session_key)
                 return
             elif resolution.is_broadcast:
                 # @ broadcast to all project members
@@ -392,8 +375,6 @@ class ChatHandler:
                         # unregistered/remote keys.
                         self._send_local(target, forward_text)
                 self._dispatch(_show_and_route_broadcast)
-                if self._on_send_initiated:
-                    self._on_send_initiated(session_key)
                 return
             # No @mention found in text — fall through to normal send below
 
@@ -452,10 +433,6 @@ class ChatHandler:
                 self._send_local(session_key, text)
         self._dispatch(_show_and_send)
         buf.set_text("")
-
-        # Trigger Pre Flight state in ActivityHandler (activity pill, SPEC-07 R4)
-        if self._on_send_initiated:
-            self._on_send_initiated(session_key)
 
     def on_chat_event(self, event: str, payload: dict):
         """

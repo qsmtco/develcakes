@@ -11,10 +11,10 @@ Each phase row includes a Prompt column that names the prompt file governing
 that phase, so agents know exactly which prompt to load when a phase is active.
 
 Usage:
-    from utils.workflow_state import init_workflow, advance_phase, get_current_phase
+    from utils.workflow_state import init_workflow, advance_phase, get_workflow_content
     init_workflow("/path/to/project")
     advance_phase("/path/to/project", "discovery")
-    phase = get_current_phase("/path/to/project")
+    content = get_workflow_content("/path/to/project")
 """
 
 import logging
@@ -276,28 +276,6 @@ def init_workflow(project_path: str) -> None:
     os.makedirs(os.path.dirname(workflow_path), exist_ok=True)
     with open(workflow_path, "w", encoding="utf-8") as f:
         f.write(_initial_workflow_content())
-
-
-def get_current_phase(project_path: str) -> str:
-    """
-    Return the name of the current (in-progress) phase.
-    Returns PHASES[0] ("onboarding") if workflow.md doesn't exist.
-    """
-    lines = _read_workflow_lines(project_path)
-    if not lines:
-        return PHASES[0]
-
-    for line in lines:
-        if re.search(r"🔄\s*current", line):
-            m = re.match(rf"\|\s*\d+\s*\|\s*({_PHASE_NAME_RE})\s*\|", line)
-            if m:
-                return m.group(1)
-
-    # Fallback: first non-done phase
-    for name in PHASES:
-        if not is_phase_done(project_path, name):
-            return name
-    return PHASES[-1]
 
 
 def is_phase_done(project_path: str, phase_name: str) -> bool:

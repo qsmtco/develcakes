@@ -4,13 +4,11 @@ ActivityHandler — 6-state activity machine driving the shared activity-status 
 
 States: idle | sending | reasoning | streaming | tool_use | done
 
-Transitions triggered by gateway events wired from window._on_ws_event():
-  agent phase=start  → reasoning
-  agent phase=end     → done (auto → idle after 5s)
-  agent phase=error   → idle
-  tool_call event    → tool_use
-  first chat delta   → streaming
-  agent message      → sending (pre-flight)
+Transitions triggered by the local agent runtime:
+  agent start        → reasoning
+  agent end          → done (auto → idle after 5s)
+  tool start         → tool_use
+  first text delta   → streaming
 
 Owns all state machine state (timers, counters, timestamps).
 Does NOT own the status target or MainContent — received as constructor dependencies.
@@ -21,16 +19,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from models.activity import ActivityBubble
 
 _logger = logging.getLogger(__name__)
-
-# AC3 Phase 1 Part C: sentinel for the per-event agent-name cache — distinct
-# from any real resolved name (including "" and None).
-_AGENT_NAME_UNRESOLVED = object()
 
 
 class ActivityHandler:
@@ -72,26 +62,7 @@ class ActivityHandler:
         self._phase: dict[str, int] = {}  # session_key → 1 (time-driven) or 2 (event-driven)
         self._event_hop_count: dict[str, int] = {}  # session_key → number of gateway events received
 
-        # Bug fix: state tracking for missing message recovery (Phase 1 of SPEC-smarter-chat-ux)
-        self._assistant_text_buffer: dict[str, str] = {}    # session_key → last assistant text
-        self._lifecycle_ended: dict[str, bool] = {}       # run_id → True when lifecycle end fired
-        self._on_assistant_buffer: Callable[[str, str], None] | None = None  # buffer fwd callback
-        self._lifecycle_completed_callback: Callable[[str, str], None] | None = None  # cb(sk, text)
-        self._activity_bubble_callback: Callable[['ActivityBubble'], None] | None = None  # cb(bubble)
-        self._on_agent_start_callback: Callable[[str], None] | None = None  # cb(sk) — clears render guard
-        # SPEC-activity-drawer Phase 1: lifecycle separator callback.
-        # cb(session_key, agent_name, "start"|"end") — drawer uses this to insert
-        # per-agent separator rows. agent_name may be "" (drawer defaults to "Agent").
-        self._on_agent_lifecycle: Callable[[str, str, str], None] | None = None
-        # PHASE 6: AgentManager for session_key → agent_name fallback when the
-        # gateway payload's data.agentName is empty (SPEC §2.4 fallback chain).
-        self._agent_mgr = None
-        # AC3 Phase 1 Part C: one-shot agent-name cache, reset at the top of
-        # every on_gateway_event. Guarantees ≤1 _resolve_agent_name call per
-        # event and zero calls on events that never need the name.
-        self._resolved_agent_name: object = _AGENT_NAME_UNRESOLVED
-
-    # ── Public entry points (called from gateway event handlers in window) ──
+    # ── Public entry points (called from the local agent runtime) ──
 
     def on_agent_start(self, session_key, data=None):
         """agent phase=start — enter reasoning state."""
@@ -101,9 +72,6 @@ class ActivityHandler:
         self._first_delta_seen = False
         self._current_tool_name = ""
         self._set_state("reasoning", sk)
-        # Clear render guard from previous round so new responses can render
-        if self._on_agent_start_callback:
-            self._on_agent_start_callback(session_key)
 
     def on_agent_end(self, session_key, data=None):
         """agent phase=end — enter done state, auto-idle after 5s."""
@@ -112,11 +80,6 @@ class ActivityHandler:
         self._reset_session_state(sk)
         self._set_state("done", sk)
         self._start_done_flash(sk)
-
-    def on_agent_error(self, session_key, data=None):
-        """agent phase=error — return to idle immediately."""
-        sk = self._active_session() or session_key
-        self._set_state("idle", sk)
 
     def on_tool_use(self, tool_name, session_key, data=None):
         """tool_call event — enter tool_use state."""
@@ -130,107 +93,11 @@ class ActivityHandler:
         count = len(delta_text) if delta_text else 0
         self._streaming_token_count += count
 
-        if not self._first_delta_seen:
+        if delta_text and (
+            (not self._first_delta_seen) or self._state == "tool_use"
+        ):
             self._first_delta_seen = True
             self._set_state("streaming", sk)
-
-    def on_agent_message_received(self, session_key):
-        """agent message in history — pre-flight signal (brief sending state)."""
-        sk = self._active_session() or session_key
-        self._set_state("sending", sk)
-
-    def on_chat_final(self, session_key):
-        """chat final — no state change here; on_agent_end handles completion."""
-        pass
-
-    def _extract_chat_text(self, payload: dict) -> str:
-        """Extract plain text from a gateway chat event payload.
-
-        The gateway sends chat event payloads with the text at payload.message.content,
-        in one of two forms:
-        - A string (simple text responses)
-        - A list of typed blocks (block-level formatting: code, quote, media, etc.)
-
-        This helper normalizes both forms into a single string for token counting.
-        It is a local copy of chat_handler._extract_text (ui/handlers/chat_handler.py:645)
-        to keep handlers decoupled — see tests/conftest.py::test_handlers_do_not_import_each_other
-        for the rule. If a third handler ever needs the same logic, promote to
-        a shared module (out of scope for this phase).
-        """
-        msg_obj = payload.get("message", {})
-        if isinstance(msg_obj, dict):
-            content = msg_obj.get("content", "")
-        else:
-            content = msg_obj
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type", "")
-                if block_type == "text":
-                    t = block.get("text", "")
-                    if t:
-                        parts.append(t)
-                elif block_type == "input_image":
-                    # Gateway media attachment — not text, but include as a marker
-                    # so the token count reflects the response's size in spirit.
-                    # The image content itself is not counted (we cannot estimate
-                    # its token cost from a URL); we count a 0-length placeholder
-                    # by simply not appending. Token velocity is dominated by text.
-                    continue
-            return "".join(parts)
-        elif isinstance(content, str):
-            return content
-        return str(content) if content else ""
-
-    def set_on_assistant_buffer(self, cb):
-        """Set callback for buffering assistant text: cb(session_key, text).
-        ActivityHandler calls this after every stream=assistant event so ChatHandler
-        can maintain its own buffer for the missing-message recovery path.
-        """
-        self._on_assistant_buffer = cb
-
-    def set_on_lifecycle_completed(self, cb):
-        """Set callback for lifecycle end: cb(session_key, buffered_text).
-
-        ActivityHandler calls this when the agent round-trip ends (phase=end or
-        phase=error). ChatHandler uses this to render the fallback bubble when
-        no chat final arrived with a message body.
-
-        Architecture: ActivityHandler only tracks state — it never renders.
-        ChatHandler makes the render decision via this callback.
-        """
-        self._lifecycle_completed_callback = cb
-
-    def set_on_agent_start(self, cb):
-        """Set callback for agent round start: cb(session_key).
-
-        ActivityHandler calls this when lifecycle phase=start fires. ChatHandler
-        uses this to clear the render guard from the previous round so that
-        subsequent responses for the same session are not blocked.
-        """
-        self._on_agent_start_callback = cb
-
-    def set_on_activity_bubble(self, cb: Callable[['ActivityBubble'], None]):
-        """Set callback for activity bubbles: cb(activity_bubble).
-
-        ActivityHandler calls this for each tool/plan/approval/command_output/patch
-        event to generate a system bubble in the chat. ChatHandler renders via
-        build_role_bubble(role='System', text=bubble.format_text()).
-        """
-        self._activity_bubble_callback = cb
-
-    def set_on_agent_lifecycle(self, cb: Callable[[str, str, str], None]) -> None:
-        """Set callback for agent lifecycle: cb(session_key, agent_name, phase).
-
-        phase is "start" or "end". ActivityHandler fires this on every
-        stream=lifecycle phase=start and phase=end (or phase=error) event.
-        The drawer uses this to insert per-agent separator rows.
-
-        agent_name comes from payload.data.agentName when present; otherwise "".
-        """
-        self._on_agent_lifecycle = cb
 
     def set_agent_routing(self, routing_table) -> None:
         """Inject AgentRoutingTable. Called by window.py._build().
@@ -238,327 +105,6 @@ class ActivityHandler:
         Used by _is_ui_active to resolve project tabs for agent session keys.
         """
         self._agent_to_project = routing_table
-
-    def set_agent_manager(self, agent_mgr) -> None:
-        """Inject AgentManager for session_key → agent_name fallback (SPEC-activity-drawer §2.4).
-
-        Called by ConnectionSyncHandler.sync() after the gateway connects.
-        Used to resolve agent_name when the gateway payload's data.agentName is empty.
-        """
-        self._agent_mgr = agent_mgr
-    def _safe_data(self, payload: dict) -> dict:
-        """Safely extract payload.data — handles missing, None, and non-dict values.
-
-        PHASE 7 Bug #4: dict.get('data', {}) returns the default only when the
-        key is MISSING. When the key is present-but-null (data: None) or a
-        non-dict value, the default is bypassed and downstream .get() crashes
-        with AttributeError. This helper coerces any non-dict result to {} so
-        every call site is safe.
-        """
-        data = payload.get("data")
-        return data if isinstance(data, dict) else {}
-
-    def _resolve_agent_name(self, payload: dict) -> str:
-        """Resolve the agent display name from a gateway payload.
-
-        Resolution order (SPEC-activity-drawer §2.4 fallback chain):
-        1. payload.data.agentName — gateway-supplied agent name (may be empty)
-        2. AgentManager.get_name(payload.sessionKey) — local session_key → name lookup
-        3. "" — drawer will display "[Agent]" as last-resort fallback
-
-        Args:
-            payload: The gateway event payload dict.
-
-        Returns:
-            The agent display name, or "" if unknown.
-        """
-        direct = self._safe_data(payload).get("agentName", "") or ""
-        if direct:
-            return direct
-        session_key = payload.get("sessionKey", "") or ""
-        if session_key and self._agent_mgr is not None:
-            try:
-                name = self._agent_mgr.get_name(session_key)
-                if name:
-                    return name
-            except Exception:
-                pass  # AgentManager may not be ready; fall through
-        return ""
-
-    def _agent_name_for_event(self, payload: dict) -> str:
-        """Resolve the agent name at most ONCE per gateway event (AC3 Phase 1 Part C).
-
-        Lazily delegates to _resolve_agent_name on first access within an
-        event; subsequent accesses reuse the cached value. The cache is reset
-        at the top of on_gateway_event, so the cost profile is:
-          - events that never need the name (assistant deltas, res, tick…): 0 calls
-          - events that need it once or more (item/plan/approval/patch/lifecycle): exactly 1 call
-
-        DO NOT call from outside on_gateway_event's dynamic extent — the cache
-        has no TTL and would go stale across events.
-        """
-        if self._resolved_agent_name is _AGENT_NAME_UNRESOLVED:
-            self._resolved_agent_name = self._resolve_agent_name(payload)
-        return self._resolved_agent_name
-
-    def on_send_initiated(self, session_key: str):
-        """Send button pressed — enter pre-flight (sending) state with 30s timeout.
-
-        Resets progress to phase 1 (time-driven). If no res arrives within 30s,
-        revert to idle and clear progress.
-        """
-        sk = self._active_session() or session_key
-        self._stop_send_initiated_timer(sk)
-        self._reset_progress(sk)
-        self._set_state("sending", sk)
-        timer_id = self._GLib.timeout_add_seconds(
-            self.PREFlight_TIMEOUT_SEC,
-            lambda: self._on_preflight_timeout(sk),
-        )
-        self._send_initiated_timers[sk] = timer_id
-
-    def on_res_confirmed(self, session_key: str):
-        """Gateway res confirmed our send — end phase 1, transition to phase 2 (event-driven).
-
-        Called when ChatHandler receives a res matching our pending req_id.
-        """
-        sk = self._active_session() or session_key
-        self._stop_send_initiated_timer(sk)
-        # Phase 2: every gateway event now hops the bar
-        self._phase[sk] = 2
-        self._agent_start_time[sk] = time.monotonic()
-        self._set_state("reasoning", sk)
-
-    def on_gateway_event(self, event: str, payload: dict):
-        """Universal entry point for all gateway events.
-
-        Every event increments hop count in phase 2 (event-driven). State transitions
-        are delegated to specific methods. tick and health have no state handler, so they
-        only contribute to progress without causing a state change.
-        """
-        session_key = payload.get("sessionKey", "") or ""
-        sk = self._get_progress_session(session_key)
-
-        # AC3 Phase 1 Part C: reset the one-shot agent-name cache — every
-        # event gets exactly one resolution budget, spent lazily.
-        self._resolved_agent_name = _AGENT_NAME_UNRESOLVED
-
-        # Phase 2: every event hops the bar (skip idle/done — round is over)
-        if self._phase.get(sk, 1) == 2 and self._state not in ("idle", "done"):
-            self._event_hop_count[sk] = self._event_hop_count.get(sk, 0) + 1
-            # TEMPORARILY DISABLED 2026-04-22: Investigating UI freeze on large pastes.
-            # Hypothesis: 100+ gateway events during agent response each call
-            # _update_status(), queuing too many GLib.idle_add callbacks and
-            # starving GTK's render/input loop. If disabling this fixes the freeze,
-            # the fix is to throttle _update_status() to e.g. max once per 200ms.
-            # TODO: Uncomment the line below once throttling is implemented.
-            # self._update_status()
-
-        # ── Bug fix: buffer assistant text for fallback rendering ──────────
-        if event == "agent":
-            stream = payload.get("stream", "")
-            if stream == "assistant":
-                text = self._safe_data(payload).get("text", "")
-                if text:
-                    sk = payload.get("sessionKey", "") or session_key
-                    if sk:
-                        self._assistant_text_buffer[sk] = text
-                        if self._on_assistant_buffer:
-                            self._on_assistant_buffer(sk, text)
-            elif stream == "lifecycle":
-                phase = self._safe_data(payload).get("phase", "")
-                # Resolve agent name with AgentManager fallback (SPEC-activity-drawer §2.4 / PHASE 6).
-                # When the gateway's data.agentName is empty, fall back to AgentManager.
-                _agent_name = self._agent_name_for_event(payload)
-                # Track lifecycle end for missing-message recovery.
-                # Cleanup runs on both end and error — fixes memory leak.
-                if phase in ("end", "error"):
-                    run_id = payload.get("runId", "") or ""
-                    sk = payload.get("sessionKey", "") or session_key
-                    # Fire lifecycle-completed callback so ChatHandler can render fallback.
-                    # text is the last buffered assistant text for this session.
-                    if sk and self._lifecycle_completed_callback:
-                        text = self._assistant_text_buffer.get(sk, "")
-                        self._lifecycle_completed_callback(sk, text)
-                    if sk:
-                        self._assistant_text_buffer.pop(sk, None)
-                    if run_id:
-                        self._lifecycle_ended.pop(run_id, None)
-                    # SPEC-activity-drawer: fire agent_lifecycle "end" so the drawer
-                    # can insert a per-agent summary separator row.
-                    if sk and self._on_agent_lifecycle:
-                        self._on_agent_lifecycle(sk, _agent_name, "end")
-                elif phase == "start":
-                    # ── Activity bubble: lifecycle start ──────────────────
-                    sk = payload.get("sessionKey", "") or session_key
-                    if sk and self._activity_bubble_callback:
-                        from models.activity import ActivityBubble, ToolStatus
-                        bubble = ActivityBubble(type="lifecycle_start", session_key=sk,
-                                                agent_name=_agent_name, icon="⏳")
-                        self._activity_bubble_callback(bubble)
-                    # SPEC-activity-drawer: fire agent_lifecycle "start" so the
-                    # drawer can insert a per-agent separator row.
-                    if sk and self._on_agent_lifecycle:
-                        self._on_agent_lifecycle(sk, _agent_name, "start")
-            elif stream == "item":
-                # ── Activity bubble: item events (tool/command/patch) ────────
-                # NOTE: stream="tool" events are NOT broadcast to clients — only sent to
-                # toolEventRecipients. But stream="item" events ARE broadcast and carry
-                # kind="tool" / kind="command" / kind="patch" with phase, name, title, status.
-                # This is why exec bubbles worked (command_output is also broadcast) but
-                # tool_start/tool_end never appeared (stream="tool" never reaches us).
-                data = self._safe_data(payload)
-                kind = data.get("kind", "")
-                item_phase = data.get("phase", "")
-                item_name = data.get("name", "") or ""
-                item_status = data.get("status", "")
-                started_at = data.get("startedAt")
-                ended_at = data.get("endedAt")
-                # SPEC-activity-drawer §2.4: tool bubbles carry agent_name with
-                # AgentManager fallback (PHASE 6). When the gateway's data.agentName
-                # is empty on stream=item kind=tool events, fall back to AgentManager.
-                _agent_name = self._agent_name_for_event(payload)
-                sk = payload.get("sessionKey", "") or session_key
-
-                if kind == "tool" and self._activity_bubble_callback:
-                    from models.activity import ActivityBubble, ToolStatus
-                    if item_phase == "start":
-                        self._activity_bubble_callback(
-                            ActivityBubble(type="tool_start", session_key=sk, tool_name=item_name,
-                                           icon="🔧", status=ToolStatus.RUNNING,
-                                           agent_name=_agent_name)
-                        )
-                    elif item_phase == "end":
-                        is_error = item_status == "failed"
-                        icon = "❌" if is_error else "✅"
-                        btype = "tool_error" if is_error else "tool_end"
-                        duration_ms = 0
-                        if started_at and ended_at:
-                            duration_ms = ended_at - started_at
-                        self._activity_bubble_callback(
-                            ActivityBubble(type=btype, session_key=sk, tool_name=item_name,
-                                           duration_ms=duration_ms, icon=icon,
-                                           status=ToolStatus.ERROR if is_error else ToolStatus.SUCCESS,
-                                           agent_name=_agent_name)
-                        )
-            elif stream == "plan":
-                # ── Activity bubble: plan update ───────────────────────────
-                data = self._safe_data(payload)
-                title = data.get("title", "") or ""
-                steps_raw = data.get("steps", []) or []
-                steps = [s.get("title", "") or str(s) for s in steps_raw]
-                sk = payload.get("sessionKey", "") or session_key
-                # SPEC-activity-drawer §2.4: resolve agent_name with the same
-                # fallback chain used by the item/branch (PHASE 6). The plan,
-                # approval, and patch branches are siblings of `item`, so they
-                # need their own resolution — _agent_name is not in scope here.
-                _agent_name = self._agent_name_for_event(payload)
-                if title and self._activity_bubble_callback:
-                    from models.activity import ActivityBubble, ToolStatus
-                    bubble = ActivityBubble(type="plan", session_key=sk, icon="📋", title=title, steps=steps, agent_name=_agent_name)
-                    self._activity_bubble_callback(bubble)
-            elif stream == "approval":
-                # ── Activity bubble: approval request ─────────────────────
-                data = self._safe_data(payload)
-                if data.get("phase") == "requested":
-                    cmd = data.get("command", "") or ""
-                    reason = data.get("reason", "") or ""
-                    approval_id = data.get("approvalId", "") or ""
-                    sk = payload.get("sessionKey", "") or session_key
-                    # SPEC-activity-drawer §2.4: see plan/branch comment.
-                    _agent_name = self._agent_name_for_event(payload)
-                    if cmd and self._activity_bubble_callback:
-                        from models.activity import ActivityBubble, ToolStatus
-                        bubble = ActivityBubble(type="approval_request", session_key=sk, icon="🔒", command=cmd, reason=reason, approval_id=approval_id, agent_name=_agent_name)
-                        self._activity_bubble_callback(bubble)
-            elif stream == "patch":
-                # ── Activity bubble: file edit summary ────────────────────
-                data = self._safe_data(payload)
-                if data.get("phase") == "end":
-                    name = data.get("name", "") or ""
-                    added = len(data.get("added", []) or [])
-                    modified = len(data.get("modified", []) or [])
-                    deleted = len(data.get("deleted", []) or [])
-                    sk = payload.get("sessionKey", "") or session_key
-                    # SPEC-activity-drawer §2.4: see plan/branch comment.
-                    _agent_name = self._agent_name_for_event(payload)
-                    if name and self._activity_bubble_callback:
-                        from models.activity import ActivityBubble, ToolStatus
-                        bubble = ActivityBubble(type="patch", session_key=sk, tool_name=name, added=added, modified=modified, deleted=deleted, icon="✏️", agent_name=_agent_name)
-                        self._activity_bubble_callback(bubble)
-            elif stream == "command_output":
-                # ── Activity bubble: gateway exec result ───────────────────
-                # Mirrors the local exec adapter in connection_sync_handler.py:225
-                # but for gateway agents (Qaster, etc.) that run tools remotely.
-                # Only handle phase=end; phase=delta streams are ignored (same
-                # design as the patch branch — we render the final summary, not
-                # the streaming chunks).
-                data = self._safe_data(payload)
-                if data.get("phase") == "end":
-                    name = data.get("name", "") or ""
-                    output = data.get("output", "") or ""
-                    # BUGFIX-1 audit: exitCode may arrive as a string from
-                    # JSON serialization edge cases. Coerce to int so "0"
-                    # is treated as success (not error). `or 0` handles both
-                    # None and 0 cleanly.
-                    exit_code = int(data.get("exitCode", 0) or 0)
-                    duration_ms = data.get("durationMs", 0)
-                    command = data.get("title", "") or ""
-                    sk = payload.get("sessionKey", "") or session_key
-                    # SPEC-activity-drawer §2.4: see plan/branch comment.
-                    _agent_name = self._agent_name_for_event(payload)
-                    if name and self._activity_bubble_callback:
-                        from models.activity import ActivityBubble, ToolStatus
-                        # BUGFIX-1 audit: honor both exit_code AND status.
-                        # Gateway may send status="failed" with exitCode=0
-                        # (e.g. timeout, killed signal). Either signal means error.
-                        is_error = exit_code != 0 or data.get("status") == "failed"
-                        bubble = ActivityBubble(
-                            type="command_output",
-                            session_key=sk,
-                            tool_name=name,
-                            icon="💻",
-                            command=command,
-                            output=output,
-                            exit_code=exit_code,
-                            duration_ms=duration_ms,
-                            status=ToolStatus.ERROR if is_error else ToolStatus.SUCCESS,
-                            agent_name=_agent_name,
-                        )
-                        self._activity_bubble_callback(bubble)
-        if event == "agent":
-            # BUGFIX-4: State machine transitions only apply to lifecycle events.
-            # Other stream types (item, plan, approval, patch, command_output)
-            # should NOT trigger on_agent_start/end/error — they nest their
-            # own status inside `data` (or lack a `phase` field entirely) and
-            # would otherwise mis-fire the state machine if a future gateway
-            # payload ever surfaced a top-level `phase` on a non-lifecycle event.
-            stream = payload.get("stream", "")
-            if stream == "lifecycle":
-                phase = self._safe_data(payload).get("phase", "")
-                if phase == "start":
-                    self.on_agent_start(session_key, payload)
-                elif phase == "end":
-                    self.on_agent_end(session_key, payload)
-                elif phase == "error":
-                    self.on_agent_error(session_key)
-
-        elif event == "chat":
-            state = payload.get("state", "")
-            if state == "delta":
-                self.on_chat_delta(self._extract_chat_text(payload) or "", session_key)
-            elif state == "final":
-                self.on_chat_final(session_key)
-
-        elif event == "tool_call":
-            self.on_tool_use(payload.get("tool_name", "") or "", session_key, payload)
-
-        elif event == "res":
-            self.on_res_confirmed(session_key)
-
-        # tick, health, presence, etc. — no state handler, progress only
-
-    # ── Per-session progress helpers ───────────────────────────────────────
 
     def _get_progress_session(self, session_key: str | None) -> str:
         """Return the session key to use for progress tracking (active session or provided)."""
@@ -794,15 +340,6 @@ class ActivityHandler:
 
         timer_id = self._GLib.timeout_add_seconds(5, lambda: expire(sk))
         self._done_flash_timers[sk] = timer_id
-
-    def _on_preflight_timeout(self, session_key: str):
-        """Called when 30s pre-flight timeout expires — revert to idle and clear progress."""
-        self._send_initiated_timers.pop(session_key, None)
-        if self._state == "sending" and self._is_ui_active(session_key):
-            sk = self._active_session() or session_key
-            self._reset_session_state(sk)
-            self._set_state("idle", session_key)
-        return False  # don't re-run
 
     # ── Timer cleanup ─────────────────────────────────────────────────────
 
