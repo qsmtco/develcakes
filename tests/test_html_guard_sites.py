@@ -38,27 +38,31 @@ from render.html import markdown_to_html, render_document
 
 
 class TestChatSurfaceJavaScriptOff:
-    """WebKit settings: JS off is a security posture, not a preference.
+    """WebKit settings: JS posture is a SECURITY decision, not a preference.
 
-    The runtime behavior (settings.get_enable_javascript() is False) is
-    pinned by tests/test_chat_surface.py::test_javascript_disabled — this
-    catalog entry pins the SETTING call in source so a refactor that drops
-    the call fails here even if that behavior test is skipped.
+    Pre-SP2 the posture was unconditionally OFF. SPEC-19 SP2 flips the default
+    ON for live sections, with the kill-switch (`DEVELCAKES_LIVE_JS=0`)
+    restoring the JS-off degrade. The runtime behavior is pinned by
+    tests/test_chat_surface.py::test_javascript_disabled (kill-switch OFF →
+    JS off) and tests/test_live_guard.py (ON → JS on + guard). This catalog
+    entry pins that the setting RIDES _ensure_webview (the only webview
+    factory) and is driven by the resolved live flag — never a stray constant.
     """
 
-    def test_set_enable_javascript_false_in_source(self):
+    def test_set_enable_javascript_driven_by_live_flag(self):
         from ui.views import chat_surface
         src = inspect.getsource(chat_surface)
-        assert "settings.set_enable_javascript(False)" in src, (
-            "JS-off setting missing from chat_surface.py — the webview "
-            "would boot scriptable"
+        assert "set_enable_javascript(live)" in src, (
+            "JS setting is no longer driven by the live flag in chat_surface.py"
         )
 
-    def test_no_javascript_enable_call_anywhere(self):
+    def test_no_unconditional_js_enable(self):
+        """A bare `set_enable_javascript(True)` (winning over the kill-switch)
+        would make `DEVELCAKES_LIVE_JS=0` unable to disable JS — policy leak."""
         from ui.views import chat_surface
         src = inspect.getsource(chat_surface)
         assert "set_enable_javascript(True)" not in src, (
-            "A JS-enable call exists in chat_surface.py — policy reversal"
+            "an unconditional JS-enable call can defeat the kill-switch"
         )
 
     def test_setting_applied_at_webview_creation(self):
@@ -68,8 +72,8 @@ class TestChatSurfaceJavaScriptOff:
         src = inspect.getsource(chat_surface)
         ensure = src[src.index("def _ensure_webview"):]
         ensure_body = ensure[: ensure.index("return self._webview")]
-        assert "set_enable_javascript(False)" in ensure_body, (
-            "JS-off setting is not applied inside _ensure_webview"
+        assert "set_enable_javascript(live)" in ensure_body, (
+            "JS setting is not applied inside _ensure_webview"
         )
 
 
@@ -241,10 +245,13 @@ class TestRenderHandlerAppendsArePipelineSanitized:
         documented escaped fallback — never raw agent text.
 
         AST-based (not string-scan): comment and docstring mentions of
-        append_message must not count as call sites. Verified inventory:
-        4 call sites in CRH — _append_to_surface (pipeline), render_welcome
-        (pipeline), _append_on_main success (pipeline), _append_on_main
-        failure fallback (html.escape(text))."""
+        append_message must not count as call sites. Verified inventory
+        (SPEC-19 SP2: the transcript compose moved into the shared helpers
+        `_compose_text`/`_append_composed`): 3 call sites in CRH —
+        _append_composed (pipeline), render_welcome (pipeline), and the
+        _append_on_main failure fallback (html.escape(text)). The live path
+        (`surface.append_live`) is NOT an append_message site; it takes the
+        RAW agent payload by design (T3, enforced by E1/E2, not sanitized)."""
         import ast as ast_mod
         src = self._read(self.PATH)
         tree = ast_mod.parse(src)
@@ -255,8 +262,8 @@ class TestRenderHandlerAppendsArePipelineSanitized:
                     and node.func.attr == "append_message"):
                 seg = ast_mod.get_source_segment(src, node) or ""
                 sites.append((node, seg))
-        assert len(sites) == 4, (
-            f"expected exactly 4 append_message call sites, found {len(sites)} — "
+        assert len(sites) == 3, (
+            f"expected exactly 3 append_message call sites, found {len(sites)} — "
             "catalog stale: verify each new site is pipeline-fed, then "
             "extend this pin"
         )
@@ -271,6 +278,27 @@ class TestRenderHandlerAppendsArePipelineSanitized:
                 seg,
             ), f"append_message fed from an unvetted source: {seg!r}"
 
+    def test_append_live_takes_raw_payload_only_through_the_t3_helper(self):
+        """SPEC-19 SP2 T3: the ONLY `append_live` call site is `_append_composed`
+        — it forwards a payload produced by `_compose_text` from a detected
+        whole-message ```live fence. Raw agent TEXT is never appended live
+        without the fence detector (the tier decision is centralized)."""
+        import ast as ast_mod
+        src = self._read(self.PATH)
+        tree = ast_mod.parse(src)
+        sites = []
+        for node in ast_mod.walk(tree):
+            if (isinstance(node, ast_mod.Call)
+                    and isinstance(node.func, ast_mod.Attribute)
+                    and node.func.attr == "append_live"):
+                sites.append(ast_mod.get_source_segment(src, node) or "")
+        assert len(sites) == 1, f"expected exactly 1 append_live call site, found {len(sites)}"
+        # The tier gate: append_live is guarded by is_live_enabled().
+        assert "is_live_enabled" in src, (
+            "append_live is not gated on surface.is_live_enabled() — a live "
+            "payload could reach a JS-off surface"
+        )
+
     def test_composition_failure_fallback_is_escaped(self):
         """Both fallback paths escape: render_document failure appends
         html.escape(text), never raw."""
@@ -280,23 +308,18 @@ class TestRenderHandlerAppendsArePipelineSanitized:
         )
 
     def test_render_message_is_the_compose_entry(self):
-        """SPEC-13 §2c/§2g: the TWO transcript compose sites call
-        render_message (the chat entry that adds the whole-message ```html
-        fence branch); render_document is called ONLY by the welcome path
+        """SPEC-13 §2c/§2g (+SPEC-19 SP2): the transcript compose path calls
+        render_message (the chat entry with the whole-message ```html fence
+        branch); render_document is called ONLY by the welcome path
         (render_welcome), which stays markdown-by-design.
 
-        AST pin, not a string scan: a Call node IS a call; the log string
-        ("render_document failed ...") and the `from render.html import
-        render_document` line are neither, so they can neither mask a stale
-        call site nor be mistaken for a live one.
+        SPEC-19 SP2 refactor: the two transcript sites now share ONE compose
+        helper, `_compose_text` (which adds the ```live branch and delegates
+        the non-live text to render_message). `_append_to_surface` and
+        `_compose_off_thread` call `_compose_text`; both must keep routing
+        through it (NOT back to a bare render_document).
 
-        Kill-proofs (each revert kills this pin):
-          - revert _append_to_surface's compose to render_document →
-            rd_calls gains "_append_to_surface" (fails the ==["render_welcome"]
-            assert) AND the render_message count drops to 1 (fails >=2);
-          - revert _compose_off_thread's compose → same shape;
-          - add any third render_document compose site → rd_calls !=
-            ["render_welcome"].
+        AST pin, not a string scan.
         """
         import ast as ast_mod
         src = self._read(self.PATH)
@@ -316,6 +339,7 @@ class TestRenderHandlerAppendsArePipelineSanitized:
 
         rd_calls: list = []
         rm_calls: list = []
+        ct_calls: list = []
         for node in ast_mod.walk(tree):
             if (isinstance(node, ast_mod.Call)
                     and isinstance(node.func, ast_mod.Name)):
@@ -323,18 +347,21 @@ class TestRenderHandlerAppendsArePipelineSanitized:
                     rd_calls.append(_enclosing_func(node) or "<module>")
                 elif node.func.id == "render_message":
                     rm_calls.append(_enclosing_func(node) or "<module>")
+                elif node.func.id == "_compose_text":
+                    ct_calls.append(_enclosing_func(node) or "<module>")
 
         assert rd_calls == ["render_welcome"], (
             "render_document must be called ONLY by render_welcome (the "
             f"markdown-by-design welcome path); found {rd_calls!r}"
         )
-        assert len(rm_calls) >= 2, (
-            "expected the 2 transcript compose sites to call render_message; "
-            f"found {len(rm_calls)} in {rm_calls!r}"
+        # render_message is now reached via the shared _compose_text helper
+        # (itself called by BOTH transcript sites).
+        assert rm_calls == ["_compose_text"], (
+            f"render_message must be reached via _compose_text; found {rm_calls!r}"
         )
-        assert set(rm_calls) >= {"_append_to_surface", "_compose_off_thread"}, (
-            "render_message must be the compose entry at BOTH transcript "
-            f"sites; found {rm_calls!r}"
+        assert set(ct_calls) >= {"_append_to_surface", "_compose_off_thread"}, (
+            "the transcript compose must route through _compose_text at BOTH "
+            f"sites; found {ct_calls!r}"
         )
 
     def test_welcome_re_sanitize_present(self):

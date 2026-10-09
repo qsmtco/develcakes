@@ -134,10 +134,15 @@ class TestWebKitPath:
         assert "<style>" in doc and "message-row" in doc
         s.destroy()
 
-    def test_javascript_disabled(self):
+    def test_javascript_disabled(self, monkeypatch):
+        """SPEC-06 posture KEPT under the SPEC-19 kill-switch: with live JS
+        DISABLED (`DEVELCAKES_LIVE_JS=0`) the webview boots non-scriptable —
+        byte-identical to pre-SP2. (SP2 flips the DEFAULT on; the OFF path is
+        the degrade mode, pinned here.)"""
         from ui.views.chat_surface import ChatSurface
 
         s = ChatSurface()
+        s._live_js = False  # the kill-switch OFF path
         s._ensure_webview()
         settings = s._webview.get_settings()
         assert settings.get_enable_javascript() is False
@@ -1002,6 +1007,7 @@ class TestGtkRestoreMachinery:
         from ui.views.chat_surface import ChatSurface
 
         s = ChatSurface()
+        s._live_js = False  # SPEC-17/legacy GTK machinery = the NON-live path
         vadj = s.get_vadjustment()
         assert vadj is not None  # ScrolledWindow always has an adjustment
         vadj.set_page_size(page_size)
@@ -1361,6 +1367,7 @@ class TestSmartScroll:
         from ui.views.chat_surface import ChatSurface
 
         s = ChatSurface()
+        s._live_js = False  # SPEC-17 model: the NON-live document path (SP2 default-ON)
         reads: list[str] = []
         applies: list[str] = []
         loads: list[str] = []
@@ -2000,3 +2007,219 @@ class TestSmartScroll:
         assert "<= 123" in s._read_scroll_script()
         assert "<= 80" not in s._read_scroll_script()
         s.destroy()
+
+
+# ── SPEC-19 SP2: the ```live tier (fence detection, T2 degrade, cap) ──────
+
+
+class TestLiveFenceDetection:
+    """§2.1: the pure whole-message ```live detector — mirrors the ```html
+    fence exactly; prose around the fence makes it None; ```html is NOT live."""
+
+    def test_whole_message_live_fence_returns_payload(self):
+        from render.html import live_fence
+        assert live_fence("```live\n<b>hi</b>\n```") == "<b>hi</b>"
+
+    def test_crlf_and_uppercase_tolerated(self):
+        from render.html import live_fence
+        assert live_fence("```LIVE\r\n<div>x</div>\r\n```") == "<div>x</div>"
+
+    def test_prose_before_or_after_is_not_live(self):
+        from render.html import live_fence
+        assert live_fence("here:\n```live\nx\n```") is None
+        assert live_fence("```live\nx\n```\ntrailing") is None
+
+    def test_html_fence_is_not_live(self):
+        from render.html import live_fence
+        assert live_fence("```html\n<b>x</b>\n```") is None
+
+    def test_empty_payload_is_empty_string_not_none(self):
+        from render.html import live_fence
+        assert live_fence("```live\n```") == ""
+
+    def test_non_str_and_empty(self):
+        from render.html import live_fence
+        assert live_fence("") is None
+        assert live_fence(None) is None
+
+
+class TestLiveSectionMarkup:
+    """The island markup: payload is inert JSON; `<` escaped so a `</script>`
+    in the payload can never close the island early; flattened markup has no
+    script/on*."""
+
+    def test_island_escapes_lt(self):
+        from ui.views.chat_surface import _live_section_island_html
+        html = _live_section_island_html(3, "<script>alert(1)</script>")
+        assert 'data-live-id="3"' in html
+        assert "\\u003cscript" in html  # escaped, cannot terminate the island
+        assert "</script><script>" not in html
+        assert html.count("</script>") == 1  # only the island's own close
+
+    def test_flatten_mirror_strips_scripts_and_onstar(self):
+        from ui.views.chat_surface import _live_flattened_section_html
+        out = _live_flattened_section_html(
+            1, '<b>keep</b><script>bad()</script><img src="x" onerror="boom()">')
+        assert "<script" not in out and "bad()" not in out
+        assert "onerror" not in out
+        assert "<b>keep</b>" in out
+        assert 'src="x"' in out  # non-on* attrs survive
+
+
+class TestLiveKillSwitch:
+    """§2.5/§4: the kill-switch default is ON; =0 disables (T2 static)."""
+
+    def test_default_on(self, monkeypatch):
+        monkeypatch.delenv("DEVELCAKES_LIVE_JS", raising=False)
+        monkeypatch.delenv("CRABCAKES_LIVE_JS", raising=False)
+        from ui.views.chat_surface import _live_js_enabled
+        assert _live_js_enabled() is True
+
+    def test_explicit_zero_disables(self, monkeypatch):
+        monkeypatch.setenv("DEVELCAKES_LIVE_JS", "0")
+        from ui.views.chat_surface import _live_js_enabled
+        assert _live_js_enabled() is False
+
+    def test_old_name_zero_disables(self, monkeypatch):
+        monkeypatch.delenv("DEVELCAKES_LIVE_JS", raising=False)
+        monkeypatch.setenv("CRABCAKES_LIVE_JS", "0")
+        from ui.views.chat_surface import _live_js_enabled
+        assert _live_js_enabled() is False
+
+    def test_explicit_one_still_enables(self, monkeypatch):
+        monkeypatch.setenv("DEVELCAKES_LIVE_JS", "1")
+        from ui.views.chat_surface import _live_js_enabled
+        assert _live_js_enabled() is True
+
+
+class TestLiveCapAndFlattenPython:
+    """§4 cap-10 + flatten mirror at the PYTHON level (no WebKit): registry
+    bounded, oldest flattened (row html rewritten to a script-free section)."""
+
+    def test_cap_twelve_leaves_ten_and_flattens_oldest_two(self):
+        from ui.views.chat_surface import ChatSurface
+        if WebKit is None:
+            pytest.skip("ChatSurface needs WebKit for the live registry")
+        s = ChatSurface()
+        s._live_js = True
+        try:
+            ids = [s.append_live(f"<b>{i}</b><script>x{i}()</script>") for i in range(12)]
+            assert len(s._live_sections) == 10
+            # The two OLDEST are gone from the registry and flattened in the deque.
+            assert ids[0] not in s._live_sections
+            assert ids[1] not in s._live_sections
+            assert ids[11] in s._live_sections
+            flat_rows = [r for r in s._rows if r.get("live_id") == ids[0]]
+            assert flat_rows and "<script" not in flat_rows[0]["html"]
+        finally:
+            s.destroy()
+
+    def test_flatten_rewrites_row_for_rebuild(self):
+        from ui.views.chat_surface import ChatSurface
+        if WebKit is None:
+            pytest.skip("ChatSurface needs WebKit for the live registry")
+        s = ChatSurface()
+        s._live_js = True
+        try:
+            lid = s.append_live("<b>hi</b><script>leak()</script>")
+            s._flatten_live_section(lid, dom=False)
+            assert lid not in s._live_sections
+            row = [r for r in s._rows if r.get("live_id") == lid][0]
+            assert "<script" not in row["html"] and "leak()" not in row["html"]
+            assert "<b>hi</b>" in row["html"]
+        finally:
+            s.destroy()
+
+
+class TestLiveDocumentBuild:
+    """§2.2/§2.3: _blocks_html emits a live section VERBATIM as a top-level
+    child (not wrapped in agent-box chrome); the emitted document carries the
+    inert island."""
+
+    def test_live_row_emitted_verbatim(self):
+        from ui.views.chat_surface import _document, _live_section_island_html
+        rows = [{
+            "role": "agent",
+            "html": _live_section_island_html(7, "<b>x</b>"),
+            "agent": "Coder",
+            "live_id": 7,
+        }]
+        doc = _document(rows)
+        assert 'class="live-section"' in doc
+        assert 'data-live-id="7"' in doc
+        assert 'class="agent-box' not in doc  # not chrome-wrapped
+
+
+class TestLiveHandlerTierDecision:
+    """§2.2/§2.3: the handler routes a ```live fence to the live append ONLY
+    when the surface reports the tier enabled; otherwise it degrades to the
+    T2-static sanitized fragment (never error, never raw script)."""
+
+    def test_compose_live_fence_yields_payload_and_static(self):
+        from ui.handlers.chat_render_handler import _compose_text
+        payload, static = _compose_text("```live\n<b>x</b><script>y()</script>\n```")
+        assert payload == "<b>x</b><script>y()</script>"
+        assert "<script" not in static and "<b>x</b>" in static
+
+    def test_compose_non_live_has_no_payload(self):
+        from ui.handlers.chat_render_handler import _compose_text
+        payload, static = _compose_text("plain **md**")
+        assert payload is None
+        assert "<strong>md</strong>" in static
+
+    def test_append_composed_uses_live_path_when_enabled(self):
+        from ui.handlers.chat_render_handler import _append_composed
+
+        calls = {}
+
+        class _LiveSurface:
+            def is_live_enabled(self):
+                return True
+
+            def append_live(self, payload, agent_name=None, agent_color=None):
+                calls["live"] = payload
+
+            def append_message(self, *a, **k):
+                calls["static"] = a
+
+        _append_composed(_LiveSurface(), "Agent", "<b>L</b>", "<b>L</b>", "Coder", None)
+        assert calls.get("live") == "<b>L</b>"
+        assert "static" not in calls
+
+    def test_append_composed_degrades_when_disabled(self):
+        from ui.handlers.chat_render_handler import _append_composed
+
+        calls = {}
+
+        class _OffSurface:
+            def is_live_enabled(self):
+                return False
+
+            def append_live(self, payload, agent_name=None, agent_color=None):
+                calls["live"] = payload
+
+            def append_message(self, role, fragh, agent_name=None, agent_color=None):
+                calls["static"] = (role, fragh)
+
+        _append_composed(_OffSurface(), "Agent", "<b>L</b>", "<b>STATIC</b>", "Coder", None)
+        assert "live" not in calls
+        assert calls["static"] == ("agent", "<b>STATIC</b>")
+
+    def test_append_composed_static_when_no_payload(self):
+        from ui.handlers.chat_render_handler import _append_composed
+
+        calls = {}
+
+        class _Surface:
+            def is_live_enabled(self):
+                return True
+
+            def append_live(self, payload, **k):
+                calls["live"] = payload
+
+            def append_message(self, role, fragh, agent_name=None, agent_color=None):
+                calls["static"] = fragh
+
+        _append_composed(_Surface(), "Agent", None, "<p>md</p>", "Coder", None)
+        assert "live" not in calls
+        assert calls["static"] == "<p>md</p>"

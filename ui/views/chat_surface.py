@@ -41,11 +41,17 @@ import json
 import logging
 import re
 from collections import deque
+from html.parser import HTMLParser
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
+
+# SPEC-19 SP2 §2.1: the whole-message ```live fence detector (pure — no
+# rendering, no sanitizer changes). Imported here because the SURFACE owns the
+# live tier decision (see `append_message`).
+from render.html import live_fence
 
 logger = logging.getLogger(__name__)
 
@@ -77,22 +83,32 @@ else:
         WebKit = None
         _WEBKIT_VERSION = None
 
-# DEVELCAKES_LIVE_JS=1 (SPEC-19 SP1 prototype — DEFAULT OFF; flips on at SP2).
+# DEVELCAKES_LIVE_JS kill-switch (SPEC-19 SP2 — DEFAULT ON; =0 disables).
 # When ON: the transcript view runs with JS enabled + the LiveGuard enforcement
 # boundary attached, and appends become INCREMENTAL DOM injection via
-# evaluate_javascript (the F1 decision) instead of a full-document load_html.
-# When OFF (default): byte-identical to today (JS off, full-document rebuild).
+# evaluate_javascript (the F1 decision) instead of a full-document load_html;
+# a ```live fence appends a LIVE SECTION (T3).
+# When OFF (=0): the pre-SP2 posture (JS off, full-document rebuild) and a
+# ```live fence degrades to T2 static via sanitize_agent_html.
 _LIVE_JS_FLAG = "LIVE_JS"
 
 
 def _live_js_enabled() -> bool:
-    """SPEC-19 SP1 kill-switch, INVERTED for the prototype phase (default
-    OFF; `DEVELCAKES_LIVE_JS=1` opts in). SP2 flips the default on once the
-    enforcement core is proven in the field."""
+    """SPEC-19 §4 kill-switch — SP2 default flips ON.
+
+    Live JS is ENABLED by default (`DEVELCAKES_LIVE_JS=1` is now redundant);
+    `DEVELCAKES_LIVE_JS=0` disables it. Disabled → the chat surface keeps the
+    SPEC-06 ruling (JS off, full-document rebuild) and a ```live fence degrades
+    to T2 static (sanitize_agent_html — see chat_render_handler).
+
+    "Set" is presence, not truthiness (utils.config.get_env D2): ONLY the
+    exact string "0" disables; anything else (unset, "", "1", "true") is ON.
+    Preserving the old-name fallback lets `CRABCAKES_LIVE_JS=0` still kill it.
+    """
     try:
-        return get_env(_LIVE_JS_FLAG) == "1"
+        return get_env(_LIVE_JS_FLAG) != "0"
     except Exception:  # noqa: BLE001 — flag read must never break surface construction
-        return False
+        return True
 
 
 # SPEC-19 §3 E3 (SP1 stub): the injection IIFE. `json.dumps(html)` guarantees
@@ -111,6 +127,269 @@ _INJECT_TEMPLATE = (
 def _inject_script(row_html: str) -> str:
     """Build the append-injection script for one row's HTML (json.dumps-safed)."""
     return _INJECT_TEMPLATE.format(payload=json.dumps(row_html))
+
+
+# ── SPEC-19 SP2: the live-section machinery ──────────────────────────────
+#
+# A live section is `<section class="live-section" data-live-id="N">`. The
+# agent payload is carried in an INERT JSON data island
+# (`<script type="application/json" class="dc-live-src">JSON</script>`):
+# markup embedded this way never executes — not via `template.innerHTML`
+# (probe: SP2 probe row 2/4) and not via load_html (a JSON script is not a
+# JS script; probe row A). Resurrection is an EXPLICIT, scoped pass that
+# parses the island and re-creates only the inline scripts (E3).
+#
+# Why not embed the raw markup directly? Because the FULL-document rebuild
+# path uses `load_html`, which DOES execute inline `<script>` in the document
+# (probe row 1). The island keeps the rebuild inert so resurrection is the
+# single execution point in every path.
+#
+# PROBE-PINNED (SP2, WebKit 2.52.6 / xvfb) — .debug/spec19_sp2_probe*.py:
+#   * template.innerHTML <script> is inert; a RE-CREATED node executes.
+#   * a JSON-MIME script never executes (island is safe in load_html).
+#   * setTimeout/setInterval/rAF can be wrapped and the ORIGINAL clear
+#     functions stop exactly the attributed handles (A stopped, B kept).
+#   * stripping on* attributes makes a synthetic .click() a no-op.
+
+_LIVE_SECTION_CAP = 10
+
+# SPEC-19 SP2: an incremental live surface may accumulate orphaned DOM rows
+# beyond the deque window (the deque evicts; the DOM keeps append-only). Once
+# the DOM exceeds the deque by this slack, force the compaction rebuild so the
+# DOM re-converges on the window (and evicted live sections flatten). Keeps the
+# DOM bounded (P11 invariant) without a reload per append.
+_DOM_COMPACT_SLACK = 100
+
+# Timer shims (F9) — installed ONCE per WebView (window-guarded). Handles are
+# attributed to the section whose scripts are currently executing: the
+# resurrection wrapper sets `window.__dcCurrentLive = id` immediately before
+# appending that section's scripts and clears it after. Shims read it.
+_LIVE_SHIM_JS = (
+    "if (!window.__dcTimersInstalled) {"
+    "  window.__dcTimersInstalled = true;"
+    "  window.__dcTimers = {handles: {}};"
+    "  window.__dcCurrentLive = null;"
+    "  var _st = window.setTimeout.bind(window);"
+    "  var _si = window.setInterval.bind(window);"
+    "  var _raf = window.requestAnimationFrame.bind(window);"
+    "  window.__dcOrig = {"
+    "    clearTimeout: window.clearTimeout.bind(window),"
+    "    clearInterval: window.clearInterval.bind(window),"
+    "    cancelAnimationFrame: window.cancelAnimationFrame.bind(window)"
+    "  };"
+    "  window.__dcRecord = function (id, kind) {"
+    "    var live = window.__dcCurrentLive;"
+    "    if (live === null) { return; }"
+    "    var h = window.__dcTimers.handles;"
+    "    var b = h[live] || (h[live] = {timeout: [], interval: [], raf: []});"
+    "    b[kind].push(id);"
+    "  };"
+    "  window.setTimeout = function (fn, ms) {"
+    "    var extra = [].slice.call(arguments, 2);"
+    "    var id = _st(function () { fn.apply(null, extra); }, ms);"
+    "    window.__dcRecord(id, 'timeout');"
+    "    return id;"
+    "  };"
+    "  window.setInterval = function (fn, ms) {"
+    "    var extra = [].slice.call(arguments, 2);"
+    "    var id = _si(function () { fn.apply(null, extra); }, ms);"
+    "    window.__dcRecord(id, 'interval');"
+    "    return id;"
+    "  };"
+    "  window.requestAnimationFrame = function (fn) {"
+    "    var id = _raf(function (ts) { fn(ts); });"
+    "    window.__dcRecord(id, 'raf');"
+    "    return id;"
+    "  };"
+    "}"
+)
+
+# E3 resurrection, SCOPED to the given live ids. Never resurrects a script
+# with `src` (removed — never appended); preserves `type`; IIFE-wraps the body
+# so a section's top-level declarations cannot collide with another's.
+_LIVE_RESURRECT_JS = (
+    "(function () {"
+    "  __SHIMS__"
+    "  var ids = __IDS__;"
+    "  for (var a = 0; a < ids.length; a++) {"
+    "    var id = ids[a];"
+    "    var secs = document.querySelectorAll("
+    "      'section.live-section[data-live-id=\"' + id + '\"]');"
+    "    for (var b = 0; b < secs.length; b++) {"
+    "      var sec = secs[b];"
+    "      var island = sec.querySelector('script.dc-live-src');"
+    "      if (!island) { continue; }"
+    "      var payload;"
+    "      try { payload = JSON.parse(island.textContent); }"
+    "      catch (e) { payload = ''; }"
+    "      var tpl = document.createElement('template');"
+    "      tpl.innerHTML = payload;"
+    "      var scripts = [];"
+    "      var nodes = [].slice.call(tpl.content.childNodes);"
+    "      for (var c = 0; c < nodes.length; c++) {"
+    "        var nd = nodes[c];"
+    "        if (nd.nodeType === 1 && nd.tagName === 'SCRIPT') {"
+    "          if (nd.getAttribute('src')) { continue; }"
+    "          scripts.push(nd);"
+    "        } else {"
+    "          sec.appendChild(nd);"
+    "        }"
+    "      }"
+    "      if (island.parentNode) { island.parentNode.removeChild(island); }"
+    "      window.__dcCurrentLive = id;"
+    "      for (var d = 0; d < scripts.length; d++) {"
+    "        var s = document.createElement('script');"
+    "        var t = scripts[d].getAttribute('type');"
+    "        if (t) { s.setAttribute('type', t); }"
+    "        s.text = '(function(){\\n' + scripts[d].textContent + '\\n})();';"
+    "        sec.appendChild(s);"
+    "      }"
+    "      window.__dcCurrentLive = null;"
+    "    }"
+    "  }"
+    "})();"
+)
+
+# F8/F9 flatten: remove scripts, strip on* attributes, clear EXACTLY this
+# section's timers via the ORIGINAL clear functions.
+_LIVE_FLATTEN_JS = (
+    "(function () {"
+    "  var ids = __IDS__;"
+    "  var t = window.__dcTimers;"
+    "  var orig = window.__dcOrig;"
+    "  for (var a = 0; a < ids.length; a++) {"
+    "    var id = ids[a];"
+    "    var secs = document.querySelectorAll("
+    "      'section.live-section[data-live-id=\"' + id + '\"]');"
+    "    for (var b = 0; b < secs.length; b++) {"
+    "      var sec = secs[b];"
+    "      var sc = sec.querySelectorAll('script');"
+    "      for (var c = 0; c < sc.length; c++) {"
+    "        sc[c].parentNode.removeChild(sc[c]);"
+    "      }"
+    "      var all = sec.querySelectorAll('*');"
+    "      for (var d = 0; d < all.length; d++) {"
+    "        var at = all[d].attributes;"
+    "        for (var e = at.length - 1; e >= 0; e--) {"
+    "          if (/^on/i.test(at[e].name)) { all[d].removeAttribute(at[e].name); }"
+    "        }"
+    "      }"
+    "    }"
+    "    if (t && t.handles[id]) {"
+    "      var h = t.handles[id];"
+    "      for (var f = 0; f < h.timeout.length; f++) { orig.clearTimeout(h.timeout[f]); }"
+    "      for (var g = 0; g < h.interval.length; g++) { orig.clearInterval(h.interval[g]); }"
+    "      for (var i = 0; i < h.raf.length; i++) { orig.cancelAnimationFrame(h.raf[i]); }"
+    "      delete t.handles[id];"
+    "    }"
+    "  }"
+    "})();"
+)
+
+
+def _live_ids_js(ids) -> str:
+    """JSON array of int ids — safe to interpolate (ints only)."""
+    return json.dumps([int(i) for i in ids])
+
+
+def _live_resurrect_js(ids) -> str:
+    return _LIVE_RESURRECT_JS.replace("__SHIMS__", _LIVE_SHIM_JS).replace(
+        "__IDS__", _live_ids_js(ids)
+    )
+
+
+def _live_flatten_js(ids) -> str:
+    return _LIVE_FLATTEN_JS.replace("__IDS__", _live_ids_js(ids))
+
+
+def _live_section_island_html(live_id: int, payload_html: str) -> str:
+    """The section markup used by the rebuild/inject path: the payload in an
+    inert JSON data island (never executes; resurrected explicitly).
+
+    `<` is escaped to `\\u003c` (JSON string escape) so the island's text can
+    never be closed early by a `</script>` inside the payload.
+    """
+    enc = json.dumps(payload_html).replace("<", "\\u003c")
+    return (
+        f'<section class="live-section" data-live-id="{int(live_id)}">'
+        f'<script type="application/json" class="dc-live-src">{enc}</script>'
+        "</section>"
+    )
+
+
+class _LiveHtmlFlattener(HTMLParser):
+    """Python-side flatten mirror (linear, not a regex): drop `<script>`
+    elements entirely and strip `on*` attributes. Used to emit a NEUTRALIZED
+    section on a document rebuild for a section no longer in the live
+    registry. Fail-closed: any parser error yields "" (never un-flattened
+    payload)."""
+
+    _VOID = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []
+        self._skip_depth = 0
+
+    def text(self) -> str:
+        return "".join(self._out)
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._out.append(html.escape(data, quote=False))
+
+    def handle_starttag(self, tag, attrs) -> None:
+        if tag == "script":
+            self._skip_depth += 1
+            return
+        if not self._skip_depth:
+            self._out.append(self._start_tag(tag, attrs))
+
+    def handle_startendtag(self, tag, attrs) -> None:
+        if tag != "script" and not self._skip_depth:
+            self._out.append(self._start_tag(tag, attrs))
+
+    def handle_endtag(self, tag) -> None:
+        if tag == "script":
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if not self._skip_depth and tag not in self._VOID:
+            self._out.append(f"</{tag}>")
+
+    @staticmethod
+    def _start_tag(tag, attrs) -> str:
+        kept = []
+        for k, v in attrs:
+            if k.lower().startswith("on"):
+                continue
+            if v is None:
+                kept.append(f" {k}")
+            else:
+                kept.append(f' {k}="{html.escape(v, quote=True)}"')
+        return f"<{tag}{''.join(kept)}>"
+
+
+def _flatten_live_html(payload_html: str) -> str:
+    """Neutralize a live payload for static re-emission (scripts + on* gone)."""
+    parser = _LiveHtmlFlattener()
+    try:
+        parser.feed(payload_html)
+        parser.close()
+        return parser.text()
+    except Exception:
+        logger.debug("live flatten parse failed", exc_info=True)
+        return ""
+
+
+def _live_flattened_section_html(live_id: int, payload_html: str) -> str:
+    return (
+        f'<section class="live-section" data-live-id="{int(live_id)}">'
+        f"{_flatten_live_html(payload_html)}</section>"
+    )
 
 
 # Spec §7 huge-message cap.
@@ -225,6 +504,14 @@ def _blocks_html(rows: list[dict]) -> str:
     n = len(rows)
     while i < n:
         row = rows[i]
+        # SPEC-19 SP2: a live section is emitted VERBATIM as a TOP-LEVEL
+        # child of #transcript (the spec's injection shape) — never wrapped in
+        # the agent-box chrome. `row["html"]` holds either the inert island
+        # markup (still live) or the flattened markup (evicted/flattened).
+        if row.get("live_id") is not None:
+            blocks.append(row["html"])
+            i += 1
+            continue
         agent = row.get("agent") or ""
         if not agent:
             blocks.append(
@@ -331,6 +618,9 @@ class ChatSurface(Gtk.Box):
         self._window_max = window_max
         self._rows: deque = deque(maxlen=window_max)
         self._stream_buffers: dict[str, list[str]] = {}
+        # SPEC-19 SP2 §2.4: streamed live-fence placeholders (session_key → the
+        # deque row dict shown as a code block until completion replaces it).
+        self._stream_placeholders: dict[str, dict] = {}
         self._webview = None
         self._dirty = False
         self._render_pending = False
@@ -342,7 +632,20 @@ class ChatSurface(Gtk.Box):
         self._live_guard = None
         # Rows already injected into the live #transcript (incremental append);
         # the full-document load_html path re-renders from scratch instead.
-        self._injected_count = 0
+        # Monotonic (SP2): `_row_seq` counts ALL rows ever appended; the deque
+        # window can evict old rows, so an INDEX into it stalls once saturated.
+        # `_injected_seq` is the watermark of the newest row present in the
+        # live DOM; `_dom_row_count` bounds DOM growth (compaction trigger).
+        self._row_seq = 0
+        self._injected_seq = 0
+        self._dom_row_count = 0
+        self._needs_compact = False
+        # SPEC-19 SP2 live-section registry: live_id (int, monotonic) → entry
+        # {"row": <the deque row dict>, "payload": <raw live payload>}. Insertion
+        # order = oldest-first, which the cap uses to evict. A row's `html`
+        # holds its CURRENT markup (island while live, flattened once evicted).
+        self._live_sections: dict[int, dict] = {}
+        self._next_live_id = 1
         # FIX 3 (SP5a audit): the surface owns its scroll — when mounted
         # (directly, no wrapper) it must fill the pane.
         self._scroll = _make_owned_scroll()
@@ -624,12 +927,21 @@ class ChatSurface(Gtk.Box):
             return GLib.SOURCE_REMOVE
         self._dirty = False
         self._rebuild_count += 1
+        # SPEC-19 SP2 §2.3: a DOM/Python divergence (placeholder edit/removal,
+        # or a flattened-evicted live section) forces a full-document reload —
+        # the incremental path can only APPEND. Flatten evicted live sections
+        # FIRST so the emitted document is already neutralized.
+        if self._needs_compact:
+            self._needs_compact = False
+            self._reap_evicted_live()
+            self._rebuild_live_document()
+            return GLib.SOURCE_REMOVE
         # SPEC-19 SP1 (F1): with live JS ON and a document ALREADY loaded,
         # appends are INCREMENTAL — inject only the new row(s) via eval, no
         # full-document reload (live state survives). The initial load and the
         # compaction rebuild still use load_html (below / _on_scroll_read).
         if (self._live_js and self._webview is not None
-                and self._injected_count < len(self._rows)):
+                and self._injected_seq < self._row_seq):
             self._inject_new_rows()
             return GLib.SOURCE_REMOVE
         # Legacy GTK capture (MICRO smart-scroll, retained, NOT the fix):
@@ -642,7 +954,8 @@ class ChatSurface(Gtk.Box):
             # No web view yet, OR the live path's FIRST load — a fresh
             # surface's first paint lands at the bottom; no document to read.
             self._pending_scroll = (True, 0.0)
-            self._injected_count = len(self._rows)
+            self._injected_seq = self._row_seq
+            self._dom_row_count = len(self._rows)
             self._issue_load(_document(list(self._rows)))
             return GLib.SOURCE_REMOVE
         # A document is already loaded — read its position FIRST; the read
@@ -651,6 +964,18 @@ class ChatSurface(Gtk.Box):
         self._read_in_flight = True
         self._document_eval(self._read_scroll_script(), self._on_scroll_read)
         return GLib.SOURCE_REMOVE
+
+    def _rebuild_live_document(self) -> None:
+        """Full-document reload for a live surface (compaction). The document
+        emits inert islands for live sections and flattened markup for
+        evicted ones; FINISHED then resurrects the STILL-LIVE sections."""
+        vadj = self._scroll.get_vadjustment()
+        if vadj is not None:
+            self._pending_restore = (self._was_at_bottom, vadj.get_value())
+        self._pending_scroll = (True, 0.0)
+        self._injected_seq = self._row_seq
+        self._dom_row_count = len(self._rows)
+        self._issue_load(_document(list(self._rows)))
 
     def _issue_load(self, doc: str) -> None:
         """BUG#1 (audit fix): the ONE place that arms `_load_in_flight` before
@@ -689,18 +1014,50 @@ class ChatSurface(Gtk.Box):
     def _inject_new_rows(self) -> None:
         """SPEC-19 SP1 F1: append the not-yet-injected rows incrementally.
 
-        Only the delta (`_injected_count..len`) is injected; the document is
-        NOT reloaded, so live DOM state survives appends. HTML is passed as a
+        Only rows with `seq > _injected_seq` are injected; the document is NOT
+        reloaded, so live DOM state survives appends. HTML is passed as a
         json.dumps string literal (never interpolated raw into JS). Injection
         is in the MAIN world (the loaded document's world) — live scripts run.
+
+        Monotonic model (SP2): `_injected_seq` is a watermark over `seq`, NOT
+        an index into the (evictable) deque — indices stall once the window
+        saturates. If the deque evicted rows that were never injected (DOM
+        would permanently retain orphan rows), force a compaction instead. A
+        bounded DOM (`_dom_row_count`) triggers compaction too (bounded-memory
+        invariant under the live path).
+
+        SPEC-19 SP2: any live SECTIONS in the delta are injected as inert JSON
+        islands; after injection lands, resurrection runs SCOPED to exactly
+        those new ids (their inline scripts execute).
         """
         rows = list(self._rows)
-        new_rows = rows[self._injected_count:]
+        new_rows = [r for r in rows if r.get("seq", 0) > self._injected_seq]
         if not new_rows:
+            self._injected_seq = self._row_seq
+            return
+        # Orphan guard: the oldest surviving row's seq must be exactly the
+        # next-to-inject seq. Otherwise the deque dropped un-injected rows and
+        # an incremental append cannot represent the DOM → compact. Also
+        # compact once the DOM accumulates a SLACK of orphaned rows beyond the
+        # deque window (bounded-memory invariant: DOM ≤ window + slack).
+        oldest_seq = rows[0].get("seq", 0)
+        if (oldest_seq > self._injected_seq + 1
+                or self._dom_row_count > len(rows) + _DOM_COMPACT_SLACK):
+            self._needs_compact = True
+            self._schedule_render()
             return
         html = _blocks_html(new_rows)
-        self._injected_count = len(rows)
-        self._document_eval_main(_inject_script(html), lambda _t: None)
+        self._injected_seq = new_rows[-1].get("seq", self._row_seq)
+        self._dom_row_count += len(new_rows)
+        live_ids = [r["live_id"] for r in new_rows if r.get("live_id") is not None]
+
+        def _after_inject(_t):
+            if live_ids and not self._destroyed:
+                self._document_eval_main(
+                    _live_resurrect_js(live_ids), lambda _x: None)
+
+        self._document_eval_main(_inject_script(html), _after_inject)
+
 
     def _document_eval_main(self, script: str, callback) -> None:
         """Evaluate `script` in the document's MAIN world (live content world).
@@ -821,6 +1178,15 @@ class ChatSurface(Gtk.Box):
         # deferred append can re-render. Cleared BEFORE the dirty-kick so the
         # kicked render is not itself gated.
         self._load_in_flight = False
+        # SPEC-19 SP2: a full-document (re)load re-emits live sections as
+        # INERT JSON islands — resurrect every STILL-LIVE section now (the
+        # load wiped the previous document's scripts + timer registry). Runs
+        # in the MAIN world; scoped to the live registry's ids.
+        if self._live_js and self._live_sections:
+            self._document_eval_main(
+                _live_resurrect_js(list(self._live_sections.keys())),
+                lambda _t: None,
+            )
         pending = self._pending_scroll
         if pending is not None:
             at_bottom, y = pending
@@ -933,31 +1299,177 @@ class ChatSurface(Gtk.Box):
         """
         if self._destroyed:
             return
-        self._rows.append(
-            {
-                "role": role if role in ("user", "agent", "system") else "system",
-                "html": _cap_row_html(html_fragment),
-                "agent": agent_name or "",
-                "color": _sanitize_color(agent_color),
-            }
-        )
+        self._append_row({
+            "role": role if role in ("user", "agent", "system") else "system",
+            "html": _cap_row_html(html_fragment),
+            "agent": agent_name or "",
+            "color": _sanitize_color(agent_color),
+        })
+
+    def _append_row(self, row: dict) -> None:
+        """Assign a monotonic seq and append (single append chokepoint)."""
+        self._row_seq += 1
+        row["seq"] = self._row_seq
+        self._rows.append(row)
         self._schedule_render()
+
+    # ── SPEC-19 SP2: the live tier ──
+    def is_live_enabled(self) -> bool:
+        """True when this surface runs the live tier (JS on + guard attached).
+
+        The render handler branches on this to choose between the live append
+        (T3) and the T2-static degrade (sanitize_agent_html) for a ```live
+        fence. The flag is resolved once at construction.
+        """
+        return bool(self._live_js)
+
+    def append_live(self, payload_html: str, agent_name: str | None = None,
+                    agent_color: str | None = None) -> int | None:
+        """SPEC-19 SP2 §2.2 T3: append an agent ```live payload as a LIVE
+        SECTION of #transcript.
+
+        The payload travels as an inert JSON data island; the section is
+        registered and (if the document is loaded) resurrected immediately.
+        Unlike `append_message`, a live row carries `live_id` and its `html`
+        is the island markup, re-emitted verbatim by `_blocks_html`.
+
+        Cap (§4): appending past `_LIVE_SECTION_CAP` flattens the OLDEST live
+        section FIRST (its scripts/on*/timers neutralized), then registers the
+        new one. Bounded-memory invariant holds by construction.
+
+        Returns the assigned live id (or None if the surface is destroyed).
+        """
+        if self._destroyed:
+            return None
+        live_id = self._next_live_id
+        self._next_live_id += 1
+        payload_html = _cap_row_html(payload_html)
+        row = {
+            "role": "agent",
+            "html": _live_section_island_html(live_id, payload_html),
+            "agent": agent_name or "",
+            "color": _sanitize_color(agent_color),
+            "live_id": live_id,
+        }
+        self._append_row(row)
+        self._live_sections[live_id] = {"row": row, "payload": payload_html}
+        # Cap overflow: flatten oldest-first until within the cap.
+        while len(self._live_sections) > _LIVE_SECTION_CAP:
+            oldest = next(iter(self._live_sections))
+            self._flatten_live_section(oldest, dom=True)
+        return live_id
+
+    def _reap_evicted_live(self) -> None:
+        """Compaction: a live row that fell out of the deque window is no
+        longer present in the rebuilt document — flatten its DOM section +
+        deregister (it becomes plain static DOM)."""
+        rows = list(self._rows)
+
+        def _present(row) -> bool:
+            return any(r is row for r in rows)
+
+        for lid in list(self._live_sections.keys()):
+            if not _present(self._live_sections[lid]["row"]):
+                self._flatten_live_section(lid, dom=True)
+
+    def _flatten_live_section(self, live_id: int, dom: bool = True) -> None:
+        """F8/F9 full neutralization of ONE section.
+
+        - JS (dom=True): remove its script nodes, strip every on* attribute,
+          clear EXACTLY its recorded timers (original clear fns), deregister.
+        - Python: rewrite the row's `html` to flattened section markup so any
+          future full-document rebuild emits it INERT (no island, no scripts).
+
+        A DOM flatten makes the Python row markup (island) DIVERGE from the
+        DOM (flattened) — mark the surface for a compaction rebuild so the two
+        re-converge on the next render.
+        """
+        entry = self._live_sections.pop(live_id, None)
+        if entry is None:
+            return
+        payload = entry["payload"]
+        entry["row"]["html"] = _live_flattened_section_html(live_id, payload)
+        if dom and self._webview is not None and not self._destroyed:
+            self._document_eval_main(
+                _live_flatten_js([live_id]), lambda _t: None
+            )
 
     def stream_delta(self, session_key: str, text: str, agent_name: str | None = None) -> None:
         """Buffer a streaming delta — NOTHING renders until end_stream.
 
         REGISTER (SP3 audit r2, accepted class): pre-flush chunks accumulate
         unbounded until end_stream (P11 register item).
+
+        SPEC-19 §2.4: when the accumulating text is a live fence IN PROGRESS
+        (` ```live ` opener present), a plain CODE-BLOCK placeholder is shown —
+        the live section is only created at COMPLETION (end_stream). This is
+        the streaming rule; end_stream REPLACES the placeholder.
         """
         self._stream_buffers.setdefault(session_key, []).append(text)
+        joined = "".join(self._stream_buffers[session_key])
+        if self._live_js and self._looks_like_live_stream(joined):
+            self._update_stream_placeholder(session_key, joined, agent_name)
+
+    @staticmethod
+    def _looks_like_live_stream(text: str) -> bool:
+        return text.lstrip().lower().startswith("```live")
+
+    def _update_stream_placeholder(self, session_key: str, joined: str,
+                                   agent_name) -> None:
+        """Render/refresh the streaming placeholder row (a code block) for a
+        live-fence-in-progress. Idempotent per session — one placeholder row.
+
+        Any change to an already-injected placeholder forces a compaction
+        rebuild (the incremental path cannot edit an existing row's DOM).
+        """
+        body = html.escape(joined).replace("\n", "<br>")
+        existing = self._stream_placeholders.get(session_key)
+        if existing is None:
+            row = {
+                "role": "agent",
+                "html": f'<pre class="stream-placeholder">{body}</pre>',
+                "agent": agent_name or "",
+                "color": "",
+            }
+            self._stream_placeholders[session_key] = row
+            self._append_row(row)
+        else:
+            existing["html"] = f'<pre class="stream-placeholder">{body}</pre>'
+            self._needs_compact = True
+            self._schedule_render()
 
     def end_stream(self, session_key: str, agent_name: str | None = None) -> None:
-        """Flush the buffered stream as ONE atomic message row."""
+        """Flush the buffered stream as ONE atomic message row.
+
+        SPEC-19 §2.4: a completed live fence REPLACES its streaming
+        placeholder with the live section (T3 path); anything else keeps the
+        existing escaped-row behavior. Removing the placeholder row makes the
+        DOM diverge from the deque → force a compaction rebuild so the
+        placeholder disappears and the live section appears.
+        """
         chunks = self._stream_buffers.pop(session_key, None)
+        placeholder = self._stream_placeholders.pop(session_key, None)
+        if placeholder is not None:
+            try:
+                self._rows.remove(placeholder)
+            except ValueError:
+                pass
+            self._needs_compact = True
         if not chunks:
+            if self._needs_compact:
+                self._schedule_render()
             return
-        joined = html.escape("".join(chunks)).replace("\n", "<br>")
-        self.append_message("agent", joined, agent_name=agent_name)
+        joined = "".join(chunks)
+        payload = live_fence(joined) if self._live_js else None
+        if payload is not None:
+            self.append_live(payload, agent_name=agent_name)
+            return
+        self._append_row({
+            "role": "agent",
+            "html": _cap_row_html(html.escape(joined).replace("\n", "<br>")),
+            "agent": agent_name or "",
+            "color": "",
+        })
 
     def destroy(self) -> None:
         """Drop the webview (idempotent — twice-safe).
@@ -980,7 +1492,9 @@ class ChatSurface(Gtk.Box):
         self._render_pending = False
         self._dirty = False
         self._stream_buffers.clear()
+        self._stream_placeholders.clear()
         self._rows.clear()
+        self._live_sections.clear()
         # MICRO smart-scroll (edge 7): cancel any pending settle idle and
         # disconnect the adjustment handlers so a height change landing AFTER
         # destroy cannot restore on a dead surface (and no restore fires from

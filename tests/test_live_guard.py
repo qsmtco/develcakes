@@ -516,3 +516,298 @@ class TestStoreDirPermissions:
         # The store path must end up 0700 regardless of pre-existence.
         mode = stat.S_IMODE(os.stat(store).st_mode)
         assert mode == 0o700, f"store dir not chmod 0700 (got {oct(mode)})"
+
+
+# ── 5. SPEC-19 SP2: the live tier end-to-end (real WebKit under xvfb) ─────
+#
+# Each test builds a REAL surface (JS on, guard attached), appends live
+# sections via the production path (append_live / the handler compose), and
+# reads the DOM back through the surface's OWN eval seam (MAIN world via
+# _document_eval_main) so live script effects are observable.
+
+
+def _main_eval(surface, code, timeout=6):
+    """Evaluate in the MAIN world (where live scripts run) and return text."""
+    box = {}
+    surface._document_eval_main(code, lambda t: box.__setitem__("v", t))
+    _pump(timeout)
+    return box.get("v")
+
+
+def _live_surface(monkeypatch, window_max=500):
+    """A presented ChatSurface with the live tier ON (default) and a loaded
+    empty document. Caller owns win.close()/s.destroy()."""
+    monkeypatch.setattr(cs_module, "_live_js_enabled", lambda: True)
+    s = ChatSurface(window_max=window_max)
+    win = _present(s)
+    # Seed the initial document load so subsequent appends are INCREMENTAL.
+    s.append_message("agent", "<p>seed</p>", "Coder")
+    s._drain_renders()
+    _pump(1.2)
+    return s, win
+
+
+class TestLiveAppendExecutes:
+    """§3: the live append executes inline script (real WebKit)."""
+
+    def test_live_section_script_sets_window_flag(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            s.append_live("<p>LIVE</p><script>window.__t3sp2 = 42;</script>")
+            s._drain_renders()
+            _pump(1.0)
+            assert _main_eval(s, "window.__t3sp2") == "42"
+            assert _eval(s._webview, "document.body.textContent") is not None
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveE3Resurrection:
+    """§3 E3: script-with-src NEVER resurrects; IIFE prevents leakage; type
+    preserved."""
+
+    def test_script_src_never_resurrects(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            # A script with src AND an inline body: per HTML spec src wins and
+            # the inline body is ignored. A correct E3 resurrection SKIPS the
+            # whole node (never resurrects src scripts), so the inline marker
+            # must stay undefined. A mutant that resurrects it (as an inline
+            # node) would EXECUTE the body → RED.
+            s.append_live(
+                '<b>no-src-run</b>'
+                '<script src="data:text/javascript,">window.__srcleak=1;</script>'
+                '<script>window.__ok=1;</script>'
+            )
+            s._drain_renders()
+            _pump(1.0)
+            # The src script node must be ABSENT from the DOM (removed).
+            n = _main_eval(s,
+                "document.querySelectorAll('section.live-section script[src]').length")
+            assert n == "0", f"a script[src] node survived: {n}"
+            # Its inline body must NOT have executed.
+            leak = _main_eval(s, "String(window.__srcleak)")
+            assert leak == "undefined", f"a src script's body executed: {leak}"
+            # The inline script still ran.
+            assert _main_eval(s, "window.__ok") == "1"
+        finally:
+            win.close()
+            s.destroy()
+
+    def test_data_src_never_resurrects(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            s.append_live(
+                '<script src="data:text/javascript,window.__d=1"></script>'
+                '<script>window.__inline=1;</script>'
+            )
+            s._drain_renders()
+            _pump(1.0)
+            n = _main_eval(s, "window.__d")
+            assert n in (None, "", "null", "undefined"), (
+                f"a data: src script executed: {n}")
+            ns = _main_eval(s,
+                "document.querySelectorAll('section.live-section script[src]').length")
+            assert ns == "0"
+        finally:
+            win.close()
+            s.destroy()
+
+    def test_iife_prevents_window_leakage(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            s.append_live("<script>function collides(){return 1;}</script>")
+            s._drain_renders()
+            _pump(1.0)
+            assert _main_eval(s, "String(window.collides)") == "undefined"
+        finally:
+            win.close()
+            s.destroy()
+
+    def test_script_type_preserved(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            s.append_live('<script type="application/ecmascript">window.__ty=1;</script>')
+            s._drain_renders()
+            _pump(1.0)
+            ty = _main_eval(s,
+                "var s=document.querySelector('section.live-section script[type]');"
+                "s ? s.getAttribute('type') : 'NONE'")
+            assert ty == "application/ecmascript", f"type not preserved: {ty}"
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveTimerAttribution:
+    """§3 F9: handles are attributed per-section; flatten(A) stops ONLY A."""
+
+    def test_flatten_a_stops_only_a(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            a = s.append_live(
+                "<script>window.setInterval(function(){window.__A=(window.__A||0)+1;},60);</script>")
+            b = s.append_live(
+                "<script>window.setInterval(function(){window.__B=(window.__B||0)+1;},60);</script>")
+            s._drain_renders()
+            _pump(0.8)
+            # Both ticking.
+            a1 = _main_eval(s, "window.__A")
+            b1 = _main_eval(s, "window.__B")
+            assert a1 and a1 != "undefined", "A never ticked"
+            assert b1 and b1 != "undefined", "B never ticked"
+            # Flatten A only.
+            s._flatten_live_section(a, dom=True)
+            _pump(0.4)
+            a2 = _main_eval(s, "window.__A")
+            b2 = _main_eval(s, "window.__B")
+            _pump(0.4)
+            a3 = _main_eval(s, "window.__A")
+            b3 = _main_eval(s, "window.__B")
+            assert a2 == a3, f"A kept ticking after flatten ({a2}->{a3})"
+            assert int(b3) > int(b2), f"B was wrongly stopped ({b2}->{b3})"
+            assert b in s._live_sections  # B deregistered? no — still live
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveFlattenNeutralizes:
+    """§3 F8: flatten removes onclick + stops the interval."""
+
+    def test_flatten_kills_onclick_and_interval(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            lid = s.append_live(
+                '<button id="btn" onclick="window.__boom=1">Press</button>'
+                '<script>window.setInterval(function(){window.__tick=(window.__tick||0)+1;},60);</script>')
+            s._drain_renders()
+            _pump(0.8)
+            s._flatten_live_section(lid, dom=True)
+            _pump(0.3)
+            # onclick attribute stripped → synthetic click is a no-op.
+            attr = _main_eval(s, "document.getElementById('btn').getAttribute('onclick')")
+            assert attr in (None, "", "null"), f"onclick survived: {attr}"
+            _main_eval(s, "document.getElementById('btn').click();")
+            _pump(0.3)
+            assert _main_eval(s, "String(window.__boom)") == "undefined"
+            # Interval stopped.
+            t1 = _main_eval(s, "window.__tick")
+            _pump(0.4)
+            t2 = _main_eval(s, "window.__tick")
+            assert t1 == t2, f"interval kept ticking after flatten ({t1}->{t2})"
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveStreamingReplacement:
+    """§3: a streamed ```live fence shows a code-block placeholder; on
+    completion it is REPLACED by the live section."""
+
+    def test_streamed_live_replaced_on_completion(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            # Stream deltas (a live fence in progress).
+            s.stream_delta("sk", "```live\n<b>LIVEBODY</b>\n")
+            s._drain_renders()
+            _pump(0.6)
+            # Placeholder: a code block, NOT an executed live section.
+            assert _main_eval(s,
+                "document.querySelectorAll('pre.stream-placeholder').length") == "1"
+            assert _main_eval(s,
+                "document.querySelectorAll('section.live-section').length") == "0"
+            # Completion.
+            s.stream_delta("sk", "```")
+            s.end_stream("sk", "Coder")
+            s._drain_renders()
+            _pump(1.0)
+            # Placeholder gone; live section present.
+            assert _main_eval(s,
+                "document.querySelectorAll('pre.stream-placeholder').length") == "0"
+            assert _main_eval(s,
+                "document.querySelectorAll('section.live-section').length") == "1"
+            assert "LIVEBODY" in (_main_eval(s, "document.body.textContent") or "")
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveKillSwitchStatic:
+    """§3: kill-switch OFF → a ```live fence renders T2 static via
+    sanitize_agent_html (no live section, no error)."""
+
+    def test_kill_switch_off_renders_static(self, monkeypatch):
+        from ui.handlers import chat_render_handler as crh
+
+        # OFF: the surface reports not-live, and the handler compose sanitizes.
+        monkeypatch.setattr(cs_module, "_live_js_enabled", lambda: False)
+        s = ChatSurface()
+        win = _present(s)
+        try:
+            s.append_message("agent", "<p>seed</p>", "Coder")
+            s._drain_renders()
+            _pump(1.0)
+            assert s.is_live_enabled() is False
+            # The compose helper still produces T2 static (never raw script).
+            payload, static = crh._compose_text("```live\n<script>window.__x=1;</script><b>hi</b>\n```")
+            assert payload == "<script>window.__x=1;</script><b>hi</b>"
+            assert "<script" not in static  # sanitize_agent_html stripped it
+            assert "<b>hi</b>" in static
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveCap10DOM:
+    """§3 cap 10 of 12: exactly 10 live sections remain; oldest 2 flattened
+    (no scripts in their DOM)."""
+
+    def test_cap_twelve_keeps_ten_live(self, monkeypatch):
+        s, win = _live_surface(monkeypatch)
+        try:
+            for i in range(12):
+                s.append_live(f"<b>S{i}</b><script>window.setInterval(function(){{}},1000);</script>")
+                s._drain_renders()
+                _pump(0.15)
+            _pump(0.6)
+            total = _main_eval(s, "document.querySelectorAll('section.live-section').length")
+            assert total == "12"  # all 12 sections present in DOM
+            scripts = _main_eval(s,
+                "document.querySelectorAll('section.live-section script:not([type=\"application/json\"])').length")
+            assert scripts == "10", f"expected 10 live scripts, got {scripts}"
+        finally:
+            win.close()
+            s.destroy()
+
+
+class TestLiveEvictionCompaction:
+    """§3: eviction compaction rebuilds the document; evicted live sections
+    emit flattened HTML (text present, no live script nodes)."""
+
+    def test_compaction_flattens_evicted(self, monkeypatch):
+        # Tiny window → force eviction after a few appends.
+        s, win = _live_surface(monkeypatch, window_max=4)
+        try:
+            s.append_live("<b>OLDEST</b><script>window.__old=1;</script>")
+            s._drain_renders()
+            _pump(0.6)
+            for i in range(6):
+                s.append_live(f"<b>filler{i}</b>")
+                s._drain_renders()
+                _pump(0.15)
+            # Force a compaction rebuild (windowed DOM).
+            s._needs_compact = True
+            s._schedule_render()
+            s._drain_renders()
+            _pump(1.0)
+            # The oldest section is no longer in the deque → its row emits
+            # flattened markup (no island, no script).
+            all_html = "".join(r["html"] for r in s._rows)
+            assert "OLDEST" not in all_html or "<script" not in all_html
+            body = _main_eval(s, "document.body.textContent") or ""
+            assert "filler5" in body
+        finally:
+            win.close()
+            s.destroy()

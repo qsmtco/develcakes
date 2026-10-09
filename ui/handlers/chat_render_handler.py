@@ -51,8 +51,8 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-from render.html import render_document, render_message
-from render.sanitize import sanitize_html
+from render.html import live_fence, render_document, render_message
+from render.sanitize import sanitize_agent_html, sanitize_html
 from ui.views.chat_surface import create_chat_surface
 from utils.escaping import xml_template
 from concurrent.futures import ThreadPoolExecutor
@@ -113,6 +113,35 @@ def _surface_role(role: str) -> str:
     """Map handler roles ("You"/"Agent"/"System") to surface roles
     ("user"/"agent"/"system") — unknown values fall back to system."""
     return {"You": "user", "Agent": "agent"}.get(role, "system")
+
+
+def _compose_text(text: str) -> tuple[str | None, str]:
+    """SPEC-19 SP2 §2.2/§2.3: compose one message into (live_payload, html).
+
+    - A whole-message ```live fence → (payload, sanitize_agent_html(payload)).
+      The static fragment is the T2 degrade the surface uses when the live tier
+      is OFF (kill-switch) or unavailable — never an error, never raw.
+    - Anything else → (None, render_message(text)) — the unchanged pipeline.
+
+    Pure (no GTK): safe to run on the compose thread.
+    """
+    payload = live_fence(text)
+    if payload is not None:
+        return payload, sanitize_agent_html(payload)
+    return None, render_message(text)
+
+
+def _append_composed(surface, role: str, live_payload: str | None, html_fragment: str,
+                     agent_name, agent_color) -> None:
+    """Append a composed message, choosing the live (T3) path when the surface
+    supports it and the tier is enabled; otherwise the static append."""
+    is_live = getattr(surface, "is_live_enabled", None)
+    if live_payload is not None and callable(is_live) and is_live():
+        surface.append_live(live_payload, agent_name=agent_name,
+                            agent_color=agent_color)
+        return
+    surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name,
+                           agent_color=agent_color)
 
 
 class ChatRenderHandler:
@@ -474,8 +503,9 @@ class ChatRenderHandler:
 
         FIX 2: mount_key threads through so a project-routed reply mounts
         its surface in the project tab's box (see _surface_for)."""
+        live_payload: str | None = None
         try:
-            html_fragment = render_message(text)
+            live_payload, html_fragment = _compose_text(text)
         except Exception:
             _logger.exception("render_message failed — appending escaped raw text")
             html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
@@ -495,8 +525,8 @@ class ChatRenderHandler:
         if surface is None:
             _logger.debug("render dropped: surface evicted after mount misses display_key=%r", display_key)
             return
-        surface.append_message(_surface_role(role), html_fragment, agent_name=agent_name,
-                               agent_color=agent_color)
+        _append_composed(surface, role, live_payload, html_fragment,
+                         agent_name, agent_color)
         # FIX 1 (r3): the round-2 parent re-read reset that lived here is
         # REMOVED — the _mount_surface bool contract (read inside
         # _surface_for) is now the SOLE miss-reset mechanism, per the audit's
@@ -618,7 +648,9 @@ class ChatRenderHandler:
         def _compose_off_thread():
             try:
                 # Heavy pure-Python work — no GTK calls. sanitize runs here.
-                html_fragment = render_message(text)
+                # SPEC-19 SP2: a ```live fence composes to (payload, T2-static
+                # fragment); anything else → (None, render_message(text)).
+                live_payload, html_fragment = _compose_text(text)
 
                 def _append_on_main():
                     try:
@@ -634,10 +666,8 @@ class ChatRenderHandler:
                         # recreation contract, same as _append_to_surface).
                         if surface is None:
                             return
-                        surface.append_message(
-                            _surface_role(role), html_fragment, agent_name=agent_name,
-                            agent_color=agent_color,
-                        )
+                        _append_composed(surface, role, live_payload,
+                                         html_fragment, agent_name, agent_color)
                     except Exception:
                         _logger.exception("surface append failed — escaped raw text fallback")
                         try:

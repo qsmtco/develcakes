@@ -366,6 +366,36 @@ def _whole_message_html_fence(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+# SPEC-19 §2.1: the whole-message ```live fence (T3 agent-live tier). Mirrors
+# _whole_message_html_fence EXACTLY (same anchoring/CRLF/non-greedy rules) but
+# for the `live` tag. PURE DETECTION ONLY — no rendering, no sanitizer. The
+# chat surface / render handler decide the path (live section when the flag is
+# ON, T2 static via sanitize_agent_html when OFF). A ```html fence is NOT live
+# (it stays the SPEC-13 T2 path) — the two tags never overlap.
+_WHOLE_MESSAGE_LIVE_FENCE_RE = re.compile(
+    r"^```live[ \t]*\r?\n(.*?)\r?\n?```[ \t]*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def live_fence(text: str) -> str | None:
+    """SPEC-19 protocol: the ENTIRE trimmed message is ONE ```live fenced
+    block → return the fence content (the agent's LIVE payload). Any other
+    shape → None.
+
+    Same anchoring discipline as `_whole_message_html_fence`: leading/trailing
+    whitespace around the whole message is tolerated, but any prose (before OR
+    after) makes this None. An empty payload returns "" (distinct from None —
+    it IS a promoted, empty live section). A ```html fence returns None (that
+    is the T2 path, handled by render_message).
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    m = _WHOLE_MESSAGE_LIVE_FENCE_RE.match(stripped)
+    return m.group(1) if m else None
+
+
 def render_message(text: str) -> str:
     """THE chat entry point (SPEC-13). ONE rule set:
       1. whole-message ```html fence → sanitize_agent_html(payload)
