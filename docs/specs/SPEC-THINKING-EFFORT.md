@@ -1,6 +1,13 @@
 # Task: Per-agent thinking effort (Off / Low / High)
 
-**Status:** ❌ NOT IMPLEMENTED — no thinking_effort or reasoning_effort field found anywhere in codebase
+> **SUPERSEDED (2026-10-09):** This design was never implemented and is re-homed to
+> `docs/specs/SPEC-REASONING-EFFORT.md` — the control moves from the agent builder to the
+> **provider card** (PM direction), level set becomes off/low/medium/high, and the per-agent
+> override is now a Phase-2 candidate there. Carried forward into the new spec: off = omit
+> entirely, the hardcoded Anthropic budget table, backwards compat, and the "don't bundle
+> effort with visibility" rule. **Do not implement THIS document.**
+
+**Status:** ❌ NOT IMPLEMENTED — SUPERSEDED by `SPEC-REASONING-EFFORT.md` (2026-10-09)
 
 ## Context
 
