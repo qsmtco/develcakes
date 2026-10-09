@@ -114,20 +114,88 @@ def _live_js_enabled() -> bool:
 
 # SPEC-19 §3 E3 (SP1 stub): the injection IIFE. `json.dumps(html)` guarantees
 # the payload is a SAFE JS string literal — markup is NEVER interpolated raw.
-_INJECT_TEMPLATE = (
-    "(function () {{"
-    "  var host = document.getElementById('transcript');"
-    "  if (!host) {{ host = document.documentElement; }}"
-    "  var tpl = document.createElement('template');"
-    "  tpl.innerHTML = {payload};"
-    "  host.appendChild(tpl.content);"
-    "}})();"
-)
+#
+# FOLLOW TRANSACTION (SPEC-17 × SPEC-19 re-derivation, 2026-10-08): injection
+# is ONE atomic scroll transaction in a single JS execution — measure
+# at-bottom BEFORE the append, pin AFTER it (no async read/apply gap → no
+# queued-append race). If the reader was at the bottom, a bounded rAF "settle
+# tail" keeps the bottom pinned through post-append height growth
+# (live-section animations — F10); it aborts the moment the reader scrolls
+# away (never fights the reader) and is doubly bounded: exits after
+# `_FOLLOW_SETTLE_FRAMES` frames with no height change, hard cap
+# `_FOLLOW_TAIL_CAP` frames. The threshold is `_BOTTOM_THRESHOLD`
+# interpolated as a NUMBER (`:g` → "80") — never a second literal.
+# The SAME tail runs on the load-path bottom apply (`_bottom_and_settle_script`)
+# — resurrection re-runs live-section timers and regrows heights AFTER the
+# FINISHED apply (probe R7: a bottom reader drifted 960px without it).
+_FOLLOW_SETTLE_FRAMES = 30  # ~0.5 s at 60 fps with no change → settled
+_FOLLOW_TAIL_CAP = 420      # ~7 s — the tail must never run away
 
 
-def _inject_script(row_html: str) -> str:
-    """Build the append-injection script for one row's HTML (json.dumps-safed)."""
-    return _INJECT_TEMPLATE.format(payload=json.dumps(row_html))
+def _settle_tail_js() -> str:
+    """The bounded rAF settle tail (shared by the injection transaction and
+    the load-path bottom apply). Assumes `el` and `atBottom()` are in scope.
+    Re-pins on every height change while the reader stays at the bottom;
+    aborts the moment the reader scrolls away (never fights the reader);
+    exits after `_FOLLOW_SETTLE_FRAMES` stable frames or the hard cap."""
+    return (
+        "  var lastH = el.scrollHeight;"
+        "  var frames = 0;"
+        "  var stable = 0;"
+        "  (function tail() {"
+        "    frames += 1;"
+        f"    if (frames > {_FOLLOW_TAIL_CAP}) {{ return; }}"
+        "    if (!atBottom()) { return; }"
+        "    var h = el.scrollHeight;"
+        "    if (h !== lastH) { lastH = h; stable = 0; el.scrollTop = h; }"
+        f"    else {{ stable += 1; if (stable > {_FOLLOW_SETTLE_FRAMES}) {{ return; }} }}"
+        "    window.requestAnimationFrame(tail);"
+        "  })();"
+    )
+
+
+def _bottom_and_settle_script(threshold: float) -> str:
+    """Bottom pin + settle tail — for applies onto a document whose LIVE
+    sections will re-animate height AFTER this executes (resurrection re-runs
+    their timers; probe R7: the reader at bottom drifted 960px without it)."""
+    return (
+        "(function () {"
+        f"  var T = {threshold:g};"
+        "  var el = document.scrollingElement || document.documentElement;"
+        "  function max() { return Math.max(0, el.scrollHeight - el.clientHeight); }"
+        "  function atBottom() { return (max() - (el.scrollTop || 0)) <= T; }"
+        "  el.scrollTop = el.scrollHeight;"
+        + _settle_tail_js()
+        + "})();"
+    )
+
+
+def _inject_script(row_html: str, threshold: float) -> str:
+    """Build the append-injection script for one row's HTML (json.dumps-safed).
+
+    Atomic follow transaction (see the block comment above). Returns
+    'followed' (reader was at bottom — pinned + settle tail armed) or 'held'
+    (reader was up — position preserved, nothing pinned); probes read the
+    value, the eval callback ignores it.
+    """
+    return (
+        "(function () {"
+        f"  var T = {threshold:g};"
+        "  var el = document.scrollingElement || document.documentElement;"
+        "  var host = document.getElementById('transcript');"
+        "  if (!host) { host = document.documentElement; }"
+        "  function max() { return Math.max(0, el.scrollHeight - el.clientHeight); }"
+        "  function atBottom() { return (max() - (el.scrollTop || 0)) <= T; }"
+        "  var wasBottom = atBottom();"
+        "  var tpl = document.createElement('template');"
+        f"  tpl.innerHTML = {json.dumps(row_html)};"
+        "  host.appendChild(tpl.content);"
+        "  if (!wasBottom) { return 'held'; }"
+        "  el.scrollTop = el.scrollHeight;"
+        + _settle_tail_js()
+        + "  return 'followed';"
+        "})();"
+    )
 
 
 # ── SPEC-19 SP2: the live-section machinery ──────────────────────────────
@@ -1017,13 +1085,30 @@ class ChatSurface(Gtk.Box):
     def _rebuild_live_document(self) -> None:
         """Full-document reload for a live surface (compaction). The document
         emits inert islands for live sections and flattened markup for
-        evicted ones; FINISHED then resurrects the STILL-LIVE sections."""
+        evicted ones; FINISHED then resurrects the STILL-LIVE sections.
+
+        FOLLOW (SPEC-17 model, injection regime): the reader's DOCUMENT
+        position is CAPTURED (read → `_on_scroll_read`) before the reload and
+        applied at FINISHED — a compaction must not yank a mid-history reader
+        to the bottom. This path is hit by streaming live-fence placeholder
+        refreshes (`_update_stream_placeholder`), `end_stream` placeholder
+        removal, and eviction/orphan compactions — all must honour the
+        captured intent, never assume bottom.
+        """
         vadj = self._scroll.get_vadjustment()
         if vadj is not None:
             self._pending_restore = (self._was_at_bottom, vadj.get_value())
-        self._pending_scroll = (True, 0.0)
         self._injected_seq = self._row_seq
         self._dom_row_count = len(self._rows)
+        if self._webview is not None:
+            # Capture the DOCUMENT intent FIRST; the read callback issues the
+            # load (SP1.1: do not load until the read finishes or fails).
+            self._read_in_flight = True
+            self._document_eval(self._read_scroll_script(), self._on_scroll_read)
+            return
+        # No document yet (placeholder churn before the first paint) — a
+        # fresh first load lands at the bottom by construction.
+        self._pending_scroll = (True, 0.0)
         self._issue_load(_document(list(self._rows)))
 
     def _issue_load(self, doc: str) -> None:
@@ -1109,7 +1194,8 @@ class ChatSurface(Gtk.Box):
                 self._schedule_bridge_poll()
                 self._drain_bridge_queue()
 
-        self._document_eval_main(_inject_script(html), _after_inject)
+        self._document_eval_main(
+            _inject_script(html, self._BOTTOM_THRESHOLD), _after_inject)
 
 
     def _document_eval_main(self, script: str, callback) -> None:
@@ -1329,7 +1415,13 @@ class ChatSurface(Gtk.Box):
         pending = self._pending_scroll
         if pending is not None:
             at_bottom, y = pending
-            script = _BOTTOM_SCRIPT if at_bottom else self._scroll_to_script(y)
+            if at_bottom and self._live_js and self._live_sections:
+                # Resurrection (above) re-runs section timers → heights
+                # re-animate AFTER this apply. Keep the bottom pinned through
+                # the regrowth window (probe R7 — 960px drift without this).
+                script = _bottom_and_settle_script(self._BOTTOM_THRESHOLD)
+            else:
+                script = _BOTTOM_SCRIPT if at_bottom else self._scroll_to_script(y)
             self._document_eval(script, lambda _text: None)
             self._pending_scroll = None
         # BUG#2 (audit fix round 2): the dirty-kick must run REGARDLESS of the
@@ -1410,7 +1502,11 @@ class ChatSurface(Gtk.Box):
             # `_BOTTOM_SCRIPT` (the user's "go to latest" wins).
             self._scroll_override = True
         if self._webview is not None:
-            self._document_eval(_BOTTOM_SCRIPT, lambda _text: None)
+            # With live sections present the document may re-animate height
+            # right after this — arm the settle tail together with the pin.
+            script = (_bottom_and_settle_script(self._BOTTOM_THRESHOLD)
+                      if (self._live_js and self._live_sections) else _BOTTOM_SCRIPT)
+            self._document_eval(script, lambda _text: None)
 
     def _schedule_render(self) -> None:
         """Coalesce: at most one pending render at any time."""

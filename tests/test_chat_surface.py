@@ -1,6 +1,8 @@
 # tests/test_chat_surface.py — SPEC-06 SP3 battery (xvfb; WebKit 6.0 present
 # on this box, TextViewFallback is the environment-independent path).
 
+import json
+
 import pytest
 
 gi = pytest.importorskip("gi")
@@ -2006,6 +2008,137 @@ class TestSmartScroll:
         monkeypatch.setattr(cs.ChatSurface, "_BOTTOM_THRESHOLD", 123.0, raising=False)
         assert "<= 123" in s._read_scroll_script()
         assert "<= 80" not in s._read_scroll_script()
+        s.destroy()
+
+
+# ── SPEC-19 × SPEC-17: injection follow transaction + rebuild intent ──────
+
+
+@pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
+class TestInjectionFollowTransaction:
+    """The injection script is ONE atomic scroll transaction (measure →
+    append → pin + bounded settle tail), and compaction reloads CAPTURE the
+    reader intent instead of assuming bottom (the 2026-10-08 fix for the
+    live-tier follow regression)."""
+
+    def test_inject_script_interpolates_threshold_as_number(self):
+        from ui.views.chat_surface import _inject_script
+
+        script = _inject_script("<b>x</b>", 80.0)
+        assert "var T = 80;" in script  # interpolated as a NUMBER
+        assert "<= T" in script
+        assert "el.scrollTop = el.scrollHeight" in script  # the pin
+        assert "requestAnimationFrame" in script  # the settle tail
+        assert "var T = 123;" in _inject_script("<b>x</b>", 123.0)  # mutant kill
+
+    def test_inject_script_payload_is_json_literal(self):
+        from ui.views.chat_surface import _inject_script
+
+        payload = '</script><img onerror="x">'
+        script = _inject_script(payload, 80.0)
+        assert json.dumps(payload) in script  # JSON literal, never raw
+        assert 'onerror="x"' not in script  # quotes escaped inside the literal
+
+    def test_inject_script_tail_bounds(self):
+        from ui.views import chat_surface as cs
+
+        script = cs._inject_script("<p>x</p>", 80.0)
+        assert f"frames > {cs._FOLLOW_TAIL_CAP}" in script
+        assert f"stable > {cs._FOLLOW_SETTLE_FRAMES}" in script
+
+    def _seam_surface(self, monkeypatch, *, read, webview=True):
+        from ui.views.chat_surface import ChatSurface
+
+        s = ChatSurface()
+        s._live_js = True
+        reads: list[str] = []
+        applies: list[str] = []
+        loads: list[str] = []
+
+        def _fake_eval(script, callback):
+            if "JSON.stringify" in script:  # the SP1.1 read script
+                reads.append(script)
+                callback(read)
+            else:  # an apply script
+                applies.append(script)
+                callback(None)
+
+        monkeypatch.setattr(s, "_document_eval", _fake_eval)
+        mains: list[str] = []
+
+        def _fake_eval_main(script, callback):
+            mains.append(script)
+            callback(None)
+
+        monkeypatch.setattr(s, "_document_eval_main", _fake_eval_main)
+        monkeypatch.setattr(s, "_schedule_bridge_poll", lambda: None)
+        monkeypatch.setattr(s, "_load_html", lambda doc: loads.append(doc))
+        if webview:
+            s._webview = object()  # sentinel: a document is "loaded"
+        s._test_reads = reads
+        s._test_applies = applies
+        s._test_mains = mains
+        s._test_loads = loads
+        return s
+
+    def test_rebuild_captures_reading_position(self, monkeypatch):
+        """A compaction must READ the document position first and restore it
+        at FINISHED — never yank a mid-history reader to the bottom."""
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias")
+        s = self._seam_surface(monkeypatch, read='{"y": 150, "atBottom": false}')
+        s._dirty = True
+        s._needs_compact = True
+        s._do_render()
+        assert s._test_reads, "compaction did not READ the position first"
+        assert s._pending_scroll == (False, 150.0)
+        assert s._test_loads, "read callback did not issue the rebuild load"
+        s._on_load_changed(s._webview, WebKit.LoadEvent.FINISHED)
+        assert s._test_applies and s._test_applies[-1] != _BOTTOM_SCRIPT
+        assert "el.scrollTop = 150.0" in s._test_applies[-1]
+        s.destroy()
+
+    def test_rebuild_at_bottom_lands_bottom(self, monkeypatch):
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias")
+        s = self._seam_surface(monkeypatch, read='{"y": 900, "atBottom": true}')
+        s._dirty = True
+        s._needs_compact = True
+        s._do_render()
+        s._on_load_changed(s._webview, WebKit.LoadEvent.FINISHED)
+        assert s._test_applies[-1] == _BOTTOM_SCRIPT
+        s.destroy()
+
+    def test_rebuild_bottom_with_live_sections_arms_settle_tail(self, monkeypatch):
+        """Resurrection regrows live-section heights AFTER the FINISHED apply
+        (probe R7: 960px drift) — the bottom apply must carry the settle tail."""
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias")
+        from ui.views.chat_surface import _bottom_and_settle_script
+
+        s = self._seam_surface(monkeypatch, read='{"y": 900, "atBottom": true}')
+        row = {"role": "agent", "html": "<b>x</b>", "agent": "", "color": ""}
+        s._rows.append(row)  # PRESENT row — `_reap_evicted_live` must NOT
+        s._live_sections[7] = {"row": row, "payload": "<b>x</b>"}  # flatten it
+        s._dirty = True
+        s._needs_compact = True
+        s._do_render()
+        s._on_load_changed(s._webview, WebKit.LoadEvent.FINISHED)
+        assert s._test_applies[-1] == _bottom_and_settle_script(s._BOTTOM_THRESHOLD)
+        assert s._test_applies[-1] != _BOTTOM_SCRIPT
+        assert "requestAnimationFrame" in s._test_applies[-1]
+        s.destroy()
+
+    def test_rebuild_without_webview_lands_bottom(self, monkeypatch):
+        if not _surface_supports_smart_scroll():
+            pytest.skip("ChatSurface is the TextViewFallback alias")
+        s = self._seam_surface(monkeypatch, read="unused", webview=False)
+        s._dirty = True
+        s._needs_compact = True
+        s._do_render()
+        assert s._pending_scroll == (True, 0.0)
+        assert s._test_loads, "no load issued"
+        assert not s._test_reads, "no document → no read"
         s.destroy()
 
 

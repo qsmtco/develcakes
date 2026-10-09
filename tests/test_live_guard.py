@@ -9,6 +9,7 @@
 #   3. chat_surface integration: real-render witness (no monkeypatched
 #      _load_html), P3 live-state-survives-append, scroll follow/preserve.
 
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -402,23 +403,67 @@ class TestLiveStateSurvivesAppend:
 
 
 class TestInjectionScroll:
-    """SPEC-19 SP1 F1 scroll: injected rows follow / preserve."""
+    """SPEC-19 SP1 F1 scroll: injected rows follow / preserve.
+
+    FIX (2026-10-08): the original tests asserted on the surface's OUTER
+    vadjustment — the wrong object. WebKit does not implement Gtk.Scrollable;
+    the page scrolls inside the web view, so that adjustment is degenerate
+    (upper == page_size, value pinned at 0) and the old assertions passed
+    VACUOUSLY while the real document never followed. Retargeted to the
+    DOCUMENT (`scrollingElement`), read through the surface's own eval seam —
+    the same wrong-object mistake TestSmartScroll's docstring warns about.
+    """
+
+    _READ = (
+        "(function(){var el=document.scrollingElement||document.documentElement;"
+        "return JSON.stringify({y:el.scrollTop,"
+        "max:Math.max(0,el.scrollHeight-el.clientHeight)});})()"
+    )
+    # One TALL control row: growth must exceed _BOTTOM_THRESHOLD (80) so the
+    # follow assertion is non-vacuous (a short row could hide a missing pin).
+    _GROW = ("<p>FOLLOW-CTRL — the quick brown fox jumps over the lazy dog. "
+             "lorem ipsum dolor sit amet consectetur adipiscing elit sed do "
+             "eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+             "ut enim ad minim veniam quis nostrud exercitation ullamco. "
+             "duis aute irure dolor in reprehenderit in voluptate velit. "
+             "excepteur sint occaecat cupidatat non proident sunt in culpa. "
+             "qui officia deserunt mollit anim id est laborum.</p>")
+
+    def _state(self, s):
+        box = {}
+        s._document_eval(self._READ, lambda t: box.__setitem__("v", t))
+        _pump(0.6)
+        assert box.get("v"), "document read failed (eval seam returned nothing)"
+        return json.loads(box["v"])
+
+    def _seed(self, s, rows=30):
+        for i in range(rows):
+            s.append_message(
+                "agent",
+                f"<p>msg {i} — padding text so the document overflows the "
+                f"viewport. lorem ipsum dolor sit amet consectetur.</p>",
+                "Coder")
+        s._drain_renders()
+        _pump(1.2)
 
     def test_injected_rows_follow_at_bottom(self, monkeypatch):
         monkeypatch.setattr(cs_module, "_live_js_enabled", lambda: True)
         s = ChatSurface()
         win = _present(s)
         try:
-            for i in range(6):
-                s.append_message("agent", f"<p>msg {i}</p>", "Coder")
-                s._drain_renders()
-                _pump(0.4)
-            vadj = s.get_vadjustment()
-            _pump(0.5)
-            max_v = vadj.get_upper() - vadj.get_page_size()
-            assert max_v - vadj.get_value() <= s._BOTTOM_THRESHOLD, (
-                f"at-bottom follow broke under injection: "
-                f"value={vadj.get_value()} max={max_v}")
+            self._seed(s)
+            pre = self._state(s)
+            assert pre["max"] > 0, f"document not scrollable: {pre}"
+            assert pre["max"] - pre["y"] <= s._BOTTOM_THRESHOLD, (
+                f"initial load not at bottom: {pre}")
+            s.append_message("agent", self._GROW, "Coder")
+            s._drain_renders()
+            _pump(0.8)
+            post = self._state(s)
+            assert post["max"] > pre["max"] + 80, (
+                f"control row did not grow the document enough: {post}")
+            assert post["max"] - post["y"] <= s._BOTTOM_THRESHOLD, (
+                f"at-bottom follow broke under injection: {post}")
         finally:
             win.close()
             s.destroy()
@@ -428,19 +473,47 @@ class TestInjectionScroll:
         s = ChatSurface()
         win = _present(s)
         try:
-            for i in range(20):
-                s.append_message("agent", f"<p>msg {i}</p>", "Coder")
-                s._drain_renders()
-                _pump(0.3)
-            vadj = s.get_vadjustment()
+            self._seed(s)
+            pre = self._state(s)
+            assert pre["max"] > 400, f"document too short for the test: {pre}"
+            s._document_eval(
+                "(function(){var el=document.scrollingElement||"
+                "document.documentElement; el.scrollTop=150;"
+                "return el.scrollTop;})()",
+                lambda t: None)
             _pump(0.4)
-            vadj.set_value(40.0)  # scroll UP (away from bottom) — reading
-            _pump(0.3)
-            s.append_message("agent", "<p>new</p>", "Coder")
+            s.append_message("agent", self._GROW, "Coder")
             s._drain_renders()
-            _pump(0.6)
-            assert vadj.get_value() <= 200.0, (
-                f"reading position lost (snapped): value={vadj.get_value()}")
+            _pump(0.8)
+            post = self._state(s)
+            assert post["y"] <= 260, (
+                f"reading position lost (snapped toward bottom): {post}")
+            assert post["max"] - post["y"] > s._BOTTOM_THRESHOLD, (
+                f"reader at y=150 must not be at the bottom: {post}")
+        finally:
+            win.close()
+            s.destroy()
+
+    def test_scroll_to_latest_then_append_follows(self, monkeypatch):
+        monkeypatch.setattr(cs_module, "_live_js_enabled", lambda: True)
+        s = ChatSurface()
+        win = _present(s)
+        try:
+            self._seed(s)
+            s._document_eval(
+                "(function(){var el=document.scrollingElement||"
+                "document.documentElement; el.scrollTop=150;"
+                "return el.scrollTop;})()",
+                lambda t: None)
+            _pump(0.4)
+            s.scroll_to_latest()  # the "go to latest" seam arms bottom intent
+            _pump(0.4)
+            s.append_message("agent", self._GROW, "Coder")
+            s._drain_renders()
+            _pump(0.8)
+            post = self._state(s)
+            assert post["max"] - post["y"] <= s._BOTTOM_THRESHOLD, (
+                f"append after scroll_to_latest did not follow: {post}")
         finally:
             win.close()
             s.destroy()

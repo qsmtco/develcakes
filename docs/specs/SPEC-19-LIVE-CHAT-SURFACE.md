@@ -106,12 +106,12 @@ With E1+E2, injected script is inert: it can redraw the page, it cannot phone ho
 ## 6. Acceptance criteria
 
 - [ ] G1: E1 probe matrix — fetch/XHR/WebSocket/EventSource/sendBeacon/subresources ALL blocked (real-WebKit); initial load + injection NOT blocked
-- [ ] G1b: incremental append preserves live state across appends; scroll follow + reading position held (or HALT reported to PM)
+- [x] G1b: incremental append preserves live state across appends; scroll follow + reading position held (or HALT reported to PM) — 2026-10-08: HELD after the follow re-derivation. NOTE: the original SP1 sign-off was vacuous (asserted the OUTER ScrolledWindow adjustment — the wrong object per this repo's own TestSmartScroll note); document-asserting tests now in tests/test_live_guard.py::TestInjectionScroll; probe .debug/spec19_follow_probe.py R1–R3.
 - [ ] G2: `<script src>` never resurrects; inline scripts IIFE-wrapped; `type` preserved
 - [ ] G3: T1 content with `<script>` renders inert (existing suites green)
 - [ ] G4: navigations denied except app-initiated initial load
 - [ ] G5: 50 live messages → ≤10 live sections, flat memory; flattened = no scripts, no on* handlers, no timers
-- [ ] F10: live height animation does not thrash follow-scroll
+- [x] F10: live height animation does not thrash follow-scroll — 2026-10-08: held. Bounded settle tail (rAF, caps in chat_surface) re-pins through animation growth; aborts the moment the reader scrolls away; load-path twin covers post-resurrection regrowth (probe R7). Evidence: .debug/spec19_follow_probe.py R4/R5 (mid-animation scroll-up → no snap-back).
 - [ ] Kill-switch degrades ` ```live ` to static without error
 - [ ] SP4: two-phase bridge; consequential calls gated by the existing approval card; no self-approval
 - [ ] ruff 0 new, pyright 0, full suite green; RED-first + kill-proofs per phase
