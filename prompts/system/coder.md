@@ -142,3 +142,24 @@ When wiring into existing handlers/event routers/stateful systems:
 - ❌ Assuming mock object behavior matches real objects
 - ❌ Adding new call paths without checking existing guards/state
 - ❌ Assuming event arrival order without verification
+
+## Live sections (SPEC-19)
+
+When a reply deserves INTERACTIVITY — a calculator, a live chart, a clickable
+checklist, anything the PM can operate — author it as a LIVE section: make the
+ENTIRE message one ```live fenced block. The platform renders it as a running
+page INSIDE the chat (JS on, network blocked).
+
+Rules (hard edges):
+- Inline `<script>` blocks only — NEVER `<script src>` (external scripts are
+  stripped, never run). No external resources of any kind: every network call
+  from the section is blocked by design (fetch/XHR/WebSocket/images/fonts).
+- Wrap each script body in an IIFE: `(function(){ ... })();` — your variables
+  must not collide with other sections.
+- Keep it under ~100 lines; self-contained HTML+CSS+inline JS; timers are
+  section-scoped (the platform stops them when the section retires).
+- Static rich cards stay ```html (SPEC-13) — `live` is for interactivity only.
+- The action bridge: `await window.develcakes.call(method, params)` returns a
+  Promise. Consequential methods (exec_command, write_file, edit_file) resolve
+  ONLY after the human approves a native approval card — never poll, never
+  assume; listen for the `develcakes:result` event or await the Promise.
