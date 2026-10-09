@@ -407,39 +407,46 @@ class TestAgentAuthorSanitize:
         for prop in ("display:flex", "opacity:0.5", "border-radius:4px"):
             assert prop in out, f"{prop} stripped from: {out!r}"
 
-    # ── CSS allowlist: deny-by-omission kills url()-bearing props ─────────
+    # ── CSS allowlist: SPEC-19 SP3 admitted background/url()-bearing props ─
+    # (Prior to SP3 these were denied by property-name omission. SP3 admits
+    # background/background-image/mask/border-image; the url() VALUE passes
+    # nh3 (property-name filter only) but the LOAD is blocked by E1 — see
+    # tests/test_live_guard.py. list-style-image stays OUT.)
 
-    def test_css_background_url_stripped_property_wise(self):
-        """`background` is not on the allowlist → the url() property dies,
-        but the element (and any allowed proposal alongside) survives."""
+    def test_css_background_url_value_passes_but_load_is_e1_blocked(self):
+        """SPEC-19 SP3 §2: background now admitted; url() VALUE passes nh3.
+        The security boundary is E1 (content filter), proven in
+        test_live_guard.py — not this layer."""
         out = sanitize_agent_html('<div style="background:url(http://x)">hi</div>')
-        assert "url(" not in out.lower()
-        assert "background" not in out.lower()
         assert "<div" in out.lower()
+        assert "background" in out.lower()
+        # nh3 keeps the url() value (property-name filter only) — pinned so a
+        # future nh3 that strips values flips this test deliberately.
+        assert "url(" in out.lower()
 
-    def test_css_background_image_url_stripped(self):
+    def test_css_background_image_url_value_passes(self):
         out = sanitize_agent_html(
             '<div style="background-image:url(http://x)">hi</div>'
         )
-        assert "url(" not in out.lower()
-        assert "background-image" not in out.lower()
+        assert "background-image" in out.lower()
 
-    def test_css_list_style_image_url_stripped(self):
+    def test_css_list_style_image_url_still_stripped(self):
+        """list-style-image stays OUT of the allowlist (no SP3 use case) —
+        deny-by-omission still kills it."""
         out = sanitize_agent_html(
             '<div style="list-style-image:url(http://x)">hi</div>'
         )
         assert "url(" not in out.lower()
 
     def test_css_allowed_and_denied_mixed(self):
-        """A single style attribute keeping an allowed prop while dropping a
-        url()-bearing one — the property-level gate, not all-or-nothing."""
+        """A single style attribute keeping allowed props while dropping a
+        still-denied one (list-style-image) — the property-level gate."""
         out = sanitize_agent_html(
-            '<div style="color:red;background:url(http://x);display:flex">hi</div>'
+            '<div style="color:red;list-style-image:url(http://x);display:flex">hi</div>'
         )
         assert "color:red" in out
         assert "display:flex" in out
-        assert "url(" not in out.lower()
-        assert "background" not in out.lower()
+        assert "list-style-image" not in out.lower()
 
     # ── link_rel forced; style ELEMENT not admitted (probe verdict) ────────
 
@@ -557,3 +564,108 @@ class TestAgentAuthorSanitize:
         attribute dies and a div element is stripped there."""
         assert sanitize_html('<p style="color:red">hi</p>') == "<p>hi</p>"
         assert "<div" not in sanitize_html("<div>x</div>")
+
+
+# ── SPEC-19 SP3: T2 CSS property allowlist extension (inline-capable) ─────
+#
+# SPEC-19 §5 SP3: add inline-capable chart/layout properties to the T2
+# agent-author CSS allowlist. animation-*/@keyframes stay OUT (T3-only — they
+# need <style>, which nh3 can never pass; SPEC-19 §5 SP3 amendment).
+#
+# §2 PROBE (nh3 0.3.7, run before this change): `filter_style_properties`
+# filters property NAMES only — url() VALUES pass through VERBATIM:
+#   IN : <div style="background: url(http://127.0.0.1:1/x.png)">
+#   OUT: <div style="background:url(http://127.0.0.1:1/x.png)">
+# So adding background/mask/border-image re-opens url() reachability. E1
+# (SPEC-19's compiled content filter) BLOCKS the CSS-driven load — proven:
+# control (no filter) background:url() → +1 server hit; filtered → +0. The
+# T2 card renders in the SAME transcript webview as live sections, so E1
+# covers it. url() is therefore INERT on T2; the load-blocking test lives at
+# the enforcement layer (tests/test_live_guard.py).
+
+
+class TestT2CssAllowlistExtension:
+    def test_background_conic_gradient_kept(self):
+        out = sanitize_agent_html(
+            '<div style="background: conic-gradient(red 0 30%, blue 30% 100%)">x</div>'
+        )
+        assert "conic-gradient" in out, repr(out)
+        assert "background" in out
+
+    def test_background_linear_gradient_kept(self):
+        out = sanitize_agent_html(
+            '<div style="background-image: linear-gradient(to right, red, blue)">x</div>'
+        )
+        assert "linear-gradient" in out, repr(out)
+        assert "background-image" in out
+
+    def test_background_longhand_family_kept(self):
+        out = sanitize_agent_html(
+            '<div style="background-size: cover; background-position: center; '
+            'background-repeat: no-repeat; background-clip: content-box">x</div>'
+        )
+        for prop in ("background-size", "background-position",
+                     "background-repeat", "background-clip"):
+            assert prop in out, f"{prop} stripped: {out!r}"
+
+    def test_filter_transform_transition_kept(self):
+        out = sanitize_agent_html(
+            '<div style="filter: blur(2px); transform: translateX(10px) '
+            'scale(1.1); transition: opacity 0.3s ease-in; '
+            'transition-duration: 0.3s">x</div>'
+        )
+        assert "filter:blur(2px)" in out.replace(" ", ""), repr(out)
+        assert "transform" in out
+        assert "transition" in out
+
+    def test_grid_properties_kept(self):
+        out = sanitize_agent_html(
+            '<div style="display: grid; grid-template-columns: 1fr 2fr; '
+            'grid-auto-flow: row; place-items: center">x</div>'
+        )
+        assert "grid-template-columns" in out, repr(out)
+        assert "grid-auto-flow" in out
+        assert "place-items" in out
+
+    def test_position_clip_mask_columns_kept(self):
+        out = sanitize_agent_html(
+            '<div style="position: absolute; top: 4px; left: 8px; z-index: 3; '
+            'clip-path: circle(50%); mask-image: none; '
+            'columns: 2; aspect-ratio: 16/9">x</div>'
+        )
+        for prop in ("position", "top", "left", "z-index", "clip-path",
+                     "mask-image", "columns", "aspect-ratio"):
+            assert prop in out, f"{prop} stripped: {out!r}"
+
+    def test_animation_not_admitted(self):
+        """animation-* is T3-only (needs <style>); it must be STRIPPED on T2."""
+        out = sanitize_agent_html(
+            '<div style="animation: spin 2s linear infinite; '
+            'animation-name: spin; animation-duration: 2s">x</div>'
+        )
+        assert "animation" not in out.lower(), repr(out)
+
+    def test_url_value_passes_at_nh3_layer(self):
+        """§2 probe pin: nh3 passes url() VALUES (property-name filter only).
+        The load itself is blocked by E1 at the enforcement layer, NOT here —
+        this test pins the nh3 behavior the probe found, so a future nh3 that
+        strips values would flip this test (and the E1 layer would still
+        hold)."""
+        out = sanitize_agent_html(
+            '<div style="background: url(http://127.0.0.1:9/x.png)">x</div>'
+        )
+        assert "url(" in out.lower(), repr(out)
+
+    def test_markdown_path_unchanged_by_extension(self):
+        """T1: the markdown-path sanitizer still strips style entirely —
+        the CSS allowlist extension is author-policy only."""
+        assert sanitize_html('<div style="background: linear-gradient(red,blue)">x</div>') == "x"
+        assert sanitize_html("<div>x</div>") == "x"
+
+    def test_extension_does_not_admit_style_element(self):
+        """The <style> element stays stripped (nh3 panics if admitted)."""
+        out = sanitize_agent_html(
+            "<style>div{background:linear-gradient(red,blue)}</style><p>hi</p>"
+        )
+        assert "<style" not in out.lower()
+        assert "<p>hi</p>" in out

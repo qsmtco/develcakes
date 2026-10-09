@@ -169,6 +169,37 @@ _AGENT_CSS_PROPERTIES = frozenset({
     "display", "flex-direction", "flex-wrap", "gap", "justify-content",
     "align-items", "align-content", "opacity", "overflow", "box-sizing",
     "box-shadow", "cursor", "border-collapse", "vertical-align", "float",
+    # ── SPEC-19 SP3 (§5): inline-capable chart/layout properties ──────────
+    # The agent's static cards want gradients / filters / transforms / grid.
+    # ★ §2 PROBE (nh3 0.3.7, 2026-10-08): filter_style_properties filters
+    # property NAMES only — url() VALUES pass through VERBATIM. Adding
+    # background/mask/border-image therefore re-opens url() reachability, and
+    # that is SAFE because E1 (the compiled block-all-remote content filter,
+    # SPEC-19 §3) BLOCKS the CSS-driven load in the transcript webview where
+    # T2 cards render (probe: control background:url() +1 hit; filtered +0).
+    # url() is INERT on T2 — the enforcement test lives in test_live_guard.py.
+    # background shorthand (keeps gradients: linear/radial/conic-gradient)
+    "background", "background-image", "background-size",
+    "background-position", "background-repeat", "background-clip",
+    "filter", "backdrop-filter",
+    "transform", "transform-origin",
+    "transition", "transition-property", "transition-duration",
+    "transition-timing-function", "transition-delay",
+    "object-fit", "object-position", "aspect-ratio",
+    "position", "top", "right", "bottom", "left", "z-index", "inset",
+    "grid-template-columns", "grid-template-rows", "grid-column", "grid-row",
+    "grid-auto-flow", "grid-auto-columns", "grid-auto-rows", "grid-area",
+    "place-items", "place-content", "place-self",
+    "clip-path",
+    "mask", "mask-image", "mask-size", "mask-position", "mask-repeat",
+    "border-image", "border-image-source", "border-image-slice",
+    "border-image-width", "border-image-outset", "border-image-repeat",
+    "columns", "column-count", "column-width", "column-gap",
+    "resize", "user-select", "pointer-events", "visibility",
+    "content-visibility", "contain",
+    "scroll-margin", "scroll-padding",
+    # animation-*/@keyframes are DELIBERATELY ABSENT (SPEC-19 §5 SP3 amended:
+    # T3-only — they require <style>, which nh3 can never pass).
 })
 
 
