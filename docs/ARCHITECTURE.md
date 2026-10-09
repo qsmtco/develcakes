@@ -269,6 +269,8 @@ crabcakes/
 
 **Chat images (SPEC-20).** Local images render as inline `data:` URIs, app-read (the webview fetches nothing; E1 stays blanket). `sanitize_with_local_images` admits exactly `data:image/(png|jpeg|gif|webp);base64`. The "NO img" ruling now applies to markdown `![alt](url)` and to untrusted echo. Tool results stay plain text on the feed card. The path check lives in `utils/image_paths.py` (LOW-7), shared with the Pango viewer.
 
+**Live action bridge (SPEC-19 SP4 / SPEC-20a).** Consequential methods stay approval-only; read_file is the read-only registry and returns validated local image bytes (LOW-7 roots, image allowlist, 8 MB) on the same develcakes:result seam, with no approval card.
+
 **`utils/` GTK carve-out (documented exceptions):** Four files in `utils/`
 import `gi.repository` despite the "no GTK" rule above. These are
 narrowly-scoped exceptions that have been reviewed and accepted:

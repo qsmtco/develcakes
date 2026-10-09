@@ -63,8 +63,9 @@ logger = logging.getLogger(__name__)
 # below routes to the fallback surface. Old CRABCAKES_ name rides the
 # one-release fallback (utils.config.get_env — D2).
 from utils.config import get_env
-from utils.live_bridge import LiveBridge
+from utils.live_bridge import READ_ONLY_METHODS, LiveBridge
 from utils.live_guard import LiveGuard
+from utils.live_reader import read_local_image
 
 if get_env("NO_WEBKIT"):
     WebKit = None
@@ -742,8 +743,11 @@ class ChatSurface(Gtk.Box):
         self._live_guard = None
         # SPEC-19 SP4: the two-phase action bridge. `_live_bridge` is the pure
         # LiveBridge (approver = the injected callback → window wires it to the
-        # exec-approval card). The bridge itself never executes anything.
+        # exec-approval card). Consequential calls are never executed here.
+        # SPEC-20a: read_file is the read-only registry — the reader validates
+        # and reads; the bridge only routes.
         self._live_bridge = LiveBridge(approver=live_bridge_approver)
+        self._live_bridge.set_reader(read_local_image)
         # id → (was the call still pending?) used to route disk-backed results
         # to the page. The poll drains __dcBridgeQueue.
         self._bridge_poll_source = None
@@ -1251,9 +1255,12 @@ class ChatSurface(Gtk.Box):
                 call_id = item.get("id")
                 if not isinstance(method, str) or not isinstance(call_id, str):
                     continue
-                # The bridge returns {status, id}; the PAGE Promise stays pending.
-                # Nothing is executed — the injected approver routes to the card.
-                self._live_bridge.dispatch(method, params)
+                # Consequential: {status:pending}; the page Promise stays open
+                # until resolve_bridge_call. Read-only (SPEC-20a): the result
+                # is already final and rides the SAME develcakes:result seam.
+                result = self._live_bridge.dispatch(method, params)
+                if method in READ_ONLY_METHODS:
+                    self._dispatch_bridge_result(result)
                 ids.append(call_id)
             if ids:
                 self._schedule_bridge_poll()

@@ -103,6 +103,8 @@ With E1+E2, injected script is inert: it can redraw the page, it cannot phone ho
 | **SP4** | Action bridge, **two-phase (F6)**: `window.develcakes.call(method, params)` returns `{status: "pending", id}` immediately; resolution arrives as a DOM event later — approvals take minutes, a 30s Promise timeout would eat them. Consequential methods route through the **existing exec-approval card** (`feed_card.py` needs_approval → `agent_runtime_handler.approve_exec`); the page learns the outcome via the bridge event, never self-approves | G6 consequential call without approval = refused; approval path = the same card `exec_command` uses |
 | Feed (3a) | **excluded** — its own future unit if ever | — |
 
+SPEC-20a: the SP4 read-only registry is read_file — validated local reads do not raise an approval card and resolve on the same develcakes:result seam.
+
 ## 6. Acceptance criteria
 
 - [ ] G1: E1 probe matrix — fetch/XHR/WebSocket/EventSource/sendBeacon/subresources ALL blocked (real-WebKit); initial load + injection NOT blocked
