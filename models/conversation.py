@@ -23,6 +23,10 @@ from typing import Callable
 
 _DEFAULT_ENCODING_NAME = "cl100k_base"  # GPT-4 / GPT-3.5-turbo encoding; reasonable proxy for non-OpenAI models
 
+# SPEC-21 SP0: per-string token-count memo cap. Cleared (not LRU-evicted) when
+# full so a recount pays one cold encode instead of growing without bound.
+_TOKEN_MEMO_MAX = 20_000
+
 _logger = logging.getLogger(__name__)
 
 
@@ -182,6 +186,9 @@ class Conversation:
     # Invalidated by any message add/remove/trim operation. Keyed on
     # (len(messages), hash(system_prompt)). See get_token_estimate().
     _token_estimate_cache: tuple | None = field(default=None, repr=False, compare=False)
+    # SPEC-21 SP0: per-string token counts. Survives _token_estimate_cache
+    # wipes so a stub/pop recount is lookups plus the new strings only.
+    _token_count_memo: dict = field(default_factory=dict, repr=False, compare=False)
 
     # ── Message helpers ───────────────────────────────────────────────────────
 
@@ -307,6 +314,23 @@ class Conversation:
                     conv_chars += len(tc.result)
         return system_chars, conv_chars
 
+    def _count_text(self, encoding, text: str) -> int:
+        """Token count for one string, encoded at most once per conversation.
+
+        encode_ordinary, not encode: encode() raises ValueError on any text
+        containing a special-token literal such as "<|endoftext|>".
+        """
+        if not text:
+            return 0
+        key = (encoding.name, len(text), hash(text))
+        count = self._token_count_memo.get(key)
+        if count is None:
+            if len(self._token_count_memo) >= _TOKEN_MEMO_MAX:
+                self._token_count_memo.clear()
+            count = len(encoding.encode_ordinary(text))
+            self._token_count_memo[key] = count
+        return count
+
     def get_token_estimate(self) -> int:
         """
         Token count estimate for the conversation.
@@ -351,13 +375,13 @@ class Conversation:
         Does NOT count tool_call.name (it doesn't appear in the API request body
         sent to the LLM, only the id and arguments do).
         """
-        total = len(encoding.encode(self.system_prompt))
+        total = self._count_text(encoding, self.system_prompt)
         for msg in self.messages:
-            total += len(encoding.encode(msg.content or ""))
+            total += self._count_text(encoding, msg.content or "")
             for tc in msg.tool_calls:
-                total += len(encoding.encode(str(tc.arguments)))
+                total += self._count_text(encoding, str(tc.arguments))
                 if tc.result:
-                    total += len(encoding.encode(tc.result))
+                    total += self._count_text(encoding, tc.result)
         return total
 
     def get_token_breakdown(self, model_max_tokens: int) -> dict:
@@ -379,14 +403,8 @@ class Conversation:
         """
         encoding = _tiktoken_encoding_for(self.model)
         if encoding is not None:
-            system_tokens = len(encoding.encode(self.system_prompt))
-            conversation_tokens = 0
-            for msg in self.messages:
-                conversation_tokens += len(encoding.encode(msg.content or ""))
-                for tc in msg.tool_calls:
-                    conversation_tokens += len(encoding.encode(str(tc.arguments)))
-                    if tc.result:
-                        conversation_tokens += len(encoding.encode(tc.result))
+            system_tokens = self._count_text(encoding, self.system_prompt)
+            conversation_tokens = self.get_token_estimate() - system_tokens
         else:
             # Fallback: chars // 4 heuristic
             system_chars, conv_chars = self._count_char_tokens()

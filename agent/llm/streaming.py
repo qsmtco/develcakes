@@ -21,15 +21,21 @@ Public API:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import socket
 import ssl
+import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections import namedtuple
-from typing import Iterator
+from typing import IO, Iterator, cast
+from urllib.parse import urlsplit
+
+from utils.config import get_env
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +157,278 @@ RETRYABLE_OSERROR_TYPES: tuple[type[Exception], ...] = (
 
 MAX_SSL_RETRIES = 3
 SSL_RETRY_BASE_MS = 500
+
+# SPEC-21 SP3: per-host keep-alive. Default OFF (DEVELCAKES_HTTP_KEEPALIVE=1
+# to enable). Idle connections only — a request checks a socket out of the
+# pool so two agent threads never share one HTTPSConnection.
+_POOL: dict[tuple[str, str, int], list[tuple[http.client.HTTPSConnection, float]]] = {}
+_POOL_LOCK = threading.Lock()
+_POOL_MAX_IDLE = 8
+_POOL_IDLE_S = 30.0
+
+_STALE_REUSED = (
+    http.client.RemoteDisconnected,
+    http.client.CannotSendRequest,
+    http.client.BadStatusLine,
+    BrokenPipeError,
+    ConnectionResetError,
+    ssl.SSLError,
+)
+
+
+def _keepalive_enabled() -> bool:
+    """SPEC-21 SP3: DEVELCAKES_HTTP_KEEPALIVE=1 enables the pooled fast path.
+
+    Default OFF until measured against a live provider. =1 pools; anything
+    else (including unset) is today's urllib urlopen path.
+    """
+    return get_env("HTTP_KEEPALIVE") == "1"
+
+
+def _pool_idle_count() -> int:
+    return sum(len(bucket) for bucket in _POOL.values())
+
+
+def _discard_conn(conn: http.client.HTTPSConnection) -> None:
+    try:
+        conn.close()
+    except Exception as e:
+        logger.debug("discard pooled conn: %s", e)
+
+
+def _checkout(
+    origin: tuple[str, str, int], timeout: float
+) -> tuple[http.client.HTTPSConnection, bool]:
+    """Return (connection, reused). Connection is not in the pool while in use."""
+    now = time.monotonic()
+    with _POOL_LOCK:
+        bucket = _POOL.get(origin)
+        while bucket:
+            conn, parked = bucket.pop()
+            if now - parked <= _POOL_IDLE_S:
+                return conn, True
+            _discard_conn(conn)
+        if bucket is not None and not bucket:
+            _POOL.pop(origin, None)
+    return http.client.HTTPSConnection(origin[1], origin[2], timeout=timeout), False
+
+
+def _return_to_pool(
+    origin: tuple[str, str, int], conn: http.client.HTTPSConnection
+) -> None:
+    now = time.monotonic()
+    with _POOL_LOCK:
+        while _pool_idle_count() >= _POOL_MAX_IDLE:
+            oldest_origin = None
+            oldest_t = None
+            for o, bucket in _POOL.items():
+                if not bucket:
+                    continue
+                parked = bucket[0][1]
+                if oldest_t is None or parked < oldest_t:
+                    oldest_t = parked
+                    oldest_origin = o
+            if oldest_origin is None:
+                break
+            old_conn, _unused = _POOL[oldest_origin].pop(0)
+            if not _POOL[oldest_origin]:
+                del _POOL[oldest_origin]
+            _discard_conn(old_conn)
+        _POOL.setdefault(origin, []).append((conn, now))
+
+
+class _PooledResponse:
+    """HTTPResponse-shaped wrapper. On close(), drain leftover bytes and
+    return the connection to the pool only when the response is reusable
+    (2xx, keep-alive, drain reached EOF)."""
+
+    def __init__(
+        self,
+        resp,
+        conn: http.client.HTTPSConnection,
+        origin: tuple[str, str, int],
+        *,
+        returnable: bool,
+    ) -> None:
+        self._resp = resp
+        self._conn = conn
+        self._origin = origin
+        self._returnable = returnable
+        self._closed = False
+
+    def read(self, amt=None):
+        return self._resp.read(amt)
+
+    def readline(self, *args, **kwargs):
+        return self._resp.readline(*args, **kwargs)
+
+    def __iter__(self):
+        return self._resp
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        reusable = self._returnable
+        if reusable:
+            try:
+                if not self._resp.isclosed():
+                    sock = getattr(self._conn, "sock", None)
+                    old_to = None
+                    if sock is not None:
+                        old_to = sock.gettimeout()
+                        sock.settimeout(1.0)
+                    try:
+                        leftover = 0
+                        while leftover < 65536:
+                            chunk = self._resp.read(4096)
+                            if not chunk:
+                                break
+                            leftover += len(chunk)
+                        else:
+                            reusable = False
+                    finally:
+                        if sock is not None and old_to is not None:
+                            try:
+                                sock.settimeout(old_to)
+                            except Exception:
+                                pass
+            except Exception:
+                reusable = False
+        if reusable:
+            # HTTPResponse.close() closes the socket makefile. Leave the
+            # response unread-closed so the idle HTTPSConnection can take
+            # another request (the body was fully drained above).
+            _return_to_pool(self._origin, self._conn)
+        else:
+            try:
+                self._resp.close()
+            except Exception:
+                pass
+            _discard_conn(self._conn)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._resp, name)
+
+
+def _origin_and_path(req) -> tuple[tuple[str, str, int], str]:
+    parts = urlsplit(req.full_url)
+    host = parts.hostname or ""
+    port = parts.port or 443
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    return ("https", host, port), path
+
+
+def _request_headers(req) -> dict[str, str]:
+    headers = dict(req.header_items())
+    dropped = [k for k in headers if k.lower() == "connection"]
+    for k in dropped:
+        headers.pop(k)
+    if not any(k.lower() == "user-agent" for k in headers):
+        headers["User-Agent"] = (
+            f"Python-urllib/{sys.version_info.major}.{sys.version_info.minor}"
+        )
+    return headers
+
+
+def _response_returnable(resp) -> bool:
+    conn_hdr = (resp.getheader("Connection") or "").lower()
+    if conn_hdr == "close":
+        return False
+    version = getattr(resp, "version", 11)
+    if version < 11 and conn_hdr != "keep-alive":
+        return False
+    return True
+
+
+def _eligible(req) -> bool:
+    if not _keepalive_enabled():
+        return False
+    method = (req.get_method() or "").upper()
+    if method != "POST":
+        return False
+    if urlsplit(req.full_url).scheme != "https":
+        return False
+    if urllib.request.getproxies().get("https"):
+        return False
+    return True
+
+
+def _try_pooled(req, timeout):
+    """One pooled attempt.
+
+    Returns a _PooledResponse, or None to fall back to urllib (ineligible,
+    3xx, or a stale reused socket before any response byte). Raises
+    HTTPError for status >= 400. Other failures take urllib's exception
+    shape so the existing retry loop classifies them.
+    """
+    if not _eligible(req):
+        return None
+    origin, path = _origin_and_path(req)
+    conn, reused = _checkout(origin, timeout)
+    try:
+        if reused and getattr(conn, "sock", None) is not None:
+            conn.sock.settimeout(timeout)
+        headers = _request_headers(req)
+        try:
+            conn.request("POST", path, body=req.data, headers=headers)
+        except Exception as e:
+            _discard_conn(conn)
+            if reused and isinstance(e, _STALE_REUSED):
+                return None
+            if isinstance(e, OSError):
+                raise urllib.error.URLError(e) from e
+            raise
+        try:
+            resp = conn.getresponse()
+        except Exception as e:
+            _discard_conn(conn)
+            if reused and isinstance(e, _STALE_REUSED):
+                return None
+            raise
+    except urllib.error.URLError:
+        raise
+    except Exception:
+        _discard_conn(conn)
+        raise
+    status = resp.status
+    if 300 <= status < 400:
+        try:
+            resp.close()
+        except Exception:
+            pass
+        _discard_conn(conn)
+        return None
+    if status >= 400:
+        wrapped = _PooledResponse(resp, conn, origin, returnable=False)
+        raise urllib.error.HTTPError(
+            req.full_url,
+            status,
+            resp.reason,
+            resp.headers,
+            cast("IO[bytes]", wrapped),
+        )
+    return _PooledResponse(
+        resp, conn, origin, returnable=_response_returnable(resp)
+    )
+
+
+def _open(req, timeout):
+    """Pooled path when enabled and eligible; otherwise today's urlopen."""
+    if _eligible(req):
+        pooled = _try_pooled(req, timeout)
+        if pooled is not None:
+            return pooled
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def is_retryable_ssl_error(exc: BaseException) -> bool:
@@ -327,7 +605,7 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=MAX_SSL_RETRIES):
     last_exc = None
     for attempt in range(max_retries + 1):
         try:
-            return urllib.request.urlopen(req, timeout=timeout)
+            return _open(req, timeout)
         except (ConnectionResetError, BrokenPipeError, TimeoutError, socket.gaierror) as e:
             # Bare OSError subclasses — never SSL-wrapped, retry directly.
             # TimeoutError (Python 3.10+, alias for socket.timeout) fires

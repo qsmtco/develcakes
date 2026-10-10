@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from fnmatch import fnmatch
+from fnmatch import translate
 from typing import Callable
 
 from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
@@ -51,33 +51,61 @@ def _load_gitignore_patterns(project_path: str) -> list[str]:
     return patterns
 
 
-def _match_gitignore(name: str, patterns: list[str], anchored: bool = False) -> bool:
-    """
-    Return True if name matches any non-negated .gitignore pattern.
-    fnmatch is used as a close approximation to gitignore semantics.
+def _compile_gitignore(patterns: list[str]) -> Callable[[str], bool]:
+    """Compile .gitignore patterns into one predicate equal to _match_gitignore.
 
-    Args:
-        name: Path segment or path to match.
-        patterns: List of .gitignore patterns.
-        anchored: If True, patterns with / are anchored to the start (depth-1).
-                  If False, all patterns match anywhere (simpler behavior).
+    fnmatch() normalizes with os.path.normcase, the identity on POSIX, so
+    re.match(translate(p)) is the same test it performed per pattern.
     """
+    rules: list[tuple[bool, str]] = []
     for pattern in patterns:
         negated = pattern.startswith("!")
         active = pattern[1:] if negated else pattern
-
-        # Directory-only pattern: ends with /
-        dir_only = active.endswith("/")
-        if dir_only:
+        if active.endswith("/"):
             active = active[:-1]
-            # Anchored directory pattern: only matches at depth 1
-            if "/" not in active and fnmatch(name, active):
-                return not negated
-            continue
+            if "/" in active:
+                continue
+        rules.append((negated, active))
+    if not any(negated for negated, _ in rules):
+        if not rules:
+            return lambda name: False
+        combined = re.compile("|".join(translate(active) for _, active in rules))
+        return lambda name: combined.match(name) is not None
+    compiled = [(negated, re.compile(translate(active))) for negated, active in rules]
 
-        if fnmatch(name, active):
-            return not negated
-    return False
+    def match(name: str) -> bool:
+        for negated, rx in compiled:
+            if rx.match(name):
+                return not negated
+        return False
+
+    return match
+
+
+# SPEC-21 SP2: compile-once matcher + per-name memo, keyed on the pattern
+# tuple so a .gitignore edit produces a new entry. Concurrent first use
+# may compile twice; both predicates are equivalent.
+_GITIGNORE_MATCHERS: dict[tuple[str, ...], tuple[Callable[[str], bool], dict[str, bool]]] = {}
+
+
+def _match_gitignore(name: str, patterns: list[str], anchored: bool = False) -> bool:
+    """
+    Return True if name matches any non-negated .gitignore pattern.
+    Patterns are compiled once (SPEC-21 SP2) with the same truth table as
+    the previous per-call fnmatch loop. `anchored` is unused; kept for the
+    public signature.
+    """
+    key = tuple(patterns)
+    entry = _GITIGNORE_MATCHERS.get(key)
+    if entry is None:
+        entry = _GITIGNORE_MATCHERS[key] = (_compile_gitignore(patterns), {})
+    matcher, seen = entry
+    hit = seen.get(name)
+    if hit is None:
+        if len(seen) >= 50_000:
+            seen.clear()
+        hit = seen[name] = matcher(name)
+    return hit
 
 
 def _is_ignored(rel_path: str, project_path: str, patterns: list[str]) -> bool:
@@ -576,7 +604,8 @@ def build_file_index(
                 try:
                     full_path = os.path.join(project_path, rel_path)
                     with open(full_path, "rb") as f:
-                        lc = sum(1 for _ in f)
+                        data = f.read()
+                    lc = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
                     line_str = f"{lc:,} lines / "
                 except (OSError, UnicodeDecodeError):
                     pass  # binary or unreadable — skip line count

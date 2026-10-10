@@ -143,7 +143,6 @@ class DefaultContextStrategy:
         # Snapshot state for telemetry BEFORE any mutation.
         messages_count_before = len(conv.messages)
         tokens_before = conv.get_token_estimate()
-        conv._token_estimate_cache = None
         summary_tokens_injected = 0
 
         # Phase 4: P2/P3-aware trim parameters. Defined before the trim loop
@@ -267,12 +266,14 @@ class DefaultContextStrategy:
             if m.role == MessageRole.ASSISTANT and m.tool_calls:
                 for tc in m.tool_calls:
                     valid_call_ids.add(tc.call_id)
+        before_sweep = len(conv.messages)
         conv.messages[:] = [
             m
             for m in conv.messages
             if m.role != MessageRole.TOOL_RESULT or m.tool_call_id in valid_call_ids
         ]
-        conv._token_estimate_cache = None
+        if len(conv.messages) != before_sweep:
+            conv._token_estimate_cache = None
 
         # ── Summary injection ─────────────────────────────────────────────────
         # Phase 4.10: fire when any messages were removed AND at least 4
@@ -287,7 +288,9 @@ class DefaultContextStrategy:
                 if fitted is not None:
                     encoding = _tiktoken_encoding_for(conv.model)
                     if encoding is not None:
-                        summary_tokens_injected = len(encoding.encode(fitted))
+                        summary_tokens_injected = len(
+                            getattr(encoding, "encode_ordinary")(fitted)
+                        )
                     else:
                         summary_tokens_injected = len(fitted) // 4
                     summary_msg = Message(
@@ -582,7 +585,7 @@ class DefaultContextStrategy:
 
         def _count_tokens(s: str) -> int:
             if encoding is not None:
-                return len(encoding.encode(s))
+                return len(getattr(encoding, "encode_ordinary")(s))
             return len(s) // 4
 
         # Try progressively smaller versions. Truncate by token fraction

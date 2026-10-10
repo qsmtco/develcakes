@@ -63,7 +63,9 @@ class RuntimeProviderMixin:
         try:
             import yaml
 
-            raw: Any = yaml.safe_load(text)
+            from utils.yaml_load import safe_load_yaml
+
+            raw: Any = safe_load_yaml(text)
         except ImportError:
             try:
                 raw = json.loads(text)

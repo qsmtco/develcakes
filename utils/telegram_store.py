@@ -56,9 +56,9 @@ def load_bridge_config() -> dict[str, Any]:
         _logger.warning("telegram_store: failed to read: %s", redact_log_preview(str(e)))
         return dict(_DEFAULTS)
     try:
-        import yaml
+        from utils.yaml_load import safe_load_yaml
 
-        raw = yaml.safe_load(text)
+        raw = safe_load_yaml(text)
     except ImportError:
         try:
             raw = json.loads(text)

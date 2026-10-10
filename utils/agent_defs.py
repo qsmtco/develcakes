@@ -63,9 +63,9 @@ def _parse_agent_file(filepath: str) -> dict | None:
     # Try YAML first
     if filepath.endswith((".yaml", ".yml")):
         try:
-            import yaml
+            from utils.yaml_load import safe_load_yaml
             with open(filepath, encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                data = safe_load_yaml(f)
             if isinstance(data, dict):
                 _normalize_fallback_fields(data)
                 return data
@@ -315,7 +315,8 @@ def save_agent_def(agent_def: dict) -> str:
         if os.path.exists(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as ef:
-                    existing = yaml.safe_load(ef) or {}
+                    from utils.yaml_load import safe_load_yaml
+                    existing = safe_load_yaml(ef) or {}
                 for key in _PRESERVED_KEYS:
                     if key not in export and key in existing:
                         export[key] = existing[key]

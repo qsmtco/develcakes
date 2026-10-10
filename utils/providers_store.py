@@ -116,8 +116,8 @@ def _parse(text: str) -> list[ProviderConfig]:
     Tolerates malformed content — returns [] with a warning."""
     raw: Any = None
     try:
-        import yaml
-        raw = yaml.safe_load(text)
+        from utils.yaml_load import safe_load_yaml
+        raw = safe_load_yaml(text)
     except ImportError:
         try:
             raw = json.loads(text)

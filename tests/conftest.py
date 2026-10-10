@@ -34,6 +34,19 @@ os.environ["CRABCAKES_MIGRATE_STORE"] = "0"
 
 
 @pytest.fixture(autouse=True)
+def _clear_http_keepalive_gate(request, monkeypatch):
+    """SPEC-21 SP3: an exported DEVELCAKES_HTTP_KEEPALIVE=1 in a developer
+    shell must not route urlopen-patched suites through HTTPSConnection.
+    The keep-alive tests set the gate themselves.
+    """
+    path = str(getattr(request.node, "path", request.node.fspath))
+    if path.endswith("test_http_keepalive.py"):
+        return
+    monkeypatch.delenv("DEVELCAKES_HTTP_KEEPALIVE", raising=False)
+    monkeypatch.delenv("CRABCAKES_HTTP_KEEPALIVE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
     """Point the persistence wrapper's store seam at a per-test tmp DB.
 
