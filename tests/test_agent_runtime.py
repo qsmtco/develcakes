@@ -1937,7 +1937,7 @@ class TestStreamingSignature:
         assert call_site_match != -1, "Production caller to self._call_llm_streaming not found"
         # Extract the call (rough — just check for key kwargs)
         call_chunk = runtime_source[call_site_match:call_site_match + 800]
-        for required_kw in ["session_key=", "base_url=", "api_key=", "model=", "caller_key=", "messages=", "tools=", "timeout="]:
+        for required_kw in ["session_key=", "base_url=", "api_key=", "model=", "caller_key=", "messages=", "tools=", "timeout=", "reasoning_effort="]:
             assert required_kw in call_chunk, (
                 f"Production caller is missing required kwarg {required_kw!r}.\n"
                 f"Call site: {call_chunk[:200]}"

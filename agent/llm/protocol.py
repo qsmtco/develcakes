@@ -33,6 +33,7 @@ class LLMProvider(Protocol):
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> dict: ...
 
     def stream(
@@ -44,4 +45,5 @@ class LLMProvider(Protocol):
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> Iterator: ...

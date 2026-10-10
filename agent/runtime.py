@@ -80,6 +80,7 @@ class StreamingCallKwargs(TypedDict, total=False):
     timeout: float
     x_title: str
     turn_token: object | None
+    reasoning_effort: str
 
 
 # Public API — symbols explicitly exported for external use (PHASE-FOLLOWUP-5)
@@ -2441,11 +2442,41 @@ class AgentRuntime:
                 )
             if not effective_api_key and live_card.api_key:
                 effective_api_key = live_card.api_key
+            # Reasoning: a Settings save must affect the next message without
+            # restarting the agent. Valid levels (incl. "off") apply; a
+            # non-empty invalid string warns and keeps the frozen level.
+            from models.providers import _VALID_REASONING_LEVELS
+            live_level = getattr(live_card, "reasoning_effort", "off") or "off"
+            live_level = live_level.strip().lower() if isinstance(live_level, str) else "off"
+            if live_level in _VALID_REASONING_LEVELS:
+                provider_cfg.reasoning_effort = live_level
+            else:
+                logger.warning(
+                    "[call-llm] live reasoning_effort %r for %s is not a valid "
+                    "level; keeping frozen %r",
+                    live_level, provider_name,
+                    getattr(provider_cfg, "reasoning_effort", "off"),
+                )
+            live_flag = getattr(live_card, "supports_reasoning", None)
+            if isinstance(live_flag, bool):
+                provider_cfg.supports_reasoning = live_flag
+            else:
+                logger.warning(
+                    "[call-llm] live supports_reasoning %r for %s is not a "
+                    "bool; keeping frozen %r",
+                    live_flag, provider_name,
+                    getattr(provider_cfg, "supports_reasoning", False),
+                )
         if not effective_api_key:
             # Last resort: the (possibly stale) frozen runtime snapshot.
             effective_api_key = provider_cfg.api_key
         # Use app_title as X-Title header for OpenRouter attribution
         x_title = conv.app_title or ""
+        effective_effort = (
+            getattr(provider_cfg, "reasoning_effort", "off")
+            if getattr(provider_cfg, "supports_reasoning", False)
+            else "off"
+        )
 
         # Use streaming when on_text_delta is registered AND the provider supports it
         use_streaming = (
@@ -2468,6 +2499,7 @@ class AgentRuntime:
                     timeout=float(self._config.tool_timeout_seconds),
                     x_title=x_title,
                     turn_token=turn_token,
+                    reasoning_effort=effective_effort,
                 )
             except (IndexError, KeyError, TypeError, ValueError) as e:
                 e._crabcakes_context = {
@@ -2496,6 +2528,7 @@ class AgentRuntime:
                 tools=tools if tools else None,
                 timeout=float(self._config.tool_timeout_seconds),
                 x_title=x_title,
+                reasoning_effort=effective_effort,
             )
         except (IndexError, KeyError, TypeError, ValueError) as e:
             e._crabcakes_context = {
@@ -2517,6 +2550,7 @@ class AgentRuntime:
         timeout: float,
         x_title: str = "",
         turn_token: object | None = None,
+        reasoning_effort: str = "off",
     ) -> dict:
         """
         Call the LLM with streaming. Fires on_text_delta as chunks arrive,
@@ -2558,6 +2592,7 @@ class AgentRuntime:
             tools=tools,
             timeout=timeout,
             x_title=x_title,
+            reasoning_effort=reasoning_effort,
         )
 
         for ev in _stream:
@@ -3069,6 +3104,7 @@ class AgentRuntime:
             tools=None,
             timeout=float(self._config.tool_timeout_seconds),
             x_title="crabcakes-summary",
+            reasoning_effort="off",
         )
         from agent.llm.extractors import extract_text_content
         fmt = _RESPONSE_FORMAT.get(provider_name, "openai")

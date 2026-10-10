@@ -12,13 +12,16 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-from models.providers import ProviderConfig
+from models.providers import ProviderConfig, validate_provider_reasoning_effort
+
+_REASONING_LEVELS = ("off", "low", "medium", "high")
 if TYPE_CHECKING:
     from ui.handlers.settings_handler import SettingsHandler
     from utils.provider_test import TestResult
@@ -118,6 +121,34 @@ class _ProviderCard:
         )
         vbox.append(threshold_row)
 
+        # Supports reasoning — send-side guard. Default off so a non-reasoning
+        # OpenRouter model cannot 400 on first Save. The dropdown is inert
+        # unless this box is checked.
+        self._supports_reasoning_check = Gtk.CheckButton()
+        self._supports_reasoning_check.set_active(False)
+        self._supports_reasoning_check.connect(
+            "toggled", self._on_supports_reasoning_toggled
+        )
+        supports_row = self._labeled(
+            "Supports reasoning", self._supports_reasoning_check
+        )
+        vbox.append(supports_row)
+
+        self._reasoning_dropdown = Gtk.DropDown.new_from_strings(
+            ["Off", "Low", "Medium", "High"]
+        )
+        self._reasoning_dropdown.set_selected(0)
+        self._reasoning_dropdown.set_hexpand(True)
+        self._reasoning_dropdown.set_sensitive(False)
+        reasoning_row = self._labeled("Reasoning", self._reasoning_dropdown)
+        vbox.append(reasoning_row)
+
+        # Changing Default Model drops the opt-in — a DeepSeek card pointed
+        # at GLM must not stay flagged. Populate sets a guard so loading
+        # a stored card does not trip this.
+        self._populating = False
+        self._model_entry.connect("changed", self._on_model_changed_reset_reasoning)
+
         # Status label
         self._status_label = Gtk.Label(label="Untested")
         self._status_label.add_css_class("settings-status-untested")
@@ -146,6 +177,26 @@ class _ProviderCard:
         vbox.append(btn_row)
         self._frame.set_child(vbox)
 
+    def _reasoning_level_from_dropdown(self) -> str:
+        idx = int(self._reasoning_dropdown.get_selected())
+        if 0 <= idx < len(_REASONING_LEVELS):
+            return _REASONING_LEVELS[idx]
+        return "off"
+
+    def _on_supports_reasoning_toggled(self, *_args) -> None:
+        self._reasoning_dropdown.set_sensitive(
+            self._supports_reasoning_check.get_active()
+        )
+
+    def _on_model_changed_reset_reasoning(self, *_args) -> None:
+        """Uncheck Supports reasoning when Default Model diverges from stored."""
+        if self._populating:
+            return
+        current = self._model_entry.get_text().strip()
+        stored = (self._provider.default_model or "").strip()
+        if current != stored:
+            self._supports_reasoning_check.set_active(False)
+
     def _labeled(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
         """Create a label + widget row."""
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -159,15 +210,27 @@ class _ProviderCard:
 
     def _populate_from_provider(self) -> None:
         p = self._provider
-        self._name_entry.set_text(p.name or "")
-        self._base_url_entry.set_text(p.base_url or "")
-        self._model_entry.set_text(p.default_model or "")
-        self._api_key_entry.set_text(p.api_key or "")
-        self._caller_label.set_text(
-            f"  {p.caller}" if p.caller else "  (auto-detected on save)"
-        )
-        self._max_tokens_spin.set_value(p.max_tokens or 128_000)
-        self._compaction_threshold_spin.set_value(p.compaction_threshold or 0.80)
+        self._populating = True
+        try:
+            self._name_entry.set_text(p.name or "")
+            self._base_url_entry.set_text(p.base_url or "")
+            self._model_entry.set_text(p.default_model or "")
+            self._api_key_entry.set_text(p.api_key or "")
+            self._caller_label.set_text(
+                f"  {p.caller}" if p.caller else "  (auto-detected on save)"
+            )
+            self._max_tokens_spin.set_value(p.max_tokens or 128_000)
+            self._compaction_threshold_spin.set_value(p.compaction_threshold or 0.80)
+            self._supports_reasoning_check.set_active(bool(p.supports_reasoning))
+            level = validate_provider_reasoning_effort(
+                getattr(p, "reasoning_effort", "off")
+            )
+            self._reasoning_dropdown.set_selected(
+                _REASONING_LEVELS.index(level) if level in _REASONING_LEVELS else 0
+            )
+            self._reasoning_dropdown.set_sensitive(bool(p.supports_reasoning))
+        finally:
+            self._populating = False
 
     def _is_dirty(self) -> bool:
         """True if any entry field differs from the stored provider values.
@@ -181,6 +244,10 @@ class _ProviderCard:
             or self._api_key_entry.get_text().strip() != (p.api_key or "")
             or int(self._max_tokens_spin.get_value()) != (p.max_tokens or 128_000)
             or float(self._compaction_threshold_spin.get_value()) != (p.compaction_threshold or 0.80)
+            or bool(self._supports_reasoning_check.get_active()) != bool(p.supports_reasoning)
+            or self._reasoning_level_from_dropdown() != (
+                validate_provider_reasoning_effort(getattr(p, "reasoning_effort", "off"))
+            )
         )
 
     def _update_provider_ref(self, provider: ProviderConfig) -> None:
@@ -207,11 +274,14 @@ class _ProviderCard:
             supports_tools=existing.supports_tools if existing else True,
             supports_streaming=existing.supports_streaming if existing else True,
             max_tokens=int(self._max_tokens_spin.get_value()),
+            default_max_tokens=existing.default_max_tokens if existing else 0,
             compaction_threshold=float(
                 self._compaction_threshold_spin.get_value()
             ),  # Phase A
             last_verified_at=existing.last_verified_at if existing else None,
             last_error=existing.last_error if existing else None,
+            reasoning_effort=self._reasoning_level_from_dropdown(),
+            supports_reasoning=bool(self._supports_reasoning_check.get_active()),
         )
 
     def _on_reveal_clicked(self, *args) -> None:
@@ -291,17 +361,9 @@ class _ProviderCard:
             # test succeeded just now — the handler's exact timestamp will be
             # reconciled on the next refresh_providers() call.
             from datetime import datetime, timezone
-            self._provider = ProviderConfig(
-                name=self._provider.name,
-                base_url=self._provider.base_url,
-                api_key=self._provider.api_key,
-                default_model=self._provider.default_model,
-                caller=self._provider.caller,
-                enabled=self._provider.enabled,
-                supports_tools=self._provider.supports_tools,
-                supports_streaming=self._provider.supports_streaming,
+            self._provider = replace(
+                self._provider,
                 max_tokens=new_max_tokens,
-                default_max_tokens=self._provider.default_max_tokens,
                 last_verified_at=datetime.now(timezone.utc).isoformat(),
                 last_error=None,
             )
@@ -310,18 +372,8 @@ class _ProviderCard:
             self._set_status(f"❌ {error_msg}", fail=True)
             # Stamp the error on the in-memory provider too so refresh doesn't
             # revert to "Untested".
-            self._provider = ProviderConfig(
-                name=self._provider.name,
-                base_url=self._provider.base_url,
-                api_key=self._provider.api_key,
-                default_model=self._provider.default_model,
-                caller=self._provider.caller,
-                enabled=self._provider.enabled,
-                supports_tools=self._provider.supports_tools,
-                supports_streaming=self._provider.supports_streaming,
-                max_tokens=self._provider.max_tokens,
-                default_max_tokens=self._provider.default_max_tokens,
-                last_verified_at=self._provider.last_verified_at,
+            self._provider = replace(
+                self._provider,
                 last_error=error_msg,
             )
 

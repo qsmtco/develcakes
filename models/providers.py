@@ -53,11 +53,14 @@ class ProviderConfig:
     last_verified_at: str | None = None
     last_error: str | None = None
     context_mode: str = "auto"          # "auto" | "preload" | "jit" | "hybrid"
+    reasoning_effort: str = "off"       # "off" | "low" | "medium" | "high"
+    supports_reasoning: bool = False    # send-side guard; card checkbox
 
 
 # ── Context mode validation ───────────────────────────────────────────────────
 
 _VALID_CONTEXT_MODES = frozenset({"auto", "preload", "jit", "hybrid"})
+_VALID_REASONING_LEVELS = frozenset({"off", "low", "medium", "high"})
 
 
 def validate_provider_context_mode(mode: str) -> str:
@@ -69,4 +72,19 @@ def validate_provider_context_mode(mode: str) -> str:
         raise ValueError(
             f"Invalid context_mode: {mode!r}. Must be one of {sorted(_VALID_CONTEXT_MODES)}."
         )
+    return normalized
+
+
+def validate_provider_reasoning_effort(level: object) -> str:
+    """Coerce a reasoning_effort value to off|low|medium|high.
+
+    Missing, empty, non-string, or unrecognized values become ``"off"``.
+    The adapter must never see a level outside the closed set — a bad
+    value forwarded on the wire can 400 the request.
+    """
+    if not isinstance(level, str):
+        return "off"
+    normalized = level.strip().lower()
+    if normalized not in _VALID_REASONING_LEVELS:
+        return "off"
     return normalized

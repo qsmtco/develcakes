@@ -18,7 +18,11 @@ import logging
 import os
 from typing import Any
 
-from models.providers import ProviderConfig
+from models.providers import (
+    _VALID_REASONING_LEVELS,
+    ProviderConfig,
+    validate_provider_reasoning_effort,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -59,7 +63,41 @@ def _to_dict(p: ProviderConfig) -> dict[str, Any]:
         "compaction_threshold": p.compaction_threshold,
         "last_verified_at": p.last_verified_at,
         "last_error": p.last_error,
+        "reasoning_effort": validate_provider_reasoning_effort(
+            getattr(p, "reasoning_effort", "off")
+        ),
+        "supports_reasoning": bool(getattr(p, "supports_reasoning", False)),
     }
+
+
+def _normalize_reasoning_effort(d: dict[str, Any]) -> str:
+    """Load-path coerce: missing/empty → off; unknown → off + warning."""
+    raw = d.get("reasoning_effort", "off")
+    if raw in (None, ""):
+        return "off"
+    level = validate_provider_reasoning_effort(raw)
+    already_off = isinstance(raw, str) and raw.strip().lower() == "off"
+    if level == "off" and not already_off:
+        _logger.warning(
+            "providers.yaml: provider %r has invalid reasoning_effort %r; "
+            "coercing to 'off'. Valid levels: %s.",
+            d.get("name", "<unnamed>"), raw, sorted(_VALID_REASONING_LEVELS),
+        )
+    return level
+
+
+def _normalize_supports_reasoning(d: dict[str, Any]) -> bool:
+    """Load-path: only an actual bool True is True. Missing → False."""
+    raw = d.get("supports_reasoning", False)
+    if isinstance(raw, bool):
+        return raw
+    if raw not in (None, ""):
+        _logger.warning(
+            "providers.yaml: provider %r has invalid supports_reasoning %r; "
+            "coercing to False.",
+            d.get("name", "<unnamed>"), raw,
+        )
+    return False
 
 
 def _from_dict(d: dict[str, Any]) -> ProviderConfig:
@@ -98,6 +136,8 @@ def _from_dict(d: dict[str, Any]) -> ProviderConfig:
         compaction_threshold=d.get("compaction_threshold", 0.80),
         last_verified_at=d.get("last_verified_at"),
         last_error=d.get("last_error"),
+        reasoning_effort=_normalize_reasoning_effort(d),
+        supports_reasoning=_normalize_supports_reasoning(d),
     )
 
 

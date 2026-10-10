@@ -44,6 +44,7 @@ class AnthropicProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> dict:
         """Call Anthropic Messages API."""
         endpoint = f"{base_url.rstrip('/')}/messages"
@@ -97,6 +98,7 @@ class AnthropicProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> Iterator:
         """Yield SSE events from Anthropic Messages streaming API."""
         endpoint = f"{base_url.rstrip('/')}/messages"

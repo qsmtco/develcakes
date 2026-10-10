@@ -81,6 +81,8 @@ class TestLoadSave:
             max_tokens=64000,
             last_verified_at="2026-06-07T20:30:00Z",
             last_error="some error",
+            reasoning_effort="low",
+            supports_reasoning=True,
         )
         ps.save_providers([p])
 
@@ -93,6 +95,8 @@ class TestLoadSave:
         assert lp.max_tokens == 64000
         assert lp.last_verified_at == "2026-06-07T20:30:00Z"
         assert lp.last_error == "some error"
+        assert lp.reasoning_effort == "low"
+        assert lp.supports_reasoning is True
 
     def test_round_trip_json_fallback(self, tmp_config_dir):
         """If pyyaml is missing, write a JSON file and confirm load works."""

@@ -79,6 +79,9 @@ class TestProviderCards:
         assert card._test_btn is not None
         assert card._remove_btn is not None
         assert card._save_btn is not None
+        assert card._supports_reasoning_check is not None
+        assert card._reasoning_dropdown is not None
+        assert card._reasoning_dropdown.get_sensitive() is False
 
     def test_api_key_entry_is_password(self, tmp_config_dir):
         h = SettingsHandler()
@@ -447,3 +450,65 @@ class TestMaxTokensSpinButton:
             f"BUG #7 (dialog): wizard-stamped value was overwritten: "
             f"max_tokens={card._provider.max_tokens}"
         )
+
+
+class TestReasoningCard:
+    """T3: checkbox + dropdown survive the mirror chain; dropdown is inert."""
+
+    def test_round_trip_checkbox_and_dropdown(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider(
+            "p1", reasoning_effort="high", supports_reasoning=True,
+        ))
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+        assert card._supports_reasoning_check.get_active() is True
+        assert card._reasoning_dropdown.get_selected() == 3
+        assert card._reasoning_dropdown.get_sensitive() is True
+        collected = card._collect_from_form()
+        assert collected.reasoning_effort == "high"
+        assert collected.supports_reasoning is True
+        h.add_or_update(collected)
+        reloaded = h.list_providers()
+        assert reloaded[0].reasoning_effort == "high"
+        assert reloaded[0].supports_reasoning is True
+
+    def test_is_dirty_flips_on_checkbox_and_dropdown(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+        assert not card._is_dirty()
+        card._supports_reasoning_check.set_active(True)
+        assert card._is_dirty()
+        card._supports_reasoning_check.set_active(False)
+        assert not card._is_dirty()
+        # Dropdown value is persisted even while the box is unchecked.
+        card._reasoning_dropdown.set_selected(2)
+        assert card._is_dirty()
+        assert card._collect_from_form().reasoning_effort == "medium"
+
+    def test_dropdown_inert_until_checked(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+        assert card._reasoning_dropdown.get_sensitive() is False
+        card._supports_reasoning_check.set_active(True)
+        assert card._reasoning_dropdown.get_sensitive() is True
+        card._supports_reasoning_check.set_active(False)
+        assert card._reasoning_dropdown.get_sensitive() is False
+
+    def test_changing_default_model_unchecks(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider(
+            "p1", reasoning_effort="high", supports_reasoning=True,
+        ))
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+        assert card._supports_reasoning_check.get_active() is True
+        card._model_entry.set_text("openrouter/some-other-model")
+        assert card._supports_reasoning_check.get_active() is False
+        assert card._reasoning_dropdown.get_sensitive() is False
+        # Level is kept so re-checking does not lose High.
+        assert card._reasoning_dropdown.get_selected() == 3

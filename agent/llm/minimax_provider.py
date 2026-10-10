@@ -97,6 +97,7 @@ class MiniMaxProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> dict:
         """Call MiniMax ChatCompletion v2 API."""
         endpoint = f"{base_url.rstrip('/')}/text/chatcompletion_v2"
@@ -145,6 +146,7 @@ class MiniMaxProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ):
         """Yield SSE events from MiniMax ChatCompletion streaming API (OpenAI-compatible)."""
         endpoint = f"{base_url.rstrip('/')}/text/chatcompletion_v2"

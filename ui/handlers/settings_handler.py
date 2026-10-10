@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -255,33 +256,15 @@ class SettingsHandler:
                             if (result.context_window and not user_has_customized)
                             else p.max_tokens
                         )
-                        providers[i] = ProviderConfig(
-                            name=p.name,
-                            base_url=p.base_url,
-                            api_key=p.api_key,
-                            default_model=p.default_model,
-                            caller=p.caller,                # PRESERVE — was missing, caused regression
-                            enabled=p.enabled,
-                            supports_tools=p.supports_tools,
-                            supports_streaming=p.supports_streaming,
+                        providers[i] = replace(
+                            p,
                             max_tokens=new_max_tokens,
-                            default_max_tokens=p.default_max_tokens,
                             last_verified_at=datetime.now(timezone.utc).isoformat(),
                             last_error=None,
                         )
                     else:
-                        providers[i] = ProviderConfig(
-                            name=p.name,
-                            base_url=p.base_url,
-                            api_key=p.api_key,
-                            default_model=p.default_model,
-                            caller=p.caller,                # PRESERVE — was missing, caused regression
-                            enabled=p.enabled,
-                            supports_tools=p.supports_tools,
-                            supports_streaming=p.supports_streaming,
-                            max_tokens=p.max_tokens,
-                            default_max_tokens=p.default_max_tokens,
-                            last_verified_at=p.last_verified_at,
+                        providers[i] = replace(
+                            p,
                             last_error=result.error or "unknown",
                         )
                     break
@@ -326,14 +309,8 @@ class SettingsHandler:
         providers = load_providers()
         for i, p in enumerate(providers):
             if p.name == provider.name:
-                providers[i] = ProviderConfig(
-                    name=p.name, base_url=p.base_url, api_key=p.api_key,
-                    default_model=p.default_model,
-                    caller=p.caller,                # PRESERVE — was missing, caused regression
-                    enabled=p.enabled, supports_tools=p.supports_tools,
-                    supports_streaming=p.supports_streaming,
-                    max_tokens=p.max_tokens, default_max_tokens=p.default_max_tokens,
-                    last_verified_at=p.last_verified_at,
+                providers[i] = replace(
+                    p,
                     last_error=result.error or "unknown",
                 )
                 break

@@ -40,6 +40,8 @@ class LLMProviderConfig:
     enabled: bool = True
     last_verified_at: str | None = None
     last_error: str | None = None
+    reasoning_effort: str = "off"       # "off" | "low" | "medium" | "high"
+    supports_reasoning: bool = False    # send-side guard; card checkbox
 
 
 @dataclass
@@ -146,6 +148,8 @@ def _to_llm_provider(p) -> LLMProviderConfig:
         enabled=p.enabled,
         last_verified_at=p.last_verified_at,
         last_error=p.last_error,
+        reasoning_effort=getattr(p, "reasoning_effort", "off") or "off",
+        supports_reasoning=bool(getattr(p, "supports_reasoning", False)),
     )
 
 

@@ -20,6 +20,20 @@ from agent.llm.streaming import (
 logger = logging.getLogger(__name__)
 
 
+def _apply_reasoning(payload: dict, caller: str, level: str) -> None:
+    """Map the abstract level to this caller's wire format.
+
+    off / "" / unknown caller → omit the field entirely. Runtime already
+    collapses supports_reasoning=False to "off"; this is the second guard.
+    """
+    if not level or level == "off":
+        return
+    if caller == "openai":
+        payload["reasoning_effort"] = level
+    elif caller == "openrouter":
+        payload["reasoning"] = {"effort": level}
+
+
 class OpenAIProvider:
     """Handles OpenAI, OpenRouter, and ZAI APIs (all OpenAI-compatible).
 
@@ -48,6 +62,7 @@ class OpenAIProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ) -> dict:
         """Call OpenAI Chat Completions API (also used by OpenRouter, ZAI)."""
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -58,6 +73,7 @@ class OpenAIProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        _apply_reasoning(payload, self._id, reasoning_effort)
 
         body = json.dumps(payload).encode()
         headers = {
@@ -91,6 +107,7 @@ class OpenAIProvider:
         tools: list[dict] | None,
         timeout: float,
         x_title: str = "",
+        reasoning_effort: str = "off",
     ):
         """Yield SSE events from OpenAI Chat Completions streaming API (also used by OpenRouter, ZAI)."""
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -102,6 +119,7 @@ class OpenAIProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        _apply_reasoning(payload, self._id, reasoning_effort)
 
         body = json.dumps(payload).encode()
         headers = {
