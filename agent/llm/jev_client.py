@@ -212,7 +212,14 @@ def probe_decision_model(provider: object, timeout: float = 4.0):
     # exercises exactly what the runtime sends. A raw call (not
     # classify_unknown) so the probe can distinguish "answered with low
     # confidence" from "unavailable" — both map to None in production.
+    #
+    # `started`/`elapsed` are module-local to this function; elapsed is seeded
+    # to 0 BEFORE the call so the except branches can always read it (a
+    # failure is exactly when latency_ms must not raise — BUG: the original
+    # assigned elapsed only on the success path, so every failing probe raised
+    # UnboundLocalError and hid the real provider error).
     started = time.monotonic()
+    elapsed = 0
     card = provider
     endpoint = base_url.rstrip("/") + "/v1/systemone"
     model = (getattr(card, "default_model", "") or "").strip() or "jev-latest"

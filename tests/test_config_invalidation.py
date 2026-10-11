@@ -253,7 +253,10 @@ class TestRefreshProviderConfig:
         providers = rt._config.providers
         assert providers != {}  # precondition
 
-        save_providers([])  # disk now reports no providers
+        # Intentional clear (the user removed the last card) — the explicit
+        # flag the store's empty-overwrite guard requires (2026-10-11
+        # hardening). Unflagged empty saves now raise.
+        save_providers([], allow_empty=True)
         assert load_providers() == []  # precondition: the wipe is really there
         h.refresh_provider_config()
 

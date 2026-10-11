@@ -44,7 +44,7 @@ def startup_warnings() -> list[str]:
                     f"{agent.get('name') or 'agent'} fallback {fallback!r} "
                     "does not match a provider card name"
                 )
-            elif isinstance(primary, str) and "/" not in primary and fallback == primary:
+            elif isinstance(primary, str) and primary and fallback == primary:
                 warnings.append(
                     f"{agent.get('name') or 'agent'} fallback is the same card as the primary"
                 )

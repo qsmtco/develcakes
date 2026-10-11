@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 
 from agent.llm.failure_classifier import (
@@ -138,6 +139,13 @@ class TestStreamError:
     def test_code_0_useless(self):
         assert classify_stream_error({"code": 0, "message": "nope"}) == FailureClass.UNKNOWN
 
+    def test_code_0_auth_markers_are_permanent_auth(self):
+        """SPEC-22 fix-round BUG #6: a 401-shaped stream event with a
+        non-numeric code carrying auth text must advance the chain, not
+        burn a retry on a dead key. Shared with classify_exception."""
+        for msg in ("invalid api key", "Unauthorized", "login failed"):
+            assert classify_stream_error({"code": 0, "message": msg}) == FailureClass.PERMANENT_AUTH
+
     def test_not_a_dict(self):
         assert classify_stream_error(None) == FailureClass.UNKNOWN
         assert classify_stream_error("400") == FailureClass.UNKNOWN
@@ -194,6 +202,30 @@ class TestStore:
         old = _failure(FailureClass.TRANSIENT)
         old.timestamp = 1.0
         record(old)
+        assert summary()["last_24h"] == 0
+
+    def test_summary_falls_back_to_audit_log_when_cold(self, tmp_config_dir):
+        """SPEC-22 fix-round BUG #7: after a restart the deque is empty, but
+        summary() must reflect fresh audit-log.jsonl events (cold-cache)."""
+        fresh = _failure(FailureClass.PERMANENT_AUTH)
+        fresh.timestamp = time.time()
+        record(fresh)  # writes both the deque AND the audit line
+        reset_for_tests()  # simulate restart — deque cold, file warm
+        assert recent() == []
+        summed = summary()
+        assert summed["last_24h"] == 1
+        assert summed["by_class"] == {"permanent_auth": 1}
+        assert summed["agents_affected"] == ["special:coder"]
+
+    def test_summary_cold_empty_audit_log(self, tmp_config_dir):
+        reset_for_tests()
+        assert summary() == {"last_24h": 0, "by_class": {}, "agents_affected": []}
+
+    def test_summary_tail_ignores_old_audit_lines(self, tmp_config_dir):
+        old = _failure(FailureClass.TRANSIENT)
+        old.timestamp = 1.0  # outside the 24h window
+        record(old)
+        reset_for_tests()
         assert summary()["last_24h"] == 0
 
 
@@ -279,6 +311,56 @@ class TestRuntimeRecordOnce:
         assert failure is not None
         assert failure.failure_class.value == "unknown"
 
+    def test_provider_network_error_without_marker_is_recorded(self, tmp_config_dir):
+        """REGRESSION GUARD (SPEC-22 audit, BUG #1): a provider call raising a
+        network/HTTP error carries NO `_crabcakes_context` marker — the narrow
+        handlers only catch (IndexError, KeyError, TypeError, ValueError).
+        The generic tool-loop handler MUST still classify+record it.
+
+        A guard like `if getattr(e, "_crabcakes_context", None) is not None:`
+        (proposed in the audit's BUG #1) silently suppresses this — the whole
+        point of the SPEC-22 store. This test fails loudly if that guard
+        (or any origin-marker gate) is reintroduced.
+        """
+        import unittest.mock
+
+        from agent.config import AgentConfig, LLMProviderConfig
+        from agent.runtime import AgentRuntime
+
+        reset_for_tests()
+        card = LLMProviderConfig(
+            name="OpenRouter", base_url="https://x/v1", api_key="k",
+            default_model="openrouter/demo", caller="openrouter",
+        )
+        cfg = AgentConfig(
+            providers={"openrouter": card, "OpenRouter": card},
+            default_provider="openrouter", default_model="openrouter/demo",
+            provider_failover_enabled=False, auto_save_conversations=False,
+        )
+        rt = AgentRuntime(cfg)
+        rt.start()
+        sk = "special:coder"
+        rt.create_conversation("Coder", sk, "/tmp")
+
+        class _Provider:
+            def call(self, **kwargs):
+                cause = urllib.error.HTTPError("https://x/v1", 401, "unauthorized", hdrs=None, fp=None)
+                err = RuntimeError("OpenAI API error 401 unauthorized: bad key")
+                err.__cause__ = cause
+                raise err
+            stream = None
+
+        with unittest.mock.patch("agent.runtime._get_provider", lambda _key: _Provider()):
+            rt._run_loop(sk, "hi")
+
+        recorded = recent()
+        assert len(recorded) == 1, (
+            "genuine provider 401 was NOT recorded — an origin-marker guard "
+            f"suppresses the classification path (recorded={recorded!r})"
+        )
+        assert recorded[0].failure_class == FailureClass.PERMANENT_AUTH
+        rt.stop()
+
 
 class TestStartup:
     def test_missing_brave_key_named(self, tmp_config_dir, monkeypatch):
@@ -293,6 +375,26 @@ class TestStartup:
         found = startup_warnings()
         assert any("BRAVE_API_KEY" in item for item in found)
         assert any("M3" in item for item in found)
+
+    def test_same_card_fallback_warns_for_bare_name(self, tmp_config_dir, monkeypatch):
+        """SPEC-22 fix-round BUG #4: `llm_name` is a card display name (no
+        vendor prefix), so the same-card warning must fire on plain names.
+        The old `"/" not in primary` clause was dead — this pins the removal."""
+        from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
+        from utils.startup_checks import startup_warnings
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        monkeypatch.delenv("OPENCLAW_BRAVE_API_KEY", raising=False)
+        save_providers([ProviderConfig(
+            name="M3", base_url="https://x/v1", api_key="k",
+            default_model="zai/glm", caller="zai",
+        )])
+        monkeypatch.setattr(
+            "utils.agent_defs.load_agent_defs",
+            lambda: [{"name": "Coder", "llm_name": "M3", "fallback_provider": "M3"}],
+        )
+        found = startup_warnings()
+        assert any("same card as the primary" in item for item in found)
 
 
 def test_policy_table_does_not_import_jev(monkeypatch):

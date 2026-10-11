@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from typing import Any
 
 from models.providers import (
@@ -186,6 +187,34 @@ def _parse(text: str) -> list[ProviderConfig]:
     return providers
 
 
+def _existing_card_count() -> int:
+    """Count cards currently on disk (0 when absent/unreadable/malformed)."""
+    path = get_providers_path()
+    if not os.path.isfile(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return 0
+    return len(_parse(text))
+
+
+def _backup_existing(path: str) -> None:
+    """Keep a single-generation .bak of `path` before an overwrite.
+
+    Best-effort — a backup failure must never block a legitimate save; it
+    is logged instead. Recovery net for the 2026-10-11 store-truncation
+    incident class.
+    """
+    if not os.path.isfile(path):
+        return
+    try:
+        shutil.copy2(path, path + ".bak")
+    except OSError as e:
+        _logger.warning("providers_store: could not write %s.bak: %s", path, e)
+
+
 def load_providers() -> list[ProviderConfig]:
     """Read providers.yaml → list[ProviderConfig]. Empty list if missing.
     Tolerates malformed lines (logs warning, skips)."""
@@ -201,12 +230,34 @@ def load_providers() -> list[ProviderConfig]:
     return _parse(text)
 
 
-def save_providers(providers: list[ProviderConfig]) -> None:
+def save_providers(providers: list[ProviderConfig], *,
+                   allow_empty: bool = False) -> None:
     """Write list[ProviderConfig] → providers.yaml. Creates parent dir.
     File is written with mode 0o600 (owner-only — contains API keys).
-    Parent dir is chmod 0o700 if created.
-    Atomic: writes to .tmp then renames."""
+    Parent dir is chmod 0o700 if created. The previous file is preserved
+    as providers.yaml.bak (one generation) before every overwrite.
+    Atomic: writes to .tmp then renames.
+
+    Safety guard (2026-10-11 incident): refuses to overwrite a non-empty
+    store with an empty list unless the caller passes ``allow_empty=True``
+    (the explicit remove-the-last-card path). A degraded load must not
+    silently truncate the store; oversized intentional shrinks log a
+    warning naming the .bak recovery file.
+    """
     path = get_providers_path()
+    existing = _existing_card_count()
+    if not providers and existing and not allow_empty:
+        raise ValueError(
+            f"refusing to overwrite providers.yaml ({existing} card(s)) with an "
+            f"empty list — pass allow_empty=True if clearing is intentional"
+        )
+    if existing and len(providers) < existing:
+        _logger.warning(
+            "providers_store: saving %d card(s) over %d on disk — if this drop "
+            "was not intentional, the previous file is at %s.bak",
+            len(providers), existing, path,
+        )
+    _backup_existing(path)
     parent = os.path.dirname(path)
 
     # Create parent dir with restricted permissions if it doesn't exist
@@ -252,9 +303,13 @@ def add_provider(providers: list[ProviderConfig], p: ProviderConfig) -> None:
 
 
 def remove_provider(providers: list[ProviderConfig], name: str) -> None:
-    """Remove-by-name-and-save. No-op if not found."""
+    """Remove-by-name-and-save. No-op if not found.
+
+    Removing the last card is an intentional clear — pass through
+    ``allow_empty=True`` to the save guard.
+    """
     filtered = [x for x in providers if x.name != name]
-    save_providers(filtered)
+    save_providers(filtered, allow_empty=True)
 
 
 def update_provider(providers: list[ProviderConfig], p: ProviderConfig) -> None:

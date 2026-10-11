@@ -47,6 +47,22 @@ def _clear_http_keepalive_gate(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_config_resolution(tmp_path, monkeypatch):
+    """Keep EVERY test's config/data resolution inside a per-test tmp dir.
+
+    Regression net (2026-10-11 incident): suites that terminate turns
+    without requesting ``tmp_config_dir`` wrote fixture events into the
+    REAL ~/.config/develcakes/audit-log.jsonl and session files into the
+    real conversations dir. ``get_config_dir()`` prefers $XDG_CONFIG_HOME
+    over $HOME — so BOTH inputs are redirected here; a HOME-only patch
+    silently stops isolating whenever XDG_CONFIG_HOME is set in the
+    ambient environment (found in the same audit). Do not remove.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+
+@pytest.fixture(autouse=True)
 def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
     """Point the persistence wrapper's store seam at a per-test tmp DB.
 
@@ -72,12 +88,18 @@ def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
 @pytest.fixture
 def tmp_config_dir(tmp_path, monkeypatch):
     """
-    Patch ~/.config/crabcakes to point at an isolated temp directory.
+    Patch config resolution to an isolated temp directory.
     All tests that touch config files use this fixture.
+
+    Sets BOTH HOME and XDG_CONFIG_HOME — get_config_dir() prefers
+    $XDG_CONFIG_HOME, so a HOME-only patch silently stops isolating
+    whenever XDG_CONFIG_HOME is set in the ambient environment. The
+    created dir name matches get_config_dir()'s final component.
     """
-    config_dir = tmp_path / ".config" / "crabcakes"
-    config_dir.mkdir(parents=True)
+    config_dir = tmp_path / ".config" / "develcakes"
+    config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     return config_dir
 
 

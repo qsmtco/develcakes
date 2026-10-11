@@ -50,19 +50,39 @@ def recent(limit: int = 20, session_key: str | None = None) -> list[ProviderFail
 
 
 def summary() -> dict:
+    cutoff = time.time() - 86400
     with _lock:
         items = list(_events)
-    cutoff = time.time() - 86400
+    if items:
+        # Warm path: the in-memory deque is authoritative.
+        pairs = [
+            (item.failure_class.value, item.session_key, item.timestamp)
+            for item in items
+            if isinstance(item.timestamp, (int, float))
+        ]
+    else:
+        # Cold path (SPEC-22 fix-round BUG #7): after a restart the deque is
+        # empty but audit-log.jsonl is the durable record. Fall back to its
+        # tail so "is anything failing right now?" is not silently green.
+        pairs = []
+        for rec in _tail_audit_records():
+            ts = rec.get("timestamp")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                pairs.append((
+                    str(rec.get("failure_class") or ""),
+                    str(rec.get("session_key") or ""),
+                    float(ts),
+                ))
     by_class: dict[str, int] = {}
     agents: list[str] = []
     seen_agents: set[str] = set()
-    fresh = [item for item in items if isinstance(item.timestamp, (int, float)) and item.timestamp >= cutoff]
-    for item in fresh:
-        key = item.failure_class.value
+    fresh = [pair for pair in pairs if pair[2] >= cutoff]
+    for class_value, session_key, _ts in fresh:
+        key = class_value or "unknown"
         by_class[key] = by_class.get(key, 0) + 1
-        if item.session_key and item.session_key not in seen_agents:
-            seen_agents.add(item.session_key)
-            agents.append(item.session_key)
+        if session_key and session_key not in seen_agents:
+            seen_agents.add(session_key)
+            agents.append(session_key)
     return {
         "last_24h": len(fresh),
         "by_class": by_class,
@@ -76,10 +96,51 @@ def reset_for_tests() -> None:
         _events.clear()
 
 
+def _audit_log_path() -> str:
+    from utils.config import get_config_dir
+    return os.path.join(get_config_dir(), "audit-log.jsonl")
+
+
+def _tail_audit_records(max_lines: int = _CAP) -> list[dict]:
+    """Read the last ``max_lines`` provider_failure records from the audit log.
+
+    Cold-restart fallback for ``summary()`` (SPEC-22 §"Failure store replay
+    after restart"). Bounded read from the tail, never raises — a missing or
+    unreadable log yields [].
+    """
+    try:
+        path = _audit_log_path()
+        if not os.path.exists(path):
+            return []
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            # Read a bounded tail window; one JSONL line is well under 1 KiB,
+            # so _CAP * 1024 covers max_lines records with margin.
+            window = min(size, max_lines * 1024)
+            handle.seek(size - window)
+            chunk = handle.read()
+        lines = chunk.decode("utf-8", errors="replace").splitlines()
+        records: list[dict] = []
+        for line in lines[-max_lines:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(rec, dict) and rec.get("kind") == "provider_failure":
+                records.append(rec)
+        return records
+    except Exception:
+        _logger.exception("provider failure audit tail read failed")
+        return []
+
+
 def _append_audit(failure: ProviderFailure) -> None:
     try:
-        from utils.config import get_config_dir
-        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        path = _audit_log_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         line = {
             "kind": "provider_failure",

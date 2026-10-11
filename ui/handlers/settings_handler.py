@@ -168,7 +168,9 @@ class SettingsHandler:
             logger.debug("Remove: provider '%s' not found", name)
             return
         providers = [p for p in providers if p.name != name]
-        save_providers(providers)
+        # Explicit user removal — clearing the last card is intentional and
+        # must pass the store's empty-overwrite guard (2026-10-11 hardening).
+        save_providers(providers, allow_empty=True)
         logger.info("Removed provider: %s", name)
         if self._on_providers_changed:
             self._on_providers_changed(providers)

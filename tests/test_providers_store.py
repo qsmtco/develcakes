@@ -637,3 +637,47 @@ class TestValidCallersDuplicationInvariant:
             f"but agent.runtime._PROVIDER_CALLERS.keys()={sorted(get_valid_callers())}. "
             f"Update _VALID_CALLERS in utils/providers_store.py to match the runtime."
         )
+
+
+# ── TestSaveSafetyGuards (2026-10-11 store-truncation incident) ─────────────
+
+
+class TestSaveSafetyGuards:
+    """The store must not silently self-truncate, and must keep a recovery
+    generation of the previous file. 2026-10-11: a degraded read followed
+    by any save could overwrite a full store with almost nothing; there
+    was no backup and no guard.
+    """
+
+    def test_save_keeps_previous_generation_as_bak(self, tmp_config_dir):
+        from utils.yaml_load import safe_load_yaml
+        ps.save_providers([_make_provider("A"), _make_provider("B")])
+        ps.save_providers([_make_provider("A")])
+        with open(ps.get_providers_path() + ".bak", encoding="utf-8") as f:
+            bak = safe_load_yaml(f)
+        assert [d["name"] for d in bak] == ["A", "B"]
+
+    def test_refuses_empty_over_nonempty(self, tmp_config_dir):
+        ps.save_providers([_make_provider("A")])
+        with pytest.raises(ValueError):
+            ps.save_providers([])
+        # Explicit intentional clear works — remove_provider passes this.
+        ps.save_providers([], allow_empty=True)
+        assert ps.load_providers() == []
+
+    def test_empty_over_missing_is_allowed(self, tmp_config_dir):
+        ps.save_providers([])  # nothing on disk to protect — must not raise
+
+    def test_remove_last_card_is_intentional(self, tmp_config_dir):
+        ps.save_providers([_make_provider("A")])
+        ps.remove_provider(ps.load_providers(), "A")
+        assert ps.load_providers() == []
+
+    def test_shrink_logs_warning_naming_bak(self, tmp_config_dir, caplog):
+        import logging
+        ps.save_providers([_make_provider("A"), _make_provider("B")])
+        with caplog.at_level(logging.WARNING, logger="utils.providers_store"):
+            ps.save_providers([_make_provider("A")])
+        assert any(
+            "providers.yaml.bak" in str(r.message) for r in caplog.records
+        )

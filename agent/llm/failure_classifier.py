@@ -75,10 +75,28 @@ _MODEL_REJECTION_MARKERS = (
     "thinking parameter",
 )
 
+# Human-message auth markers, shared by classify_stream_error (code==0) and
+# classify_exception. A dead key must map to PERMANENT_AUTH on BOTH surfaces —
+# a 401-shaped stream event with a non-numeric code otherwise wastes a retry on
+# the same dead key instead of advancing the chain (SPEC-22 fix-round BUG #6).
+_MESSAGE_AUTH_MARKERS = (
+    "login fail",
+    "invalid api key",
+    "unauthorized",
+)
+
 _STATUS_RE = re.compile(
     r"(?:API error|code=|status_code=)\s*(\d{3,4})",
     re.IGNORECASE,
 )
+# Second-pass fallback (SPEC-22 fix-round BUG #8): many provider error bodies
+# carry a bare status ("HTTP/1.1 500 …", "Error 429 …") with no "API error"/
+# "code=" prefix and no chained HTTPError (e.g. `raise … from None`). Scoped to
+# classify_exception only — NOT _extract_status — so is_provider_exception and
+# status_code_of keep their narrow semantics (a bare number in arbitrary text
+# must not make a non-provider exception look like one). `\b` prevents matching
+# "500" inside "5000".
+_BARE_STATUS_RE = re.compile(r"\b(401|402|403|404|429|5\d\d)\b")
 _SECRET_RE = re.compile(r"(?:sk-|Bearer\s+)[A-Za-z0-9_\-\.]+", re.IGNORECASE)
 _URL_USERINFO_RE = re.compile(r"(https?://)[^\s/@]+:[^\s/@]+@")
 
@@ -170,6 +188,8 @@ def classify_stream_error(error_payload: object) -> FailureClass:
         code_int = 0
     if code_int == 0:
         lowered = message.lower()
+        if any(marker in lowered for marker in _MESSAGE_AUTH_MARKERS):
+            return FailureClass.PERMANENT_AUTH
         if "rate limit" in lowered or "timeout" in lowered or "overloaded" in lowered:
             return FailureClass.TRANSIENT
         return FailureClass.UNKNOWN
@@ -214,8 +234,14 @@ def classify_exception(exc: BaseException, provider: str = "", model: str = "") 
     if _chain_is_transient(exc):
         return FailureClass.TRANSIENT
     lowered = str(exc).lower()
-    if "login fail" in lowered or "invalid api key" in lowered or "unauthorized" in lowered:
+    if any(marker in lowered for marker in _MESSAGE_AUTH_MARKERS):
         return FailureClass.PERMANENT_AUTH
+    # Second-pass fallback (SPEC-22 fix-round BUG #8): a provider body carrying
+    # a bare status and no chained HTTPError. classify_exception ONLY — never
+    # _extract_status — so is_provider_exception/status_code_of stay narrow.
+    bare = _BARE_STATUS_RE.search(str(exc))
+    if bare:
+        return _class_for_status(int(bare.group(1)), str(exc), from_http=False)
     return FailureClass.UNKNOWN
 
 
