@@ -97,6 +97,36 @@ class TestClassifyException:
         exc = urllib.error.URLError(socket.gaierror("dns"))
         assert classify_exception(exc) == FailureClass.TRANSIENT
 
+    def test_bare_status_without_chain_is_transient(self):
+        """SPEC-22 fix-round BUG #8: a bare provider status in the body (no
+        chained HTTPError, no 'API error' prefix) must still classify."""
+        assert classify_exception(RuntimeError("HTTP/1.1 500 Internal Server Error")) == FailureClass.TRANSIENT
+        assert classify_exception(RuntimeError("HTTP 503 Service Unavailable")) == FailureClass.TRANSIENT
+        assert classify_exception(RuntimeError("Error 429 Too Many Requests")) == FailureClass.TRANSIENT
+
+    def test_bare_status_auth_and_model(self):
+        assert classify_exception(RuntimeError("HTTP/1.1 401 Unauthorized")) == FailureClass.PERMANENT_AUTH
+        assert classify_exception(RuntimeError("got status 404")) == FailureClass.PERMANENT_MODEL
+
+    def test_suppressed_context_401_via_from_none(self):
+        """`raise ... from None` keeps __context__ — _extract_status still wins."""
+        h = urllib.error.HTTPError("https://x", 401, "u", hdrs=None, fp=None)
+        try:
+            try:
+                raise h
+            except urllib.error.HTTPError:
+                raise RuntimeError("could not authenticate") from None
+        except RuntimeError as exc:
+            assert classify_exception(exc) == FailureClass.PERMANENT_AUTH
+
+    def test_bare_status_does_not_widen_is_provider_exception(self):
+        """The second-pass regex lives in classify_exception ONLY — a bare
+        number in arbitrary text must not make a non-provider exc look like one."""
+        from agent.llm.failure_classifier import is_provider_exception, status_code_of
+        exc = RuntimeError("we processed 500 records")
+        assert status_code_of(exc) is None
+        assert is_provider_exception(exc) is False
+
 
 class TestStreamError:
     def test_code_429(self):
@@ -297,16 +327,154 @@ class TestDecisionModelLookup:
         )])
         assert classify_unknown("anything", 400) is None
 
-    def test_keyed_card_still_none_until_adapter(self, tmp_config_dir):
-        """Card present + keyed, but the Stage-2 adapter is not shipped —
-        classify_unknown honestly stays None (documented, not faked)."""
+    def test_keyed_card_classifies_via_mock_endpoint(self, tmp_config_dir, monkeypatch):
+        """Card present + keyed → a REAL typed-decision call. The endpoint is
+        mocked (no network in tests): a well-formed choice answer with good
+        confidence must produce the corresponding FailureClass."""
         from utils.providers_store import save_providers
         from models.providers import ProviderConfig
         save_providers([ProviderConfig(
             name="DecisionModel", base_url="https://jev.example/v1",
             api_key="jev-key", default_model="typesafe/system-one", caller="",
         )])
-        assert classify_unknown("anything", 400) is None
+
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "model": "jev-test",
+                    "answers": {"failure_class": {
+                        "type": "choice", "choice": "transient",
+                        "probabilities": {"transient": 0.9},
+                        "confidence": 0.9,
+                    }},
+                }).encode()
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data)
+            captured["auth"] = req.headers.get("Authorization")
+            captured["timeout"] = timeout
+            return _Resp()
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        result = classify_unknown("429 rate limited", 429)
+        from agent.llm.failure_classifier import FailureClass
+        assert result is FailureClass.TRANSIENT
+        assert captured["url"].endswith("/v1/systemone")
+        assert captured["auth"] == "Bearer jev-key"
+        assert captured["body"]["model"] == "typesafe/system-one"
+        assert captured["body"]["questions"]["failure_class"]["type"] == "choice"
+        assert captured["timeout"] is not None and captured["timeout"] <= 2.5
+
+    def test_keyed_card_low_confidence_returns_none(self, tmp_config_dir, monkeypatch):
+        """Confidence below the floor → None (fail open, not a guess)."""
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="typesafe/system-one", caller="",
+        )])
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "answers": {"failure_class": {
+                        "type": "choice", "choice": "transient",
+                        "confidence": 0.3,
+                    }},
+                }).encode()
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        assert classify_unknown("mystery", None) is None
+
+    def test_keyed_card_invalid_choice_returns_none(self, tmp_config_dir, monkeypatch):
+        """An answer outside the closed class set → None (shape guard)."""
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="typesafe/system-one", caller="",
+        )])
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "answers": {"failure_class": {
+                        "type": "choice", "choice": "purple", "confidence": 0.99,
+                    }},
+                }).encode()
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        assert classify_unknown("mystery", None) is None
+
+    def test_keyed_card_network_failure_returns_none(self, tmp_config_dir, monkeypatch):
+        """Endpoint unreachable → None, never an exception (fail-open floor)."""
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="typesafe/system-one", caller="",
+        )])
+
+        import urllib.request
+
+        def boom(req, timeout=None):
+            raise OSError("network down")
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        assert classify_unknown("mystery", None) is None
+
+    def test_keyed_card_shape_drift_returns_none(self, tmp_config_dir, monkeypatch):
+        """A noul answer (wrong type) or missing keys → None."""
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="typesafe/system-one", caller="",
+        )])
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "answers": {"failure_class": {"type": "noul", "noul": 0.9}},
+                }).encode()
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        assert classify_unknown("mystery", None) is None
 
     def test_load_decision_card_finds_by_constant(self, tmp_config_dir):
         from agent.llm.jev_client import load_decision_card
