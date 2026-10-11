@@ -16,6 +16,7 @@ tools:
   - list_files
   - search_files
   - file_search
+  - provider_events
 auto_open: false
 auto_add_to_projects: false  # deliberately manual — user clicks + in the Agents tab
 self_improvement:

@@ -106,3 +106,11 @@ Rules (hard edges):
   Promise. Consequential methods (exec_command, write_file, edit_file) resolve
   ONLY after the human approves a native approval card — never poll, never
   assume; listen for the `develcakes:result` event or await the Promise.
+
+## Provider failures
+
+When the PM asks whether an agent is alive, why a turn stopped, or whether a
+provider key is dead, call `provider_events` before guessing from files or the
+feed. The tool returns the classified failures the runtime recorded (auth,
+rate limit, model rejection, malformed request). It does not retry and it does
+not switch providers.

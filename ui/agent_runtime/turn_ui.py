@@ -673,11 +673,30 @@ class RuntimeTurnUiMixin:
             # When the runtime passes a raw exception object (not a string),
             # translate it to a user-friendly message for display while keeping
             # the exception stored in _last_error_exception for context enrichment.
+            # SPEC-22 fix round JOB 1: the failure may ride on a raised
+            # exception (`_failure`) OR on the string carrier the runtime
+            # dispatch uses for the metadata path (`provider_failure` on a
+            # `_FailureMessage` str subclass). Both mean the same thing here:
+            # enrich the bubble + emit a provider_error feed card. A plain
+            # string with neither attribute leaves `failure` None.
+            if isinstance(message, BaseException):
+                failure = getattr(message, "_failure", None)
+            else:
+                failure = getattr(message, "provider_failure", None)
             if isinstance(message, BaseException):
                 from agent.llm.streaming import friendly_error_message
                 display_msg = friendly_error_message(message)
             else:
                 display_msg = str(message)
+            if failure is not None:
+                from agent.llm.failure_classifier import class_label
+                code = failure.status_code if failure.status_code else ""
+                prefix = (
+                    f"[Provider failure — {class_label(failure.failure_class)}] "
+                    f"{failure.provider} {code}"
+                ).strip()
+                if not display_msg.startswith("[Provider failure"):
+                    display_msg = f"{prefix}\n{display_msg}" if display_msg else prefix
             # Resolve agent display name from the local registry so the error
             # bubble header shows "Coder" / "Debugger" / etc. instead of "Agent".
             # Mirrors the resolution in _do_response_complete.
@@ -747,9 +766,13 @@ class RuntimeTurnUiMixin:
                     # string, so the two sides can't drift.
                     if display_msg != CANCEL_MESSAGE:
                         card = FeedCardData(
-                            card_type="system",
+                            card_type="provider_error" if failure is not None else "system",
                             source="agent",
-                            title=f"Turn failed: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}",
+                            title=(
+                                f"Provider failure: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}"
+                                if failure is not None
+                                else f"Turn failed: {resolved_name or self.get_agent_name_for_session(session_key) or 'Agent'}"
+                            ),
                             body=display_msg[:2000],
                             author="Runtime",
                             timestamp=datetime.now(timezone.utc),  # noqa: UP017 — same pattern as publish_cli_nudge_card (:565)
@@ -760,6 +783,12 @@ class RuntimeTurnUiMixin:
                                 "provider": (provider_meta or {}).get("provider"),
                                 "model": (provider_meta or {}).get("model"),
                                 "exception_type": (provider_meta or {}).get("exception_type"),
+                                "failure_class": (
+                                    failure.failure_class.value if failure is not None else None
+                                ),
+                                "provider_failure_detail": (
+                                    failure.detail if failure is not None else None
+                                ),
                             },
                         )
                         self._fh.add_card(card)

@@ -880,6 +880,7 @@ class AgentRuntimeHandler(
             on_error=self._on_error,
             on_enforcement_status=self._on_enforcement_status,
         )
+        rt.set_on_provider_failover(self._on_provider_failover)
         # SPEC-08 SP4A (Ruling 2: handler-owned card): the runtime ships a
         # logged fallback banner receiver; this handler owns project_name +
         # the feed seam, so it builds the FeedCardData itself. Registered on
@@ -1897,6 +1898,32 @@ class AgentRuntimeHandler(
         replacing the existing logger.info dispatch. None clears.
         """
         self._on_token_breakdown_extra = cb
+
+    def _on_provider_failover(self, session_key: str, reason: str, _turn_token: object = None) -> None:
+        """Feed card when Stage 3 advances to the fallback. Does not end the turn.
+
+        Trigger: AgentRuntime.set_on_provider_failover, fired from the chain
+        walk after decide() returns advance_chain.
+        """
+        if self._fh is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            from models.feed_card import FeedCardData
+            project = self._active_project[0] if self._active_project else "(none)"
+            card = FeedCardData(
+                card_type="provider_error",
+                source="agent",
+                title="Provider failover",
+                body=str(reason)[:2000],
+                author="Runtime",
+                timestamp=datetime.now(timezone.utc),
+                project_name=project,
+                metadata={"session_key": session_key, "kind": "failover"},
+            )
+            self._fh.add_card(card)
+        except Exception:
+            logger.exception("failover feed card failed for %s", session_key)
 
     def _on_error(self, session_key: str, message: str, _turn_token: object = None) -> None:
         """AgentRuntime error callback. Show error bubble."""

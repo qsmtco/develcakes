@@ -19,10 +19,11 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Self, TypedDict
 
 if TYPE_CHECKING:
     from models.conversation import Conversation
@@ -188,6 +189,26 @@ def _log_store_migration_banner(stats: dict) -> None:
 # a bare literal, so the skip comparison can't drift. Chat-bubble rendering
 # of the message is unchanged.
 CANCEL_MESSAGE = "Cancelled by user"
+
+
+class _FailureMessage(str):
+    """A provider-error message that rides its ProviderFailure through dispatch.
+
+    `TurnResult.error` is a STRING (SPEC-22 fix round JOB 1). When the
+    failure was carried in `metadata["provider_failure"]` rather than on a
+    raised exception, the UI's `_do_error(sk, message, token)` still needs to
+    find it. This str subclass keeps the message's string contract intact
+    (`str(message)`, `.lower()`, substring checks all work) while exposing
+    `.provider_failure` for the class-line/feed-card branches. The alternative
+    — threading metadata through the callback signature — was a larger diff.
+    """
+
+    provider_failure: object
+
+    def __new__(cls, message: str, provider_failure: object) -> Self:
+        obj = super().__new__(cls, message)
+        obj.provider_failure = provider_failure
+        return obj
 
 
 class TurnStatus(Enum):
@@ -555,6 +576,8 @@ class AgentRuntime:
         self._last_breakdown_session: str = ""
         self._on_error = on_error
         self._on_enforcement_status = on_enforcement_status
+        self._on_provider_failover = None
+        self._last_stream_text: dict[str, str] = {}
 
         # Phase CB-3: per-session list of pending stuck messages to send as
         # transient prefixes on the next LLM call.
@@ -908,6 +931,30 @@ class AgentRuntime:
             err_msg = result.error
             if err_msg is None:
                 err_msg = "Turn ended without error message"
+            # SPEC-22 fix round JOB 1: read the failure from metadata FIRST
+            # (the stream/empty-content carrier), then fall back to the
+            # exception carrier the narrow handlers attach (`exc._failure`).
+            # `TurnResult.error` stays a STRING — the metadata path never
+            # stuffs an exception into it. Record happens ONCE here.
+            provider_failure = None
+            if isinstance(result.metadata, dict):
+                provider_failure = result.metadata.get("provider_failure")
+            if provider_failure is None:
+                provider_failure = getattr(err_msg, "_failure", None)
+            if result.status == TurnStatus.FAILED:
+                self._record_attached_failure(provider_failure)
+                # JOB 1 carrier bridge: `_do_error` receives `err_msg` (a
+                # string) and metadata does not reach it. When a failure rode
+                # in metadata, hand it off on a small str subclass so the UI
+                # path can read `.provider_failure` without changing the
+                # callback signature. The smaller-diff choice (documented):
+                # subclass over threading metadata into `_do_error`.
+                if (
+                    provider_failure is not None
+                    and not isinstance(err_msg, BaseException)
+                    and not isinstance(err_msg, _FailureMessage)
+                ):
+                    err_msg = _FailureMessage(str(err_msg), provider_failure)
             self._dispatch(
                 self._on_error, sk, err_msg,
                 _turn_token=result.turn_token,
@@ -954,6 +1001,110 @@ class AgentRuntime:
             result.error is not None,
         )
         return result
+
+    def _attach_provider_failure(
+        self,
+        exc: BaseException,
+        session_key: str,
+        stage: str,
+    ) -> object | None:
+        """Classify once and stash the result on the exception. Does not record.
+
+        The narrow provider-call handlers attach every exception they catch
+        (that boundary is a provider call). The generic turn handler attaches
+        only when `is_provider_exception` is true, so a tool-loop KeyError is
+        not reported as a provider failure. Recording happens once, in
+        `_terminate_turn`.
+        """
+        existing = getattr(exc, "_failure", None)
+        if existing is not None:
+            return existing
+        from agent.llm.failure_classifier import (
+            ProviderFailure,
+            classify_exception,
+            is_provider_exception,
+            sanitize_detail,
+            status_code_of,
+        )
+        if stage != "request_boundary" and not is_provider_exception(exc):
+            return None
+        ctx = getattr(exc, "_crabcakes_context", None)
+        ctx = ctx if isinstance(ctx, dict) else {}
+        provider = str(ctx.get("provider") or "")
+        model = str(ctx.get("model") or "")
+        if not provider or not model:
+            conv = self._conversations.get(session_key)
+            conv_model = getattr(conv, "model", "") or ""
+            if not model:
+                model = conv_model
+            if not provider and "/" in conv_model:
+                provider = conv_model.split("/", 1)[0]
+        failure = ProviderFailure(
+            session_key=session_key,
+            provider=provider,
+            model=model,
+            failure_class=classify_exception(exc, provider, model),
+            status_code=status_code_of(exc),
+            detail=sanitize_detail(exc),
+            stage="request" if stage == "request_boundary" else stage,
+            attempt=1,
+            timestamp=time.time(),
+        )
+        try:
+            exc._failure = failure  # type: ignore[attr-defined]
+        except Exception:
+            logger.exception("could not attach provider failure for %s", session_key)
+            return None
+        return failure
+
+    def _classified_stream_error(
+        self,
+        session_key: str,
+        stream_err: object | None,
+        stage: str,
+    ):
+        """Build the ProviderFailure for a stream/empty-content failure.
+
+        SPEC-22 §2.2: this returns the failure object (or None) so the caller
+        stashes it in `TurnResult.metadata["provider_failure"]`. It must NOT be
+        routed through `TurnResult.error` — that field's contract is a STRING
+        (see the fix-round brief JOB 1). `ClassifiedProviderError` remains for
+        the raised-exception carrier used by `_stream_failure_exception`, which
+        is a genuinely different path (a BaseException for the chat translator).
+        """
+        from agent.llm.failure_classifier import failure_for_stream
+        conv = self._conversations.get(session_key)
+        conv_model = getattr(conv, "model", "") or ""
+        provider = conv_model.split("/", 1)[0] if "/" in conv_model else ""
+        return failure_for_stream(
+            session_key=session_key,
+            provider=provider,
+            model=conv_model,
+            stream_err=stream_err,
+            stage=stage,
+        )
+
+    def _record_attached_failure(self, failure: object) -> None:
+        """Record one ProviderFailure. Accepts a failure OR a carrier object.
+
+        Callers pass either the resolved ProviderFailure (the metadata-first
+        path in `_terminate_turn`) or a carrier that holds one under
+        `._failure` (the raised-exception / ClassifiedProviderError path).
+        Normalizing here keeps every call site correct without each having to
+        know which shape it holds.
+        """
+        if failure is None:
+            return
+        from agent.llm.failure_classifier import ProviderFailure
+        if not isinstance(failure, ProviderFailure):
+            failure = getattr(failure, "_failure", None)
+            if not isinstance(failure, ProviderFailure):
+                return
+        try:
+            from utils.provider_failure_store import record
+            record(failure)
+        except Exception:
+            logger.exception("provider failure record failed")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1835,7 +1986,13 @@ class AgentRuntime:
                                 session_key=session_key,
                                 turn_token=turn_token,
                                 error=error_text,
-                                metadata={"reason": "empty_content", "iteration": iteration},
+                                metadata={
+                                    "reason": "empty_content",
+                                    "iteration": iteration,
+                                    "provider_failure": self._classified_stream_error(
+                                        session_key, stream_err, "empty_content",
+                                    ),
+                                },
                             ))
                             return
 
@@ -1876,7 +2033,13 @@ class AgentRuntime:
                                 session_key=session_key,
                                 turn_token=turn_token,
                                 error=error_text,
-                                metadata={"reason": "stream_error_with_content", "iteration": iteration},
+                                metadata={
+                                    "reason": "stream_error_with_content",
+                                    "iteration": iteration,
+                                    "provider_failure": self._classified_stream_error(
+                                        session_key, stream_err, "stream",
+                                    ),
+                                },
                             ))
                             return
 
@@ -1955,6 +2118,7 @@ class AgentRuntime:
 
             except Exception as e:
                 logger.exception("Error in tool loop for %s", session_key)
+                self._attach_provider_failure(e, session_key, "request")
                 # Phase 2b Edit D.6: route through _terminate_turn. The
                 # _auto_save is subsumed (FAILED always persists per
                 # _terminate_turn's contract) and the dispatch is subsumed
@@ -2315,7 +2479,238 @@ class AgentRuntime:
             return provider_cfg.caller.lower()
         return ""
 
+    def set_on_provider_failover(self, cb) -> None:
+        """Store the callback fired when a call advances to the fallback provider.
+
+        Trigger: `_call_llm` chain walk, only while `provider_failover_enabled`
+        is true, after `decide()` returns `advance_chain`. The callback is
+        `(session_key, reason)`. A missing callback just logs.
+        """
+        self._on_provider_failover = cb
+
     def _call_llm(
+        self,
+        session_key: str,
+        messages: list[dict],
+        tools: list[dict],
+        turn_token: object | None = None,
+    ) -> dict:
+        """One provider call, or the SPEC-22 chain walk when failover is enabled.
+
+        The flag defaults off. Off means this is exactly one `_call_llm_once`.
+        On means retry / advance / halt per `decide()`, without putting a
+        partial assistant message into the next request.
+        """
+        if not getattr(self._config, "provider_failover_enabled", False):
+            return self._call_llm_once(session_key, messages, tools, turn_token=turn_token)
+        return self._call_llm_chain(session_key, messages, tools, turn_token)
+
+    def _call_llm_chain(self, session_key: str, messages: list[dict], tools: list[dict], turn_token) -> dict:
+        from agent.llm.failure_policy import RetryConfig, decide
+
+        started = time.monotonic()
+        attempt = 1
+        on_fallback = False
+        seen_messages = list(messages)
+        for _step in range(8):
+            if not self._turn_still_active(session_key, turn_token):
+                raise RuntimeError("turn cancelled before provider failover")
+            try:
+                response = self._call_llm_once(
+                    session_key, seen_messages, tools, turn_token=turn_token,
+                )
+            except Exception as exc:
+                self._attach_provider_failure(exc, session_key, "request")
+                failure = getattr(exc, "_failure", None)
+                if failure is None:
+                    raise
+                self._record_attached_failure(exc)
+                action = self._failover_action(
+                    failure, attempt, on_fallback, started, decide, RetryConfig,
+                )
+                if action == "retry":
+                    self._failover_sleep(failure, attempt, on_fallback, started, decide, RetryConfig)
+                    attempt += 1
+                    continue
+                if action == "advance":
+                    fallback_name = self._switch_to_fallback(session_key)
+                    if not fallback_name:
+                        self._release_session_lease(session_key)
+                        raise
+                    self._note_failover(session_key, failure, fallback_name, turn_token)
+                    on_fallback = True
+                    attempt = 1
+                    continue
+                self._release_session_lease(session_key)
+                raise
+            stream_exc = self._stream_failure_exception(session_key, response)
+            if stream_exc is None:
+                self._last_stream_text.pop(session_key, None)
+                return response
+            failure = stream_exc._failure
+            self._record_attached_failure(stream_exc)
+            action = self._failover_action(
+                failure, attempt, on_fallback, started, decide, RetryConfig,
+            )
+            if action == "retry":
+                self._failover_sleep(failure, attempt, on_fallback, started, decide, RetryConfig)
+                attempt += 1
+                continue
+            if action == "advance":
+                fallback_name = self._switch_to_fallback(session_key)
+                if not fallback_name:
+                    self._release_session_lease(session_key)
+                    raise stream_exc
+                self._note_failover(session_key, failure, fallback_name, turn_token)
+                on_fallback = True
+                attempt = 1
+                continue
+            self._release_session_lease(session_key)
+            raise stream_exc
+        raise RuntimeError("provider failover stopped after 8 steps")
+
+    def _failover_action(self, failure, attempt, on_fallback, started, decide, retry_config_cls):
+        cfg = retry_config_cls(
+            provider_retries=int(getattr(self._config, "provider_retries", 2) or 2),
+            backoff_base_s=float(getattr(self._config, "provider_retry_backoff_s", 1.0) or 0.0),
+            provider_failover_budget_s=float(getattr(self._config, "provider_failover_budget_s", 30.0) or 30.0),
+        )
+        conv = self._conversations.get(failure.session_key)
+        primary = getattr(conv, "model", "") or failure.provider or "primary"
+        primary_name = primary.split("/", 1)[0] if "/" in primary else primary
+        fallback = (getattr(conv, "fallback_provider", None) or "").strip()
+        if on_fallback or not fallback or fallback == primary_name:
+            chain = [primary_name]
+        else:
+            chain = [primary_name, fallback]
+        budget = cfg.provider_failover_budget_s
+        if time.monotonic() - started >= budget and attempt <= cfg.provider_retries:
+            attempt = cfg.provider_retries + 1
+        decision = decide(failure, attempt, chain, cfg)
+        return {
+            "retry": "retry",
+            "advance_chain": "advance",
+            "halt": "halt",
+        }.get(decision.action, "halt")
+
+    def _failover_sleep(self, failure, attempt, on_fallback, started, decide, retry_config_cls) -> None:
+        cfg = retry_config_cls(
+            provider_retries=int(getattr(self._config, "provider_retries", 2) or 2),
+            backoff_base_s=float(getattr(self._config, "provider_retry_backoff_s", 0.0) or 0.0),
+        )
+        wait = cfg.backoff_base_s
+        if wait > 0:
+            time.sleep(wait)
+
+    def _turn_still_active(self, session_key: str, turn_token) -> bool:
+        if session_key in getattr(self, "_cancelled_epochs", ()):
+            return False
+        tokens = getattr(self, "_turn_tokens", None)
+        if not isinstance(tokens, dict) or session_key not in tokens:
+            return True
+        if turn_token is None:
+            return True
+        return tokens[session_key] is turn_token
+
+    def _switch_to_fallback(self, session_key: str) -> str:
+        """Point the conversation at the fallback card. Returns the card name, or ''."""
+        conv = self._conversations.get(session_key)
+        if conv is None:
+            return ""
+        name = (getattr(conv, "fallback_provider", None) or "").strip()
+        if not name:
+            return ""
+        card = self._config.providers.get(name)
+        if card is None:
+            try:
+                from agent.config import _to_llm_provider
+                from utils.providers_store import load_providers
+                for item in load_providers():
+                    if getattr(item, "name", "") == name:
+                        card = _to_llm_provider(item)
+                        break
+            except Exception:
+                logger.exception("fallback card lookup failed for %s", name)
+                return ""
+        if card is None:
+            return ""
+        model = getattr(card, "default_model", "") or ""
+        caller = getattr(card, "caller", "") or name
+        if model and "/" not in model:
+            model = f"{caller}/{model}"
+        if not model:
+            return ""
+        prefix = model.split("/", 1)[0]
+        self._config.providers[prefix] = card
+        self._config.providers[name] = card
+        conv.model = model
+        return name
+
+    def _note_failover(self, session_key: str, failure, fallback_name: str, turn_token) -> None:
+        streamed = bool(self._last_stream_text.get(session_key))
+        self._discard_partial_assistant(session_key)
+        if streamed and self._on_text_delta is not None:
+            marker = f"\n[stream interrupted — provider failed; retrying on {fallback_name}]\n"
+            self._dispatch(self._on_text_delta, session_key, marker, _turn_token=turn_token)
+        reason = (
+            f"{failure.provider or 'provider'} {failure.status_code or failure.failure_class.value}"
+            f" — failed over to {fallback_name}"
+        )
+        logger.info("[failover] %s %s", session_key, reason)
+        cb = self._on_provider_failover
+        if cb is not None:
+            self._dispatch(cb, session_key, reason)
+
+    def _discard_partial_assistant(self, session_key: str) -> None:
+        conv = self._conversations.get(session_key)
+        partial = self._last_stream_text.get(session_key) or ""
+        if conv is None or not getattr(conv, "messages", None) or not partial:
+            return
+        last = conv.messages[-1]
+        role = str(getattr(getattr(last, "role", ""), "value", getattr(last, "role", "")))
+        if role == "assistant" and (getattr(last, "content", "") or "") == partial:
+            conv.messages.pop()
+        self._last_stream_text.pop(session_key, None)
+
+    def _stream_failure_exception(self, session_key: str, response: dict):
+        if not isinstance(response, dict):
+            return None
+        err = response.get("_stream_error")
+        if not err:
+            return None
+        from agent.llm.failure_classifier import ClassifiedProviderError, failure_for_stream
+        conv = self._conversations.get(session_key)
+        model = getattr(conv, "model", "") or ""
+        provider = model.split("/", 1)[0] if "/" in model else model
+        content = ""
+        choices = response.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            content = ((choices[0].get("message") or {}).get("content")) or ""
+        if content:
+            self._last_stream_text[session_key] = content
+        failure = failure_for_stream(
+            session_key=session_key,
+            provider=provider,
+            model=model,
+            stream_err=err,
+            stage="stream" if content else "empty_content",
+        )
+        return ClassifiedProviderError(str(err), failure)
+
+    def _release_session_lease(self, session_key: str) -> None:
+        conv = self._conversations.get(session_key)
+        project_path = getattr(conv, "project_path", None) or ""
+        if not project_path:
+            return
+        try:
+            from utils.work_persistence import find_live_lease, release_work
+            lease = find_live_lease(project_path, session_key)
+            if lease is not None:
+                release_work(project_path, lease.unit_id, session_key)
+        except Exception:
+            logger.exception("work-claim release failed for %s", session_key)
+
+    def _call_llm_once(
         self,
         session_key: str,
         messages: list[dict],
@@ -2507,6 +2902,7 @@ class AgentRuntime:
                     "model": model,
                     "exception_type": type(e).__name__,
                 }
+                self._attach_provider_failure(e, session_key, "request_boundary")
                 raise
 
         caller_key = self._resolve_caller_key(provider_cfg, model)
@@ -2536,6 +2932,7 @@ class AgentRuntime:
                 "model": model,
                 "exception_type": type(e).__name__,
             }
+            self._attach_provider_failure(e, session_key, "request_boundary")
             raise
 
     def _call_llm_streaming(
@@ -2599,6 +2996,7 @@ class AgentRuntime:
             if ev.type == "text_delta":
                 text = ev.data.get("content") or ""
                 full_content += text
+                self._last_stream_text[session_key] = full_content
                 if self._on_text_delta:
                     self._dispatch(self._on_text_delta, session_key, text, _turn_token=turn_token)
 
@@ -3096,16 +3494,24 @@ class AgentRuntime:
             )
 
         provider = _get_provider(caller_key)
-        response_dict = provider.call(
-            base_url=provider_cfg.base_url,
-            api_key=api_key,
-            model=model,
-            messages=messages,
-            tools=None,
-            timeout=float(self._config.tool_timeout_seconds),
-            x_title="crabcakes-summary",
-            reasoning_effort="off",
-        )
+        summary_session = getattr(conv, "session_key", None) or "summary"
+        try:
+            response_dict = provider.call(
+                base_url=provider_cfg.base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                tools=None,
+                timeout=float(self._config.tool_timeout_seconds),
+                x_title="crabcakes-summary",
+                reasoning_effort="off",
+            )
+        except Exception as exc:
+            # D7: compaction stays non-fatal at the caller. Record, then re-raise
+            # so LLMSummarizeStrategy can fall back to a textual summary.
+            self._attach_provider_failure(exc, summary_session, "summary")
+            self._record_attached_failure(exc)
+            raise
         from agent.llm.extractors import extract_text_content
         fmt = _RESPONSE_FORMAT.get(provider_name, "openai")
         text = extract_text_content(response_dict, response_format=fmt)

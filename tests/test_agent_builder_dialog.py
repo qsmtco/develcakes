@@ -240,3 +240,32 @@ class TestSaveButtonRequiresFallback:
         dlg._fallback_dropdown.set_selected(1)
         assert dlg._get_selected_fallback_provider() != ""
 
+
+
+class TestDecisionModelExcluded:
+    """SPEC-22 §2.8: the DecisionModel/JEV card never appears as an agent
+    provider or fallback."""
+
+    def test_decision_model_hidden_from_provider_dropdown(self, gtk_parent):
+        providers = [
+            ProviderConfig("openai", "u", "k", "gpt-4o", True),
+            ProviderConfig("DecisionModel", "u", "k", "typesafe/s1", True),
+            ProviderConfig("anthropic", "u", "k", "c", True),
+        ]
+        dlg = _make_dlg(gtk_parent, providers)
+        model = dlg._provider_dropdown.get_model()
+        names = [model.get_string(i) for i in range(model.get_n_items())]
+        assert "DecisionModel" not in names
+        assert names == ["openai", "anthropic"]
+
+    def test_decision_model_hidden_from_fallback_dropdown(self, gtk_parent):
+        providers = [
+            ProviderConfig("openai", "u", "k", "gpt-4o", True),
+            ProviderConfig("DecisionModel", "u", "k", "typesafe/s1", True),
+            ProviderConfig("anthropic", "u", "k", "c", True),
+        ]
+        dlg = _make_dlg(gtk_parent, providers)
+        dlg._populate_fallback_provider_dropdown()
+        model = dlg._fallback_dropdown.get_model()
+        names = [model.get_string(i) for i in range(model.get_n_items())]
+        assert "DecisionModel" not in names

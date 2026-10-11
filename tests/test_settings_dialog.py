@@ -512,3 +512,60 @@ class TestReasoningCard:
         assert card._reasoning_dropdown.get_sensitive() is False
         # Level is kept so re-checking does not lose High.
         assert card._reasoning_dropdown.get_selected() == 3
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-22 §2.8 — Decision Model settings page
+# ═══════════════════════════════════════════════════════════════════
+
+class TestDecisionModelPage:
+    def test_page_exists_and_name_is_locked(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        # The page is in the settings stack.
+        assert d._stack.get_child_by_name("decision-model") is not None
+        card = d._decision_card
+        # The card is pre-named with the constant, and the name is FIXED.
+        assert card._name_entry.get_text() == "DecisionModel"
+        assert card._name_entry.get_editable() is False
+
+    def test_present_card_hidden_from_general_providers_list(self, tmp_config_dir):
+        h = SettingsHandler()
+        # A real DecisionModel card stored via the same yaml store.
+        h.add_or_update(_make_provider(
+            "DecisionModel",
+            base_url="https://jev.example/v1",
+            default_model="typesafe/system-one",
+        ), allow_empty_caller=True)
+        h.add_or_update(_make_provider("Chat"))
+        d = SettingsDialog(parent=None, handler=h)
+        # Only the chat provider appears in the general list.
+        assert [c._provider.name for c in d._cards] == ["Chat"]
+        # The decision card reflects the stored card.
+        assert d._decision_card._provider.name == "DecisionModel"
+        assert d._decision_card._base_url_entry.get_text() == "https://jev.example/v1"
+
+    def test_round_trips_through_save_load(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._decision_card
+        card._base_url_entry.set_text("https://jev.example/v1")
+        card._api_key_entry.set_text("jev-key")
+        card._model_entry.set_text("typesafe/system-one")
+        card._on_save_clicked()
+        reloaded = {p.name: p for p in h.list_providers()}
+        assert "DecisionModel" in reloaded
+        stored = reloaded["DecisionModel"]
+        assert stored.base_url == "https://jev.example/v1"
+        assert stored.api_key == "jev-key"
+        assert stored.default_model == "typesafe/system-one"
+        # caller stays empty (allow_empty_caller) — the adapter sets its own.
+        assert stored.caller == ""
+
+    def test_absent_card_leaves_page_placeholder_editable(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._decision_card
+        assert card._name_entry.get_text() == "DecisionModel"
+        # No stored card yet — index lookups on the store see nothing.
+        assert all(p.name != "DecisionModel" for p in h.list_providers())

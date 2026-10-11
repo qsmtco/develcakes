@@ -6839,3 +6839,86 @@ class TestSpec10AgentCheckpoints:
         assert entry.path_used == wt
         body = gitpython.Repo(wt).git.log("--format=%B", "-1")
         assert "Agent: special:coder" in body.splitlines()
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-22 fix round (JOB 1): TurnResult.error stays a STRING
+# ═══════════════════════════════════════════════════════════════════
+
+class TestProviderFailureCarrier:
+    """The stream/empty-content failure rides in metadata; error stays a str."""
+
+    def test_stream_error_path_error_is_str_and_metadata_carries_failure(self):
+        """RED-first: pre-fix, `error` was a ClassifiedProviderError object."""
+        from agent.llm.failure_classifier import ProviderFailure
+        from agent.llm.streaming import SSEEvent
+        from unittest.mock import MagicMock
+
+        captured: list = []
+        rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None,
+                          on_error=lambda sk, msg: captured.append((sk, msg)))
+        rt.start()
+        sk = _uniq()
+        rt.create_conversation("Coder", sk, "/tmp")
+
+        mock_provider = MagicMock()
+        mock_provider.stream.return_value = iter([
+            SSEEvent(type="error", data={"error": {"code": 429, "message": "Rate limit exceeded"}}),
+            SSEEvent(type="done", data={}),
+        ])
+        with unittest.mock.patch("agent.runtime._get_provider", return_value=mock_provider):
+            with unittest.mock.patch.object(rt, "_call_llm", _make_streaming_lambda(rt)):
+                rt._run_loop(sk, "hello")
+
+        result = rt.get_last_turn_result(sk)
+        assert result is not None
+        # Core contract: error is a STRING, never an exception/workflow object.
+        assert isinstance(result.error, str)
+        # String methods that broke pre-fix must not raise.
+        assert "no content" in result.error.lower() or "provider error" in result.error.lower()
+        # The failure is carried in metadata for the UI/store to consume.
+        failure = result.metadata.get("provider_failure")
+        assert isinstance(failure, ProviderFailure)
+        assert failure.failure_class.value == "transient"
+        rt.stop()
+
+    def test_metadata_failure_reaches_do_error_carrier(self):
+        """The dispatched message exposes the failure (string subclass bridge)."""
+        from agent.llm.failure_classifier import FailureClass, ProviderFailure
+        from agent.runtime import _FailureMessage
+
+        failure = ProviderFailure(
+            session_key="s", provider="OpenRouter", model="m",
+            failure_class=FailureClass.PERMANENT_AUTH, status_code=401,
+            detail="unauthorized", stage="request", attempt=1, timestamp=0.0,
+        )
+        msg = _FailureMessage("Provider error (code=401): unauthorized", failure)
+        # Still a str (all string consumers keep working)...
+        assert isinstance(msg, str)
+        assert "unauthorized" in msg
+        assert msg.lower().startswith("provider error")
+        # ...AND carries the failure for the UI branch.
+        assert msg.provider_failure is failure
+
+    def test_terminate_turn_records_metadata_failure_once(self):
+        """metadata provider_failure is recorded exactly once, no exception path."""
+        from agent.llm.failure_classifier import FailureClass, ProviderFailure
+        from agent.runtime import AgentRuntime, TurnResult, TurnStatus
+        from utils.provider_failure_store import recent, reset_for_tests
+        reset_for_tests()
+
+        rt = AgentRuntime(_make_cfg())
+        failure = ProviderFailure(
+            session_key="special:coder", provider="OpenRouter", model="m",
+            failure_class=FailureClass.TRANSIENT, status_code=429,
+            detail="rate limited", stage="stream", attempt=1, timestamp=0.0,
+        )
+        rt._terminate_turn(TurnResult(
+            status=TurnStatus.FAILED,
+            session_key="special:coder",
+            turn_token=object(),
+            error="Provider error (code=429): rate limited",
+            metadata={"reason": "stream", "provider_failure": failure},
+        ))
+        assert len(recent()) == 1
+        assert recent()[0].failure_class == FailureClass.TRANSIENT

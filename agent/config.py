@@ -86,6 +86,10 @@ class AgentConfig:
     fallback_provider: str | None = None   # plain provider fallback (user-set, e.g. "openrouter")
     fallback_model: str | None = None      # plain provider fallback model
     user_id: str = ""                     # A-4: user identity for audit log traceability
+    provider_failover_enabled: bool = False  # SPEC-22 Stage 3; off until the chain walk is reviewed
+    provider_retries: int = 2
+    provider_retry_backoff_s: float = 1.0
+    provider_failover_budget_s: float = 30.0
 
 
 def _check_permissions(path: str) -> None:
@@ -253,6 +257,10 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
         fallback_provider=raw.get("fallback_provider"),
         fallback_model=raw.get("fallback_model"),
         user_id=raw.get("user_id", ""),  # A-4: wire user_id from agent.json into config
+        provider_failover_enabled=bool(raw.get("provider_failover_enabled", False)),
+        provider_retries=int(raw.get("provider_retries", 2) or 2),
+        provider_retry_backoff_s=float(raw.get("provider_retry_backoff_s", 1.0) or 0.0),
+        provider_failover_budget_s=float(raw.get("provider_failover_budget_s", 30.0) or 30.0),
     )
 
 

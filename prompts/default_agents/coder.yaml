@@ -16,6 +16,7 @@ tools:
   - search_files
   - web_search
   - web_fetch
+  - provider_events
 self_improvement:
   bug_journal: true
   project_rules: true

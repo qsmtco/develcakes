@@ -3,6 +3,7 @@
 **Date:** 2026-10-09
 **Author:** Supervisor
 **Status:** READY — Stage 1 for implementation; Stages 2–3 interfaces pinned, delivery gated
+**Amended:** 2026-10-10 — audit fixes, marked inline as `FIX (2026-10-10)`. A status-400 is not one class; a failure is recorded once; section cites match the headings; `fallback_provider` is a card display name; Stage 3 has a wall-clock cap.
 **Implements:** PM direction 2026-10-09 (provider-failure lifecycle discussion; PM ratified the
 chain-walk policy, the 400 rule, and the JEV role with corrections recorded inline)
 **Depends on:** SPEC-21 (the `_open`/`urlopen_with_ssl_retry` choke point — read, do not modify)
@@ -23,16 +24,19 @@ chain-walk policy, the 400 rule, and the JEV role with corrections recorded inli
 
 Three concrete proofs from this codebase:
 
-1. **The fallback feature is dead.** `fallback_provider`/`fallback_model` are authored in every
-   live agent YAML (`coder.yaml: fallback_provider: M3`, `supervisor.yaml: M3`,
-   `debugger.yaml: GLM 5.3 Full`, `auxilium.yaml: openrouter`), loaded
-   (`special_agents.py:116`), edited via a mandatory-feeling UI (`agent_builder.py:345` —
-   *"every agent must have a fallback provider configured"*), stored on the Conversation
-   (`conversation.py:178`), and persisted (`persistence.py:124,395`). **No code anywhere reads
-   them to make a decision.** There is no `if conv.fallback_provider` in the repo. When a
-   provider dies, the turn fails. Full stop. The UI promises resilience that does not exist.
-   (`agent_runtime_handler.py:1108` records a partial removal on 2026-06-15 — this is finishing
-   a job someone started, not inventing one.)
+1. **The fallback feature is dead.** `fallback_provider` is required on every agent
+   (`utils/agent_defs.py` rejects a missing or `None` value), edited via a mandatory-feeling UI
+   (`agent_builder.py:345` — *"every agent must have a fallback provider configured"*), loaded
+   (`special_agents.py:116`), stored on the Conversation (`conversation.py:178`), and persisted
+   (`persistence.py:124,395`). **No code anywhere reads it to make a decision.** There is no
+   `if conv.fallback_provider` in the repo. When a provider dies, the turn fails. Full stop.
+   The UI promises resilience that does not exist.
+   **FIX (2026-10-10):** `fallback_model` is not part of this fossil. It was removed from agent
+   YAML on 2026-06-15 (`utils/agent_defs.py` ignores a leftover key; `agent_runtime_handler.py:1108`
+   records the removal). The value that remains is `fallback_provider`, and it is a **card
+   display name** (`M3`, `GLM 5.3 Full`) — `agent_builder._get_selected_fallback_provider`
+   returns `ProviderConfig.name`. It is not a model prefix and not a caller id. Stage 3
+   resolves it by card name (§2.6).
 2. **Notification reaches exactly one place, sometimes.** The runtime's failure paths all
    funnel into `_terminate_turn(FAILED)` → `_dispatch(self._on_error, sk, err_msg)`
    (`runtime.py:~908-918`) → `AgentRuntimeHandler._on_error` (`:1901`) → `_do_error`
@@ -49,7 +53,7 @@ READ from source (runtime.py line anchors at HEAD `9645e89b`):
 
 | # | Failure path | Where | Today's behavior |
 |---|---|---|---|
-| D1 | HTTP/SSL/DNS at request send | `urlopen_with_ssl_retry` (streaming.py:290) retries transient 4× with backoff, then raises | Exception propagates to D2 |
+| D1 | HTTP/SSL/DNS at request send | `urlopen_with_ssl_retry` (`streaming.py`, `MAX_SSL_RETRIES = 3`) — 1 try + 3 retries, then raises | Exception propagates to D2 |
 | D2 | `_call_llm` call/stream raises | `runtime.py:2504,2533` `except (IndexError, KeyError, TypeError, ValueError)` — attaches `_crabcakes_context` (provider/model), re-raises | Caught by `_run_loop`'s handler → `_terminate_turn(FAILED)` → chat bubble ONLY. **HTTPError/URLError/TimeoutError are NOT in that tuple — they ride the generic handler at `runtime.py:1956`** |
 | D3 | Mid-stream error event (OpenRouter `finish_reason="error"`) | captured as `_stream_error` (`runtime.py:2620-2710`), surfaced at `:1792` (empty content) and `:1842` (partial content) | `_terminate_turn(FAILED)` → chat bubble ONLY, **string-mangled provider code** (`Provider error (code=429): …`) — machine-readable class is discarded |
 | D4 | Empty/whitespace content | `runtime.py:~1780-1840` — placeholder assistant message + FAILED | chat bubble ONLY; cause indistinguishable from real provider error |
@@ -65,7 +69,7 @@ nobody. Zero paths notify the feed or the Supervisor. Zero paths retry or fail o
 The `web_search` tool was misconfigured (`BRAVE_API_KEY` absent from the app's environment).
 The app had no idea until a call was made and failed. The PM discovered it by attempting a
 task. Same disease, smaller organ: **configuration faults are silent until probed.** This spec
-adds a startup sanity check for exactly this class (§2.5).
+adds a startup sanity check for exactly this class (§2.7).
 
 ---
 
@@ -79,11 +83,25 @@ class:**
 
 | Class | Same-provider retry | Then |
 |---|---|---|
-| **transient** — 429, 5xx, timeout, network/SSL/DNS | YES — up to 2 policy-level retries with backoff (on top of the existing transport-level retries in `urlopen_with_ssl_retry`) | chain advances to fallback |
+| **transient** — 429, 5xx, timeout, network/SSL/DNS | YES — up to 2 policy-level retries with backoff, inside the wall-clock cap in §2.6. Transport retries (`urlopen_with_ssl_retry`, 1 + `MAX_SSL_RETRIES`) already happened before this row runs; they are not counted again here | chain advances to fallback |
 | **permanent-auth** — 401, 402, 403 (dead key, out of credit, banned) | NO — same key, same failure | **chain advances IMMEDIATELY** (★ PM correction: "a 401 on the main provider SHOULD failover; if the fallback also 401s then that's a legit failure and the work halts" — the fallback is a different provider with a different key; a 401 says nothing about it) |
-| **permanent-model** — 404 model, 400 model-specific | NO | chain advances immediately |
-| **bad-request** — 400 malformed (OUR bug: bad payload, schema violation) | NO | **HALT + loud report. No failover** — a lenient fallback provider accepting our broken payload would MASK the bug (★ PM ratified) |
-| **unknown** — everything unclassifiable | NO | JEV classifier, deterministic fail-open (§2.4) |
+| **permanent-model** — 404, or a 400 whose body says this model/provider rejected a parameter or the model id | NO | chain advances immediately |
+| **bad-request** — a 400 whose body says the payload itself is malformed (invalid JSON, schema/tool-schema rejection, missing required request field, broken message structure) | NO | **HALT + loud report. No failover** — a lenient fallback provider accepting our broken payload would MASK the bug (★ PM ratified) |
+| **unknown** — everything unclassifiable, including a 400 whose body matches neither 400 list | NO same-provider policy retry beyond the floor | JEV only when `jev_enabled` (§2.5). Otherwise the deterministic floor. An ambiguous 400 is this row, not `bad_request` |
+
+**FIX (2026-10-10) — status 400 is not one class.** OpenRouter (and others) return 400 both
+for a payload we built wrong and for a parameter the model does not accept. Mapping every
+400 to `bad_request` would halt a turn the fallback could serve, and would label a provider
+quirk as a develcakes bug. Reasoning-effort injection is the live example of the second
+shape. The classifier reads the error body:
+
+- **bad_request** (halt, no failover) when the text says the request is malformed: invalid
+  JSON, schema or tool-schema rejection, missing required field, broken message structure.
+- **permanent_model** (advance immediately) when the text says this model rejected something:
+  unknown/unsupported model, unsupported or unexpected parameter, "invalid arguments passed
+  to the model", a rejected `reasoning` / `thinking` / `reasoning_effort` key.
+- **unknown** when a 400 matches neither list. It does not take the bad-request halt, and
+  it does not consult JEV unless `jev_enabled`. The enumerated rows never consult JEV.
 
 **Chain outcomes:**
 
@@ -186,18 +204,24 @@ def classify_exception(exc: BaseException, provider: str, model: str) -> Failure
     """Map a raised exception to a class. Order matters:
     HTTPError.code 401/402/403 → PERMANENT_AUTH
     HTTPError.code 404 → PERMANENT_MODEL
-    HTTPError.code 400 → BAD_REQUEST (subject to §2.4 JEV refinement)
+    HTTPError.code 400 → classify_http_400(body)   # bad_request | permanent_model | unknown
     HTTPError.code 429 or >=500 → TRANSIENT
     TimeoutError / socket.gaierror / ssl.SSLError / ConnectionError / URLError
       → TRANSIENT (walks the chain like is_retryable_ssl_error does)
     anything else → UNKNOWN
-    NEVER raises; NEVER returns None."""
+    NEVER raises; NEVER returns None.
+    Enumerated classes are status + body text only. JEV is not called from here."""
+
+def classify_http_400(body: str) -> FailureClass:
+    """Split a 400. See the §1 rule. Schema/payload text → BAD_REQUEST.
+    Model/parameter-rejected text → PERMANENT_MODEL. Neither → UNKNOWN."""
 
 def classify_stream_error(error_payload: dict) -> FailureClass:
     """Map an OpenRouter-style _stream_error dict ({code, message}) to a class.
     code 429 → TRANSIENT; 401/402/403 → PERMANENT_AUTH; 404 → PERMANENT_MODEL;
-    400 → BAD_REQUEST; >=500 → TRANSIENT; message-text heuristics only for
-    UNKNOWN refinement (e.g. 'rate limit' in message with code 0 → TRANSIENT)."""
+    code 400 → classify_http_400(message); >=500 → TRANSIENT.
+    code 0 / missing: message heuristics only ('rate limit' → TRANSIENT);
+    otherwise UNKNOWN. JEV is not called from here."""
 ```
 
 **Redaction rule (SPEC-15 lesson):** `detail` is built through the EXISTING
@@ -206,11 +230,17 @@ exception bodies beyond status+reason — URLs with credentials must never enter
 
 ### 2.2 Detection wiring — three sites in `agent/runtime.py`, zero new try-blocks
 
-1. **D2 (request-boundary raise):** inside the two existing narrow `except` clauses
-   (:2504, :2533) AND the generic `:1956` handler — classify FIRST, attach
-   `exc._failure = ProviderFailure(...)` (the `_crabcakes_context` precedent), then re-raise /
-   terminate as today. The classifier is additive: existing behavior is unchanged until the
-   policy layer (Stage 2) reads `exc._failure`.
+1. **D2 (request-boundary raise):** the narrow `except` clauses (:2504, :2533) **attach**
+   `exc._failure = ProviderFailure(...)` (the `_crabcakes_context` precedent) and re-raise.
+   They do **not** call `record()` and they do **not** fire `on_provider_failure`. The
+   generic handler (:1956) is the only D2 consumer: if `exc._failure` is already set, use
+   that object and do not classify again; if it is missing (HTTPError, URLError, timeout —
+   the cases the narrow tuple misses), classify there and attach. Then `record()` once and
+   terminate as today. **FIX (2026-10-10):** instrumenting both sites without this split
+   double-records, because the narrow handler re-raises into the generic one. `record()` of
+   an object it has already stored is a no-op. The classifier is additive: turn behavior is
+   unchanged until the policy layer (Stage 2) reads `exc._failure`. Notification (feed card,
+   class line) is Stage 1 and is fired from this single consumer, not from both sites.
 2. **D3/D4 (stream-error & empty-content):** at the two `_stream_error` surface points
    (:1792, :1842) and the empty-content branch — classify via `classify_stream_error`; stash
    the `ProviderFailure` into `TurnResult.metadata["provider_failure"]` (metadata already
@@ -230,10 +260,13 @@ Bounded deque (100 events, same cap discipline as `_compaction_events`) + append
 via one lock, no GTK. API:
 
 ```python
-def record(failure: ProviderFailure) -> None
+def record(failure: ProviderFailure) -> None  # idempotent on object identity
 def recent(limit: int = 20, session_key: str | None = None) -> list[ProviderFailure]
 def summary() -> dict   # {"last_24h": int, "by_class": {...}, "agents_affected": [...]}
 ```
+
+`record()` stores each `ProviderFailure` instance at most once. A second call with the same
+object returns without appending another audit line or growing the deque.
 
 ### 2.4 Notification fan-out (Stage 1's deliverable)
 
@@ -255,14 +288,7 @@ def summary() -> dict   # {"last_24h": int, "by_class": {...}, "agents_affected"
    - `/status` compiles `summary()` into its output (TO-VERIFY the handler's shape at
      implementation);
    - Stage-2 option (registered, not shipped): push-inject a system note into the
-     Supervisor's conversation on dual-failure halts.
-
-**Startup sanity check (§0.2's lesson):** on app activate (after `migrate_v1_config`), one
-non-blocking check — providers.yaml parses and has ≥1 enabled card; for every agent card with
-web tools, `BRAVE_API_KEY`/`OPENCLAW_BRAVE_API_KEY` present (warning card, not fatal); per
-enabled provider, `fallback_provider` (if set) resolves to a real card (the fossil becomes
-LOAD-BEARING in Stage 2 — misconfiguration must be visible at startup, not at 2 a.m.).
-Results render as ONE feed card ("startup checks: n ok / n warnings").
+     Supervisor's conversation on dual-failure halts. The startup check is §2.7, not this section.
 
 ### 2.5 Stage 2 — `agent/llm/failure_policy.py` (NEW, pure; interface ships in Stage 1's PR as types only)
 
@@ -292,11 +318,46 @@ confidence — §DISCOVERY) fit this seam; the enumerated rows NEVER consult it.
 In `_call_llm`, wrap the provider call in the chain-walk: on Decision, re-resolve
 provider/model from the fallback CARD (the SPEC-20/21 `live_card` overlay machinery already
 rebuilds caller/base_url/key per call — reuse it), re-issue at the request boundary, emit the
-failover feed card. Halt path: `_terminate_turn(FAILED)` with the typed report +
+failover feed card.
+
+**FIX (2026-10-10) — resolve the fallback by card display name.** `conv.fallback_provider`
+is `ProviderConfig.name` (`M3`, `GLM 5.3 Full`), not a model prefix and not a caller id.
+Look up `providers.yaml` with `p.name == fallback_provider`, then use that card's `caller`,
+`base_url`, `api_key`, and `default_model`. A prefix lookup (`model.split("/")[0]`) will
+miss these cards. A name that matches no card leaves the chain as `[primary]` (startup
+check already warned; §7).
+
+**FIX (2026-10-10) — wall-clock cap.** D1 already spent up to 4 attempts (1 + `MAX_SSL_RETRIES`)
+with backoff before the exception was classified. Each policy retry re-enters that transport
+budget, and the fallback does it again. `RetryConfig.provider_failover_budget_s` defaults to
+**30**, measured from the first classified failure of the current chain step. When the budget
+is exhausted, do not start another policy retry: advance the chain if the class allows an
+advance, otherwise halt. Overridable in agent.json next to `provider_retries`.
+
+Halt path: `_terminate_turn(FAILED)` with the typed report +
 **work-claim release** (`work_persistence` release-if-held; TO-VERIFY the lease API) +
 `stop-all` integration check (the SPEC-10 turn registry must see a failed-over turn as ONE
 turn). `conv.model` switching mid-turn must update `_compute_model_max` (the compaction
 budget follows the provider — verified those helpers read `conv.model` live).
+
+Mid-stream failover is already decided: §1 option (b). Stage 3 implements that ruling. It is
+not an open review question.
+
+### 2.7 Startup sanity check (Stage 1)
+
+On app activate (after `migrate_v1_config`), one non-blocking check:
+
+- `providers.yaml` parses and has at least one enabled card.
+- For every agent card with web tools, `BRAVE_API_KEY` or `OPENCLAW_BRAVE_API_KEY` is present
+  (warning, not fatal). This is the §0.2 class.
+- Each `fallback_provider`, when set, equals some `ProviderConfig.name` (display name, §2.6).
+  A missing card, or a fallback that names the same card as the primary, is a warning. The
+  chain becomes load-bearing in Stage 3; the warning ships in Stage 1 so the misconfiguration
+  is visible at launch.
+
+Results render as ONE feed card ("startup checks: n ok / n warnings"). A `DecisionModel` card
+that is present but keyless is a warning here too (§2.8); `classify_unknown` still returns
+`None` at runtime.
 
 ### 2.8 The `DecisionModel` provider — JEV configured as a first-class provider (PM design 2026-10-09)
 
@@ -333,8 +394,9 @@ A bespoke `jev.json` would be a second config system with its own save/validate/
 6. **`DECISION_MODEL_ENABLED` / caller wiring**: `jev_client.classify_unknown` resolves the card
    by `DECISION_MODEL_PROVIDER` at call time. Config sources (held in module constants):
    `DECISION_MODEL_PROVIDER = "DecisionModel"`; the card provides base_url + api_key + model.
-   The env-var path (`DEVELCAKES_JEV_API_KEY`/`BASE_URL`) from §2.4 becomes the FALLBACK when no
-   card exists — the card is the primary, human-editable source.
+   The env-var path (`DEVELCAKES_JEV_API_KEY` / `DEVELCAKES_JEV_BASE_URL`) is the fallback when
+   no card exists — the card is the primary, human-editable source. Either way, `classify_unknown`
+   still obeys the §2.5 floor (unreachable, slow, or low confidence → deterministic).
 
 7. **Optional by construction.** No `DecisionModel` card → `classify_unknown` returns `None` →
    deterministic floor. The entire failure lifecycle works without JEV. Startup sanity check
@@ -380,8 +442,9 @@ Stage 3 adds: `decide()` between classify and terminate — retry/advance re-ent
 
 | File | Change | Stage | Risk |
 |---|---|---|---|
-| `agent/llm/failure_classifier.py` | NEW ~120 | 1 | Low (pure) |
-| `utils/provider_failure_store.py` | NEW ~80 | 1 | Low (pure) |
+| `agent/llm/failure_classifier.py` | NEW ~120, including `classify_http_400` | 1 | Low (pure) |
+| `utils/provider_failure_store.py` | NEW ~80; `record()` idempotent on object identity | 1 | Low (pure) |
+| `agent/llm/jev_client.py` | Stage 1 stub: `DECISION_MODEL_PROVIDER` + `classify_unknown` returns `None` | 1 | Low |
 | `agent/runtime.py` | classify at 3 sites + metadata + `on_provider_failure` callback | 1 | **Medium** — hot paths; additive only |
 | `agent/tools.py` | `provider_events` tool (~40) | 1 | Low |
 | `ui/window.py` + `agent_runtime_handler` | wire callback + feed card (~60) | 1 | Low (copies SP4 pattern) |
@@ -412,16 +475,17 @@ exceptions), the agent-builder fallback UI (Stage 3 makes it honest; until then 
    NAMED test: `test_pm_correction_401_advances_chain`).
 7. Stage 3 PR: actuation, behind a `provider_failover_enabled` config default OFF for the
    first release; Debugger adversarial audit (mid-turn model switch × compaction budget ×
-   stop-all × claims) BEFORE default-on. Mid-stream policy: PM decision at review.
+   stop-all × claims × wall-clock cap) BEFORE default-on. Mid-stream policy is already §1
+   option (b) — implement that, do not reopen it.
 
 ## 6. Acceptance criteria
 
 - [ ] A1 Every path D1–D7 produces a classified `ProviderFailure` (table-driven test, all seven rows).
-- [ ] A2 A provider failure produces ALL THREE surfaces: feed card, chat bubble with class line, store event — with one code path, no duplicates on dual-dispatch.
+- [ ] A2 A provider failure produces ALL THREE surfaces: feed card, chat bubble with class line, store event. The narrow `except` attaches `_failure` and re-raises; only the generic handler records and fans out. A test that raises through both sites asserts one store event and one feed card.
 - [ ] A3 The Supervisor, asked "is Coder alive?", answers from `provider_events` in one call (integration test: drive failure → call tool → factual answer).
 - [ ] A4 `/status` includes the failure summary; startup check emits its card (incl. the missing-BRAVE_KEY case from §0.2 as a named test).
 - [ ] A5 No behavior change when no failure occurs: payload shapes, turn statuses, and existing test suites byte-identical (the classifier is additive).
-- [ ] A6 Policy table: all five classes × attempts 1–2 × chain positions — exhaustively tested, including `test_pm_correction_401_advances_chain` and `test_400_never_fails_over`.
+- [ ] A6 Policy table: all five classes × attempts 1–2 × chain positions — exhaustively tested, including `test_pm_correction_401_advances_chain`, `test_400_schema_never_fails_over` (malformed payload halts), `test_400_unsupported_parameter_advances_chain` (parameter/model rejection fails over), and `test_400_ambiguous_is_unknown` (a 400 matching neither list is `unknown`, not `bad_request`).
 - [ ] A7 Stage 3 (gated): primary-401 → fallback continues the SAME turn with a failover card; dual-auth-failure halts with the account-level report and releases the work claim. **Mid-stream failure (PM ruling b): partial content closed with the visible interruption marker, partial assistant message DISCARDED from conversation state, request re-issued fresh on the fallback** — asserted by a test that fails if the partial message persists into the next provider call.
 - [ ] A8 Redaction: no credential-bearing URL or raw key ever appears in store, card, or audit line (probe with a poisoned base_url).
 - [ ] A9 `DecisionModel` (Stage 2): a card named `DecisionModel` is looked up by the
@@ -435,7 +499,11 @@ exceptions), the agent-builder fallback UI (Stage 3 makes it honest; until then 
 | Case | Expected |
 |---|---|
 | Fallback card == primary card | startup check flags it; policy treats chain length 1 (failover to self is a retry — refuse, halt) |
-| Fallback provider not in providers.yaml | startup warning; at runtime chain = [primary] |
+| Fallback provider not in providers.yaml | startup warning; at runtime chain = [primary]. Match is on `ProviderConfig.name`, not the model prefix |
+| 400 schema / malformed payload | `bad_request` — halt, no failover, card says it is our bug |
+| 400 unsupported parameter or unknown model | `permanent_model` — advance the chain immediately |
+| 400 body matches neither list | `unknown` — deterministic floor (or JEV if enabled). Not labeled as our bug |
+| Policy retries would exceed `provider_failover_budget_s` (default 30s) | stop retrying that step; advance if the class allows, else halt |
 | 429 with `Retry-After` | Stage 3 reads the header when present; backoff = max(policy, header) |
 | Failure during fallback's own call | that's chain exhaustion → halt path, second event recorded with attempt=2 |
 | Compaction-summary failure (D7) | event recorded, turn continues (today's non-fatal contract kept) |
@@ -482,3 +550,9 @@ context-integrity requirement (discard the partial assistant message).
 **PM decisions folded in (2026-10-09):** OQ-1 = (b) abort-clean-and-restart; OQ-2 = both
 (injected note + readable queue); DecisionModel = a first-class provider reached by a
 hard-coded name, user-editable endpoint/key/model, hidden from chat-provider selection (§2.8).
+
+**Audit fixes folded in (2026-10-10):** status 400 splits into schema (`bad_request`),
+parameter/model rejection (`permanent_model`), and ambiguous (`unknown`); `record()` runs
+once from the generic handler; startup check is §2.7; Stage 1 file table includes the
+`jev_client` stub; `fallback_provider` resolves by card display name; Stage 3 caps
+wall-clock at `provider_failover_budget_s` (default 30). Mid-stream policy stays §1 (b).

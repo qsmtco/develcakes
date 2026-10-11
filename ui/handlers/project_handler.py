@@ -659,6 +659,17 @@ class ProjectHandler:
             f"Review: {review_status}",
             f"Solo DM: {solo_str}",
         ]
+        try:
+            from utils.provider_failure_store import summary
+            totals = summary()
+            by_class = totals.get("by_class") or {}
+            if by_class:
+                parts = ", ".join(f"{name} {count}" for name, count in sorted(by_class.items()))
+                lines.append(
+                    f"Provider failures (last 24h, cap 100): {totals.get('last_24h', 0)} — {parts}"
+                )
+        except Exception:
+            _logger.exception("/status provider-failure summary failed")
         return CommandResult(handled=True, response_text="\n".join(lines))
 
     def cmd_agents(self, cmd: Command, session_key: str | None = None) -> CommandResult:

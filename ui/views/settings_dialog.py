@@ -19,8 +19,12 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
+from agent.llm.jev_client import DECISION_MODEL_PROVIDER as _DECISION_MODEL_PROVIDER
 from models.providers import ProviderConfig, validate_provider_reasoning_effort
 
+# SPEC-22 §2.8: the structural handle the code looks the JEV card up by. The
+# Settings page pre-names its card with this; the general Providers list and
+# agent-provider dropdowns filter it out (it is not a chat model).
 _REASONING_LEVELS = ("off", "low", "medium", "high")
 if TYPE_CHECKING:
     from ui.handlers.settings_handler import SettingsHandler
@@ -32,10 +36,22 @@ logger = logging.getLogger(__name__)
 class _ProviderCard:
     """A single provider's edit form. Pure view — delegates to handler."""
 
-    def __init__(self, dialog: SettingsDialog, provider: ProviderConfig | None):
-        """If provider is None, this is a new (unsaved) card with empty fields."""
+    def __init__(self, dialog: SettingsDialog, provider: ProviderConfig | None, *,
+                 fixed_name: bool = False, allow_empty_caller: bool = False,
+                 test_runner=None):
+        """If provider is None, this is a new (unsaved) card with empty fields.
+
+        ``fixed_name`` locks the Name entry (used for the DecisionModel card,
+        whose name is the code's structural handle — SPEC-22 §2.8).
+        ``allow_empty_caller`` lets a card save with caller="" (the JEV adapter
+        sets its own; we do not invent caller detection — fix-round JOB 2).
+        ``test_runner`` overrides Test Connection (the DecisionModel probe).
+        """
         self._dialog = dialog
         self._is_new = provider is None
+        self._fixed_name = fixed_name
+        self._allow_empty_caller = allow_empty_caller
+        self._test_runner = test_runner
         self._provider = provider or ProviderConfig(
             name="", base_url="", api_key="", default_model="", caller="",
         )
@@ -57,6 +73,13 @@ class _ProviderCard:
         self._name_entry = Gtk.Entry()
         self._name_entry.set_placeholder_text("Provider name")
         self._name_entry.set_hexpand(True)
+        if self._fixed_name:
+            self._name_entry.set_editable(False)
+            self._name_entry.set_can_focus(False)
+            self._name_entry.set_tooltip_text(
+                "Fixed name — this card is looked up by the code via a "
+                "structural constant; only its contents are user data."
+            )
         name_row = self._labeled("Name", self._name_entry)
         vbox.append(name_row)
 
@@ -293,7 +316,9 @@ class _ProviderCard:
         """Save the card's current form values via handler."""
         provider = self._collect_from_form()
         try:
-            self._dialog._handler.add_or_update(provider)
+            self._dialog._handler.add_or_update(
+                provider, allow_empty_caller=self._allow_empty_caller,
+            )
         except ValueError as e:
             self._set_status(str(e), fail=True)
 
@@ -304,7 +329,24 @@ class _ProviderCard:
         self._status_label.remove_css_class("settings-status-ok")
         self._status_label.remove_css_class("settings-status-fail")
         self._status_label.add_css_class("settings-status-untested")
+        if self._test_runner is not None:
+            # DecisionModel: an honest pre-adapter probe (reachability), not a
+            # chat completion. Runs off-thread exactly like test_provider.
+            self._test_runner()
+            return
         self._dialog._handler.test_provider(provider, self._on_test_result)
+
+    def _apply_test_result_inline(self, result: TestResult) -> None:
+        """Update status + spin from a TestResult without touching the store.
+
+        The DecisionModel probe is not a stored chat provider, so it must not
+        stamp `last_verified_at` in providers.yaml; this mirrors only the
+        presentation half of `_on_test_result`.
+        """
+        if result.ok:
+            self._set_status(f"✅ {result.latency_ms}ms · {result.model_used}", ok=True)
+        else:
+            self._set_status(f"❌ {result.error or 'unknown error'}", fail=True)
 
     def _on_remove_clicked(self, *args) -> None:
         """Remove this provider. Shows confirmation first."""
@@ -497,6 +539,10 @@ class SettingsDialog:
         telegram_page = self._build_telegram_page()
         self._stack.add_titled(telegram_page, "telegram", "Telegram Bridge")
 
+        # ── Decision Model page (SPEC-22 §2.8) ────────────────────────
+        self._decision_page = self._build_decision_page()
+        self._stack.add_titled(self._decision_page, "decision-model", "Decision Model")
+
         content.append(self._stack)
         self._window.set_child(content)
 
@@ -524,7 +570,19 @@ class SettingsDialog:
         Clean cards (no unsaved edits) are updated with fresh data from
         the provider list. Dirty cards keep their entry values but get
         their provider reference updated so status labels reflect test results.
+
+        SPEC-22 §2.8: the DecisionModel card is NOT a chat provider — it is
+        filtered out of the general Providers list (it lives on its own page).
         """
+        # SPEC-22 §2.8: sync the Decision Model page from the UNFILTERED list
+        # (its card lives on its own page), then filter it out of the general
+        # Providers list — it is not a chat provider.
+        self._refresh_decision_card(providers)
+        providers = [
+            p for p in providers
+            if getattr(p, "name", "") != _DECISION_MODEL_PROVIDER
+        ]
+
         # Build lookup of current cards by provider name
         current_by_name: dict[str, _ProviderCard] = {}
         for card in self._cards:
@@ -679,6 +737,115 @@ class SettingsDialog:
 
         self._refresh_telegram_section()
         return page
+
+    # ── Decision Model section (SPEC-22 §2.8) ─────────────────────────
+
+    def _build_decision_page(self) -> Gtk.Box:
+        """Build the "Decision Model" page: ONE fixed-name provider card.
+
+        The card is a REAL ProviderConfig in providers.yaml (same store, same
+        round-trip) reached by the code through `DECISION_MODEL_PROVIDER`. Its
+        name is locked; every other field is user-editable. It reuses the
+        _ProviderCard widget so the save/round-trip path cannot drift from the
+        general provider path (the reasoning-effort field-strip lesson).
+
+        The stored card (if any) is injected here lazily; when absent this page
+        shows an empty placeholder card the user can fill and Save to create it.
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "The Decision Model (JEV) is an optional classifier the failure "
+            "lifecycle consults for unclassifiable provider errors. Its name is "
+            "fixed — the code looks it up structurally — but the endpoint, key, "
+            "and model are yours. Point it at any compatible service. With no "
+            "card (or no key), JEV features degrade to the deterministic floor "
+            "and the rest of the app is unaffected."
+        )
+        page.append(intro)
+
+        self._decision_card = _ProviderCard(
+            self,
+            # Placeholder; synced from the store by _refresh_decision_card.
+            ProviderConfig(
+                name=_DECISION_MODEL_PROVIDER,
+                base_url="", api_key="", default_model="", caller="",
+            ),
+            fixed_name=True,
+            allow_empty_caller=True,  # the JEV adapter sets its own caller
+            test_runner=self._decision_test_runner,
+        )
+        page.append(self._decision_card.get_widget())
+        return page
+
+    def _refresh_decision_card(self, providers: list[ProviderConfig]) -> None:
+        """Sync the Decision Model card with the stored card (if present).
+
+        ``providers`` is the full unfiltered list; the caller filters only the
+        general list. A dirty card keeps the user's unsaved edits.
+        """
+        card = getattr(self, "_decision_card", None)
+        if card is None:
+            return
+        stored = next(
+            (p for p in providers
+             if getattr(p, "name", "") == _DECISION_MODEL_PROVIDER),
+            None,
+        )
+        if stored is None:
+            # No stored card — leave the empty placeholder editable but keep
+            # the fixed name present so Save can create it.
+            card._name_entry.set_text(_DECISION_MODEL_PROVIDER)
+            return
+        if card._is_dirty():
+            card._update_provider_ref(stored)
+        else:
+            card._provider = stored
+            card._populate_from_provider()
+
+    def _decision_test_runner(self) -> None:
+        """Run the honest pre-adapter DecisionModel probe off-thread.
+
+        Not a stored chat provider, so it must NOT stamp providers.yaml. The
+        result updates the card's status label only (see
+        `_ProviderCard._apply_test_result_inline`).
+        """
+        card = self._decision_card
+        provider = card._collect_from_form()
+
+        def _worker():
+            try:
+                from agent.llm.jev_client import probe_decision_model
+                result = probe_decision_model(provider)
+            except Exception as exc:  # noqa: BLE001 — probe failure is its payload
+                from utils.provider_test import TestResult
+                result = TestResult(
+                    ok=False, latency_ms=0, error=f"probe raised: {exc}",
+                    model_used="pre-adapter probe",
+                )
+
+            def _dispatch():
+                try:
+                    card._apply_test_result_inline(result)
+                except Exception:
+                    logger.exception("decision-model probe result dispatch failed")
+
+            glib = getattr(card._dialog._handler, "_GLib", None)
+            if glib is not None and hasattr(glib, "idle_add"):
+                glib.idle_add(_dispatch)
+            else:
+                _dispatch()
+
+        import threading
+        threading.Thread(target=_worker, daemon=True, name="decision-model-probe").start()
 
     def _labeled_row(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
         """Label + widget row (mirrors _ProviderCard._labeled)."""

@@ -516,6 +516,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # buttons). The bridge filters to its own allowlist internally.
         self._feed_handler.set_card_added_callback(
             self._bridge_handler.on_feed_card_added)
+        self._emit_startup_check_card()
 
         # FeedTab created here (once) — inject into LeftPanel's Projects "Feed" sub-tab
         from ui.views.feed_tab import FeedTab
@@ -1253,6 +1254,26 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         self._bridge_notice_pending = True
         self._emit_bridge_card(title=title, body=body)
+
+    def _emit_startup_check_card(self) -> None:
+        """SPEC-22: one feed card when startup configuration looks wrong.
+
+        A clean install emits nothing. Warnings (missing Brave key, fallback
+        name that is not a card, keyless DecisionModel) become one card.
+        """
+        try:
+            from utils.startup_checks import startup_warnings
+            warnings = startup_warnings()
+        except Exception:
+            logger.exception("startup sanity check failed")
+            return
+        if not warnings:
+            return
+        body = "\n".join(f"- {item}" for item in warnings)
+        self._emit_bridge_card(
+            title=f"Startup checks: {len(warnings)} warning(s)",
+            body=body,
+        )
 
     def _emit_bridge_card(self, *, title: str, body: str) -> None:
         """Build + add a telegram-bridge feed card (shared by both emitters)."""

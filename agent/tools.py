@@ -1297,6 +1297,63 @@ def _register_tools() -> None:
         lambda url, max_chars=10000, **kwargs: _web_fetch(url, max_chars),  # type: ignore
     )
 
+    # provider_events — SPEC-22 read-only failure log for Supervisor / Coder
+    _TOOLS["provider_events"] = (
+        ToolDefinition(
+            name="provider_events",
+            description=(
+                "Read recent provider failures (auth, rate limit, model rejection, "
+                "malformed request). Use this when asked whether an agent is alive "
+                "or why a turn stopped. Read-only. Does not retry or change providers."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_key": {
+                        "type": "string",
+                        "description": "Optional session key filter, e.g. special:coder",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many recent events to return (default 20)",
+                    },
+                },
+                "required": [],
+            },
+            requires_approval=False,
+        ),
+        lambda session_key=None, limit=20, **kwargs: _provider_events(session_key, limit),  # type: ignore
+    )
+
+
+def _provider_events(session_key: str | None = None, limit: int = 20):
+    """Format the provider-failure store for an agent tool call."""
+    from utils.provider_failure_store import recent, summary
+    try:
+        cap = int(limit)
+    except (TypeError, ValueError):
+        cap = 20
+    cap = min(max(cap, 1), 100)
+    key = session_key.strip() if isinstance(session_key, str) and session_key.strip() else None
+    events = recent(limit=cap, session_key=key)
+    totals = summary()
+    if not events:
+        return ToolResult(success=True, output="No provider failures recorded.")
+    lines = [
+        (
+            f"Provider failures in memory: {totals.get('last_24h', 0)} in the last 24h "
+            "(store cap 100)."
+        ),
+    ]
+    for item in events:
+        code = item.status_code if item.status_code is not None else "-"
+        lines.append(
+            f"- {item.failure_class.value} provider={item.provider or '?'} "
+            f"model={item.model or '?'} status={code} stage={item.stage} "
+            f"session={item.session_key} detail={item.detail}"
+        )
+    return ToolResult(success=True, output="\n".join(lines))
+
 
 _register_tools()
 
