@@ -129,19 +129,29 @@ class EnforcementMiddleware:
                 ctx.project_path,
                 ctx.enforcement_config,
             )
-            if enf_result.appended_message:
+            if enf_result.checks:
+                suffix = (
+                    "\n" + enf_result.appended_message
+                    if enf_result.appended_message else ""
+                )
+                result = dataclasses.replace(
+                    result,
+                    output=(result.output or "") + suffix,
+                    enforcement_checks=list(enf_result.checks),
+                )
+            elif enf_result.appended_message:
                 result = dataclasses.replace(
                     result,
                     output=(result.output or "") + "\n" + enf_result.appended_message,
                 )
-                if self._on_status is not None:
-                    for check_record in enf_result.checks:
-                        self._on_status(ctx.session_key, tool_name, {
-                            "tier": check_record.tier,
-                            "file": check_record.file,
-                            "passed": check_record.passed,
-                            "detail": check_record.detail,
-                        })
+            if enf_result.appended_message and self._on_status is not None:
+                for check_record in enf_result.checks:
+                    self._on_status(ctx.session_key, tool_name, {
+                        "tier": check_record.tier,
+                        "file": check_record.file,
+                        "passed": check_record.passed,
+                        "detail": check_record.detail,
+                    })
         except Exception:
             logger.exception(
                 "Enforcement check failed for %s (session=%s):",

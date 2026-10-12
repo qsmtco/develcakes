@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     watermark INTEGER NOT NULL DEFAULT -1,
     epoch INTEGER  NOT NULL DEFAULT 0,
     diverged INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    task_card TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -117,6 +118,11 @@ class TranscriptStore:
             self._wal_retry(5, 0.010)
             self._conn.execute("PRAGMA busy_timeout=15000")
             self._conn.executescript(_SCHEMA)
+            # CREATE TABLE IF NOT EXISTS does not add columns to a DB that
+            # already has sessions. Store-only load reads task_card from that
+            # row; without the column the SELECT fails and the card comes
+            # back empty.
+            self._ensure_task_card_column()
         except BaseException:
             self._conn.close()
             raise
@@ -443,6 +449,7 @@ class TranscriptStore:
         agent_name: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        task_card: str | None = None,
     ) -> None:
         """Upsert sessions-table metadata (SPEC-08 §2 wrapper contract, SP4A).
 
@@ -452,7 +459,10 @@ class TranscriptStore:
         HIGH-3 api_key re-resolution, so the columns needed writers. None
         means "leave the existing value"; '' writes '' (callers pass None
         for unknown fields, never ''). HIGH-3: agent_name/model/provider
-        carry no secrets. Committing; creates the sessions row when absent.
+        carry no secrets. ``task_card`` is the per-session scratch SPEC-23
+        stores in the JSON body; store-only load has no JSON file, so the
+        same string has to live on this row. Committing; creates the
+        sessions row when absent.
         """
         with self._lock:
             self._ensure_open()
@@ -460,21 +470,25 @@ class TranscriptStore:
                 self._conn.execute(self._BEGIN)
                 self._conn.execute(
                     "INSERT INTO sessions (session_key, agent_name, model,"
-                    " provider, updated_at)"
-                    f" VALUES (?, COALESCE(?, ''), COALESCE(?, ''), ?, {_TS_NOW})"
+                    " provider, task_card, updated_at)"
+                    " VALUES (?, COALESCE(?, ''), COALESCE(?, ''), ?,"
+                    f" COALESCE(?, ''), {_TS_NOW})"
                     " ON CONFLICT(session_key) DO UPDATE SET"
                     " agent_name = COALESCE(?, agent_name),"
                     " model = COALESCE(?, model),"
                     " provider = COALESCE(?, provider),"
+                    " task_card = COALESCE(?, task_card),"
                     " updated_at = excluded.updated_at",
                     (
                         session_key,
                         agent_name,
                         model,
                         provider,
+                        task_card,
                         agent_name,
                         model,
                         provider,
+                        task_card,
                     ),
                 )
                 self._conn.execute("COMMIT")
@@ -487,18 +501,36 @@ class TranscriptStore:
 
         Returns the JSON-shape keys the store-mode loader feeds to
         resolve_api_key_for_conversation: agent_name/model (possibly ''
-        when never written) and provider (str | None).
+        when never written), provider (str | None), and task_card (''
+        when never written).
         """
         with self._lock:
             self._ensure_open()
             row = self._conn.execute(
-                "SELECT agent_name, model, provider FROM sessions"
+                "SELECT agent_name, model, provider, task_card FROM sessions"
                 " WHERE session_key = ?",
                 (session_key,),
             ).fetchone()
         if row is None:
             return {}
-        return {"agent_name": row[0] or "", "model": row[1] or "", "provider": row[2]}
+        card = row[3] if isinstance(row[3], str) else ""
+        return {
+            "agent_name": row[0] or "",
+            "model": row[1] or "",
+            "provider": row[2],
+            "task_card": card,
+        }
+
+    def _ensure_task_card_column(self) -> None:
+        """Add sessions.task_card on a DB created before that column existed."""
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "task_card" not in cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN task_card TEXT NOT NULL DEFAULT ''"
+            )
 
     def covers(self, session_key: str, upto: int) -> bool:
         """True iff the CURRENT epoch holds a row at every seq in [0..upto].

@@ -109,6 +109,66 @@ class TestSandbox:
             assert r.success is True
             assert "a.txt" in r.output
 
+    def test_list_files_recursive_caps(self):
+        from agent.tools import MAX_LIST_ENTRIES
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(MAX_LIST_ENTRIES + 50):
+                open(os.path.join(proj, f"f{i:04d}.txt"), "w").close()
+            r = execute_tool("list_files", {"path": ".", "recursive": True}, proj)
+            assert r.success is True
+            lines = r.output.splitlines()
+            assert len(lines) <= MAX_LIST_ENTRIES + 1
+            assert lines[-1] == f"[... truncated at {MAX_LIST_ENTRIES} entries ...]"
+            assert r.output.count("f") >= MAX_LIST_ENTRIES  # the fill names are present
+
+    def test_list_files_exact_cap_has_no_notice(self):
+        from agent.tools import MAX_LIST_ENTRIES
+        with tempfile.TemporaryDirectory() as proj:
+            sub = os.path.join(proj, "exact")
+            os.makedirs(sub)
+            for i in range(MAX_LIST_ENTRIES):
+                open(os.path.join(sub, f"e{i:04d}.txt"), "w").close()
+            r = execute_tool("list_files", {"path": "exact", "recursive": True}, proj)
+            assert r.success is True
+            assert "truncated" not in r.output
+            assert len(r.output.splitlines()) == MAX_LIST_ENTRIES
+
+    def test_list_files_stops_across_sibling_dirs(self):
+        from agent.tools import MAX_LIST_ENTRIES
+        with tempfile.TemporaryDirectory() as proj:
+            for dirname in ("a", "b"):
+                os.makedirs(os.path.join(proj, dirname))
+                for i in range(MAX_LIST_ENTRIES):
+                    open(os.path.join(proj, dirname, f"{dirname}{i:04d}.txt"), "w").close()
+            r = execute_tool("list_files", {"path": ".", "recursive": True}, proj)
+            assert r.success is True
+            lines = [ln for ln in r.output.splitlines() if not ln.startswith("[")]
+            assert len(lines) == MAX_LIST_ENTRIES
+            assert r.output.splitlines()[-1].startswith("[... truncated at")
+
+    def test_list_files_empty_directory(self):
+        with tempfile.TemporaryDirectory() as proj:
+            os.makedirs(os.path.join(proj, "empty"))
+            r = execute_tool("list_files", {"path": "empty"}, proj)
+            assert r.success is True
+            assert r.output == "(empty)"
+
+    def test_exec_output_bounded_for_model(self):
+        from agent.tools import CONV_OUTPUT_HEAD, CONV_OUTPUT_TAIL, MAX_EXEC_OUTPUT
+        with tempfile.TemporaryDirectory() as proj:
+            r = execute_tool(
+                "exec_command",
+                {"command": f"python3 -c \"print('x' * {MAX_EXEC_OUTPUT + 5000})\""},
+                proj,
+                "special:coder",
+                approval_callback=lambda sk, tn, args: True,
+            )
+            assert r.success is True
+            assert len(r.output) <= CONV_OUTPUT_HEAD + CONV_OUTPUT_TAIL + 80
+            assert "[... " in r.output and "chars omitted" in r.output
+            assert "[... truncated at" in r.stdout
+            assert len(r.stdout) > CONV_OUTPUT_HEAD + CONV_OUTPUT_TAIL
+
     def test_search_files_outside_sandbox_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
             r = execute_tool("search_files", {"pattern": "hello", "path": "/etc"}, proj)
@@ -135,6 +195,7 @@ class TestReadFile:
             assert "Not a file" in r.error or "not" in r.error.lower()
 
     def test_read_truncates_at_50kb(self):
+        from agent.tools import MAX_READ_SIZE
         with tempfile.TemporaryDirectory() as proj:
             large = os.path.join(proj, "large.txt")
             with open(large, "w") as f:
@@ -142,6 +203,74 @@ class TestReadFile:
             r = execute_tool("read_file", {"path": "large.txt"}, proj)
             assert r.success is True
             assert "truncated" in r.output
+            assert len(r.output) <= MAX_READ_SIZE + 200
+            assert len(r.output) > 16 * 1024  # not the 16KB conversation head/tail
+            assert r.output.count("x") == MAX_READ_SIZE
+            assert "offset=51200" in r.output
+
+    def test_read_explicit_limit_cannot_exceed_cap(self):
+        from agent.tools import MAX_READ_SIZE
+        with tempfile.TemporaryDirectory() as proj:
+            large = os.path.join(proj, "large.txt")
+            with open(large, "wb") as f:
+                f.write(b"q" * 500_000)
+            r = execute_tool("read_file", {"path": "large.txt", "limit": 200_000}, proj)
+            assert r.success is True
+            assert "truncated" in r.output
+            assert len(r.output) <= MAX_READ_SIZE + 200
+            # "q" is not in the notice ("bytes" contains "y").
+            assert r.output.count("q") == MAX_READ_SIZE
+
+    def test_read_small_limit_has_no_notice(self):
+        with tempfile.TemporaryDirectory() as proj:
+            f = os.path.join(proj, "test.txt")
+            with open(f, "w") as fh:
+                fh.write("0123456789abcdefghij")
+            r = execute_tool("read_file", {"path": "test.txt", "offset": 5, "limit": 5}, proj)
+            assert r.success is True
+            assert r.output == "56789"
+            assert "truncated" not in r.output
+
+    def test_read_negative_limit_rejected(self):
+        with tempfile.TemporaryDirectory() as proj:
+            f = os.path.join(proj, "test.txt")
+            with open(f, "w") as fh:
+                fh.write("hello")
+            r = execute_tool("read_file", {"path": "test.txt", "limit": -1}, proj)
+            assert r.success is False
+            assert r.error == "limit must be >= 0"
+            r0 = execute_tool("read_file", {"path": "test.txt", "limit": 0}, proj)
+            assert r0.success is True
+            assert r0.output == ""
+
+    def test_read_negative_offset_is_oserror(self):
+        with tempfile.TemporaryDirectory() as proj:
+            f = os.path.join(proj, "test.txt")
+            with open(f, "w") as fh:
+                fh.write("hello")
+            r = execute_tool("read_file", {"path": "test.txt", "offset": -1}, proj)
+            assert r.success is False
+            assert r.error.startswith("Cannot read test.txt:")
+
+    def test_read_exact_cap_has_no_notice(self):
+        from agent.tools import MAX_READ_SIZE
+        with tempfile.TemporaryDirectory() as proj:
+            f = os.path.join(proj, "exact.txt")
+            with open(f, "wb") as fh:
+                fh.write(b"z" * MAX_READ_SIZE)
+            r = execute_tool("read_file", {"path": "exact.txt"}, proj)
+            assert r.success is True
+            assert r.output == "z" * MAX_READ_SIZE
+            assert "truncated" not in r.output
+
+    def test_read_bad_limit_type(self):
+        with tempfile.TemporaryDirectory() as proj:
+            f = os.path.join(proj, "test.txt")
+            with open(f, "w") as fh:
+                fh.write("hello")
+            r = execute_tool("read_file", {"path": "test.txt", "limit": "5"}, proj)
+            assert r.success is False
+            assert "limit must be an integer" in r.error
 
     def test_read_binary_file_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -184,6 +313,20 @@ class TestWriteFile:
             r = execute_tool("write_file", {"path": "f.txt", "content": "hello"}, proj)
             assert r.success is True
             assert "5 bytes" in r.output
+
+    def test_write_file_description_does_not_ask_for_full_round_trip(self):
+        desc = next(t.description for t in get_all_tools() if t.name == "write_file")
+        assert "Always read_file first" not in desc
+        assert "Always read a file before overwriting it" not in desc
+        assert "use edit_file" in desc
+        assert "read_file returns a window" in desc
+
+    def test_edit_file_description_does_not_ask_to_read_the_full_file(self):
+        desc = next(t.description for t in get_all_tools() if t.name == "edit_file")
+        assert "reading the full file" not in desc
+        assert "read the full file" not in desc
+        assert "read_file returns a window" in desc
+        assert "already have in hand" in desc
 
 
 class TestExecCommand:

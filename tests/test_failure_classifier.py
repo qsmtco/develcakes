@@ -429,6 +429,28 @@ class TestDecisionModelLookup:
         )])
         assert classify_unknown("anything", 400) is None
 
+    def test_empty_model_does_not_open_a_socket(self, tmp_config_dir, monkeypatch):
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="", caller="",
+        )])
+
+        def boom(req, timeout=None):
+            raise AssertionError("urlopen must not be called")
+
+        import urllib.request
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        assert classify_unknown("mystery", 500) is None
+        from agent.llm.jev_client import probe_decision_model
+        result = probe_decision_model(ProviderConfig(
+            name="DecisionModel", base_url="https://jev.example/v1",
+            api_key="jev-key", default_model="", caller="",
+        ))
+        assert result.ok is False
+        assert "default_model" in (result.error or "")
+
     def test_keyed_card_classifies_via_mock_endpoint(self, tmp_config_dir, monkeypatch):
         """Card present + keyed → a REAL typed-decision call. The endpoint is
         mocked (no network in tests): a well-formed choice answer with good

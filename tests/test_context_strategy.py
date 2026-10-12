@@ -254,6 +254,38 @@ class TestPruneToolOutputs:
         # Most recent tool result should be intact.
         assert "[compacted \u2014" not in conv.messages[5].content
 
+    def test_prune_clears_parent_tool_call_result(self):
+        """Stubbing a tool message drops the duplicate string on the parent call."""
+        conv = Conversation(agent_name="test", model="test/x")
+        tc = ToolCall(
+            call_id="call_0",
+            tool_name="read_file",
+            arguments={"path": "a.py"},
+            result="Z" * 4_000,
+        )
+        conv.add_assistant_message("go", [tc])
+        conv.add_tool_result("call_0", "x" * 5_000)
+        DefaultContextStrategy().prune_tool_outputs(conv, target_tokens=1, protect_turns=0)
+        assert conv.messages[1].content.startswith("[compacted \u2014")
+        assert tc.result is None
+
+    def test_prune_does_not_rewrite_masked_body(self):
+        """A Stage 2 mask is already short. Prune must not replace it."""
+        conv = Conversation(agent_name="test", model="test/x")
+        masked = "[masked \u2014 read_file a.py offset=0 (12 chars removed)]"
+        tc = ToolCall(
+            call_id="call_0",
+            tool_name="read_file",
+            arguments={"path": "a.py"},
+            result="KEEP",
+        )
+        conv.add_user_message("u" * 8_000)
+        conv.add_assistant_message("go", [tc])
+        conv.add_tool_result("call_0", masked)
+        DefaultContextStrategy().prune_tool_outputs(conv, target_tokens=1, protect_turns=0)
+        assert conv.messages[-1].content == masked
+        assert tc.result == "KEEP"
+
     def test_protected_recent_turns_untouched(self):
         """The protect_turns most recent tool results are never stubbed."""
         conv = Conversation(agent_name="test", model="test/x")

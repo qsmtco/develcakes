@@ -39,6 +39,7 @@ SESSION_COLUMNS = {
     "epoch",
     "diverged",
     "updated_at",
+    "task_card",
 }
 
 
@@ -231,11 +232,12 @@ def test_schema_has_no_secret_columns(tmp_path):
     assertion (any added column fails), plus: no 'api' substring anywhere,
     and 'key' is only tolerated in session_key.
 
-    SP2 fix-round-2 sanctioned exception: sessions gained `diverged` (8
-    columns now) — a non-secret metadata flag for the append-only guard
-    (front-trimmed sessions go JSON-only; the store rows stay as audit
-    ledger). The pin was NOT weakened: the set is still exact, and the
-    secret-substring sweeps below still run over it.
+    SP2 fix-round-2 sanctioned exception: sessions gained `diverged` — a
+    non-secret metadata flag for the append-only guard (front-trimmed
+    sessions go JSON-only; the store rows stay as audit ledger). SPEC-23
+    added `task_card` so a store-only load can rebuild the per-session
+    scratch without the JSON file. The pin was NOT weakened: the set is
+    still exact, and the secret-substring sweeps below still run over it.
     """
     store = _store(tmp_path)
     turn_cols = {
@@ -252,6 +254,39 @@ def test_schema_has_no_secret_columns(tmp_path):
     assert not [c for c in all_cols if "password" in c.lower()]
     key_bearing = [c for c in all_cols if "key" in c.lower()]
     assert key_bearing == ["session_key"]
+
+
+def test_legacy_sessions_table_gains_task_card(tmp_path):
+    """A DB created before task_card still opens, and a later meta write
+    that omits the card does not wipe one already stored."""
+    db_path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            session_key TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            provider TEXT,
+            watermark INTEGER NOT NULL DEFAULT -1,
+            epoch INTEGER NOT NULL DEFAULT 0,
+            diverged INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        );
+        INSERT INTO sessions (session_key, agent_name) VALUES ('sk', 'Coder');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = TranscriptStore(db_path=db_path)
+    assert store.session_meta("sk")["task_card"] == ""
+    store.set_session_meta("sk", task_card="read a.py")
+    store.set_session_meta("sk", agent_name="Coder")
+    assert store.session_meta("sk")["task_card"] == "read a.py"
+    store.set_session_meta("sk", task_card="")
+    assert store.session_meta("sk")["task_card"] == ""
+    store.close()
 
 
 def test_concurrent_append_two_threads_zero_lost(tmp_path):

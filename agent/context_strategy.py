@@ -358,12 +358,12 @@ class DefaultContextStrategy:
 
         Stops when get_token_estimate() <= target_tokens.
         Idempotent: detects already-stubbed messages by their
-        "[compacted —" prefix and skips them.
+        "[compacted —" or "[masked —" prefix and skips them.
 
         **Cache invalidation contract:** This method mutates ``msg.content``
         in place. The token estimate cache is keyed on
-        ``(len(messages), hash(system_prompt))`` — neither changes when we
-        mutate content. So we MUST invalidate the cache after each stub;
+        ``(len(messages), hash(system_prompt), hash(task_card))`` — none of
+        those change when we mutate content. So we MUST invalidate the cache after each stub;
         otherwise the loop's ``get_token_estimate()`` calls would return
         the pre-stub cached value, causing the loop to over-stub.
 
@@ -409,13 +409,14 @@ class DefaultContextStrategy:
             if conv.get_token_estimate() <= target_tokens:
                 break
             msg = conv.messages[idx]
-            # Idempotence: skip already-stubbed messages.
-            if msg.content.startswith("[compacted \u2014"):
+            # Idempotence: skip already-stubbed or already-masked messages.
+            if msg.content.startswith("[compacted \u2014") or msg.content.startswith("[masked \u2014"):
                 continue
             # Find the tool name from the parent ASSISTANT message's tool_calls.
             # Fast path: check immediate predecessor (the common case).
             # Slow path: backward-walk for interleaved messages.
             tool_name = "[unknown tool]"
+            parent = None
             if msg.tool_call_id and idx > 0:
                 for parent_idx in range(idx - 1, -1, -1):
                     candidate = conv.messages[parent_idx]
@@ -426,23 +427,81 @@ class DefaultContextStrategy:
                         for tc in candidate.tool_calls:
                             if tc.call_id == msg.tool_call_id:
                                 tool_name = tc.tool_name
+                                parent = candidate
                                 break
-                        if tool_name != "[unknown tool]":
+                        if parent is not None:
                             break  # Found the parent; stop searching.
             original_len = len(msg.content)
             stub = f"[compacted \u2014 {tool_name} output, {original_len} chars removed]"
             msg.content = stub
+            # The tool message is the copy the meter counts. Drop the
+            # duplicate string kept on the parent call.
+            if parent is not None:
+                for tc in parent.tool_calls:
+                    if tc.call_id == msg.tool_call_id:
+                        tc.result = None
             # Record the stub's actual token footprint (not 0). Uses the same
             # chars//4 heuristic as _find_split_index's fallback path.
             msg.tokens_used = len(stub) // 4
             # CRITICAL: invalidate cache after each mutation. The cache key
-            # (len(messages), hash(system_prompt)) is unchanged by content
-            # mutation, so a stale cache would return pre-stub tokens.
+            # (len, hash(system_prompt), hash(task_card)) is unchanged by
+            # content mutation, so a stale cache would return pre-stub tokens.
             conv._token_estimate_cache = None
 
-        # Cache is invalidated inside the loop after each stub (line 335).
+        # Cache is invalidated inside the loop after each stub.
         tokens_after = conv.get_token_estimate()
         return tokens_before - tokens_after
+
+    def mask_old_observations(self, conv: Conversation, keep_last: int = 3) -> int:
+        """Replace tool results older than the last ``keep_last`` with a one-line mask.
+
+        Does not consult the token budget, insert a summary, or pop messages.
+        Returns the number of messages whose content was replaced.
+        """
+        if keep_last < 0:
+            keep_last = 0
+        tool_result_indices: list[int] = []
+        for i in range(len(conv.messages) - 1, -1, -1):
+            if conv.messages[i].role == MessageRole.TOOL_RESULT:
+                tool_result_indices.append(i)
+        replaced = 0
+        for idx in tool_result_indices[keep_last:]:
+            msg = conv.messages[idx]
+            if msg.content.startswith("[masked \u2014") or msg.content.startswith("[compacted \u2014"):
+                continue
+            tool_name = "[unknown tool]"
+            path = ""
+            offset: object = 0
+            parent = None
+            if msg.tool_call_id and idx > 0:
+                for parent_idx in range(idx - 1, -1, -1):
+                    candidate = conv.messages[parent_idx]
+                    if candidate.role == MessageRole.ASSISTANT and candidate.tool_calls:
+                        for tc in candidate.tool_calls:
+                            if tc.call_id == msg.tool_call_id:
+                                tool_name = tc.tool_name or "[unknown tool]"
+                                parent = candidate
+                                args = tc.arguments if isinstance(tc.arguments, dict) else {}
+                                raw_path = args.get("path", "")
+                                path = raw_path if isinstance(raw_path, str) else ""
+                                offset = args.get("offset", 0)
+                                if offset is None:
+                                    offset = 0
+                                break
+                        if parent is not None:
+                            break
+            n = len(msg.content)
+            path_shown = path.replace("\n", " ")
+            msg.content = (
+                f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n} chars removed)]"
+            )
+            if parent is not None:
+                for tc in parent.tool_calls:
+                    if tc.call_id == msg.tool_call_id:
+                        tc.result = None
+            conv._token_estimate_cache = None
+            replaced += 1
+        return replaced
 
     # ── Phase 6: P5 _find_split_index + P6 _fit_summary ──────────────────────
 

@@ -323,10 +323,16 @@ def test_arh_clear_conversation_deletes_store_rows_behaviorally(tmp_path, monkey
     arh._fh = None
 
     conv = types.SimpleNamespace(messages=[1, 2, 3], step_count=2, total_tokens=9,
-                                 total_cost=1.0, _token_estimate_cache=None)
+                                 total_cost=1.0, _token_estimate_cache=None,
+                                 task_card="notes")
+    dropped: list[str] = []
     rt = types.SimpleNamespace(
         is_loop_active=lambda sk: False,
-        get_conversation=lambda sk: conv)
+        get_conversation=lambda sk: conv,
+        drop_read_cache=lambda sk: dropped.append(sk),
+        drop_compile=lambda sk: dropped.append("compile:" + sk),
+        drop_repo_map=lambda sk: dropped.append("map:" + sk),
+    )
     arh._runtimes = {"T": rt}
 
     monkeypatch.setattr("agent.persistence._get_store", lambda: store)
@@ -335,13 +341,19 @@ def test_arh_clear_conversation_deletes_store_rows_behaviorally(tmp_path, monkey
 
     assert arh.clear_conversation("special:sk") is True
     assert conv.messages == [] and conv.step_count == 0
+    assert conv.task_card == ""
     assert store.load_all("special:sk") == []  # THE regression pin: store rows GONE
+    assert dropped == ["special:sk", "compile:special:sk", "map:special:sk"]
 
     # refusal path: active loop → rows INTACT (best-effort tolerance)
     rt.is_loop_active = lambda sk: True
     conv.messages = [1]
+    conv.task_card = "stay"
+    dropped.clear()
     store.append_turn("special:sk", "user", "keepme")
     assert arh.clear_conversation("special:sk") is False
     assert conv.messages == [1]
+    assert conv.task_card == "stay"
+    assert dropped == []
     assert store.load_all("special:sk"), "refusal must not delete rows"
     store.close()

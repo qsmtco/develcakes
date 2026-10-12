@@ -350,8 +350,14 @@ _RESPONSE_FORMAT: dict[str, str] = {
 # ── SSE streaming helpers (extracted to agent/llm/streaming.py, Phase B5) ──
 from agent.llm.streaming import (
     SSEEvent,
+    ssl_retry_budget,
     stream_with_ssl_retry,
 )
+
+# A later chain attempt starts only when at least this much budget remains.
+# The socket timeout is then min(attempt cap, remaining), so the try ends
+# inside the budget.
+_FAILOVER_ATTEMPT_FLOOR_S = 1.0
 
 
 # ── Stream functions (moved to provider classes, Phase B6) ──────────────────
@@ -670,6 +676,19 @@ class AgentRuntime:
         # session_key → list[dict{"tool", "args_hash", "iteration"}]
         self._tool_history: dict[str, list[dict]] = {}
         self._tool_history_lock = threading.Lock()
+        # session_key → (path, offset, limit) → (mtime_ns, size).
+        # Cleared at turn end and on clear_conversation. Same-turn identical
+        # reads become a one-line unchanged notice instead of a second body.
+        self._read_fingerprints: dict[str, dict[tuple, tuple]] = {}
+        # How many tool results have landed since the last observation mask.
+        # Masking runs in batches of 4 so the prefix stays stable in between.
+        self._obs_since_mask: dict[str, int] = {}
+        # session_key → compiled wire packet after an enforced write.
+        # The stored transcript is kept; this dict is what the model sees.
+        self._compile: dict[str, dict] = {}
+        # session_key → rendered repo-map block for the current user goal.
+        self._repo_map_block: dict[str, str] = {}
+        self._repo_map_key: dict[str, tuple] = {}
         # Audit-Fix-8: Guard _compaction_events against concurrent append+truncate.
         self._compaction_lock = threading.Lock()
 
@@ -1713,6 +1732,13 @@ class AgentRuntime:
                 self._dispatch(self._on_turn_start, session_key, _turn_token=turn_token)
 
             try:
+                # A new user message starts a new turn. Read fingerprints and
+                # the observation-mask counter must not survive from the
+                # previous turn: _cleanup_tool_history runs on cancel and
+                # failure, not on a completed turn.
+                with self._tool_history_lock:
+                    self._read_fingerprints.pop(session_key, None)
+                self._obs_since_mask.pop(session_key, None)
                 # Step 1: add user message
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
@@ -1759,6 +1785,14 @@ class AgentRuntime:
                             return
                     iteration += 1
                     logger.debug("[tool-loop] sk=%s iteration=%d/%d", session_key, iteration, max_iter)
+
+                    # Observation mask is separate from budget prune. Every
+                    # four tool results, stub everything older than the last
+                    # three before the next compact + LLM call.
+                    n_obs = self._obs_since_mask.get(session_key, 0)
+                    if n_obs >= 4:
+                        self._context_strategy.mask_old_observations(conv, keep_last=3)
+                        self._obs_since_mask[session_key] = 0
 
                     # §0: Pluggable context strategy — compaction before each LLM call.
                     # The strategy lives in agent/context_strategy.py; the former
@@ -1835,17 +1869,7 @@ class AgentRuntime:
                     # HTTP 400 rejections (which corrupt conversation state because
                     # the assistant message is already added by the time the error
                     # surfaces). Response reserve accounts for output tokens.
-                    RESPONSE_RESERVE_TOKENS = self._RESPONSE_RESERVE_TOKENS
-                    post_trim_estimate = conv.get_token_estimate()
-                    effective_budget = model_max - RESPONSE_RESERVE_TOKENS
-                    if post_trim_estimate >= effective_budget:
-                        usage_pct = int((post_trim_estimate / model_max) * 100) if model_max > 0 else 0
-                        raise RuntimeError(
-                            f"Conversation is at {post_trim_estimate:,}/{model_max:,} tokens "
-                            f"({usage_pct}%) after compaction — exceeds model context window. "
-                            f"Use /clear to reset or /compact to summarize the conversation."
-                        )
-                    messages = conv.to_api_messages()
+                    messages = self._messages_for_model(session_key, conv, model_max)
 
                     # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
                     # §2.2 Edit G): transition RUNNING → STREAMING (non-terminal)
@@ -2243,8 +2267,11 @@ class AgentRuntime:
                 logger.debug("[tool-loop] sk=%s exec_command approval: %s", session_key, approved)
                 if approved is False or approved is None:  # None = timeout = denial
                     tc.mark_failed("exec_command requires PM approval — request denied or timed out")
-                    conv.add_tool_result(call_id, tc.result or "denied")
-                    self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
+                    text = tc.result or "denied"
+                    tc.result = None
+                    conv.add_tool_result(call_id, text)
+                    self._count_tool_observation(session_key)
+                    self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
                     self._audit_log.record(tool_name, args, approved=False,
                                             user=getattr(self._config, "user_id", ""),
                                             result="denied")  # A-4
@@ -2263,8 +2290,11 @@ class AgentRuntime:
                             f"{tool_name} blocked: {path_arg} is a sensitive path\n"
                             "PM approval denied or timed out."
                         )
-                        conv.add_tool_result(call_id, tc.result or "denied")
-                        self._dispatch(self._on_tool_call_result, session_key, tool_name, tc.result or "denied", False)
+                        text = tc.result or "denied"
+                        tc.result = None
+                        conv.add_tool_result(call_id, text)
+                        self._count_tool_observation(session_key)
+                        self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
                         self._audit_log.record(tool_name, args, approved=False,
                                                 user=getattr(self._config, "user_id", ""),
                                                 result="denied")  # A-4
@@ -2331,11 +2361,21 @@ class AgentRuntime:
             logger.debug("[tool-loop] sk=%s tool %s result: success=%s output_len=%d",
                          session_key, tool_name, result.success, len(result.output or ""))
 
-            # Record tool result — ToolResult dataclass stays clean
+            # Record tool result — ToolResult dataclass stays clean.
+            # mark_completed sets status and completed_at. The tool message
+            # is the copy that is kept; tc.result is cleared before
+            # add_tool_result so the body is not stored twice.
             tc.mark_completed(result.output if result.success else result.error or "")
             tool_result_text = tc.result or ""
+            if tool_name == "read_file" and result.success:
+                tool_result_text = self._dedup_read_output(
+                    session_key, conv, args, tool_result_text,
+                )
+            tc.result = None
 
             conv.add_tool_result(call_id, tool_result_text)
+            self._count_tool_observation(session_key)
+            self._maybe_compile(session_key, conv, tool_name, args, result)
             self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
 
             # A-4: Record in audit log
@@ -2497,83 +2537,175 @@ class AgentRuntime:
     ) -> dict:
         """One provider call, or the SPEC-22 chain walk when failover is enabled.
 
-        The flag defaults off. Off means this is exactly one `_call_llm_once`.
-        On means retry / advance / halt per `decide()`, without putting a
-        partial assistant message into the next request.
+        The flag defaults on. Off means this is exactly one `_call_llm_once`
+        at the tool timeout. On means retry / advance / halt per `decide()`,
+        each attempt bounded by `provider_failover_attempt_timeout_s`.
         """
-        if not getattr(self._config, "provider_failover_enabled", False):
+        if not getattr(self._config, "provider_failover_enabled", True):
             return self._call_llm_once(session_key, messages, tools, turn_token=turn_token)
         return self._call_llm_chain(session_key, messages, tools, turn_token)
+
+    def _failover_limits(self) -> tuple[float, float]:
+        """Return (budget seconds, per-attempt socket timeout)."""
+        try:
+            budget = float(getattr(self._config, "provider_failover_budget_s", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            budget = 30.0
+        try:
+            cap = float(getattr(self._config, "provider_failover_attempt_timeout_s", 8.0) or 8.0)
+        except (TypeError, ValueError):
+            cap = 8.0
+        if budget != budget or budget <= 0:  # NaN or non-positive
+            budget = 30.0
+        if cap != cap or cap <= 0:
+            cap = 8.0
+        return budget, cap
+
+    def _chain_socket_timeout(
+        self,
+        budget_started: float | None,
+        budget: float,
+        cap: float,
+    ) -> float | None:
+        """Idle timeout for the next chain attempt.
+
+        The first attempt of a chain step uses `cap` and does not consult
+        the budget. After a classified failure the clock is running: the
+        next attempt starts only when at least `_FAILOVER_ATTEMPT_FLOOR_S`
+        remains, and its socket timeout is the lesser of `cap` and that
+        remainder so the try ends inside the budget.
+        """
+        if budget_started is None:
+            return cap
+        remaining = budget - (time.monotonic() - budget_started)
+        if remaining < _FAILOVER_ATTEMPT_FLOOR_S:
+            return None
+        return min(cap, remaining)
 
     def _call_llm_chain(self, session_key: str, messages: list[dict], tools: list[dict], turn_token) -> dict:
         from agent.llm.failure_policy import RetryConfig, decide
 
-        started = time.monotonic()
+        budget, cap = self._failover_limits()
+        budget_started: float | None = None
         attempt = 1
         on_fallback = False
         seen_messages = list(messages)
+        pending: tuple[BaseException, object] | None = None
         for _step in range(8):
             if not self._turn_still_active(session_key, turn_token):
                 raise RuntimeError("turn cancelled before provider failover")
-            try:
-                response = self._call_llm_once(
-                    session_key, seen_messages, tools, turn_token=turn_token,
+            timeout = self._chain_socket_timeout(budget_started, budget, cap)
+            if timeout is None:
+                if pending is None:
+                    raise RuntimeError("provider failover budget cannot cover another attempt")
+                exc, failure = pending
+                outcome = self._apply_chain_decision(
+                    session_key, exc, failure, attempt, on_fallback,
+                    budget_started, budget, cap, turn_token, decide, RetryConfig,
                 )
+                if outcome == "advance":
+                    on_fallback = True
+                    attempt = 1
+                    budget_started = None
+                    pending = None
+                    continue
+                # Halt and a failed advance already released the lease.
+                # A retry with no time left would spin, so stop the turn.
+                if outcome == "retry":
+                    self._release_session_lease(session_key)
+                raise exc
+            try:
+                with ssl_retry_budget(0):
+                    response = self._call_llm_once(
+                        session_key, seen_messages, tools,
+                        turn_token=turn_token, request_timeout=timeout,
+                    )
             except Exception as exc:
                 self._attach_provider_failure(exc, session_key, "request")
                 failure = getattr(exc, "_failure", None)
                 if failure is None:
                     raise
+                if budget_started is None:
+                    budget_started = time.monotonic()
                 self._record_attached_failure(exc)
-                action = self._failover_action(
-                    failure, attempt, on_fallback, started, decide, RetryConfig,
+                pending = (exc, failure)
+                outcome = self._apply_chain_decision(
+                    session_key, exc, failure, attempt, on_fallback,
+                    budget_started, budget, cap, turn_token, decide, RetryConfig,
                 )
-                if action == "retry":
-                    self._failover_sleep(failure, attempt, on_fallback, started, decide, RetryConfig)
+                if outcome == "retry":
                     attempt += 1
                     continue
-                if action == "advance":
-                    fallback_name = self._switch_to_fallback(session_key)
-                    if not fallback_name:
-                        self._release_session_lease(session_key)
-                        raise
-                    self._note_failover(session_key, failure, fallback_name, turn_token)
+                if outcome == "advance":
                     on_fallback = True
                     attempt = 1
+                    budget_started = None
+                    pending = None
                     continue
-                self._release_session_lease(session_key)
                 raise
             stream_exc = self._stream_failure_exception(session_key, response)
             if stream_exc is None:
                 self._last_stream_text.pop(session_key, None)
                 return response
             failure = stream_exc._failure
+            if budget_started is None:
+                budget_started = time.monotonic()
             self._record_attached_failure(stream_exc)
-            action = self._failover_action(
-                failure, attempt, on_fallback, started, decide, RetryConfig,
+            pending = (stream_exc, failure)
+            outcome = self._apply_chain_decision(
+                session_key, stream_exc, failure, attempt, on_fallback,
+                budget_started, budget, cap, turn_token, decide, RetryConfig,
             )
-            if action == "retry":
-                self._failover_sleep(failure, attempt, on_fallback, started, decide, RetryConfig)
+            if outcome == "retry":
                 attempt += 1
                 continue
-            if action == "advance":
-                fallback_name = self._switch_to_fallback(session_key)
-                if not fallback_name:
-                    self._release_session_lease(session_key)
-                    raise stream_exc
-                self._note_failover(session_key, failure, fallback_name, turn_token)
+            if outcome == "advance":
                 on_fallback = True
                 attempt = 1
+                budget_started = None
+                pending = None
                 continue
-            self._release_session_lease(session_key)
             raise stream_exc
         raise RuntimeError("provider failover stopped after 8 steps")
 
-    def _failover_action(self, failure, attempt, on_fallback, started, decide, retry_config_cls):
+    def _apply_chain_decision(
+        self,
+        session_key: str,
+        exc: BaseException,
+        failure: object,
+        attempt: int,
+        on_fallback: bool,
+        budget_started: float | None,
+        budget: float,
+        cap: float,
+        turn_token,
+        decide,
+        retry_config_cls,
+    ) -> str:
+        """Return 'retry', 'advance', or 'raise'."""
+        action = self._failover_action(
+            failure, attempt, on_fallback, budget_started, budget, cap, decide, retry_config_cls,
+        )
+        if action == "retry":
+            self._failover_sleep(budget_started, budget, retry_config_cls)
+            return "retry"
+        if action == "advance":
+            fallback_name = self._switch_to_fallback(session_key)
+            if not fallback_name:
+                self._release_session_lease(session_key)
+                return "raise"
+            self._note_failover(session_key, failure, fallback_name, turn_token)
+            return "advance"
+        self._release_session_lease(session_key)
+        return "raise"
+
+    def _failover_action(
+        self, failure, attempt, on_fallback, budget_started, budget, cap, decide, retry_config_cls,
+    ):
         cfg = retry_config_cls(
             provider_retries=int(getattr(self._config, "provider_retries", 2) or 2),
             backoff_base_s=float(getattr(self._config, "provider_retry_backoff_s", 1.0) or 0.0),
-            provider_failover_budget_s=float(getattr(self._config, "provider_failover_budget_s", 30.0) or 30.0),
+            provider_failover_budget_s=budget,
         )
         conv = self._conversations.get(failure.session_key)
         primary = getattr(conv, "model", "") or failure.provider or "primary"
@@ -2583,8 +2715,11 @@ class AgentRuntime:
             chain = [primary_name]
         else:
             chain = [primary_name, fallback]
-        budget = cfg.provider_failover_budget_s
-        if time.monotonic() - started >= budget and attempt <= cfg.provider_retries:
+        if (
+            budget_started is not None
+            and self._chain_socket_timeout(budget_started, budget, cap) is None
+            and attempt <= cfg.provider_retries
+        ):
             attempt = cfg.provider_retries + 1
         decision = decide(failure, attempt, chain, cfg)
         return {
@@ -2593,12 +2728,20 @@ class AgentRuntime:
             "halt": "halt",
         }.get(decision.action, "halt")
 
-    def _failover_sleep(self, failure, attempt, on_fallback, started, decide, retry_config_cls) -> None:
+    def _failover_sleep(self, budget_started, budget, retry_config_cls) -> None:
         cfg = retry_config_cls(
-            provider_retries=int(getattr(self._config, "provider_retries", 2) or 2),
-            backoff_base_s=float(getattr(self._config, "provider_retry_backoff_s", 0.0) or 0.0),
+            backoff_base_s=float(getattr(self._config, "provider_retry_backoff_s", 1.0) or 0.0),
         )
         wait = cfg.backoff_base_s
+        if wait <= 0:
+            return
+        if budget_started is not None:
+            remaining = budget - (time.monotonic() - budget_started)
+            # Leave at least the floor so the next attempt is allowed to start.
+            max_sleep = remaining - _FAILOVER_ATTEMPT_FLOOR_S
+            if max_sleep <= 0:
+                return
+            wait = min(wait, max_sleep)
         if wait > 0:
             time.sleep(wait)
 
@@ -2716,6 +2859,7 @@ class AgentRuntime:
         messages: list[dict],
         tools: list[dict],
         turn_token: object | None = None,
+        request_timeout: float | None = None,
     ) -> dict:
         """
         Make a single LLM API call. Uses SSE streaming when on_text_delta is set
@@ -2891,7 +3035,11 @@ class AgentRuntime:
                     caller_key=caller_key,
                     messages=messages,
                     tools=tools if tools else None,
-                    timeout=float(self._config.tool_timeout_seconds),
+                    timeout=(
+                        float(request_timeout)
+                        if request_timeout is not None
+                        else float(self._config.tool_timeout_seconds)
+                    ),
                     x_title=x_title,
                     turn_token=turn_token,
                     reasoning_effort=effective_effort,
@@ -2922,7 +3070,11 @@ class AgentRuntime:
                 model=model,
                 messages=messages,
                 tools=tools if tools else None,
-                timeout=float(self._config.tool_timeout_seconds),
+                timeout=(
+                    float(request_timeout)
+                    if request_timeout is not None
+                    else float(self._config.tool_timeout_seconds)
+                ),
                 x_title=x_title,
                 reasoning_effort=effective_effort,
             )
@@ -3154,10 +3306,314 @@ class AgentRuntime:
 
             return None
 
+    def drop_compile(self, session_key: str) -> None:
+        """Drop this session's compiled wire packet. A missing key is a no-op.
+
+        Trigger: clear_conversation's reset path, not the active-loop refusal.
+        """
+        self._compile.pop(session_key, None)
+
+    def _format_checks(self, checks: list) -> str:
+        blocks = []
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            block = f"[{item.get('tier', '')}] passed={item.get('passed')} {item.get('detail', '')}"
+            output = item.get("output") or ""
+            if isinstance(output, str) and output:
+                block = block + "\n" + output
+            blocks.append(block)
+        return "\n".join(blocks)
+
+    def drop_repo_map(self, session_key: str) -> None:
+        """Drop the cached repo-map block. A missing key is a no-op.
+
+        Trigger: clear_conversation's reset path. A tool iteration must
+        reuse the block; only a cleared conversation drops it.
+        """
+        self._repo_map_block.pop(session_key, None)
+        self._repo_map_key.pop(session_key, None)
+
+    def _repo_map_block_for(self, session_key: str, conv) -> str:
+        from models.conversation import MessageRole
+        goal = ""
+        for msg in reversed(conv.messages):
+            if msg.role == MessageRole.USER:
+                goal = msg.content or ""
+                break
+        project = conv.project_path or ""
+        if not project or not isinstance(goal, str) or not goal:
+            return ""
+        key = (project, hash(goal))
+        if self._repo_map_key.get(session_key) == key:
+            return self._repo_map_block.get(session_key, "")
+        try:
+            from agent.repo_map import build_repo_map
+            block = build_repo_map(project, goal)
+        except Exception:
+            logger.exception("build_repo_map failed for %s", session_key)
+            block = ""
+        if not isinstance(block, str):
+            block = ""
+        self._repo_map_key[session_key] = key
+        self._repo_map_block[session_key] = block
+        return block
+
+    def _prefix_repo_map(self, messages: list[dict], block: str) -> list[dict]:
+        if not block:
+            return messages
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                content = messages[i].get("content") or ""
+                if not isinstance(content, str):
+                    content = str(content)
+                messages[i] = {"role": "user", "content": block + "\n\n" + content}
+                break
+        return messages
+
+    def _compiled_messages(self, conv, packet: dict, map_block: str = "") -> list[dict]:
+        from models.conversation import serialize_messages
+        tail = conv.messages[packet["after"]:]
+        fact_lines = ""
+        if map_block:
+            fact_lines = "## Repo map\n" + map_block + "\n\n"
+        project = conv.project_path or ""
+        if project:
+            try:
+                from utils.project_awareness import load_live_facts
+                live = load_live_facts(project)
+                texts = [f["text"] for f in live[-30:] if isinstance(f.get("text"), str)]
+                if texts:
+                    fact_lines += "\n".join(texts) + "\n\n"
+            except Exception:
+                logger.exception("load_live_facts failed for %s", project)
+        body = (
+            packet["goal"]
+            + "\n\n"
+            + fact_lines
+            + "## Write\n"
+            + packet["hunk"]
+            + "\n\n## Checks\n"
+            + self._format_checks(packet["checks"])
+        )
+        messages: list[dict] = []
+        if conv.system_prompt:
+            messages.append({"role": "system", "content": conv.system_prompt})
+        messages.append({"role": "user", "content": body})
+        messages.extend(serialize_messages(tail, index_base=len(messages)))
+        return messages
+
+    def _wire_char_tokens(self, messages: list[dict]) -> int:
+        total = 0
+        for entry in messages:
+            content = entry.get("content") or ""
+            if isinstance(content, str):
+                total += len(content)
+            for tc in entry.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                raw = fn.get("arguments") or ""
+                if not isinstance(raw, str):
+                    raw = json.dumps(raw)
+                total += len(raw)
+        return total // 4
+
+    def _over_budget_error(self, used: int, model_max: int) -> RuntimeError:
+        usage_pct = int((used / model_max) * 100) if model_max > 0 else 0
+        return RuntimeError(
+            f"Conversation is at {used:,}/{model_max:,} tokens "
+            f"({usage_pct}%) after compaction — exceeds model context window. "
+            f"Use /clear to reset or /compact to summarize the conversation."
+        )
+
+    def _messages_for_model(self, session_key: str, conv, model_max: int) -> list[dict]:
+        """Wire list for the next model call.
+
+        After an enforced write, this is the compiled packet plus messages
+        appended after that write. Otherwise it is to_api_messages().
+        """
+        effective = model_max - self._RESPONSE_RESERVE_TOKENS
+        block = self._repo_map_block_for(session_key, conv)
+        packet = self._compile.get(session_key)
+        if packet is None:
+            post = conv.get_token_estimate()
+            if post >= effective:
+                raise self._over_budget_error(post, model_max)
+            return self._prefix_repo_map(conv.to_api_messages(), block)
+        messages = self._compiled_messages(conv, packet, block)
+        compiled = self._wire_char_tokens(messages)
+        if compiled >= effective:
+            raise self._over_budget_error(compiled, model_max)
+        return messages
+
+    def _maybe_compile(self, session_key: str, conv, tool_name: str, args, result) -> None:
+        """Store a compiled packet after an enforced write. No checks means no change."""
+        if tool_name not in ("write_file", "edit_file"):
+            return
+        checks = getattr(result, "enforcement_checks", None) or []
+        if not checks:
+            return
+        from models.conversation import MessageRole
+        goal = None
+        for msg in reversed(conv.messages):
+            if msg.role == MessageRole.USER:
+                goal = msg.content or ""
+                break
+        if goal is None:
+            return
+        if not isinstance(args, dict):
+            args = {}
+        path = args.get("path", "")
+        if not isinstance(path, str):
+            path = ""
+        if tool_name == "edit_file":
+            old = args.get("old_text", "")
+            new = args.get("new_text", "")
+            if not isinstance(old, str):
+                old = "" if old is None else str(old)
+            if not isinstance(new, str):
+                new = "" if new is None else str(new)
+            hunk = f"--- old_text\n{old[:4000]}\n--- new_text\n{new[:4000]}"
+        else:
+            content = args.get("content", "")
+            if not isinstance(content, str):
+                content = "" if content is None else str(content)
+            byte_count = len(content.encode("utf-8"))
+            hunk = f"write_file replaced {path} ({byte_count} bytes)"
+        stored = []
+        for check in checks:
+            output = getattr(check, "output", "") or ""
+            if not isinstance(output, str):
+                output = str(output)
+            detail = getattr(check, "detail", "") or ""
+            if not isinstance(detail, str):
+                detail = str(detail)
+            stored.append({
+                "tier": getattr(check, "tier", ""),
+                "passed": bool(getattr(check, "passed", False)),
+                "detail": detail,
+                "output": output[:2000],
+            })
+        self._compile[session_key] = {
+            "goal": goal,
+            "path": path,
+            "hunk": hunk,
+            "checks": stored,
+            "after": len(conv.messages),
+        }
+        try:
+            from utils.project_awareness import record_enforcement_fact
+            record_enforcement_fact(
+                conv.project_path or "",
+                session_key,
+                path,
+                checks,
+            )
+        except Exception:
+            logger.exception("record_enforcement_fact failed for %s", session_key)
+
+    def drop_read_cache(self, session_key: str) -> None:
+        """Drop this session's read_file fingerprints. A missing key is a no-op.
+
+        Trigger: clear_conversation's reset path (not the active-loop refusal).
+        A cleared transcript must not answer "unchanged" for a file it never saw.
+        """
+        with self._tool_history_lock:
+            self._read_fingerprints.pop(session_key, None)
+
+    def _count_tool_observation(self, session_key: str) -> None:
+        """Count one add_tool_result toward the next observation-mask batch."""
+        self._obs_since_mask[session_key] = self._obs_since_mask.get(session_key, 0) + 1
+
+    def _task_line(self, tool_name: str, args: dict, result) -> str:
+        """One progress line for the session task card, or "" to skip."""
+        if not isinstance(args, dict):
+            args = {}
+        path = args.get("path", "")
+        if not isinstance(path, str):
+            path = ""
+        if tool_name == "read_file":
+            offset = args.get("offset")
+            return f"read {path} offset={offset or 0}"
+        if tool_name in ("edit_file", "write_file"):
+            return f"{tool_name} {path}"
+        if tool_name == "exec_command":
+            command = args.get("command", "")
+            if not isinstance(command, str):
+                command = ""
+            command = command.replace("\n", " ")[:80]
+            return f"exec exit={result.exit_code} {command}"
+        return ""
+
+    def _note_task(self, session_key: str, line: str) -> None:
+        """Append one progress line to the session task card (max 2000 chars).
+
+        The card is a scratch list for this conversation, not project memory.
+        An empty line is a no-op. A missing conversation is a no-op.
+        """
+        if not isinstance(line, str):
+            return
+        line = line.replace("\n", " ").strip()
+        if not line:
+            return
+        conv = self.get_conversation(session_key)
+        if conv is None:
+            return
+        card = conv.task_card or ""
+        if not isinstance(card, str):
+            card = ""
+        card = f"{card}\n{line}" if card else line
+        if len(card) > 2000:
+            tail = card[-2000:]
+            nl = tail.find("\n")
+            if nl != -1:
+                tail = tail[nl + 1:]
+            card = tail
+        conv.task_card = card
+        conv._token_estimate_cache = None
+
+    def _dedup_read_output(self, session_key: str, conv, args: dict, output: str) -> str:
+        """Return the unchanged notice when this turn already read the same bytes.
+
+        Key is (path, offset or 0, limit). Value is (st_mtime_ns, st_size).
+        An empty project_path or a failed stat skips dedup and returns output.
+        """
+        if not isinstance(args, dict):
+            return output
+        path = args.get("path", "")
+        offset = args.get("offset")
+        limit = args.get("limit")
+        if not isinstance(path, str):
+            return output
+        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
+            return output
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+            return output
+        project = conv.project_path or ""
+        if not project:
+            return output
+        try:
+            st = os.stat(os.path.join(project, path))
+        except OSError as exc:
+            logger.debug("read_file dedup skipped for %s: %s", path, exc)
+            return output
+        key = (path, offset or 0, limit)
+        fp = (st.st_mtime_ns, st.st_size)
+        with self._tool_history_lock:
+            bucket = self._read_fingerprints.setdefault(session_key, {})
+            if bucket.get(key) == fp:
+                return (
+                    f"[unchanged \u2014 read_file {path} offset={offset or 0} "
+                    f"limit={limit}; same mtime and size as the earlier read this turn]"
+                )
+            bucket[key] = fp
+        return output
+
     def _cleanup_tool_history(self, session_key: str) -> None:
         """Remove tool history and pending stuck messages for a session when conversation ends."""
         with self._tool_history_lock:
             self._tool_history.pop(session_key, None)
+            self._read_fingerprints.pop(session_key, None)
+        self._obs_since_mask.pop(session_key, None)
         # Phase CB-3: also clean up pending stuck messages
         self._pending_stuck_messages.pop(session_key, None)
 

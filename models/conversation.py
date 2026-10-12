@@ -141,6 +141,64 @@ class Message:
         return self.role == MessageRole.TOOL_RESULT
 
 
+def serialize_messages(messages: list[Message], *, index_base: int = 0) -> list[dict]:
+    """Serialize messages to the OpenAI wire shape. Does not add a system row.
+
+    Empty assistant messages with no tool calls become a placeholder so
+    strict providers do not reject the call. ``index_base`` keeps the
+    warning index aligned with the list the caller is building.
+    """
+    result: list[dict] = []
+    for msg in messages:
+        if msg.role == MessageRole.USER:
+            result.append({"role": "user", "content": msg.content})
+
+        elif msg.role == MessageRole.ASSISTANT:
+            # Defense in depth: strict providers (Cohere, OpenAI tool-loop,
+            # Anthropic strict mode) reject {"role":"assistant","content":""}
+            # with HTTP 400 "must have non-empty content or tool calls".
+            # A corrupt message can exist in conv.messages if it was created
+            # before the write-side guard landed, or via some other path we
+            # haven't audited. Substitute a descriptive placeholder at the
+            # wire boundary so the call succeeds. The original Message stays
+            # in conv.messages (audit trail preserved); only the serialized
+            # form changes.
+            if not msg.content and not msg.tool_calls:
+                _logger.warning(
+                    "to_api_messages: empty assistant message at idx=%d "
+                    "(role=ASSISTANT, content='', tool_calls=[]) — "
+                    "substituting placeholder to satisfy strict providers",
+                    len(result) + index_base,
+                )
+                entry = {
+                    "role": "assistant",
+                    "content": "[assistant returned no content — placeholder]",
+                }
+            else:
+                entry = {"role": "assistant", "content": msg.content}
+                if msg.tool_calls:
+                    entry["tool_calls"] = [
+                        {
+                            "id": tc.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.tool_name,
+                                "arguments": json.dumps(tc.arguments),
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ]
+            result.append(entry)
+
+        elif msg.role == MessageRole.TOOL_RESULT:
+            result.append({
+                "role": "tool",
+                "tool_call_id": msg.tool_call_id,
+                "content": msg.content,
+            })
+    return result
+
+
 @dataclass
 class Conversation:
     """Full conversation state for a single agent tab.
@@ -169,6 +227,9 @@ class Conversation:
     # invariant as `project_path` above (audit-only on disk; runtime rebuilds
     # via `_rebuild_conversation_context`).
     system_prompt: str = ""
+    # Per-session scratch list (files touched this conversation). Spliced
+    # onto the last user message at serialization time. Not project memory.
+    task_card: str = ""
     messages: list[Message] = field(default_factory=list)
     model: str = ""                      # e.g. "openai/gpt-4o"
     provider: str | None = None           # provider name for api_key re-resolution (HIGH-3)
@@ -184,7 +245,7 @@ class Conversation:
 
     # Phase CB-5: token-estimate cache (BUG #1 fix from end-to-end audit).
     # Invalidated by any message add/remove/trim operation. Keyed on
-    # (len(messages), hash(system_prompt)). See get_token_estimate().
+    # (len(messages), hash(system_prompt), hash(task_card)). See get_token_estimate().
     _token_estimate_cache: tuple | None = field(default=None, repr=False, compare=False)
     # SPEC-21 SP0: per-string token counts. Survives _token_estimate_cache
     # wipes so a stub/pop recount is lookups plus the new strings only.
@@ -250,53 +311,23 @@ class Conversation:
         if self.system_prompt:
             result.append({"role": "system", "content": self.system_prompt})
 
-        for msg in self.messages:
-            if msg.role == MessageRole.USER:
-                result.append({"role": "user", "content": msg.content})
+        result.extend(serialize_messages(self.messages, index_base=len(result)))
 
-            elif msg.role == MessageRole.ASSISTANT:
-                # Defense in depth: strict providers (Cohere, OpenAI tool-loop,
-                # Anthropic strict mode) reject {"role":"assistant","content":""}
-                # with HTTP 400 "must have non-empty content or tool calls".
-                # A corrupt message can exist in conv.messages if it was created
-                # before the write-side guard landed, or via some other path we
-                # haven't audited. Substitute a descriptive placeholder at the
-                # wire boundary so the call succeeds. The original Message stays
-                # in conv.messages (audit trail preserved); only the serialized
-                # form changes.
-                if not msg.content and not msg.tool_calls:
-                    _logger.warning(
-                        "to_api_messages: empty assistant message at idx=%d "
-                        "(role=ASSISTANT, content='', tool_calls=[]) — "
-                        "substituting placeholder to satisfy strict providers",
-                        len(result),
-                    )
-                    entry = {
-                        "role": "assistant",
-                        "content": "[assistant returned no content — placeholder]",
+        # The task card rides inside the last user message so Anthropic
+        # conversion does not grow a second user turn, and so system_prompt
+        # bytes stay stable when the card changes.
+        if self.task_card:
+            for i in range(len(result) - 1, -1, -1):
+                entry = result[i]
+                if entry.get("role") == "user":
+                    content = entry.get("content") or ""
+                    if not isinstance(content, str):
+                        content = str(content)
+                    result[i] = {
+                        "role": "user",
+                        "content": self.task_card + "\n\n" + content,
                     }
-                else:
-                    entry = {"role": "assistant", "content": msg.content}
-                    if msg.tool_calls:
-                        entry["tool_calls"] = [
-                            {
-                                "id": tc.call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.tool_name,
-                                    "arguments": json.dumps(tc.arguments),
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ]
-                result.append(entry)
-
-            elif msg.role == MessageRole.TOOL_RESULT:
-                result.append({
-                    "role": "tool",
-                    "tool_call_id": msg.tool_call_id,
-                    "content": msg.content,
-                })
+                    break
 
         return result
 
@@ -310,8 +341,7 @@ class Conversation:
             conv_chars += len(msg.content)
             for tc in msg.tool_calls:
                 conv_chars += len(str(tc.arguments))
-                if tc.result:
-                    conv_chars += len(tc.result)
+        conv_chars += len(self.task_card)
         return system_chars, conv_chars
 
     def _count_text(self, encoding, text: str) -> int:
@@ -353,7 +383,7 @@ class Conversation:
             return (system_chars + conv_chars) // 4
 
         # Tiktoken path — check cache.
-        cache_key = (len(self.messages), hash(self.system_prompt))
+        cache_key = (len(self.messages), hash(self.system_prompt), hash(self.task_card))
         if self._token_estimate_cache is not None:
             cached_key, cached_value = self._token_estimate_cache
             if cached_key == cache_key:
@@ -370,18 +400,20 @@ class Conversation:
         Counts tokens in:
         - system_prompt
         - each message's content
-        - each tool_call's arguments (serialized) and result
+        - each tool_call's arguments (serialized as str)
 
-        Does NOT count tool_call.name (it doesn't appear in the API request body
-        sent to the LLM, only the id and arguments do).
+        Does NOT count tool_call.name (it doesn't appear in the API request
+        body sent to the LLM, only the id and arguments do). Does NOT count
+        tc.result: that string is the same body already stored on the tool
+        message, and to_api_messages does not send it. Counts task_card once;
+        it is prefixed onto the last user message and is not also a message.
         """
         total = self._count_text(encoding, self.system_prompt)
+        total += self._count_text(encoding, self.task_card)
         for msg in self.messages:
             total += self._count_text(encoding, msg.content or "")
             for tc in msg.tool_calls:
                 total += self._count_text(encoding, str(tc.arguments))
-                if tc.result:
-                    total += self._count_text(encoding, tc.result)
         return total
 
     def get_token_breakdown(self, model_max_tokens: int) -> dict:

@@ -113,6 +113,7 @@ def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
             for m in conv.messages
         ],
         "system_prompt": conv.system_prompt,
+        "task_card": conv.task_card if isinstance(getattr(conv, "task_card", ""), str) else "",
         "total_tokens": conv.total_tokens,
         "total_cost": conv.total_cost,
         "step_count": conv.step_count,
@@ -135,15 +136,19 @@ def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
     except OSError:
         pass  # non-POSIX filesystem
     # SP4A: sessions-table metadata upsert — the store-mode loader reads
-    # agent_name/model/provider back for the HIGH-3 api_key re-resolution
-    # (and Conversation reconstruction) once the JSON file is renamed away.
+    # agent_name/model/provider/task_card back for the HIGH-3 api_key
+    # re-resolution (and Conversation reconstruction) once the JSON file
+    # is renamed away. task_card is not a turn row, so without this column
+    # a store-only load always rebuilds the card as "".
     # Best-effort like every other store touch: JSON is already on disk.
     try:
+        card = conv.task_card if isinstance(getattr(conv, "task_card", ""), str) else ""
         _get_store().set_session_meta(
             session_key,
             agent_name=conv.agent_name,
             model=conv.model,
             provider=getattr(conv, "provider", None),
+            task_card=card,
         )
     except Exception:
         logger.warning(
@@ -383,6 +388,7 @@ def _conversation_from_data(data: dict) -> "Conversation":
         model=data.get("model", ""),
         provider=data.get("provider"),  # HIGH-3: stored so we can re-resolve api_key
         system_prompt="",
+        task_card=data.get("task_card", "") if isinstance(data.get("task_card", ""), str) else "",
         messages=messages,
         total_tokens=data.get("total_tokens", 0),
         total_cost=data.get("total_cost", 0.0),
@@ -808,17 +814,19 @@ def migrate_conversations_to_store(
                         # every seq the file holds.
                         # SP4A: metadata BEFORE the rename — once the file is
                         # gone, the sessions table is the only agent_name/
-                        # model/provider source for store-mode load. A meta
-                        # failure does NOT block the rename (the sweep's
+                        # model/provider/task_card source for store-mode load.
+                        # A meta failure does NOT block the rename (the sweep's
                         # verdict is coverage-based): the loader rebuilds
                         # with empty metadata and HIGH-3 resolves None —
                         # logged, never silent.
                         try:
+                            raw_card = data.get("task_card", "")
                             store.set_session_meta(
                                 sk,
                                 agent_name=str(data.get("agent_name", "")),
                                 model=str(data.get("model", "")),
                                 provider=data.get("provider"),
+                                task_card=raw_card if isinstance(raw_card, str) else "",
                             )
                         except Exception:  # meta is advisory, never blocks rename
                             logger.warning(

@@ -329,32 +329,15 @@ class TestGetCurrentTask:
 
 
 class TestContextReadCap:
-    """SPEC-CONTEXT-MD-SYSTEM-FIX §3.4 — read cap increased from 3000 to 8000."""
+    """SPEC-24: PROJECT_MEMORY is the live fact board, not the diary paste."""
 
-    def test_read_cap_8000_allows_content_beyond_old_3000_limit(self, tmp_path):
-        """PROJECT_MEMORY includes content beyond the old 3000-char limit (up to 8000)."""
+    def test_project_memory_is_not_the_diary(self, tmp_path):
         init_project_config(str(tmp_path), "p")
-        # 5000 chars — would be truncated under the old 3000 cap, fits under 8000
-        marker_start = "MARKER_START_"
-        content = marker_start + ("x" * 5000)
-        save_project_context(str(tmp_path), content)
+        save_project_context(str(tmp_path), "## 2026-10-11 — Diary only\nDIARY_MARKER_UNIQUE\n")
         d = build_awareness_dict(str(tmp_path))
-        # The marker near the start is always present; the point is no truncation
-        # message appears because 5000 < 8000
-        assert marker_start in d["PROJECT_MEMORY"]
-        assert "[... context memory truncated ...]" not in d["PROJECT_MEMORY"]
-
-    def test_read_cap_8000_truncates_above_limit(self, tmp_path):
-        """Truncation boundary is exactly CONTEXT_READ_CAP chars (BUG #9 from re-audit)."""
-        init_project_config(str(tmp_path), "p")
-        # Exactly at cap — no truncation
-        save_project_context(str(tmp_path), "x" * CONTEXT_READ_CAP)
-        d = build_awareness_dict(str(tmp_path))
-        assert "[... context memory truncated ...]" not in d["PROJECT_MEMORY"]
-        # One over cap — truncation message present
-        save_project_context(str(tmp_path), "x" * (CONTEXT_READ_CAP + 1))
-        d = build_awareness_dict(str(tmp_path))
-        assert "[... context memory truncated ...]" in d["PROJECT_MEMORY"]
+        assert "DIARY_MARKER_UNIQUE" not in d["PROJECT_MEMORY"]
+        assert d["PROJECT_MEMORY"] == ""
+        assert "Diary only" in d["CURRENT_TASK"]
 
 
 # ═══════════════════════════════════════════════════════════════════

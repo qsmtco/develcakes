@@ -105,8 +105,6 @@ def test_breakdown_matches_independent_count_and_is_cached(monkeypatch):
         conv_t += len(enc.encode_ordinary(msg.content or ""))
         for tc in msg.tool_calls:
             conv_t += len(enc.encode_ordinary(str(tc.arguments)))
-            if tc.result:
-                conv_t += len(enc.encode_ordinary(tc.result))
     assert bd["system_prompt_tokens"] == sys_t
     assert bd["conversation_tokens"] == conv_t
     assert bd["total_used_tokens"] == sys_t + conv_t
@@ -128,6 +126,32 @@ def test_breakdown_matches_independent_count_and_is_cached(monkeypatch):
     calls.clear()
     conv.get_token_breakdown(128_000)
     assert calls == []
+
+
+def test_tool_call_result_is_not_double_counted(monkeypatch):
+    """The tool message is the only copy. tc.result must not add tokens."""
+    body = "Z" * 4_000
+
+    def _build(result, model):
+        conv = Conversation(agent_name="Coder", model=model)
+        tc = ToolCall(
+            call_id="c1",
+            tool_name="read_file",
+            arguments={"path": "a.py"},
+            result=result,
+        )
+        conv.add_assistant_message("ok", [tc])
+        conv.add_tool_result("c1", body)
+        return conv
+
+    # Tiktoken path.
+    assert _build(body, "gpt-4o").get_token_estimate() == _build(None, "gpt-4o").get_token_estimate()
+    # chars // 4 path. A leftover `if tc.result` here would add 1000 tokens.
+    monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
+    with_dup = _build(body, "").get_token_estimate()
+    without = _build(None, "").get_token_estimate()
+    assert with_dup == without
+    assert without >= len(body) // 4
 
 
 def test_model_switch_does_not_reuse_counts(monkeypatch):

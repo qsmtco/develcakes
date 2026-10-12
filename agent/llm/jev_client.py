@@ -20,7 +20,7 @@ headroom) and never blocks the turn longer than that.
 Wire format (pinned from docs.typesafe.ai/api, fetched 2026-10-10):
     POST {base_url}/v1/systemone
     Authorization: Bearer <key>
-    {"model": <card.default_model or "jev-latest">,
+    {"model": <card.default_model>,
      "state": "<the failure detail + status>",
      "questions": {"failure_class": {"type": "choice", "instructions": ...,
                                        "criteria": {...five classes...}}}}
@@ -48,10 +48,10 @@ DECISION_MODEL_PROVIDER = "DecisionModel"
 
 # SPEC-22 §2.4: the hard latency budget. JEV publishes 70–500 ms; the
 # requirements file's JEV rule says fail open within 2–3 s. 2.0 s is the cap.
-_JEV_TIMEOUT_S = 2.0
+_DECISION_TIMEOUT_S = 2.0
 
 # Below this confidence the answer is noise — treat as "could not classify".
-_JEV_MIN_CONFIDENCE = 0.6
+_DECISION_MIN_CONFIDENCE = 0.6
 
 # Log the outage once per process, not per call (spec edge-case table).
 _logged_outage = False
@@ -105,50 +105,39 @@ def _outage(reason: str) -> None:
     global _logged_outage
     if not _logged_outage:
         _logged_outage = True
-        _logger.warning("JEV classifier unavailable (%s) — using deterministic floor", reason)
+        _logger.warning("Decision model unavailable (%s)", reason)
 
 
-def classify_unknown(
-    detail: str, status_code: int | None = None
-) -> FailureClass | None:
-    """Return a FailureClass from JEV, or None when JEV cannot answer.
+def post_decision(state: str, questions: dict) -> tuple[dict | None, str]:
+    """POST state + questions to the Decision Model card.
 
-    Fail-open floor: no card / keyless card / any call failure / low
-    confidence / shape drift → None (the caller's heuristic takes over).
-    Never raises. Never blocks longer than _JEV_TIMEOUT_S.
+    Returns ``(answers, error)``. ``error`` is ``""`` on success.
+    ``answers`` is None whenever ``error`` is non-empty.
+    Never raises. Never inserts a model slug. The ``model`` field is
+    ``card.default_model.strip()`` exactly. Endpoint is
+    ``base_url.rstrip("/") + "/v1/systemone"``. Timeout is 2.0 seconds.
+    An empty ``default_model`` returns before any socket is opened.
     """
+    if not isinstance(state, str) or not isinstance(questions, dict):
+        return None, "decision model unavailable"
     card = load_decision_card()
     if card is None:
-        return None  # not configured — silent, not an outage
+        return None, "decision model unavailable"
     base_url = (getattr(card, "base_url", "") or "").strip()
     api_key = (getattr(card, "api_key", "") or "").strip()
+    model = (getattr(card, "default_model", "") or "").strip()
+    if not model:
+        _outage("default_model is required")
+        return None, "default_model is required"
     if not base_url or not api_key:
         _outage("DecisionModel card present but keyless or without base_url")
-        return None
-
-    from agent.llm.failure_classifier import FailureClass
-
-    endpoint = base_url.rstrip("/") + "/v1/systemone"
-    model = (getattr(card, "default_model", "") or "").strip() or "jev-latest"
-    state = (
-        f"status_code={status_code if status_code is not None else 'none'}\n"
-        f"error_detail={(detail or '')[:1000]}"
-    )
-    body = {
-        "model": model,
-        "state": state,
-        "questions": {
-            "failure_class": {
-                "type": "choice",
-                "instructions": _INSTRUCTIONS,
-                "criteria": dict(_CRITERIA),
-            }
-        },
-    }
+        return None, "decision model unavailable"
 
     import urllib.error
     import urllib.request
 
+    endpoint = base_url.rstrip("/") + "/v1/systemone"
+    body = {"model": model, "state": state, "questions": questions}
     req = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode("utf-8"),
@@ -159,14 +148,46 @@ def classify_unknown(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=_JEV_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=_DECISION_TIMEOUT_S) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        _outage(f"HTTP {exc.code}")
+        return None, f"HTTP {exc.code}"
     except Exception as exc:  # noqa: BLE001 — fail-open is the whole contract
-        _outage(f"{type(exc).__name__}")
-        return None
+        _outage(type(exc).__name__)
+        return None, "decision model unavailable"
+    if not isinstance(payload, dict) or not isinstance(payload.get("answers"), dict):
+        _outage("missing answers")
+        return None, "decision model unavailable"
+    return payload["answers"], ""
 
+
+def classify_unknown(
+    detail: str, status_code: int | None = None
+) -> FailureClass | None:
+    """Return a FailureClass from the Decision Model, or None when it cannot answer.
+
+    Fail-open floor: no card / keyless card / empty model / any call failure /
+    low confidence / shape drift → None. Never raises.
+    """
+    from agent.llm.failure_classifier import FailureClass
+
+    state = (
+        f"status_code={status_code if status_code is not None else 'none'}\n"
+        f"error_detail={(detail or '')[:1000]}"
+    )
+    questions = {
+        "failure_class": {
+            "type": "choice",
+            "instructions": _INSTRUCTIONS,
+            "criteria": dict(_CRITERIA),
+        }
+    }
+    answers, _error = post_decision(state, questions)
+    if answers is None:
+        return None
     try:
-        answer = payload["answers"]["failure_class"]
+        answer = answers["failure_class"]
         if answer.get("type") != "choice":
             _outage("non-choice answer")
             return None
@@ -175,13 +196,12 @@ def classify_unknown(
         if not isinstance(choice, str) or choice not in _VALID_JEV_CLASSES:
             _outage(f"invalid choice {choice!r}")
             return None
-        if not isinstance(confidence, (int, float)) or confidence < _JEV_MIN_CONFIDENCE:
-            _outage(f"confidence {confidence} below {_JEV_MIN_CONFIDENCE}")
+        if not isinstance(confidence, (int, float)) or confidence < _DECISION_MIN_CONFIDENCE:
+            _outage(f"confidence {confidence} below {_DECISION_MIN_CONFIDENCE}")
             return None
     except (KeyError, TypeError, AttributeError) as exc:
         _outage(f"shape drift: {type(exc).__name__}")
         return None
-
     return FailureClass(choice)
 
 
@@ -218,57 +238,42 @@ def probe_decision_model(provider: object, timeout: float = 4.0):
     # failure is exactly when latency_ms must not raise — BUG: the original
     # assigned elapsed only on the success path, so every failing probe raised
     # UnboundLocalError and hid the real provider error).
+    model = (getattr(provider, "default_model", "") or "").strip()
+    if not model:
+        return TestResult(ok=False, latency_ms=0, error="default_model is required",
+                          model_used=label)
     started = time.monotonic()
     elapsed = 0
-    card = provider
-    endpoint = base_url.rstrip("/") + "/v1/systemone"
-    model = (getattr(card, "default_model", "") or "").strip() or "jev-latest"
-    body = {
-        "model": model,
-        "state": "HTTP 429: rate limit exceeded, retry after 30 seconds",
-        "questions": {
+    answers, error = post_decision(
+        "HTTP 429: rate limit exceeded, retry after 30 seconds",
+        {
             "probe": {
                 "type": "choice",
                 "instructions": _INSTRUCTIONS,
                 "criteria": dict(_CRITERIA),
             }
         },
-    }
-    import urllib.error
-    import urllib.request
-
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
     )
+    elapsed = int((time.monotonic() - started) * 1000)
+    if answers is None:
+        return TestResult(
+            ok=False, latency_ms=elapsed,
+            error=error or "decision model unavailable",
+            model_used=label,
+        )
     try:
-        with urllib.request.urlopen(req, timeout=max(timeout, _JEV_TIMEOUT_S)) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-        elapsed = int((time.monotonic() - started) * 1000)
-        answer = payload["answers"]["probe"]
+        answer = answers["probe"]
         choice = answer["choice"]
         conf = answer.get("confidence", 0)
         return TestResult(
             ok=True,
             latency_ms=elapsed,
             error=None,
-            model_used=f"{label}: classified a canned 429 as {choice} (confidence {conf:.2f})",
+            model_used=f"{label}: classified a canned 429 as {choice} (confidence {float(conf):.2f})",
         )
-    except urllib.error.HTTPError as http_err:
-        detail = ""
-        try:
-            detail = http_err.read().decode("utf-8", errors="replace")[:200]
-        except Exception:  # body read is best-effort context
-            _logger.debug("probe could not read error body", exc_info=True)
-        return TestResult(ok=False, latency_ms=elapsed,
-                          error=f"HTTP {http_err.code}: {detail}",
-                          model_used=label)
-    except Exception as exc:  # noqa: BLE001 — the probe's payload is the failure
-        return TestResult(ok=False, latency_ms=elapsed,
-                          error=f"{type(exc).__name__}: {exc}",
-                          model_used=label)
+    except (KeyError, TypeError, ValueError) as exc:
+        return TestResult(
+            ok=False, latency_ms=elapsed,
+            error=f"decision model unavailable: {exc}",
+            model_used=label,
+        )

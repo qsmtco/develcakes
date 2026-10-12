@@ -21,6 +21,8 @@ dependencies = [
     # ui/handlers/agent_runtime_handler.py:1264,1295; ui/views/agent_builder.py:637).
     # NOT the removed R5 KB stack. Floor = venv-probed version.
     "mcp>=2.2.0",         # utils/mcp_config.py + utils/mcp_client.py
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
 ]
 
 [project.scripts]

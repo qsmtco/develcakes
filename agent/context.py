@@ -490,11 +490,9 @@ def resolve_context_mode(
         # Negative/zero window → unknown, use balanced default
         return "hybrid"
     window = model_max_tokens or 128_000
-    if window >= 500_000:
-        return "preload"   # large window — convenience wins
     if window <= 32_000:
         return "jit"       # small window — every token counts
-    return "hybrid"        # typical 128K–256K — balanced
+    return "hybrid"        # 128K and larger — index plus core-file stubs
 
 
 def build_file_index(
@@ -662,7 +660,7 @@ def build_file_context_with_core_files(
     Mode behavior:
     - "preload" (default): existing behavior — full file context + core files
     - "jit": replace base context with file index; do NOT include core files
-    - "hybrid": core files + file index (replacing base file context)
+    - "hybrid": one stub line per existing core file + file index (no file bodies)
 
     All other behavior (gitignore, .crabcakes/ docs, CB-5 core file
     preservation) is unchanged.
@@ -705,19 +703,21 @@ def build_file_context_with_core_files(
         # JIT: index only, no core files
         return file_index
 
-    # hybrid: core files + index
+    # hybrid: one stub line per existing core file, then the index.
+    # File bodies are not inlined; the model calls read_file for a window.
     core_sections = []
     for core_file in CORE_FILES:
         core_path = os.path.join(project_path, core_file)
-        content = _read_file_safe(core_path)
-        if content:
-            core_sections.append(f"## {core_file}\n\n{content}\n")
-        elif os.path.isfile(core_path):
+        if not os.path.isfile(core_path):
+            continue
+        try:
             size = os.path.getsize(core_path)
-            core_sections.append(
-                f"## {core_file}\n\n[{size // 1024}KB — too large for inline; "
-                f'use read_file("{core_file}") to read in full]\n'
-            )
+        except OSError:
+            continue
+        core_sections.append(
+            f"## {core_file}\n"
+            f"[{size} bytes \u2014 use read_file(\"{core_file}\") to read a window]\n"
+        )
     if not core_sections:
         return file_index
     return "\n".join(core_sections) + "\n\n" + file_index

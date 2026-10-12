@@ -1817,10 +1817,13 @@ the final fallback when `tiktoken` is unavailable.
 Requires `tiktoken>=0.7` (MIT-licensed, ~2MB).
 
 **Token estimate caching (Phase CB-5).** `get_token_estimate()` caches its
-tiktoken result, keyed on `(len(messages), hash(system_prompt))`. The cache
-is invalidated on any message add/remove/trim operation. This prevents the
-trim loop from re-encoding the full conversation on every iteration (which
-took ~6s per call for a 100K-char system prompt before the cache).
+tiktoken result, keyed on `(len(messages), hash(system_prompt), hash(task_card))`.
+The cache is invalidated on any message add/remove/trim operation and when
+the task card changes. This prevents the trim loop from re-encoding the full
+conversation on every iteration (which took ~6s per call for a 100K-char
+system prompt before the cache). The count includes each tool body once, on
+the tool message. `ToolCall.result` is an execution record and is cleared
+before the next serialization.
 
 **Rules:** No imports from `ui/`, `agent/`, `gateway/`, `subprocess`.
 
@@ -1831,6 +1834,10 @@ took ~6s per call for a 100K-char system prompt before the cache).
 **Owns:** `AgentConfig`, conversation store, tool loop. Provider adapters, cost functions, SSE helpers, extractors, and converters have been extracted to `agent/llm/` (Phase B1–B6). Tool middleware (enforcement + stuck detection) extracted to `agent/tool_middleware.py` (Phase A1). AuditLog extracted to `agent/audit.py` (Phase 5). Conversation persistence extracted to `agent/persistence.py` (Phase 6). All pure re-export aliases removed (Phase 4 + Phase 8); imports now go directly to the canonical modules.
 
 **Modular extraction (Phase 1 + Phases 4–8 + SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION):** `runtime.py` reduced from 3297 → 2714 lines. Cost re-exports removed (Phase 4). AuditLog extracted to `agent/audit.py` (Phase 5). Persistence extracted to `agent/persistence.py` (Phase 6). Pure re-export aliases removed (Phase 8). LLM dispatch uses `get_provider(caller_key).call()` / `.stream()`. Tool execution routes through `self._tool_chain.run()`. `_PROVIDER_CALLERS` retained for validation taxonomy (values are now direct provider lookups, not bound-method aliases). `_PROVIDER_STREAMERS` and the `_call_*` / `_stream_*_events` aliases **removed** (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 — superseded by registry dispatch in Phase B6). Per-turn state machine added: `TurnStatus` enum (5 states), `TurnResult` dataclass, `_terminate_turn()` chokepoint (all terminal paths funnel through one function), `_state_lock` for atomic state transitions. See post-mortems for all phases.
+
+After an enforced write, the next model call is a compiled list: the system prompt, one user message (goal, live facts, hunk, checks), then messages appended after that write. `conv.messages` is not trimmed by this path.
+
+`agent/llm/jev_client.py` is the Decision Model transport. `post_decision(state, questions)` returns `(answers, error)`. The model and host come from the `DecisionModel` card. There is no baked-in model slug. `agent/repo_map.py` builds a Python definition/reference graph, keeps 30 symbols, reranks them with `post_decision`, and renders at most 2,000 tokens. The runtime attaches that block to the wire user message for the current goal. It is not part of `conv.system_prompt`.
 
 **Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION):** All terminal transitions in `_run_loop` funnel through a single `_terminate_turn(result: TurnResult)` method. The state machine tracks per-turn status: `RUNNING → STREAMING → {COMPLETED | FAILED | CANCELLED}`. State is keyed by `(session_key, turn_token)` tuple (not session_key alone) so cancellation races don't clobber a new turn's state. A dedicated `_state_lock` (separate from `self._lock`) protects the compound read-decide-write operation — the GIL does NOT make this atomic. `_terminate_turn` deduplicates terminal transitions (at most one accepted terminal per turn) and rejects stale-token results (a result whose turn_token doesn't match the session's active token). `_check_and_stop_on_limit` is now a pure predicate returning `tuple[str, str] | None` (was: side-effecting with an undefined `turn_token` NameError). Public accessors `get_turn_state(sk)` and `get_last_turn_result(sk)` provide observability.
 
@@ -2033,11 +2040,10 @@ def _read_crabcakes_docs(project_path) -> str               # §4.4a — always 
 def load_custom_system_prompt(project_path) -> str | None  # .crabcakes/agent-system-prompt.md → AGENTS.md → None
 ```
 
-**Context discovery (P10).** `resolve_context_mode()` resolves `"auto"` to one
-of `"preload"`, `"hybrid"`, or `"jit"` based on `model_max_tokens`:
-- `≥ 500,000` → `"preload"` (large window — full context)
-- `≤ 32,000` → `"jit"` (small window — index only)
-- Otherwise → `"hybrid"` (core files + index)
+**Context discovery (P10).** `resolve_context_mode()` resolves `"auto"` to
+`"jit"` when `model_max_tokens` is `≤ 32,000`, and `"hybrid"` otherwise.
+`auto` does not return `"preload"`. Explicit `"preload"` still returns
+`"preload"` and still inlines file bodies.
 Negative/zero `model_max_tokens` defaults to `"hybrid"`. Input is normalized
 via `validate_provider_context_mode()` (case-insensitive, whitespace stripped).
 
@@ -2049,7 +2055,11 @@ for large projects.
 `build_file_context_with_core_files()` gains a `context_mode` parameter:
 - `"preload"` — full file context + core files (existing behavior)
 - `"jit"` — file index only, no core files
-- `"hybrid"` — core files + file index
+- `"hybrid"` — one stub line per existing core file (`[N bytes — use read_file(...)]`) plus `build_file_index`. It does not inline file bodies.
+
+Observation masking keeps the last three tool messages and replaces older
+ones in batches of four tool results. The session `task_card` is prefixed
+onto the last user message at serialization time and is not a new message.
 
 Oversized core files (>50KB) get a size placeholder with `read_file()` hint
 instead of being silently dropped.
@@ -3286,8 +3296,10 @@ class CrabWatchHandler:
 **Responsibility:** Manages the `.crabcakes/` directory per project. Reads/writes project metadata, team membership, workflow state, git context, and awareness documents. Pure Python — no GTK, no network. This is the authoritative source for project context; `utils/projects.py` deprecated its membership functions in favor of this module.
 
 **Manifest:**
-- Reads: `.crabcakes/*` (project.md, team.json, context.md, awareness.json, workflow.md)
+- Reads: `.crabcakes/*` (project.md, team.json, context.md, facts.json, awareness.json, workflow.md)
 - Writes: `.crabcakes/*` (same files)
+
+`facts.json` is one-line evidence scoped to a git sha, the files it names, and the session that recorded it. Live facts (those whose files still match that sha) are what `PROJECT_MEMORY` carries, inside the untrusted fence. `context.md` remains the diary and still supplies `CURRENT_TASK`. A git error while checking a fact keeps the fact.
 
 **Public API:**
 ```python

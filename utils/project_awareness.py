@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -54,6 +55,9 @@ MANIFEST_FILENAME = "project.md"
 TEAM_FILENAME = "team.json"
 AWARENESS_FILENAME = "awareness.json"
 CONTEXT_FILENAME = "context.md"
+FACTS_FILENAME = "facts.json"
+_FACTS_LOCK = threading.Lock()
+_FACTS_MAX = 50
 
 MAX_CONTEXT_SIZE = 50 * 1024  # 50 KB cap for context.md (write side)
 CONTEXT_READ_CAP = 8000       # Max chars injected into agent prompts (read side)
@@ -721,6 +725,139 @@ def append_project_context(project_path: str, entry: str) -> None:
     save_project_context(project_path, "\n\n".join(entries))
 
 
+def _facts_path(project_path: str) -> str:
+    return os.path.join(project_path, CRABCAKES_DIR_NAME, FACTS_FILENAME)
+
+
+def load_facts(project_path: str) -> list[dict]:
+    """Read facts.json. Missing, unreadable, or malformed files return []."""
+    if not isinstance(project_path, str) or not project_path:
+        return []
+    path = _facts_path(project_path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        _logger.warning("load_facts: %s: %s", path, exc)
+        return []
+    if not isinstance(data, list):
+        return []
+    kept: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        files = item.get("files")
+        sha = item.get("sha")
+        if not isinstance(text, str) or not isinstance(sha, str):
+            continue
+        if not isinstance(files, list) or not all(isinstance(p, str) for p in files):
+            continue
+        kept.append(item)
+    return kept
+
+
+def load_live_facts(project_path: str) -> list[dict]:
+    """Facts whose files still match the stored sha. A git error keeps the fact."""
+    facts = load_facts(project_path)
+    if not facts:
+        return []
+    try:
+        from utils.git_ops import diff_file_against_working_tree, status_porcelain
+        porcelain = status_porcelain(project_path)
+    except Exception as exc:
+        _logger.warning("load_live_facts: git unavailable, keeping facts: %s", exc)
+        return facts
+    if not isinstance(porcelain, dict):
+        porcelain = {}
+    live: list[dict] = []
+    for fact in facts:
+        drop = False
+        for rel in fact["files"]:
+            try:
+                diff = diff_file_against_working_tree(project_path, fact["sha"], rel)
+            except Exception as exc:
+                _logger.warning("load_live_facts: diff failed for %s: %s", rel, exc)
+                continue
+            if not getattr(diff, "success", False):
+                continue
+            if (getattr(diff, "stdout", "") or "").strip():
+                drop = True
+                break
+            if rel in porcelain:
+                drop = True
+                break
+        if not drop:
+            live.append(fact)
+    return live
+
+
+def record_fact(
+    project_path: str,
+    text: str,
+    files: list[str],
+    sha: str,
+    session_key: str,
+) -> None:
+    """Append one fact under the process lock. OSError is logged and not raised."""
+    if not isinstance(text, str) or not isinstance(sha, str) or not isinstance(files, list):
+        return
+    text = text.replace("\n", " ").strip()
+    if not text or not sha.strip() or not files:
+        return
+    if not all(isinstance(p, str) and p for p in files):
+        return
+    files = [p.replace("\\", "/") for p in files]
+    row = {
+        "text": text,
+        "files": files,
+        "sha": sha,
+        "session_key": session_key if isinstance(session_key, str) else "",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    try:
+        with _FACTS_LOCK:
+            facts = load_facts(project_path)
+            facts.append(row)
+            if len(facts) > _FACTS_MAX:
+                facts = facts[-_FACTS_MAX:]
+            _ensure_crabcakes_dir(project_path)
+            path = _facts_path(project_path)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(facts, f, indent=2)
+    except OSError as exc:
+        _logger.error("record_fact: failed at %s: %s", project_path, exc)
+
+
+def record_enforcement_fact(
+    project_path: str,
+    session_key: str,
+    path: str,
+    checks: list,
+) -> None:
+    """One sha-scoped line for an enforced write. A missing HEAD writes nothing."""
+    if not isinstance(path, str) or not path or not checks:
+        return
+    parts: list[str] = []
+    for check in checks:
+        tier = getattr(check, "tier", "")
+        passed = getattr(check, "passed", False)
+        parts.append(f"{tier} {'passed' if passed else 'failed'}")
+    line = f"{path}: " + ", ".join(parts)
+    try:
+        from utils.git_ops import get_head_sha
+        result = get_head_sha(project_path or "")
+    except Exception as exc:
+        _logger.warning("record_enforcement_fact: head sha failed: %s", exc)
+        return
+    if not getattr(result, "success", False) or not getattr(result, "sha", None):
+        _logger.info("record_enforcement_fact: no HEAD sha for %r; fact not written", project_path)
+        return
+    record_fact(project_path or "", line, [path], result.sha, session_key)
+
+
 def get_current_task(project_path: str) -> str:
     """Extract the most recent dated entry heading from context.md.
 
@@ -1045,7 +1182,15 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         # with different content invalidate the cache (filesystem mtime is
         # typically 1-second granularity). See FIX audit BUG #2 + BUG #8.
         _ctx_for_fp = load_project_context(project_path)
-        _content_fp = hashlib.sha1(_ctx_for_fp.encode("utf-8", errors="replace")).hexdigest()
+        _facts_for_fp = b""
+        try:
+            with open(_facts_path(project_path), "rb") as _facts_file:
+                _facts_for_fp = _facts_file.read()
+        except OSError:
+            _facts_for_fp = b""
+        _content_fp = hashlib.sha1(
+            _ctx_for_fp.encode("utf-8", errors="replace") + b"\0" + _facts_for_fp
+        ).hexdigest()
         if cached and cached[0] >= mtime and cached[2] == _content_fp:
             return cached[1]
 
@@ -1100,14 +1245,15 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         state = state[:CURRENT_STATE_MAX_CHARS] + "\n[... current state truncated ...]"
     parts["CURRENT_STATE"] = state
 
-    # Project memory
-    context = load_project_context(project_path)
-    if context.strip():
-        # HIGH-5: wrap in untrusted-data fence to mitigate prompt injection
-        context_wrapped = _untrusted_fence(context[:CONTEXT_READ_CAP], "context.md")
-        if len(context) > CONTEXT_READ_CAP:
-            context_wrapped += "\n[... context memory truncated ...]"
-        parts["PROJECT_MEMORY"] = context_wrapped
+    # Project memory is the live fact board, or empty. context.md stays the
+    # diary and still supplies CURRENT_TASK. It is not pasted here.
+    live = load_live_facts(project_path)
+    if live:
+        lines = [f["text"] for f in live[-30:] if isinstance(f.get("text"), str)]
+        blob = "\n".join(lines)
+        if len(blob) > 4000:
+            blob = blob[-4000:]
+        parts["PROJECT_MEMORY"] = _untrusted_fence(blob, "facts.json")
     else:
         parts["PROJECT_MEMORY"] = ""
 

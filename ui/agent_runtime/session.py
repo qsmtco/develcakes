@@ -79,10 +79,15 @@ class RuntimeSessionMixin:
                 conv.step_count = 0
                 conv.total_tokens = 0
                 conv.total_cost = 0.0
-                # _token_estimate_cache is keyed on (len(messages), hash(system_prompt))
+                # _token_estimate_cache is keyed on
+                # (len(messages), hash(system_prompt), hash(task_card))
                 # — messages are now empty, so the cache MUST be invalidated
                 # or the next trim pass will read a stale value.
+                conv.task_card = ""
                 conv._token_estimate_cache = None
+                rt.drop_read_cache(session_key)
+                rt.drop_compile(session_key)
+                rt.drop_repo_map(session_key)
             except Exception as exc:
                 _mod().logger.error(
                     "clear_conversation: in-place reset failed for %s: %s",

@@ -52,8 +52,9 @@ memory/
 # from the KB content. Same KB → same embeddings (byte-identical).
 .crabcakes/feed.json
 
-# Local debug scratch (audit probes, measurement scripts) — kept on disk, out of git
+# Local debug scratch (audit probes, measurement slow tests) — kept on disk, out of git
 .debug/
 scratch/
+.audit/
 .crabcakes/feed-updates.jsonl
 .worktrees/

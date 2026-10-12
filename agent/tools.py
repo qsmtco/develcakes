@@ -51,6 +51,9 @@ class ToolResult:
     stdout: str = ""              # raw stdout from exec_command
     stderr: str = ""              # raw stderr from exec_command
     exit_code: int | None = None   # raw exit code from exec_command
+    # In-process only. to_dict does not emit this. The middleware copies
+    # EnforcementCheck objects here after a successful write.
+    enforcement_checks: list = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -236,8 +239,18 @@ def cancel_all_processes(session_key: str | None = None) -> tuple[int, int]:
 # ── Path sandbox ───────────────────────────────────────────────────────────────
 
 MAX_READ_SIZE = 50 * 1024       # 50 KB
+MAX_READ_LINES = 2000
+MAX_LIST_ENTRIES = 400
 MAX_WRITE_SIZE = 2 * 1024 * 1024  # 2 MB
 MAX_EXEC_OUTPUT = 100 * 1024     # 100 KB
+# Conversation cap for exec/search/list/mcp output. Process capture stays
+# at MAX_EXEC_OUTPUT (100KB) so test_exec_output_truncation_intact holds.
+CONV_OUTPUT_CAP = 16 * 1024
+CONV_OUTPUT_HEAD = 2 * 1024
+CONV_OUTPUT_TAIL = 8 * 1024
+# read_file already returns a byte/line window whose continuation offset
+# must survive. Head/tail bounding would hide offset=.
+_ALREADY_WINDOWED = frozenset({"read_file"})
 
 # Hardcoded blocklist — always denied even with approval.
 # Commands matching these patterns (substring match) are rejected before
@@ -377,16 +390,38 @@ def _read_file(path: str, project_path: str, offset: int | None = None, limit: i
             return ToolResult(success=False, error=f"Binary file (not readable as text): {path}")
 
         # Read with optional offset/limit using binary mode
-        # (to correctly handle byte offsets in UTF-8 multi-byte files)
+        # (to correctly handle byte offsets in UTF-8 multi-byte files).
+        # offset/limit stay byte offsets. A caller limit smaller than the
+        # cap is honored with no notice. A larger limit is clamped. An
+        # omitted limit uses the cap. A line window is an extra cut inside
+        # that byte window.
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
+            return ToolResult(success=False, error="limit must be an integer >= 0")
+        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
+            return ToolResult(success=False, error="offset must be an integer")
+        if limit is not None and limit < 0:
+            return ToolResult(success=False, error="limit must be >= 0")
+        start = 0 if offset is None else offset
+        # A caller-supplied limit smaller than the cap is honored with no notice.
+        # A larger limit is clamped. An omitted limit uses the cap.
+        clamped = limit is not None and limit > MAX_READ_SIZE
+        stopped_by_us = limit is None or clamped
+        cap = MAX_READ_SIZE if limit is None else min(limit, MAX_READ_SIZE)
         with open(resolved, "rb") as f:
-            if offset is not None:
-                f.seek(offset)
-            raw = f.read(limit)
+            f.seek(start)
+            raw = f.read(cap)
         content = raw.decode("utf-8", errors="replace")
-
-        if len(content) >= MAX_READ_SIZE:
-            content += f"\n[... truncated at {MAX_READ_SIZE} bytes ...]"
-
+        lines = content.splitlines(keepends=True)
+        cut_lines = len(lines) > MAX_READ_LINES
+        if cut_lines:
+            content = "".join(lines[:MAX_READ_LINES])
+        hit_byte_cap = len(raw) == cap and (start + len(raw)) < size
+        if (hit_byte_cap or cut_lines) and stopped_by_us:
+            next_offset = start + len(raw) if not cut_lines else start + len(content.encode("utf-8"))
+            content += (
+                f"\n[... truncated at {len(content)} bytes; "
+                f"file is {size} bytes; continue with offset={next_offset} ...]"
+            )
         return ToolResult(success=True, output=content)
 
     except PermissionError:
@@ -395,6 +430,15 @@ def _read_file(path: str, project_path: str, offset: int | None = None, limit: i
         return ToolResult(success=False, error=f"File is not valid UTF-8: {path}")
     except OSError as e:
         return ToolResult(success=False, error=f"Cannot read {path}: {e}")
+
+
+def _is_context_md(path: str, project_path: str) -> bool:
+    """True when path resolves to this project's .crabcakes/context.md."""
+    resolved = _resolve_project_path(path, project_path)
+    if resolved is None or not project_path:
+        return False
+    expected = os.path.realpath(os.path.join(project_path, ".crabcakes", "context.md"))
+    return resolved == expected
 
 
 def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
@@ -415,6 +459,23 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
                     f"PM approval is required before writing to this file."
                 ),
             )
+
+    if _is_context_md(path, project_path):
+        if isinstance(content, str) and content.lstrip().startswith("## "):
+            from utils.project_awareness import append_project_context, load_project_context
+            append_project_context(project_path, content.strip())
+            loaded = load_project_context(project_path)
+            heading = content.lstrip().splitlines()[0].strip()
+            if heading not in loaded:
+                return ToolResult(success=False, error="context.md append did not persist")
+            return ToolResult(
+                success=True,
+                output="OK — appended an entry to .crabcakes/context.md",
+            )
+        return ToolResult(
+            success=False,
+            error="context.md is append-only. write_file a single ## entry. The file was not changed.",
+        )
 
     # Create parent directories if needed
     parent = os.path.dirname(resolved)
@@ -447,6 +508,12 @@ def _edit_file(path: str, old_text: str, new_text: str, project_path: str, sessi
     resolved = _resolve_project_path(path, project_path)
     if resolved is None:
         return ToolResult(success=False, error=f"Path escapes project sandbox: {path}")
+
+    if _is_context_md(path, project_path):
+        return ToolResult(
+            success=False,
+            error="context.md is append-only. write_file a single ## entry. The file was not changed.",
+        )
 
     # HIGH-1: Sensitive-path guard — require PM approval before editing
     if is_sensitive_path(path):
@@ -659,12 +726,27 @@ def _list_files(path: str, project_path: str, recursive: bool = False) -> ToolRe
         return ToolResult(success=False, error=f"Not a directory: {path}")
 
     try:
-        lines = []
+        lines: list[str] = []
+        notice = f"[... truncated at {MAX_LIST_ENTRIES} entries ...]"
+
+        def _at_cap() -> bool:
+            # Checked before the next append so a directory of exactly
+            # MAX_LIST_ENTRIES files is not labeled truncated.
+            if len(lines) >= MAX_LIST_ENTRIES:
+                lines.append(notice)
+                return True
+            return False
+
         if recursive:
+            capped = False
             for root, dirs, files in os.walk(resolved):
                 # Skip common noise directories
                 dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".pytest_cache")]
                 for name in sorted(files):
+                    if _at_cap():
+                        dirs[:] = []
+                        capped = True
+                        break
                     full = os.path.join(root, name)
                     try:
                         size = os.path.getsize(full)
@@ -672,8 +754,12 @@ def _list_files(path: str, project_path: str, recursive: bool = False) -> ToolRe
                         lines.append(f"{rel}  {size}")
                     except OSError:
                         lines.append(f"{name}  [cannot stat]")
+                if capped:
+                    break
         else:
             for name in sorted(os.listdir(resolved)):
+                if _at_cap():
+                    break
                 full = os.path.join(resolved, name)
                 try:
                     size = os.path.getsize(full) if os.path.isfile(full) else 0
@@ -1054,15 +1140,16 @@ def _register_tools() -> None:
             name="write_file",
             description=(
                 "Write content to a file in the project directory.\n\n"
-                "WHEN TO USE: To create new files, or rewrite an entire file after\n"
-                "reading it first. Always read a file before overwriting it.\n\n"
+                "WHEN TO USE: To create new files, or a full rewrite you already have in hand.\n\n"
                 "WHEN NOT TO USE: For running commands (use exec_command).\n"
-                "For reading files (use read_file).\n\n"
+                "For reading files (use read_file). For changing part of an existing file\n"
+                "(use edit_file).\n\n"
                 "BEHAVIOR: Creates parent directories if needed. Overwrites existing\n"
                 "files entirely — there is no partial edit. Max 2MB.\n"
                 "All paths are sandboxed to the project directory.\n\n"
-                "IMPORTANT: This replaces the ENTIRE file. Always read_file first,\n"
-                "then write back the full content with your changes applied."
+                "To change part of an existing file, use edit_file. write_file replaces "
+                "the entire file and is for new files or a full rewrite you already have "
+                "in hand. read_file returns a window, not the whole file."
             ),
             parameters={
                 "type": "object",
@@ -1087,15 +1174,15 @@ def _register_tools() -> None:
                 "WHEN TO USE: To change a specific section of a file without rewriting\n"
                 "the whole thing. Use when you know the exact text surrounding the change.\n\n"
                 "WHEN NOT TO USE: For creating new files (use write_file).\n"
-                "For large rewrites where the surrounding context is complex (use write_file\n"
-                "after reading the full file).\n\n"
+                "For a full rewrite you already have in hand (use write_file).\n"
+                "read_file returns a window, not the whole file.\n\n"
                 "BEHAVIOR: Finds old_text exactly in the file (no regex, no fuzzy matching).\n"
                 "Replaces only the first unique occurrence. Must be unique in the file\n"
                 "or the edit is rejected. All paths are sandboxed to the project directory.\n\n"
                 "IMPORTANT: Both old_text and new_text are matched literally.\n"
                 "Copy the exact surrounding context (including whitespace and newlines)\n"
                 "to ensure the match succeeds. Use write_file if the text is not unique\n"
-                "or you need a full file rewrite.\n\n"
+                "or you already have a full rewrite in hand.\n\n"
                 "COMMON PATTERNS:\n"
                 "- Change a function body: include the def line so context is unique\n"
                 "- Add a new import: include adjacent imports so the match is unique\n"
@@ -1360,6 +1447,31 @@ _register_tools()
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+def bound_tool_output(result: ToolResult, name: str = "") -> ToolResult:
+    """Head/tail a model-facing output that exceeds CONV_OUTPUT_CAP.
+
+    stdout, stderr, error, and exit_code are left alone so exec_command's
+    100KB process-capture contract stays on those fields. read_file is
+    already a byte window; bounding it would hide the continuation offset.
+    """
+    if not isinstance(result, ToolResult):
+        raise ValueError(f"result must be a ToolResult, got {type(result).__name__}")
+    if not isinstance(name, str):
+        raise ValueError(f"name must be a str, got {type(name).__name__}")
+    if name in _ALREADY_WINDOWED:
+        return result
+    output = result.output
+    if not isinstance(output, str) or len(output) <= CONV_OUTPUT_CAP:
+        return result
+    omitted = len(output) - CONV_OUTPUT_HEAD - CONV_OUTPUT_TAIL
+    bounded = (
+        output[:CONV_OUTPUT_HEAD]
+        + f"\n[... {omitted} chars omitted ...]\n"
+        + output[-CONV_OUTPUT_TAIL:]
+    )
+    return dataclasses.replace(result, output=bounded)
+
+
 def get_all_tools() -> list[ToolDefinition]:
     """Return all available tool definitions."""
     return [defn for defn, _ in _TOOLS.values()]
@@ -1461,11 +1573,14 @@ def execute_tool(
                 except Exception as e:
                     return ToolResult(success=False, error=f"Failed to connect to MCP server '{server_name}': {e}")
             mcp_result = mcp_call_tool(server_name, tool_name, arguments, conv_key)
-            return ToolResult(
-                success=mcp_result.success,
-                output=mcp_result.output,
-                error=mcp_result.error,
-                duration_ms=mcp_result.duration_ms,
+            return bound_tool_output(
+                ToolResult(
+                    success=mcp_result.success,
+                    output=mcp_result.output,
+                    error=mcp_result.error,
+                    duration_ms=mcp_result.duration_ms,
+                ),
+                name,
             )
         except Exception as e:
             return ToolResult(success=False, error=f"MCP client error: {e}")
@@ -1489,7 +1604,7 @@ def execute_tool(
         duration_ms = int((time.monotonic() - start) * 1000)
         if result.duration_ms == 0:
             result = dataclasses.replace(result, duration_ms=duration_ms)
-        return result
+        return bound_tool_output(result, name)
 
     except TypeError as e:
         # Missing or unexpected argument

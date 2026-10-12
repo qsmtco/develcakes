@@ -21,6 +21,7 @@ Public API:
 
 from __future__ import annotations
 
+import contextvars
 import http.client
 import json
 import logging
@@ -32,7 +33,9 @@ import time
 import urllib.error
 import urllib.request
 from collections import namedtuple
-from typing import IO, Iterator, cast
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import IO, cast
 from urllib.parse import urlsplit
 
 from utils.config import get_env
@@ -157,6 +160,39 @@ RETRYABLE_OSERROR_TYPES: tuple[type[Exception], ...] = (
 
 MAX_SSL_RETRIES = 3
 SSL_RETRY_BASE_MS = 500
+
+# Chain walks set this to 0 so one policy attempt is one socket wait.
+# Unset means the historical MAX_SSL_RETRIES budget.
+_SSL_RETRY_BUDGET: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "develcakes_ssl_retry_budget",
+    default=None,
+)
+
+
+@contextmanager
+def ssl_retry_budget(max_retries: int):
+    """Limit SSL/stream retries for provider calls on this thread.
+
+    The failover chain passes 0. A call outside the context keeps
+    MAX_SSL_RETRIES. The token is reset on the way out, including when
+    the provider call raises.
+    """
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+        raise ValueError(f"ssl retry budget must be a non-negative int, got {max_retries!r}")
+    token = _SSL_RETRY_BUDGET.set(max_retries)
+    try:
+        yield
+    finally:
+        _SSL_RETRY_BUDGET.reset(token)
+
+
+def _ssl_retry_limit(explicit: int | None) -> int:
+    if explicit is not None:
+        return explicit
+    bound = _SSL_RETRY_BUDGET.get()
+    if bound is None:
+        return MAX_SSL_RETRIES
+    return bound
 
 # SPEC-21 SP3: per-host keep-alive. Default OFF (DEVELCAKES_HTTP_KEEPALIVE=1
 # to enable). Idle connections only — a request checks a socket out of the
@@ -565,7 +601,7 @@ def friendly_error_message(exc: Exception) -> str:
     return str(exc)
 
 
-def urlopen_with_ssl_retry(req, timeout, *, max_retries=MAX_SSL_RETRIES):
+def urlopen_with_ssl_retry(req, timeout, *, max_retries=None):
     """Like urllib.request.urlopen but retries on transient SSL/DNS errors.
 
     Three except clauses trigger a retry attempt (membership decided by
@@ -602,6 +638,7 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=MAX_SSL_RETRIES):
     See docs/specs/SPEC-SSL-RETRY-FIX.md Layer 1 and
     docs/specs/SPEC-DNS-RETRY-1.md for the design.
     """
+    max_retries = _ssl_retry_limit(max_retries)
     last_exc = None
     for attempt in range(max_retries + 1):
         try:
@@ -658,7 +695,7 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=MAX_SSL_RETRIES):
 def stream_with_ssl_retry(
     streamer,
     *,
-    max_retries: int = MAX_SSL_RETRIES,
+    max_retries: int | None = None,
     **kwargs,
 ):
     """Wrap an SSE-event generator and retry the entire stream on transient
@@ -695,6 +732,7 @@ def stream_with_ssl_retry(
 
     See docs/specs/SPEC-SSL-RETRY-FIX.md Layer 2 for the design.
     """
+    max_retries = _ssl_retry_limit(max_retries)
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         streamed_text = False

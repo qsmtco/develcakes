@@ -73,10 +73,11 @@ class TestResolveContextMode:
         assert resolve_context_mode("jit", 1_000_000) == "jit"
         assert resolve_context_mode("hybrid", 1_000_000) == "hybrid"
 
-    def test_resolve_context_mode_large_window_preload(self):
-        """Large window (>=500K) resolves to preload."""
-        assert resolve_context_mode("auto", 1_000_000) == "preload"
-        assert resolve_context_mode("auto", 500_000) == "preload"
+    def test_resolve_context_mode_large_window_is_hybrid(self):
+        """auto never selects preload. Explicit preload still inlines."""
+        assert resolve_context_mode("auto", 1_000_000) == "hybrid"
+        assert resolve_context_mode("auto", 500_000) == "hybrid"
+        assert resolve_context_mode("preload", 1_000_000) == "preload"
 
     def test_resolve_context_mode_small_window_jit(self):
         """Small window (<=32K) resolves to jit."""
@@ -213,16 +214,18 @@ class TestBuildFileContextModes:
             assert "File index" in result
             assert "# Test Project" not in result  # no file contents
 
-    def test_build_file_context_hybrid_mode_includes_core_files(self):
-        """Hybrid mode has core files + index."""
+    def test_build_file_context_hybrid_mode_stubs_core_files(self):
+        """Hybrid mode is a stub line per core file plus the index. No body."""
         with tempfile.TemporaryDirectory() as proj:
+            body = "# Hybrid Test\n"
             with open(os.path.join(proj, "README.md"), 'w') as f:
-                f.write("# Hybrid Test\n")
+                f.write(body)
             with open(os.path.join(proj, "app.py"), 'w') as f:
                 f.write("pass\n")
             result = build_file_context_with_core_files(proj, context_mode="hybrid")
-            assert "# Hybrid Test" in result  # core file content
-            assert "File index" in result     # index present
+            assert body not in result
+            assert 'use read_file("README.md")' in result
+            assert "File index" in result
 
     def test_build_file_context_jit_mode_omits_core_files(self):
         """JIT mode does NOT include README/AGENTS/etc."""
@@ -429,8 +432,8 @@ class TestComposeSystemPromptContextMode:
             assert len(jit) < len(preload), \
                 "JIT (%d) should be < preload (%d)" % (len(jit), len(preload))
 
-    def test_compose_prompt_hybrid_mode_includes_core_files(self):
-        """Core files present in hybrid mode."""
+    def test_compose_prompt_hybrid_mode_stubs_core_files(self):
+        """Hybrid prompt names the core file and does not paste its body."""
         with tempfile.TemporaryDirectory() as proj:
             with open(os.path.join(proj, "README.md"), 'w') as f:
                 f.write("# Hybrid Project\n")
@@ -439,7 +442,8 @@ class TestComposeSystemPromptContextMode:
                 project_path=proj, model_max_tokens=128000,
                 context_mode="hybrid",
             )
-            assert "Hybrid Project" in prompt
+            assert "# Hybrid Project" not in prompt
+            assert 'use read_file("README.md")' in prompt
             assert "File index" in prompt
 
     def test_compose_prompt_accepts_auto_mode(self):
@@ -578,7 +582,7 @@ class TestPerSessionContextMode:
         mode_large = resolve_context_mode("auto", 500_000)
         assert mode_small != mode_large
         assert mode_small == "jit"
-        assert mode_large == "preload"
+        assert mode_large == "hybrid"
 
     def test_runtime_context_mode_fixed_for_session(self):
         """Context mode is resolved once at conversation creation, not per-turn."""

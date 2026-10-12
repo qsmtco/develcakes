@@ -107,6 +107,24 @@ class TestEnforcementMiddleware:
         check_fn.assert_called_once()
         assert "[enforcement:syntax] ✅ OK" in result.output
 
+    def test_attaches_checks_and_keeps_appended_message(self):
+        from agent.enforcement import EnforcementCheck, EnforcementResult
+        check = EnforcementCheck(
+            tier="syntax",
+            tool="edit_file",
+            file="a.py",
+            passed=False,
+            detail="syntax failed",
+            output="SyntaxError: bad",
+            duration_ms=3,
+        )
+        enf = EnforcementResult(checks=[check], appended_message="SYNTAX FAILED")
+        mw = EnforcementMiddleware(MagicMock(return_value=enf))
+        ctx = _make_context(enforcement_config=MagicMock(enabled=True))
+        result = mw("edit_file", {"path": "a.py"}, ctx, _ok_executor)
+        assert result.enforcement_checks == [check]
+        assert result.output == "done\nSYNTAX FAILED"
+
     def test_skips_when_globally_disabled(self):
         """enforcement_config=None skips enforcement."""
         check_fn = MagicMock()

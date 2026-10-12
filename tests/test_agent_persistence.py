@@ -654,6 +654,33 @@ class TestStoreModeLoad:
         assert reloaded is not None
         assert reloaded[0].api_key == "sk-from-providers"
 
+    def test_store_mode_load_keeps_task_card(self, tmp_path, monkeypatch):
+        """task_card lives in the JSON body and on the sessions row.
+
+        Rename the JSON away (the SP3 sweep) and the store-only load must
+        still return the card. A missing or non-string card stays "".
+        """
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        store = TranscriptStore(db_path=str(tmp_path / "t.db"))
+        monkeypatch.setattr(persistence, "_store_override", store)
+
+        card = "read a.py offset=0\nedit_file b.py"
+        conv = self._make_conv(task_card=card)
+        save_conversation_to_disk(conv, "special:coder")
+        json_path = os.path.join(str(tmp_path), "conversations", "special:coder.json")
+        os.rename(json_path, json_path + ".migrated")
+
+        result = load_conversation_from_disk("special:coder")
+        assert result is not None
+        loaded, meta = result
+        assert loaded.task_card == card
+        assert meta["task_card"] == card
+
+        store.set_session_meta("special:coder", task_card="")
+        cleared = load_conversation_from_disk("special:coder")
+        assert cleared is not None
+        assert cleared[0].task_card == ""
+
     def test_store_path_timestamps_are_naive(self, tmp_path, monkeypatch):
         """BUG#2 (SP4A fix round): the store's _TS_NOW ends in 'Z' →
         fromisoformat yields tz-AWARE — but Message.timestamp's convention

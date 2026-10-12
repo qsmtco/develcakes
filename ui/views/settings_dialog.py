@@ -763,12 +763,12 @@ class SettingsDialog:
         intro.set_wrap(True)
         intro.add_css_class("dim-label")
         intro.set_text(
-            "The Decision Model (JEV) is an optional classifier the failure "
-            "lifecycle consults for unclassifiable provider errors. Its name is "
+            "The Decision Model is an optional service. Its name is "
             "fixed — the code looks it up structurally — but the endpoint, key, "
-            "and model are yours. Point it at any compatible service. With no "
-            "card (or no key), JEV features degrade to the deterministic floor "
-            "and the rest of the app is unaffected."
+            "and model are yours. Point it at any compatible service. The failure "
+            "classifier and the repo-map reranker both use this card, and either "
+            "one falls back to its non-network behavior when the card is missing "
+            "or the call fails. The rest of the app is unaffected."
         )
         page.append(intro)
 
