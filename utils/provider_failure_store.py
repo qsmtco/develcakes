@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 
-from agent.llm.failure_classifier import ProviderFailure, sanitize_detail
+from agent.llm.failure_classifier import FailureClass, ProviderFailure, sanitize_detail
 
 _logger = logging.getLogger(__name__)
 
@@ -40,13 +40,40 @@ def record(failure: ProviderFailure) -> None:
 def recent(limit: int = 20, session_key: str | None = None) -> list[ProviderFailure]:
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
         limit = 20
-    with _lock:
-        items = list(_events)
-    if session_key is not None:
-        items = [item for item in items if item.session_key == session_key]
     if limit == 0:
         return []
-    return items[-limit:]
+    with _lock:
+        items = list(_events)
+    if items:
+        # Warm path: the in-memory deque is authoritative.
+        if session_key is not None:
+            items = [item for item in items if item.session_key == session_key]
+        return items[-limit:]
+    # Cold path (SPEC-26): after a restart the deque is empty but
+    # audit-log.jsonl is the durable record. Fall back to its tail so
+    # recent() is not silently empty while durable records exist.
+    rehydrated: list[ProviderFailure] = []
+    for rec in _tail_audit_records():
+        if rec.get("kind") != "provider_failure":
+            continue
+        ts = rec.get("timestamp")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            continue
+        sc = rec.get("status_code")
+        rehydrated.append(ProviderFailure(
+            session_key=str(rec.get("session_key") or ""),
+            provider=str(rec.get("provider") or ""),
+            model=str(rec.get("model") or ""),
+            failure_class=_coerce_failure_class(rec.get("failure_class")),
+            status_code=sc if isinstance(sc, int) and not isinstance(sc, bool) else None,
+            detail=sanitize_detail(str(rec.get("detail") or "")),
+            stage=str(rec.get("stage") or ""),
+            attempt=_coerce_attempt(rec.get("attempt")),
+            timestamp=float(ts),
+        ))
+    if session_key is not None:
+        rehydrated = [item for item in rehydrated if item.session_key == session_key]
+    return rehydrated[-limit:]
 
 
 def summary() -> dict:
@@ -136,6 +163,44 @@ def _tail_audit_records(max_lines: int = _CAP) -> list[dict]:
     except Exception:
         _logger.exception("provider failure audit tail read failed")
         return []
+
+
+# Note: a live FailureClass member degrades to UNKNOWN here because
+# str(FailureClass.X) is "FailureClass.X" in Py3.12 — that path is unreachable
+# via JSON, so don't "fix" it.
+def _coerce_failure_class(value: object) -> FailureClass:
+    """Map an on-disk failure_class back to a FailureClass member.
+
+    Audit logs can carry class values written by older or newer builds, so an
+    unrecognized value must not raise: the cold path degrades to UNKNOWN, the
+    same fallback failure_classifier uses whenever a class can't be resolved.
+    """
+    try:
+        return FailureClass(str(value or "unknown"))
+    except ValueError:
+        return FailureClass.UNKNOWN
+
+
+def _coerce_attempt(value: object) -> int:
+    """attempt is display-only on the rehydration path: ProviderFailure.attempt
+    is written to the audit log verbatim and rehydrated verbatim; the only
+    control-flow consumer of an attempt value is failure_policy.decide(), whose
+    attempt parameter is supplied by runtime.py's chain-local counter and is
+    never read from ProviderFailure. Negative values are preserved verbatim for
+    fidelity. Non-integral on-disk values degrade to 0, never raise.
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else 0
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return 0
+    return 0
 
 
 def _append_audit(failure: ProviderFailure) -> None:

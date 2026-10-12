@@ -206,12 +206,18 @@ class TestStore:
 
     def test_summary_falls_back_to_audit_log_when_cold(self, tmp_config_dir):
         """SPEC-22 fix-round BUG #7: after a restart the deque is empty, but
-        summary() must reflect fresh audit-log.jsonl events (cold-cache)."""
+        summary() must reflect fresh audit-log.jsonl events (cold-cache).
+
+        Note: SPEC-26 also gives recent() a cold path, so the post-restart
+        recent() now rehydrates from the audit log instead of returning [].
+        """
         fresh = _failure(FailureClass.PERMANENT_AUTH)
         fresh.timestamp = time.time()
         record(fresh)  # writes both the deque AND the audit line
         reset_for_tests()  # simulate restart — deque cold, file warm
-        assert recent() == []
+        # SPEC-26: recent() now rehydrates from the audit log post-restart
+        assert len(recent()) == 1
+        assert recent()[0].failure_class == FailureClass.PERMANENT_AUTH
         summed = summary()
         assert summed["last_24h"] == 1
         assert summed["by_class"] == {"permanent_auth": 1}
@@ -227,6 +233,279 @@ class TestStore:
         record(old)
         reset_for_tests()
         assert summary()["last_24h"] == 0
+
+    # ----------------------------------------------------------------
+    # SPEC-26 RECENT-COLD-PATH — recent() must fall back to audit log.
+    # ----------------------------------------------------------------
+
+    def test_recent_rehydrates_from_audit_log_after_restart(self, tmp_config_dir):
+        """After a restart the deque is empty, but recent() must reflect
+        fresh audit-log.jsonl events (SPEC-26 cold path)."""
+        fresh = _failure(FailureClass.PERMANENT_AUTH)
+        fresh.timestamp = time.time()
+        record(fresh)  # writes both deque AND audit line
+        reset_for_tests()  # simulate restart — deque cold, file warm
+        out = recent()
+        assert len(out) == 1
+        item = out[0]
+        assert item.session_key == fresh.session_key
+        assert item.provider == fresh.provider
+        assert item.model == fresh.model
+        assert item.failure_class == fresh.failure_class
+        assert item.status_code == fresh.status_code
+        assert item.detail == fresh.detail
+        assert item.stage == fresh.stage
+        assert item.attempt == fresh.attempt
+        assert item.timestamp == fresh.timestamp
+
+    def test_recent_warm_path_unchanged_after_record(self, tmp_config_dir):
+        """record() populates the deque; recent() must read deque (warm path)
+        — same behavior as before SPEC-26."""
+        a = _failure(FailureClass.TRANSIENT)
+        a.timestamp = 100.0
+        a.session_key = "alpha"
+        b = _failure(FailureClass.PERMANENT_AUTH)
+        b.timestamp = 200.0
+        b.session_key = "beta"
+        record(a)
+        record(b)
+        out = recent()
+        # warm path = deque order (chronological insert order, not audit file)
+        assert out == [a, b]
+        # both arg shapes still work
+        assert recent(10) == [a, b]
+        assert recent(limit=10) == [a, b]
+        assert recent(limit=10, session_key="alpha") == [a]
+        assert recent(limit=10, session_key="beta") == [b]
+        # legacy positional form used by agent/tools.py:1418
+        assert recent(10, "alpha") == [a]
+
+    def test_recent_session_key_filter_on_cold_path(self, tmp_config_dir):
+        """session_key filter must work on the cold path (rehydrated records)
+        in addition to the warm path."""
+        a = _failure(FailureClass.TRANSIENT)
+        a.session_key = "alpha"
+        a.timestamp = time.time()
+        b = _failure(FailureClass.PERMANENT_AUTH)
+        b.session_key = "beta"
+        b.timestamp = time.time()
+        record(a)
+        record(b)
+        reset_for_tests()  # deque cold
+
+        # cold path, positional
+        only_alpha = recent(50, "alpha")
+        assert len(only_alpha) == 1
+        assert only_alpha[0].session_key == "alpha"
+        # cold path, keyword
+        only_beta = recent(session_key="beta")
+        assert len(only_beta) == 1
+        assert only_beta[0].session_key == "beta"
+        # cold path, mismatch
+        assert recent(session_key="nope") == []
+
+    def test_recent_limit_includes_zero(self, tmp_config_dir):
+        """limit==0 must return [] on both warm and cold paths."""
+        record(_failure(FailureClass.TRANSIENT))
+        assert recent(0) == []
+        reset_for_tests()  # cold path
+        assert recent(0) == []
+
+        # and a normal limit still works on the cold path
+        for i in range(5):
+            item = _failure(FailureClass.TRANSIENT, provider=f"p{i}")
+            item.timestamp = time.time()
+            record(item)
+        reset_for_tests()
+        last3 = recent(3)
+        assert len(last3) == 3
+        # "last 3 in file order" = final 3 records written
+        assert [x.provider for x in last3] == ["p2", "p3", "p4"]
+
+    def test_recent_corrupt_tail_lines_skipped(self, tmp_config_dir):
+        """Malformed lines in the audit tail must not raise; valid
+        provider_failure records are still returned."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        valid_a = _failure(FailureClass.PERMANENT_AUTH)
+        valid_a.timestamp = time.time()
+        valid_b = _failure(FailureClass.TRANSIENT)
+        valid_b.timestamp = time.time()
+        # deque is empty (setup_method reset); write to audit file directly.
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('not json at all\n')
+            handle.write('{"kind": "unrelated", "timestamp": 1.0}\n')
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": valid_a.timestamp,
+                "session_key": valid_a.session_key,
+                "provider": valid_a.provider,
+                "model": valid_a.model,
+                "failure_class": "permanent_auth",
+                "status_code": valid_a.status_code,
+                "detail": valid_a.detail,
+                "stage": valid_a.stage,
+                "attempt": valid_a.attempt,
+            }) + "\n")
+            handle.write('{"kind": "provider_failure", "timestamp": "oops"}\n')
+            handle.write('{"kind": "provider_failure", "timestamp": null}\n')
+            handle.write('{"kind": "provider_failure", "timestamp": true}\n')
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": valid_b.timestamp,
+                "session_key": valid_b.session_key,
+                "provider": valid_b.provider,
+                "model": valid_b.model,
+                "failure_class": "transient",
+                "status_code": valid_b.status_code,
+                "detail": valid_b.detail,
+                "stage": valid_b.stage,
+                "attempt": valid_b.attempt,
+            }) + "\n")
+            handle.write('{"kind": "provider_failure"}\n')  # missing timestamp
+            handle.write('{}\n')  # all fields missing
+        out = recent(20)
+        # only the two valid records should be rehydrated
+        assert len(out) == 2
+        assert out[0].session_key == valid_a.session_key
+        assert out[1].session_key == valid_b.session_key
+        assert out[0].failure_class == FailureClass.PERMANENT_AUTH
+        assert out[1].failure_class == FailureClass.TRANSIENT
+
+    def test_recent_unknown_failure_class_on_cold_path_does_not_raise(self, tmp_config_dir):
+        """A valid-JSON provider_failure line carrying a failure_class value
+        written by an older build must NOT raise in the cold path; it degrades
+        to FailureClass.UNKNOWN (SPEC-26 BUG #1)."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        now = time.time()
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": now,
+                "session_key": "special:coder",
+                "provider": "OpenRouter",
+                "model": "openrouter/demo",
+                "failure_class": "galactic_drift",
+                "status_code": 500,
+                "detail": "detail",
+                "stage": "request",
+                "attempt": 1,
+            }) + "\n")
+        out = recent()  # must not raise
+        assert len(out) == 1
+        assert out[0].failure_class == FailureClass.UNKNOWN
+        # the rest of the record still round-trips
+        assert out[0].session_key == "special:coder"
+        assert out[0].provider == "OpenRouter"
+
+    def test_recent_cold_path_survives_non_numeric_attempt(self, tmp_config_dir):
+        """A non-numeric attempt on disk must NOT raise in the cold path; it
+        degrades to 0 while the surrounding record still rehydrates
+        (SPEC-26 BUG #2)."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        now = time.time()
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": now,
+                "session_key": "special:coder",
+                "provider": "OpenRouter",
+                "model": "openrouter/demo",
+                "failure_class": "transient",
+                "status_code": 502,
+                "detail": "detail",
+                "stage": "request",
+                "attempt": "abc",
+            }) + "\n")
+        out = recent()  # must not raise
+        assert len(out) == 1
+        # hostile attempt degrades, does not propagate
+        assert out[0].attempt == 0
+        # every other field still rehydrates intact
+        assert out[0].session_key == "special:coder"
+        assert out[0].provider == "OpenRouter"
+        assert out[0].model == "openrouter/demo"
+        assert out[0].failure_class == FailureClass.TRANSIENT
+        assert out[0].status_code == 502
+        assert out[0].stage == "request"
+        assert out[0].timestamp == now
+
+    def test_recent_cold_path_status_code_bool_rejected(self, tmp_config_dir):
+        """status_code==true must degrade to None (bool is not an int status
+        code), and a timestamp==true line must be skipped entirely rather than
+        rehydrated as 1.0 (SPEC-26 BUG #3)."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        now = time.time()
+        with open(path, "w", encoding="utf-8") as handle:
+            # valid timestamp, hostile bool status_code -> kept, status_code None
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": now,
+                "session_key": "special:coder",
+                "provider": "OpenRouter",
+                "model": "openrouter/demo",
+                "failure_class": "transient",
+                "status_code": True,
+                "detail": "detail",
+                "stage": "request",
+                "attempt": 1,
+            }) + "\n")
+            # hostile bool timestamp -> whole record skipped
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": True,
+                "session_key": "special:debugger",
+                "provider": "OpenRouter",
+                "model": "openrouter/demo",
+                "failure_class": "transient",
+                "status_code": 500,
+                "detail": "detail",
+                "stage": "request",
+                "attempt": 1,
+            }) + "\n")
+        out = recent()  # must not raise
+        # the timestamp-bool line is dropped, not coerced
+        assert len(out) == 1
+        assert out[0].session_key == "special:coder"
+        assert out[0].status_code is None
+        # the rest of the surviving record still round-trips
+        assert out[0].provider == "OpenRouter"
+        assert out[0].failure_class == FailureClass.TRANSIENT
+        assert out[0].stage == "request"
+        assert out[0].attempt == 1
+        assert out[0].timestamp == now
+
+    def test_recent_cold_path_negative_attempt_preserved(self, tmp_config_dir):
+        """A negative attempt is preserved verbatim on the cold path — it is
+        display-only for fidelity and must never be clamped to 0."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        now = time.time()
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "kind": "provider_failure",
+                "timestamp": now,
+                "session_key": "special:coder",
+                "provider": "OpenRouter",
+                "model": "openrouter/demo",
+                "failure_class": "transient",
+                "status_code": 500,
+                "detail": "detail",
+                "stage": "request",
+                "attempt": -3,
+            }) + "\n")
+        out = recent()  # must not raise
+        assert len(out) == 1
+        # preserved verbatim, NOT clamped to 0
+        assert out[0].attempt == -3
+        assert out[0].attempt != 0
+        # surrounding record unaffected
+        assert out[0].session_key == "special:coder"
+        assert out[0].status_code == 500
+        assert out[0].timestamp == now
 
 
 class TestPolicy:
