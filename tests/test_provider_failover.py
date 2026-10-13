@@ -5,8 +5,10 @@ from __future__ import annotations
 import urllib.error
 from types import SimpleNamespace
 
+import logging
+
 from agent.config import AgentConfig, LLMProviderConfig
-from agent.runtime import AgentRuntime
+from agent.runtime import CANCEL_MESSAGE, AgentRuntime, TurnInactive, TurnStatus
 
 
 class _Provider:
@@ -172,7 +174,7 @@ class TestFailoverChain:
         assert rt._conversations["s1"].messages == []
         assert any("retrying on M3" in str(item) for item in markers)
 
-    def test_cancelled_turn_does_not_reissue(self, monkeypatch):
+    def test_superseded_turn_does_not_reissue(self, monkeypatch):
         rt = _runtime(_cfg())
         _conv(rt)
         rt._turn_tokens["s1"] = "other"
@@ -180,10 +182,25 @@ class TestFailoverChain:
         monkeypatch.setattr("agent.runtime._get_provider", lambda _key: provider)
         try:
             rt._call_llm("s1", [{"role": "user", "content": "hi"}], [], turn_token="this")
-            raised = False
-        except RuntimeError:
-            raised = True
-        assert raised
+            raised = None
+        except TurnInactive as exc:
+            raised = exc
+        assert raised is not None and raised.reason == "superseded"
+        assert provider.calls == []
+
+    def test_cancelled_turn_does_not_reissue(self, monkeypatch):
+        rt = _runtime(_cfg())
+        _conv(rt)
+        rt._turn_tokens["s1"] = "this"
+        rt._cancelled_epochs.add("s1")
+        provider = _Provider([_http(401, "unauthorized")])
+        monkeypatch.setattr("agent.runtime._get_provider", lambda _key: provider)
+        try:
+            rt._call_llm("s1", [{"role": "user", "content": "hi"}], [], turn_token="this")
+            raised = None
+        except TurnInactive as exc:
+            raised = exc
+        assert raised is not None and raised.reason == "cancelled"
         assert provider.calls == []
 
     def test_tiny_budget_does_not_retry_the_same_provider(self, monkeypatch):
@@ -237,3 +254,63 @@ class TestFailoverChain:
         rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
         assert seen == [0]
         assert _SSL_RETRY_BUDGET.get() is None
+
+
+def _quiet_loop(tmp_path, llm):
+    """Run one coder turn whose provider call is ``llm``."""
+    cfg = _cfg()
+    cfg.auto_save_conversations = False
+    rt = _runtime(cfg)
+    sk = "special:coder"
+    token = object()
+    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
+    rt._running = True
+    errors = []
+
+    def on_error(session_key, message, _turn_token=None):
+        errors.append(message)
+
+    rt._on_error = on_error
+    rt._call_llm = llm(rt)
+    rt._run_loop(sk, "hello", turn_token=token)
+    return rt, sk, token, errors
+
+
+def test_superseded_turn_stops_without_a_failure(tmp_path, caplog):
+    def llm(rt):
+        def call(session_key, messages, tools, turn_token=None, **kwargs):
+            rt._conversations[session_key].add_assistant_message("", [])
+            rt._turn_tokens[session_key] = object()
+            return AgentRuntime._call_llm(
+                rt, session_key, messages, tools, turn_token,
+            )
+        return call
+
+    with caplog.at_level(logging.ERROR, logger="agent.runtime"):
+        rt, sk, token, errors = _quiet_loop(tmp_path, llm)
+    assert errors == []
+    assert "Error in tool loop" not in caplog.text
+    assert "stale turn_token" not in caplog.text
+    assert rt._turn_state[(sk, token)] == TurnStatus.STREAMING
+    assert (sk, token) not in rt._turn_results
+    last = rt._conversations[sk].messages[-1]
+    assert last.content == ""
+
+
+def test_cancel_during_failover_ends_cancelled(tmp_path, caplog):
+    def llm(rt):
+        def call(session_key, messages, tools, turn_token=None, **kwargs):
+            rt._cancelled_epochs.add(session_key)
+            return AgentRuntime._call_llm(
+                rt, session_key, messages, tools, turn_token,
+            )
+        return call
+
+    with caplog.at_level(logging.ERROR, logger="agent.runtime"):
+        rt, sk, token, errors = _quiet_loop(tmp_path, llm)
+    assert errors == [CANCEL_MESSAGE]
+    assert "Error in tool loop" not in caplog.text
+    assert rt._turn_state[(sk, token)] == TurnStatus.CANCELLED
+    result = rt._turn_results[(sk, token)]
+    assert result.status == TurnStatus.CANCELLED
+    assert result.error == CANCEL_MESSAGE

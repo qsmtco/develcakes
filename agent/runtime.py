@@ -191,6 +191,20 @@ def _log_store_migration_banner(stats: dict) -> None:
 CANCEL_MESSAGE = "Cancelled by user"
 
 
+class TurnInactive(Exception):
+    """This turn must not call the provider.
+
+    ``reason`` is ``"superseded"`` when a newer turn already owns the
+    session, or ``"cancelled"`` when this turn's token is still current
+    and a cancel epoch is armed. The tool loop catches it before the
+    generic failure handler.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class _FailureMessage(str):
     """A provider-error message that rides its ProviderFailure through dispatch.
 
@@ -1892,7 +1906,15 @@ class AgentRuntime:
                     with self._state_lock:
                         if self._turn_state.get((session_key, turn_token)) == TurnStatus.RUNNING:
                             self._turn_state[(session_key, turn_token)] = TurnStatus.STREAMING
-                    response = self._call_llm(session_key, messages, tools, turn_token=turn_token)
+                    try:
+                        response = self._call_llm(
+                            session_key, messages, tools, turn_token=turn_token,
+                        )
+                    except TurnInactive as inactive:
+                        self._exit_inactive_turn(
+                            session_key, turn_token, inactive.reason, iteration,
+                        )
+                        return
 
                     # Extract content and tool calls
                     # Determine provider from conversation model
@@ -2605,8 +2627,9 @@ class AgentRuntime:
         seen_messages = list(messages)
         pending: tuple[BaseException, object] | None = None
         for _step in range(8):
-            if not self._turn_still_active(session_key, turn_token):
-                raise RuntimeError("turn cancelled before provider failover")
+            inactive = self._inactive_turn_reason(session_key, turn_token)
+            if inactive is not None:
+                raise TurnInactive(inactive)
             timeout = self._chain_socket_timeout(budget_started, budget, cap)
             if timeout is None:
                 if pending is None:
@@ -2758,15 +2781,57 @@ class AgentRuntime:
         if wait > 0:
             time.sleep(wait)
 
-    def _turn_still_active(self, session_key: str, turn_token) -> bool:
-        if session_key in getattr(self, "_cancelled_epochs", ()):
-            return False
+    def _exit_inactive_turn(
+        self,
+        session_key: str,
+        turn_token: object,
+        reason: str,
+        iteration: int,
+    ) -> None:
+        """Leave a turn that must not call the provider.
+
+        A replaced token returns without a terminal record: the new turn
+        owns the session, and ``_terminate_turn`` would reject this result.
+        A cancel whose token is still current uses the same CANCELLED
+        result as the checks at the top of the tool loop.
+        """
+        if reason == "superseded":
+            logger.debug(
+                "[tool-loop] sk=%s superseded before provider call; old turn stopped",
+                session_key,
+            )
+            return
+        self._terminate_turn(TurnResult(
+            status=TurnStatus.CANCELLED,
+            session_key=session_key,
+            turn_token=turn_token,
+            error=CANCEL_MESSAGE,
+            metadata={"reason": "user", "iteration": iteration},
+        ))
+
+    def _inactive_turn_reason(self, session_key: str, turn_token) -> str | None:
+        """Why this turn must stop, or None if it should call the provider.
+
+        A replaced token is ``"superseded"`` even when a cancel epoch is
+        also armed: the new turn already cleared or is about to clear that
+        epoch, and a terminal for the old token would be stale. ``"cancelled"``
+        is the epoch while this token is still the active one.
+        """
         tokens = getattr(self, "_turn_tokens", None)
-        if not isinstance(tokens, dict) or session_key not in tokens:
-            return True
-        if turn_token is None:
-            return True
-        return tokens[session_key] is turn_token
+        replaced = (
+            isinstance(tokens, dict)
+            and session_key in tokens
+            and turn_token is not None
+            and tokens[session_key] is not turn_token
+        )
+        if replaced:
+            return "superseded"
+        if session_key in getattr(self, "_cancelled_epochs", ()):
+            return "cancelled"
+        return None
+
+    def _turn_still_active(self, session_key: str, turn_token) -> bool:
+        return self._inactive_turn_reason(session_key, turn_token) is None
 
     def _switch_to_fallback(self, session_key: str) -> str:
         """Point the conversation at the fallback card. Returns the card name, or ''."""
