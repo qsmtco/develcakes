@@ -2257,7 +2257,9 @@ class TestLiveCapAndFlattenPython:
             lid = s.append_live("<b>hi</b><script>leak()</script>")
             s._flatten_live_section(lid, dom=False)
             assert lid not in s._live_sections
-            row = [r for r in s._rows if r.get("live_id") == lid][0]
+            matches = [r for r in s._rows if r.get("live_id") == lid]
+            assert matches, "flatten must leave a rebuildable row for the section"
+            row = matches[0]
             assert "<script" not in row["html"] and "leak()" not in row["html"]
             assert "<b>hi</b>" in row["html"]
         finally:
@@ -2281,6 +2283,291 @@ class TestLiveDocumentBuild:
         assert 'class="live-section"' in doc
         assert 'data-live-id="7"' in doc
         assert 'class="agent-box' not in doc  # not chrome-wrapped
+
+
+class TestLiveSectionIdShim:
+    """SPEC-27: the id shim scopes getElementById lookups to the injecting
+    section so identically-prefixed ids across two live sections cannot bind
+    to the wrong node. The shim is a string constant in chat_surface; the
+    build order is timer shim -> id shim -> bridge init.
+
+    Two layers of assertion:
+      * generation contract - the constants are wired into the built JS in
+        the documented order (cheap; catches removal / renaming / reordering);
+      * behaviour - the shim is EXECUTED in a real JS engine against a
+        faithful DOM host (tests/_live_id_shim_harness.js). This layer is
+        what makes the suite mutation kill-proof; string greps alone survive
+        every behavioural mutant.
+    """
+
+    # ------------------------------------------------------------ helpers
+    @staticmethod
+    def _run_harness(shim, sections, probe, body_children=()):
+        """Execute `shim` in the Node DOM harness; return the probe results.
+
+        `body_children` are appended directly to <body>, i.e. OUTSIDE every
+        live section, so a section-scoped lookup must miss them and fall
+        through to the document-global original.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        import pytest
+
+        node = shutil.which("node")
+        if node is None:  # pragma: no cover - environment guard
+            pytest.skip("node is required to execute the live-section shim")
+        harness = Path(__file__).parent / "_live_id_shim_harness.js"
+        scenario = json.dumps(
+            {
+                "shim": shim,
+                "sections": sections,
+                "probe": probe,
+                "bodyChildren": list(body_children),
+            }
+        )
+        env = dict(os.environ, DC_SCENARIO=scenario)
+        proc = subprocess.run(
+            [node, str(harness)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert proc.returncode == 0, (
+            f"harness exited {proc.returncode}\nstdout={proc.stdout}\n"
+            f"stderr={proc.stderr}"
+        )
+        return json.loads(proc.stdout)
+
+    @staticmethod
+    def _probe_parent_of_target():
+        """Probe: report the id of the SECTION the looked-up node sits in."""
+        return (
+            "var a = document.getElementById('chart');"
+            " if (!a) return 'MISSING';"
+            " return a.parentElement.getAttribute('id');"
+        )
+
+    @staticmethod
+    def _duplicate_chart_sections():
+        # The regression this shim exists to prevent: both sections hold a
+        # node with id="chart"; a document-global lookup returns the first.
+        return [
+            {"id": "live-1",
+             "children": [{"tag": "canvas", "attrs": {"id": "chart"}}]},
+            {"id": "live-2",
+             "children": [{"tag": "canvas", "attrs": {"id": "chart"}}]},
+        ]
+
+    # ------------------------------------------------------------- tests
+    def test_live_id_shim_is_installed(self):
+        from ui.views.chat_surface import (
+            _LIVE_BRIDGE_INIT_JS,
+            _LIVE_ID_SHIM_JS,
+            _LIVE_SHIM_JS,
+            _live_resurrect_js,
+        )
+
+        js = _live_resurrect_js([1, 2])
+        assert _LIVE_ID_SHIM_JS in js, "id shim must be wired into the built JS"
+        assert "getElementById" in _LIVE_ID_SHIM_JS
+        # documented order: timer shim -> id shim -> bridge init
+        assert js.index(_LIVE_SHIM_JS) < js.index(_LIVE_ID_SHIM_JS)
+        assert js.index(_LIVE_ID_SHIM_JS) < js.index(_LIVE_BRIDGE_INIT_JS)
+        # the timer shim keeps its own, independent guard
+        assert "__dcTimersInstalled" in _LIVE_SHIM_JS
+
+    def test_id_shim_is_window_guarded(self):
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        assert "__dcIdShimInstalled" in _LIVE_ID_SHIM_JS
+        # set-once latch: install only when NOT already installed
+        assert "!window.__dcIdShimInstalled" in _LIVE_ID_SHIM_JS
+        # the original is captured once, by reference, OUTSIDE the
+        # replacement - never re-bound inside it (that would recurse)
+        assert "document.getElementById.bind(document)" in _LIVE_ID_SHIM_JS
+
+    def test_id_shim_scopes_lookup_to_section(self):
+        """Two sections, same child id: each section's own script must see
+        its OWN node, not the first one in the document."""
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        out = self._run_harness(
+            _LIVE_ID_SHIM_JS, self._duplicate_chart_sections(),
+            self._probe_parent_of_target(),
+        )
+        assert out["ok"], out
+        # scoped  -> ['live-1', 'live-2'];  leaking -> ['live-1', 'live-1'].
+        # This is what kills the "invert the scoping root to document" mutant.
+        assert out["result"] == ["live-1", "live-2"]
+
+    def test_id_shim_falls_back_to_document(self):
+        """An id that lives only outside any live section, and a genuinely
+        absent id, must still resolve through the document-global original.
+
+        Without the `return _dcOrigGetById(id)` fallback every app-level id
+        lookup issued from inside a live section would come back null.
+        """
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        # A node directly on <body> - outside every live section.
+        outside_sections = [{"id": "live-1", "children": []}]
+        outside = (
+            "var a = document.getElementById('toolbar');"
+            " if (!a) return 'MISSING';"
+            " return a.getAttribute('id');"
+        )
+        out = self._run_harness(
+            _LIVE_ID_SHIM_JS, outside_sections, outside,
+            body_children=[{"tag": "div", "attrs": {"id": "toolbar"}}],
+        )
+        assert out["ok"], out
+        # 'toolbar' sits on <body> -> not in the section -> falls through to
+        # the document original and IS found.
+        assert out["result"] == ["toolbar"]
+
+        # A truly absent id must resolve to null, never throw.
+        absent = (
+            "var a = document.getElementById('nope-not-here');"
+            " return a === null ? 'NULL' : 'FOUND';"
+        )
+        out2 = self._run_harness(_LIVE_ID_SHIM_JS, outside_sections, absent)
+        assert out2["ok"], out2
+        assert out2["result"] == ["NULL"], (
+            "absent id must resolve to null, never throw"
+        )
+
+    def test_id_shim_does_not_recurse(self):
+        """The shim must call the CAPTURED original, never
+        `document.getElementById(...)` by name (that would be the shim
+        itself -> unbounded recursion)."""
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        out = self._run_harness(
+            _LIVE_ID_SHIM_JS,
+            [{"id": "live-1",
+              "children": [{"tag": "div", "attrs": {"id": "a"}}]}],
+            "var a = document.getElementById('a'); return a ? 'FOUND' : 'NULL';",
+        )
+        assert out["ok"], out
+        assert out["result"] == ["FOUND"]
+
+        # Only two call sites may name getElementById: the one-time bind()
+        # capture and the fallback. No self-referential invocation.
+        assert "document.getElementById(id)" not in _LIVE_ID_SHIM_JS
+        assert "return _dcOrigGetById(id);" in _LIVE_ID_SHIM_JS
+
+    def test_backslash_id_resolved_via_attribute_form_without_css_escape(
+            self):
+        """(SPEC-27 F1) An id containing a literal backslash must still be
+        located through the section-scoped querySelector on the manual
+        (no-CSS.escape) attribute-selector path.
+
+        The builder must double the backslash -- `a\\b` must produce the
+        selector text `[id="a\\\\b"]` so the CSS parser decodes it back to
+        `a\\b`. Emitting a single backslash (`[id="a\\b"]`) makes CSS read
+        the escape `\\b` as `b`, the selector matches nothing, and the
+        lookup silently falls through to the document-global original.
+
+        RED-first: fails while the replacement literal yields one
+        backslash; pins the doubled form against regression.
+
+        The id is DUPLICATED across two sections on purpose: with a
+        unique id the mutated (single-backslash) selector misses, the
+        lookup falls through to the document-global original, and that
+        original still finds the only matching node -- masking the bug.
+        With duplicates, section 2 must NOT resolve to section 1's node.
+        """
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        sections = [
+            {"id": "live-1",
+             "children": [{"tag": "div", "attrs": {"id": "dc1\\sec",
+                                                   "data-marker": "primary"}}]},
+            {"id": "live-2",
+             "children": [{"tag": "div", "attrs": {"id": "dc1\\sec",
+                                                   "data-marker": "secondary"}}]},
+        ]
+        # Node's probe context has no CSS global, so the shim must take
+        # the manual attribute-selector path for this lookup.
+        probe = (
+            "var a = document.getElementById('dc1\\\\sec');"
+            " return a ? a.getAttribute('data-marker') : 'MISSING';"
+        )
+        out = self._run_harness(_LIVE_ID_SHIM_JS, sections, probe)
+        assert out["ok"], out
+        assert out["result"] == ["primary", "secondary"], (
+            "backslash-containing ids must resolve section-scoped: each "
+            "section's lookup must find its own node, not section 1's; "
+            "attribute selector must double the backslash"
+        )
+
+    def test_id_shim_async_fallback_is_document_global_known_limitation(self):
+        # ============================================================ #
+        # KNOWN LIMITATION PIN -- NOT A BUG.                            #
+        # Deferred (async) lookups run with document.currentScript ===  #
+        # null, so the id shim's scope context is unavailable and the   #
+        # lookup degrades to a DOCUMENT-GLOBAL query: with duplicate    #
+        # ids across sections, async code always resolves to the first  #
+        # section's node. The scope guarantee is synchronous-only.      #
+        # RED TARGET for the follow-up spec (scheduling-time capture of #
+        # section identity): when that lands, this assertion MUST flip  #
+        # to expect the scheduling section's node instead.              #
+        # ============================================================ #
+        from ui.views.chat_surface import _LIVE_ID_SHIM_JS
+
+        # Deferred continuation: runs after the sync prefix, when the
+        # harness has cleared document.currentScript.
+        async_probe = (
+            "return new Promise(function (resolve) {"
+            "  setTimeout(function () {"
+            "    var el = document.getElementById('chart');"
+            "    resolve(el && el.parentElement"
+            "             ? el.parentElement.getAttribute('id')"
+            "             : 'MISSING');"
+            "  }, 0);"
+            "});"
+        )
+        out = self._run_harness(
+            _LIVE_ID_SHIM_JS,
+            self._duplicate_chart_sections(),
+            async_probe,
+        )
+        assert out["ok"], out
+        # CURRENT behavior (pinned): BOTH sections' async continuations
+        # resolve to the document-global first `#chart` node, which lives
+        # in live-1. Section scoping is silently lost.
+        assert out["result"] == ["live-1", "live-1"], (
+            "async lookups must stay document-global while this is the "
+            f"pinned known limitation; got {out['result']}"
+        )
+
+    def test_existing_shims_unchanged(self):
+        """Adding the id shim must not perturb the pre-existing timer shim
+        or the bridge init: both are still emitted verbatim, once each."""
+        from ui.views.chat_surface import (
+            _LIVE_BRIDGE_INIT_JS,
+            _LIVE_ID_SHIM_JS,
+            _LIVE_SHIM_JS,
+            _live_resurrect_js,
+        )
+
+        js = _live_resurrect_js([1])
+        assert _LIVE_SHIM_JS in js
+        assert _LIVE_BRIDGE_INIT_JS in js
+        assert _LIVE_ID_SHIM_JS in js
+        # independent guards
+        assert "__dcTimersInstalled" in _LIVE_SHIM_JS
+        assert "__dcIdShimInstalled" in _LIVE_ID_SHIM_JS
+        # emitted exactly once - no accidental double-wrap
+        assert js.count(_LIVE_SHIM_JS) == 1
+        assert js.count(_LIVE_ID_SHIM_JS) == 1
+        assert js.count(_LIVE_BRIDGE_INIT_JS) == 1
 
 
 class TestLiveHandlerTierDecision:

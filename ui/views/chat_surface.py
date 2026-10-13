@@ -274,6 +274,57 @@ _LIVE_SHIM_JS = (
     "}"
 )
 
+# SPEC-27: section-scoped getElementById. Live sections share ONE transcript
+# document, so a section script calling document.getElementById('chart')
+# resolves the FIRST matching node in the whole transcript — typically an
+# earlier message's section. The later card renders empty while the earlier one
+# silently becomes controlled by the later script. No error, no warning.
+#
+# This shim scopes the lookup to the section that owns the executing script, so
+# an author-chosen id resolves to the author's own node. Markup and scripts are
+# NOT rewritten (SPEC-27 rejects source-rewriting as a correctness hazard).
+_LIVE_ID_SHIM_JS = (
+    "if (!window.__dcIdShimInstalled) {"
+    "  window.__dcIdShimInstalled = true;"
+    # Bound ONCE, by reference: the shim must call the captured original, never
+    # document.getElementById by name, or it would recurse into itself.
+    "  var _dcOrigGetById = document.getElementById.bind(document);"
+    "  window.__dcOrigGetById = _dcOrigGetById;"
+    "  document.getElementById = function (id) {"
+    # Authority for scoping: the DOM parent of the RUNNING script. The
+    # resurrect loop re-creates each section's <script> and appends it to the
+    # section element, so execution is synchronous and currentScript is live
+    # for the whole call. Never __dcCurrentLive — that is a data-live-id
+    # value, not a selector-safe string, and must stay diagnostics-only.
+    "    var root = null;"
+    "    try {"
+    "      if (document.currentScript"
+    "          && document.currentScript.parentElement) {"
+    "        root = document.currentScript.parentElement;"
+    "      }"
+    "    } catch (e0) { root = null; }"
+    "    if (root) {"
+    "      var esc = null;"
+    "      try { esc = (window.CSS && CSS.escape) ? CSS.escape(id) : id; }"
+    "      catch (e) { esc = id; }"
+    "      var hit = null;"
+    "      try { hit = root.querySelector('#' + esc); } catch (e2) { hit = null; }"
+    "      if (hit) { return hit; }"
+    # Non-CSS-valid ids (leading digits, dots, colons) need the attribute form.
+    "      var attr = null;"
+    "      try {"
+    '        attr = id.replace(/\\\\/g, "\\\\\\\\");'
+    "        hit = root.querySelector('[id=\"' + attr + '\"]');"
+    "      } catch (e3) { hit = null; }"
+    "      if (hit) { return hit; }"
+    "    }"
+    # Fall through to the document-global original: preserves the singleton
+    # transcript lookup and any deliberate cross-section reference.
+    "    return _dcOrigGetById(id);"
+    "  };"
+    "}"
+)
+
 # SPEC-19 SP4: the page-side bridge API, installed ONCE per document (window-
 # guarded, same init slot as the timer shims). `call(method, params)` returns a
 # Promise that resolves ONLY when the native side resolves the call after human
@@ -402,7 +453,7 @@ def _live_ids_js(ids) -> str:
 
 def _live_resurrect_js(ids) -> str:
     return _LIVE_RESURRECT_JS.replace(
-        "__SHIMS__", _LIVE_SHIM_JS + _LIVE_BRIDGE_INIT_JS
+        "__SHIMS__", _LIVE_SHIM_JS + _LIVE_ID_SHIM_JS + _LIVE_BRIDGE_INIT_JS
     ).replace(
         "__IDS__", _live_ids_js(ids)
     )
