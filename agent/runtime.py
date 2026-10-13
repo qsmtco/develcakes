@@ -359,6 +359,19 @@ from agent.llm.streaming import (
 # inside the budget.
 _FAILOVER_ATTEMPT_FLOOR_S = 1.0
 
+# Label prefixed to the repo-map block at every attachment point (normal
+# turns via _prefix_repo_map, SPEC-24 compiled packets via _compiled_messages).
+# Agents reacted to an unlabeled pile of paths and signature lines glued onto
+# the user message, so both places carry this identical explanation and must
+# never drift apart.
+REPO_MAP_HEADER = (
+    "## Repo map\n"
+    "Background for the message below. Each entry is a file path and one "
+    "Python signature, ranked for that message. Open the file if you need "
+    "the body. This is not a task, not an error, and not something to "
+    "mention."
+)
+
 
 # ── Stream functions (moved to provider classes, Phase B6) ──────────────────
 # SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 Edit J:
@@ -3367,7 +3380,10 @@ class AgentRuntime:
                 content = messages[i].get("content") or ""
                 if not isinstance(content, str):
                     content = str(content)
-                messages[i] = {"role": "user", "content": block + "\n\n" + content}
+                messages[i] = {
+                    "role": "user",
+                    "content": REPO_MAP_HEADER + "\n\n" + block + "\n\n" + content,
+                }
                 break
         return messages
 
@@ -3376,7 +3392,7 @@ class AgentRuntime:
         tail = conv.messages[packet["after"]:]
         fact_lines = ""
         if map_block:
-            fact_lines = "## Repo map\n" + map_block + "\n\n"
+            fact_lines = REPO_MAP_HEADER + "\n\n" + map_block + "\n\n"
         project = conv.project_path or ""
         if project:
             try:

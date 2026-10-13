@@ -5,7 +5,7 @@ import json
 from unittest.mock import patch
 
 from agent.repo_map import build_repo_map
-from agent.runtime import AgentRuntime
+from agent.runtime import REPO_MAP_HEADER, AgentRuntime
 from models.conversation import Conversation
 from tests.test_agent_runtime import _make_cfg, _resp
 
@@ -82,7 +82,7 @@ def test_wire_prefixes_the_map_without_touching_system_prompt(tmp_path):
     with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
         wired = rt._messages_for_model(sk, conv, 128_000)
     user = next(m for m in wired if m["role"] == "user")
-    assert user["content"].startswith("MAPBLOCK\n\nfix bar")
+    assert user["content"] == REPO_MAP_HEADER + "\n\nMAPBLOCK\n\nfix bar"
     assert conv.system_prompt == "SYS"
     assert conv.messages[-1].content == "fix bar"
 

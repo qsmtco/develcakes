@@ -1,8 +1,10 @@
 """SPEC-24 Stage A: compiled wire list after an enforced write."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from agent.enforcement import EnforcementCheck
-from agent.runtime import AgentRuntime
+from agent.runtime import REPO_MAP_HEADER, AgentRuntime
 from agent.tools import ToolResult
 from models.conversation import Conversation, ToolCall
 from tests.test_agent_runtime import _make_cfg
@@ -126,6 +128,60 @@ def test_compiled_call_skips_transcript_budget_when_packet_fits(monkeypatch):
     wired = rt._messages_for_model(sk, conv, model_max)
     assert wired[1]["role"] == "user"
     assert "Z" * 100 not in wired[1]["content"]
+
+
+def test_compiled_packet_carries_the_repo_map_label():
+    """SPEC-24 packet labels its map block with the same constant as the
+    normal path, in the same shape. Both attachment points are pinned here
+    and in test_repo_map.py, so the two cannot drift apart."""
+    rt = AgentRuntime(_make_cfg())
+    conv = _conv()
+    sk = "special:compiledmap"
+    rt._conversations[sk] = conv
+    rt._maybe_compile(
+        sk, conv, "edit_file",
+        {"path": "a.py", "old_text": "OLD", "new_text": "NEW"},
+        ToolResult(success=True, enforcement_checks=[_check()]),
+    )
+    conv.add_tool_result("w1", "OK — edited a.py")
+    rt._compile[sk]["after"] = len(conv.messages)
+    with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK") as built:
+        wired = rt._messages_for_model(sk, conv, 128_000)
+    assert built.call_count == 1
+    user = next(m for m in wired if m["role"] == "user")["content"]
+
+    # Goal first, then the labelled block, then the packet sections. The
+    # label is the runtime constant, byte for byte — not a copy in this file.
+    prefix = "fix the parser\n\n" + REPO_MAP_HEADER + "\n\nMAPBLOCK\n\n## Write\n"
+    assert user.startswith(prefix)
+    assert user.index(REPO_MAP_HEADER) < user.index("MAPBLOCK") < user.index("## Write")
+
+    # Same label on the non-compiled attachment point, for the same block.
+    plain = _conv()
+    rt._conversations["special:plainmap"] = plain
+    with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
+        wired_plain = rt._messages_for_model("special:plainmap", plain, 128_000)
+    plain_user = next(m for m in wired_plain if m["role"] == "user")["content"]
+    assert plain_user == REPO_MAP_HEADER + "\n\nMAPBLOCK\n\nfix the parser"
+    assert user[len("fix the parser\n\n"):].startswith(plain_user[: plain_user.rindex("\n\n") + 2])
+    assert REPO_MAP_HEADER in plain_user and REPO_MAP_HEADER in user
+
+    # Negative control: no map block, no label on the packet.
+    conv2 = _conv()
+    sk2 = "special:compilednomap"
+    rt._conversations[sk2] = conv2
+    rt._maybe_compile(
+        sk2, conv2, "edit_file",
+        {"path": "a.py", "old_text": "OLD", "new_text": "NEW"},
+        ToolResult(success=True, enforcement_checks=[_check()]),
+    )
+    conv2.add_tool_result("w1", "OK — edited a.py")
+    rt._compile[sk2]["after"] = len(conv2.messages)
+    with patch("agent.repo_map.build_repo_map", return_value=""):
+        wired2 = rt._messages_for_model(sk2, conv2, 128_000)
+    user2 = next(m for m in wired2 if m["role"] == "user")["content"]
+    assert REPO_MAP_HEADER not in user2
+    assert "MAPBLOCK" not in user2
 
 
 def test_markdown_write_and_failed_edit_do_not_start_compile(tmp_path):
