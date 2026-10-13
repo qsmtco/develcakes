@@ -907,3 +907,121 @@ class TestStartupDecisionCard:
         )])
         found = startup_warnings()
         assert not any("DecisionModel" in item for item in found)
+
+
+class TestAuditTailRecordBound:
+    """SPEC-28: _tail_audit_records() bounds its window by RECORDS, not raw
+    lines, so unrelated audit traffic (agent_call etc.) can no longer evict
+    provider failures out of the cold-read window."""
+
+    def setup_method(self):
+        reset_for_tests()
+
+    def _write_log(self, lines):
+        """Cold idiom: write audit-log.jsonl directly, never via record()."""
+        from utils.config import get_config_dir
+        path = os.path.join(get_config_dir(), "audit-log.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.writelines(json.dumps(line) + "\n" for line in lines)
+        return path
+
+    def _pf(self, provider, timestamp=None):
+        now = time.time()
+        return {
+            "kind": "provider_failure",
+            "timestamp": now if timestamp is None else timestamp,
+            "session_key": "special:default",
+            "provider": provider,
+            "model": "m",
+            "failure_class": "transient",
+            "status_code": None,
+            "detail": "d",
+        }
+
+    def test_cold_read_survives_unrelated_traffic(self, tmp_config_dir):
+        """50 failures interleaved with 150 unrelated lines: all 50 survive
+        the cold read, where a raw-line window would keep only the last ~100
+        lines and lose most failures."""
+        from utils.provider_failure_store import _tail_audit_records
+        rows = []
+        for i in range(50):
+            rows.append(self._pf(f"fail-{i}"))
+            for j in range(3):
+                rows.append({"kind": "agent_call", "tool": f"t{i}-{j}"})
+        self._write_log(rows)
+
+        records = _tail_audit_records()
+        assert len(records) == 50
+        assert [r["provider"] for r in records] == [f"fail-{i}" for i in range(50)]
+
+        # recent() rehydrates the same 50 from the cold log. limit=50 is
+        # required: recent() defaults to limit=20, so the bare call would
+        # return the newest 20 and cap-test the default rather than eviction.
+        rehydrated = recent(limit=50)
+        assert len(rehydrated) == 50
+        assert [f.provider for f in rehydrated] == [f"fail-{i}" for i in range(50)]
+
+    def test_summary_cold_ignores_unrelated_traffic(self, tmp_config_dir):
+        """summary()'s cold path must count all 50 failures, not only those
+        inside a raw-line window."""
+        rows = []
+        for i in range(50):
+            rows.append(self._pf(f"fail-{i}"))
+            for j in range(3):
+                rows.append({"kind": "agent_call", "tool": f"t{i}-{j}"})
+        self._write_log(rows)
+
+        assert summary()["last_24h"] == 50
+
+    def test_stops_at_matched_record_cap(self, tmp_config_dir):
+        """150 failures: the scan stops at _CAP matches, returning the LAST
+        _CAP records in file order (oldest -> newest)."""
+        import utils.provider_failure_store as pfs
+        from utils.provider_failure_store import _tail_audit_records
+        rows = [self._pf(f"fail-{i}") for i in range(150)]
+        self._write_log(rows)
+
+        records = _tail_audit_records()
+        assert len(records) == pfs._CAP
+        assert [r["provider"] for r in records] == [f"fail-{i}" for i in range(150 - pfs._CAP, 150)]
+
+    def test_multichunk_fragment_boundary(self, tmp_config_dir, monkeypatch):
+        """A provider_failure record straddling a chunk boundary must be
+        reassembled, parsed exactly once, and not duplicated."""
+        import utils.provider_failure_store as pfs
+        from utils.provider_failure_store import _tail_audit_records
+        filler = self._pf("filler", timestamp=1.0)
+        rows = [filler] * 40
+        # A deliberately long detail guarantees a boundary-spanning record.
+        spanning = self._pf("spanning")
+        spanning["detail"] = "x" * 400
+        self._write_log(rows + [spanning])
+
+        # 256-byte chunks over a multi-KB log => >= 3 chunks read.
+        monkeypatch.setattr(pfs, "_TAIL_READ_CHUNK", 256)
+        records = _tail_audit_records()
+
+        assert len(records) == 41
+        providers = [r["provider"] for r in records]
+        assert providers.count("spanning") == 1
+        assert providers[-1] == "spanning"
+        assert records[-1]["detail"] == "x" * 400
+
+    def test_scan_byte_cap_truncates_cleanly(self, tmp_config_dir, monkeypatch):
+        """When the scan cap is hit before any match, return [] rather than
+        raising or scanning the whole file."""
+        import utils.provider_failure_store as pfs
+        from utils.provider_failure_store import _tail_audit_records
+        # A large log whose newest records are all unrelated.
+        rows = [{"kind": "agent_call", "pad": "y" * 200} for _ in range(200)]
+        self._write_log(rows)
+
+        monkeypatch.setattr(pfs, "_TAIL_MAX_SCAN_BYTES", 64)
+        records = _tail_audit_records()
+        assert records == []
+
+    def test_missing_log_returns_empty(self, tmp_config_dir):
+        """No audit-log.jsonl at all: the tail read must yield []."""
+        from utils.provider_failure_store import _tail_audit_records
+
+        assert _tail_audit_records() == []

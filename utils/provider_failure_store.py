@@ -17,6 +17,10 @@ from agent.llm.failure_classifier import FailureClass, ProviderFailure, sanitize
 _logger = logging.getLogger(__name__)
 
 _CAP = 100
+# Tail-scan bounds for the cold-read fallback. Both are module-level so tests
+# can monkeypatch them to force multi-chunk scans and prove the byte cap.
+_TAIL_READ_CHUNK = 64 * 1024
+_TAIL_MAX_SCAN_BYTES = 8 * 1024 * 1024
 _lock = threading.Lock()
 _events: deque[ProviderFailure] = deque(maxlen=_CAP)
 
@@ -128,37 +132,99 @@ def _audit_log_path() -> str:
     return os.path.join(get_config_dir(), "audit-log.jsonl")
 
 
-def _tail_audit_records(max_lines: int = _CAP) -> list[dict]:
-    """Read the last ``max_lines`` provider_failure records from the audit log.
+def _byte_before(handle, offset: int) -> bytes:
+    """Return the single byte preceding ``offset`` in an open binary file.
 
-    Cold-restart fallback for ``summary()`` (SPEC-22 §"Failure store replay
-    after restart"). Bounded read from the tail, never raises — a missing or
-    unreadable log yields [].
+    Used to tell a clean line boundary (previous byte is a newline) from a
+    split line (previous byte is line content) without reading the whole
+    chunk. Returns b"" at offset 0, which callers must treat as "no byte
+    before this point" rather than a content byte.
+    """
+    if offset <= 0:
+        return b""
+    handle.seek(offset - 1)
+    return handle.read(1)
+
+
+def _tail_audit_records(max_records: int = _CAP) -> list[dict]:
+    """Read the last ``max_records`` provider_failure records from the audit log.
+
+    Cold-restart fallback for ``recent()``/``summary()`` (SPEC-22 §"Failure
+    store replay after restart", SPEC-28). Bounded read from the tail, never
+    raises — a missing or unreadable log yields [].
+
+    The bound is on RECORDS, not on raw lines. audit-log.jsonl is shared with
+    other writers (agent_call etc.), so a byte/line window taken before the
+    kind filter would let unrelated traffic evict provider failures from the
+    window (SPEC-28). Instead the file is scanned backward from EOF in
+    _TAIL_READ_CHUNK chunks, newest line first, keeping provider_failure dicts
+    until ``max_records`` are collected.
+
+    Guarantees:
+    - Record-bound: exactly the last ``max_records`` provider_failure records,
+      unrelated lines never consume a slot.
+    - Bounded scan: at most _TAIL_MAX_SCAN_BYTES is read, so the cost is O(cap)
+      and never O(file). Reaching the cap mid-file is a truncation, not an
+      error — the returned window is still correct, just shorter.
+    - Fragment-safe: a line straddling a chunk boundary is never parsed on its
+      own; its leading fragment is carried into the next (older) chunk and the
+      line is parsed only once it is whole. An unterminated trailing line is
+      only parsed if the chunk reaches offset 0.
+    - Returns records in file order (oldest -> newest), truncated to the last
+      ``max_records``. Malformed lines are skipped individually.
     """
     try:
+        if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records <= 0:
+            return []
         path = _audit_log_path()
         if not os.path.exists(path):
             return []
+        records: list[dict] = []
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            # Read a bounded tail window; one JSONL line is well under 1 KiB,
-            # so _CAP * 1024 covers max_lines records with margin.
-            window = min(size, max_lines * 1024)
-            handle.seek(size - window)
-            chunk = handle.read()
-        lines = chunk.decode("utf-8", errors="replace").splitlines()
-        records: list[dict] = []
-        for line in lines[-max_lines:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(rec, dict) and rec.get("kind") == "provider_failure":
-                records.append(rec)
+            end = handle.tell()
+            scanned = 0
+            fragment = b""  # leading bytes of a line split by a chunk edge
+            while end > 0 and len(records) < max_records and scanned < _TAIL_MAX_SCAN_BYTES:
+                size = min(_TAIL_READ_CHUNK, end, _TAIL_MAX_SCAN_BYTES - scanned)
+                if size <= 0:
+                    break
+                end -= size
+                handle.seek(end)
+                chunk = handle.read(size)
+                # FILE order: this chunk is NEWER than the carry, and the
+                # carry holds the tail of the line whose head sits in this
+                # chunk, so the carried bytes follow the bytes just read.
+                buffer = chunk + fragment
+                scanned += size
+                # A line is split across this edge when older bytes remain and
+                # the byte immediately before the chunk is not a newline.
+                split_head = end > 0 and _byte_before(handle, end) != b"\n"
+                lines = buffer.split(b"\n")
+                if split_head:
+                    # Oldest piece is a head with no tail yet: defer it to the
+                    # next-older chunk, never parse it standalone and never drop
+                    # it, so the spanning record rehydrates exactly once.
+                    fragment = lines.pop(0)
+                else:
+                    # Clean edge (or the file's first line): nothing to defer.
+                    fragment = b""
+                if lines and lines[-1] == b"":
+                    lines.pop()  # trailing newline -> empty tail element
+
+                for raw in reversed(lines):  # newest -> oldest
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = json.loads(raw.decode("utf-8", errors="replace"))
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(rec, dict) and rec.get("kind") == "provider_failure":
+                        records.append(rec)
+                        if len(records) >= max_records:
+                            break
+        records.reverse()  # newest-first collection -> file order
         return records
     except Exception:
         _logger.exception("provider failure audit tail read failed")
