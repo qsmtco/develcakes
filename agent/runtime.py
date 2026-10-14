@@ -717,7 +717,9 @@ class AgentRuntime:
         self._tool_history_lock = threading.Lock()
         # session_key → (path, offset, limit) → (mtime_ns, size).
         # Cleared at turn end and on clear_conversation. Same-turn identical
-        # reads become a one-line unchanged notice instead of a second body.
+        # reads become a one-line unchanged notice while a live read_file
+        # body for that key is still in the transcript. A mask, compact
+        # stub, or missing body returns the file body again (SPEC-32).
         self._read_fingerprints: dict[str, dict[tuple, tuple]] = {}
         # Conversation-scoped, unlike _read_fingerprints (cleared every turn).
         # Cleared only by drop_read_cache.
@@ -3832,11 +3834,51 @@ class AgentRuntime:
         conv.task_card = card
         conv._token_estimate_cache = None
 
+    def _key_body_in_transcript(
+        self, conv: Any, path: str, offset: int | None, limit: int | None,
+    ) -> bool:
+        """SPEC-32: does a real read_file body for this key still live here?
+
+        Newest to oldest. Skips [unchanged \u2014 notices and any tool that
+        is not read_file. The first remaining result for (path, offset or 0,
+        limit) decides: a [masked \u2014 or [compacted \u2014 stub is False;
+        any other content is True. Nothing left, or any exception, is False.
+        Called before add_tool_result, so the read in progress is not visible.
+        """
+        try:
+            from models.conversation import MessageRole
+            strategy = self._context_strategy
+            for i in range(len(conv.messages) - 1, -1, -1):
+                msg = conv.messages[i]
+                if getattr(msg, "role", None) != MessageRole.TOOL_RESULT:
+                    continue
+                content = msg.content or ""
+                if content.startswith("[unchanged \u2014"):
+                    continue
+                name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
+                if name != "read_file":
+                    continue
+                rlimit = strategy._tool_result_limit(conv, i)
+                if rpath != path or roffset != (offset or 0) or rlimit != limit:
+                    continue
+                return not (
+                    content.startswith("[masked \u2014")
+                    or content.startswith("[compacted \u2014")
+                )
+        except Exception:
+            try:
+                logger.debug("recovery walk failed for %s", path, exc_info=True)
+            except Exception:
+                pass
+        return False
+
     def _dedup_read_output(self, session_key: str, conv, args: dict, output: str) -> str:
         """Return the unchanged notice when this turn already read the same bytes.
 
         Key is (path, offset or 0, limit). Value is (st_mtime_ns, st_size).
         An empty project_path or a failed stat skips dedup and returns output.
+        A fingerprint match returns output when no live read_file body for
+        that key remains in the transcript.
         """
         if not isinstance(args, dict):
             return output
@@ -3862,6 +3904,12 @@ class AgentRuntime:
         with self._tool_history_lock:
             bucket = self._read_fingerprints.setdefault(session_key, {})
             if bucket.get(key) == fp:
+                if not self._key_body_in_transcript(conv, path, offset, limit):
+                    # SPEC-32: the body is masked, compacted, evicted, or
+                    # the walk could not prove a live read_file body.
+                    # Re-sending once is cheaper than an exec_command loop.
+                    bucket[key] = fp
+                    return output
                 return (
                     f"[unchanged \u2014 read_file {path} offset={offset or 0} "
                     f"limit={limit}; same mtime and size as the earlier read this turn]"

@@ -635,6 +635,28 @@ class DefaultContextStrategy:
                         break
         return tool_name, path, offset, parent
 
+    def _tool_result_limit(self, conv: Conversation, idx: int):
+        """Return the producing call's limit, or None when it was omitted.
+
+        The read-dedup key stores args.get("limit") unchanged. Missing and
+        explicit None are both None. Do not default a missing limit to 0:
+        _tool_result_meta does that for offset, and copying it here makes a
+        whole-file read (key limit None) miss every result.
+        """
+        msg = conv.messages[idx]
+        if not msg.tool_call_id or idx <= 0:
+            return None
+        for parent_idx in range(idx - 1, -1, -1):
+            candidate = conv.messages[parent_idx]
+            if candidate.role != MessageRole.ASSISTANT or not candidate.tool_calls:
+                continue
+            for tc in candidate.tool_calls:
+                if tc.call_id != msg.tool_call_id:
+                    continue
+                args = tc.arguments if isinstance(tc.arguments, dict) else {}
+                return args.get("limit", None)
+        return None
+
     def _kept_from_heavy(
         self,
         conv: Conversation,
