@@ -24,12 +24,19 @@ A rule-following agent (steel-frame: "read the whole file before writing") react
 - **Hot-path pin (`_note_tool_path` / `_protect_paths`, runtime.py:3645/3686)**: pins a path on the **third** successful read while mtime+size match. Coder's files were each read **once** — nothing pinned. The count also updates only after dedup has already answered `[unchanged]`, so a pin can never change that reply or restore a masked body. It protects against *future* masking, not *past*.
 - **`select_maskable` keep-last-3**: keeps the newest three tool results — but the re-read never produces a new body result, so there is nothing new to keep.
 
-### Solution — one rule, one site
+### Solution — one rule, one site (PM revision 2026-10-15: the recovery walk)
 
-In `_dedup_read_output`, when the fingerprint matches, **before** answering `[unchanged]`, check the **latest** tool result for that same path in the conversation:
+In `_dedup_read_output`, when the fingerprint matches, **before** answering `[unchanged]`, walk that key's tool results **newest → oldest, using the same key as the fingerprint `(path, offset, limit)`, skipping every `[unchanged —` notice.** The first result that is not a notice decides:
 
-- If it is a `[masked —` or `[compacted —` stub → **return the full body.** The agent is explicitly recovering; re-sending the bytes once is cheaper than the exec_command workaround (which spends another observation and gets masked too).
-- If the latest result for that path still carries the body (i.e. a live copy sits in the keep-last window) → `[unchanged]` remains correct.
+1. **A real body is still in the transcript** → `[unchanged]` is correct (the bytes are in the model's context).
+2. **The first real result is a `[masked —` or `[compacted —` stub** — including a summarize stub that keeps 200 characters (verified: `apply_mask_verdicts` writes the 200-char tail *after* the mask line, so the prefix test catches it; a 200-char tail is not "the bytes in context") → **return the full body.**
+3. **No body left in the transcript** (walk exhausts: results evicted by trim/compaction, or none exist) → **return the full body.** A notice pointing at bytes the model cannot see is the exact bug class that looped Coder.
+
+Why skip notices (the shadowing trap): an `[unchanged]` notice is itself a tool result. Trace: body at msg 10 → redundant re-read answers notice at msg 15 (correct at the time) → msg 10 masked in place → re-read sees msg 15 (the notice) as "latest", which has no stub prefix → `[unchanged]` forever. The notice is never a body copy; it must not decide.
+
+Closing property: the recovered body becomes the newest real result for the key, so a later re-read can honestly answer `[unchanged]` again. One early redundant read no longer arms a permanent loop; cost is bounded at one body re-send per mask cycle.
+
+**Key-matching detail:** `_tool_result_meta` returns `(tool_name, path, offset, parent)` — no limit. The walk must take limit from the producing tool call's arguments JSON so the walk key equals the fingerprint key. A stub or body of a *different* window (e.g. `offset=100` while recovering `offset=0`) must not decide.
 
 **Explicitly out of scope (PM ruling):** no pin changes; no exec-command policy ("deciding which exec_command was recovering a read is a second policy"). Once a masked read can be read again, the shell workaround dies on its own.
 
@@ -39,15 +46,16 @@ In `_dedup_read_output`, when the fingerprint matches, **before** answering `[un
 
 ### 2.1 `agent/runtime.py` — the whole fix
 
-**New helper** (place directly above `_dedup_read_output`, ~:3834):
+**New helper — the recovery walk** (place directly above `_dedup_read_output`, ~:3834):
 
 ```python
-def _latest_read_is_stub(self, conv: Any, path: str) -> bool:
-    """True when the most recent tool result for ``path`` is a mask/compact stub.
+def _key_body_in_transcript(self, conv: Any, path: str, offset: int, limit: int | None) -> bool:
+    """SPEC-32: does a real body for this key still live in the transcript?
 
-    Scans backward; the FIRST tool result whose extracted path equals ``path``
-    is the latest. Returns False when no result exists for the path (dedup
-    then falls through to the unchanged notice — safe default).
+    Walks this key's tool results newest → oldest, skipping [unchanged \u2014
+    notices (a notice is never a body copy). The first non-notice result
+    decides: stub → False (body is gone); real body → True. Walk exhausts
+    (trim/compaction evicted the results) → False. Never raises.
     """
     try:
         strategy = self._context_strategy
@@ -56,23 +64,29 @@ def _latest_read_is_stub(self, conv: Any, path: str) -> bool:
             if getattr(msg, "role", None) != MessageRole.TOOL_RESULT:
                 continue
             content = msg.content or ""
-            _name, rpath, _off, _parent = strategy._tool_result_meta(conv, i)
-            if rpath != path:
+            if content.startswith("[unchanged \u2014"):
                 continue
-            return content.startswith("[masked \u2014") or content.startswith("[compacted \u2014")
+            _name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
+            rlimit = strategy._tool_result_limit(conv, i)
+            if rpath != path or roffset != (offset or 0) or rlimit != limit:
+                continue
+            return not (content.startswith("[masked \u2014") or content.startswith("[compacted \u2014"))
     except Exception:
-        logger.debug("latest-read-is-stub scan failed for %s", path, exc_info=True)
+        logger.debug("recovery walk failed for %s", path, exc_info=True)
     return False
 ```
+
+Note: `_tool_result_limit` does not exist today — the walk needs it. Add a sibling to `_tool_result_meta` in `agent/context_strategy.py` that reads `limit` from the producing tool call's arguments JSON the same way `_tool_result_meta` reads offset. (~15 lines, mirrors the existing extraction pattern.)
 
 **Edit `_dedup_read_output`** — inside the `with self._tool_history_lock:` block, change the match branch:
 
 ```python
             if bucket.get(key) == fp:
-                if self._latest_read_is_stub(conv, path):
+                if not self._key_body_in_transcript(conv, path, offset, limit):
                     # SPEC-32: recovery re-read. The body was masked/compacted
-                    # away; re-sending once is cheaper than the exec_command
-                    # workaround (another observation that gets masked too).
+                    # away (or evicted); re-sending once is cheaper than the
+                    # exec_command workaround (another observation that gets
+                    # masked too).
                     bucket[key] = fp
                     return output
                 return (
