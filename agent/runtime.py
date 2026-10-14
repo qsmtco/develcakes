@@ -388,7 +388,14 @@ REPO_MAP_HEADER = (
     "Background for the message below. Each entry is a file path and one "
     "Python signature, ranked for that message. Open the file if you need "
     "the body. This is not a task, not an error, and not something to "
-    "mention."
+    "mention. "
+    "Entries may be stale — confirm with git/grep before acting. Product "
+    "code ranks above test stubs; signatures are anchored to current edits."
+)
+# One line ahead of the compiled packet's ## Write section. The hunk and
+# checks already ran; the next model call must not repeat that write.
+WRITE_REPLAY_PREAMBLE = (
+    "Replay of the last enforced write and its checks — already executed, do not redo."
 )
 
 
@@ -726,6 +733,12 @@ class AgentRuntime:
         # session_key → rendered repo-map block for the current user goal.
         self._repo_map_block: dict[str, str] = {}
         self._repo_map_key: dict[str, tuple] = {}
+        # Bumped after a write_file/edit_file that lands, so the map cache
+        # misses and rebuilds against the files just changed. The lock makes
+        # the increment atomic across sessions; a lost update would let the
+        # next build cache a map that missed one of the writes.
+        self._repo_map_lock = threading.Lock()
+        self._repo_map_tree_version = 0
         # Audit-Fix-8: Guard _compaction_events against concurrent append+truncate.
         self._compaction_lock = threading.Lock()
 
@@ -2439,6 +2452,9 @@ class AgentRuntime:
             conv.add_tool_result(call_id, tool_result_text)
             self._count_tool_observation(session_key)
             self._maybe_compile(session_key, conv, tool_name, args, result)
+            if result.success and tool_name in ("write_file", "edit_file"):
+                with self._repo_map_lock:
+                    self._repo_map_tree_version += 1
             self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
 
             # A-4: Record in audit log
@@ -3450,7 +3466,9 @@ class AgentRuntime:
         project = conv.project_path or ""
         if not project or not isinstance(goal, str) or not goal:
             return ""
-        key = (project, hash(goal))
+        with self._repo_map_lock:
+            tree_version = self._repo_map_tree_version
+        key = (project, hash(goal), tree_version)
         if self._repo_map_key.get(session_key) == key:
             return self._repo_map_block.get(session_key, "")
         try:
@@ -3490,6 +3508,8 @@ class AgentRuntime:
             packet["goal"]
             + "\n\n"
             + fact_lines
+            + WRITE_REPLAY_PREAMBLE
+            + "\n"
             + "## Write\n"
             + packet["hunk"]
             + "\n\n## Checks\n"

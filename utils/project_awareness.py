@@ -58,6 +58,9 @@ CONTEXT_FILENAME = "context.md"
 FACTS_FILENAME = "facts.json"
 _FACTS_LOCK = threading.Lock()
 _FACTS_MAX = 50
+_FACTS_FENCE_PREAMBLE = (
+    "Live facts, sha-scoped, self-invalidate when files change — verify before acting."
+)
 
 MAX_CONTEXT_SIZE = 50 * 1024  # 50 KB cap for context.md (write side)
 CONTEXT_READ_CAP = 8000       # Max chars injected into agent prompts (read side)
@@ -1253,6 +1256,10 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         blob = "\n".join(lines)
         if len(blob) > 4000:
             blob = blob[-4000:]
+        if blob:
+            blob = _FACTS_FENCE_PREAMBLE + "\n" + blob
+        else:
+            blob = _FACTS_FENCE_PREAMBLE
         parts["PROJECT_MEMORY"] = _untrusted_fence(blob, "facts.json")
     else:
         parts["PROJECT_MEMORY"] = ""

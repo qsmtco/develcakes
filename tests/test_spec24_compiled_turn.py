@@ -4,7 +4,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from agent.enforcement import EnforcementCheck
-from agent.runtime import REPO_MAP_HEADER, AgentRuntime
+from agent.runtime import REPO_MAP_HEADER, WRITE_REPLAY_PREAMBLE, AgentRuntime
 from agent.tools import ToolResult
 from models.conversation import Conversation, ToolCall
 from tests.test_agent_runtime import _make_cfg
@@ -152,7 +152,10 @@ def test_compiled_packet_carries_the_repo_map_label():
 
     # Goal first, then the labelled block, then the packet sections. The
     # label is the runtime constant, byte for byte — not a copy in this file.
-    prefix = "fix the parser\n\n" + REPO_MAP_HEADER + "\n\nMAPBLOCK\n\n## Write\n"
+    prefix = (
+        "fix the parser\n\n" + REPO_MAP_HEADER + "\n\nMAPBLOCK\n\n"
+        + WRITE_REPLAY_PREAMBLE + "\n## Write\n"
+    )
     assert user.startswith(prefix)
     assert user.index(REPO_MAP_HEADER) < user.index("MAPBLOCK") < user.index("## Write")
 
