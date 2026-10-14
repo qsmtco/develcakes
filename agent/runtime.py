@@ -3458,16 +3458,6 @@ class AgentRuntime:
         fact_lines = ""
         if map_block:
             fact_lines = REPO_MAP_HEADER + "\n\n" + map_block + "\n\n"
-        project = conv.project_path or ""
-        if project:
-            try:
-                from utils.project_awareness import load_live_facts
-                live = load_live_facts(project)
-                texts = [f["text"] for f in live[-30:] if isinstance(f.get("text"), str)]
-                if texts:
-                    fact_lines += "\n".join(texts) + "\n\n"
-            except Exception:
-                logger.exception("load_live_facts failed for %s", project)
         body = (
             packet["goal"]
             + "\n\n"
