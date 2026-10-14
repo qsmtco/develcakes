@@ -898,11 +898,12 @@ def test_connection(
 
 ### 3.11b `models/providers.py` — Per-Provider Context Window Resolution
 
-**Resolution chain in `agent/runtime.py::_compute_model_max`:**
+**Resolution chain in `agent/runtime.py::_compute_model_max` (SPEC-30):**
 
-1. `provider_cfg.max_tokens` if `> 0` (explicit user set, wizard default, or successful probe pre-fill)
-2. `caller_default_max_tokens(provider_cfg.caller)` (per-caller static fallback table — ensures MiniMax-M3 actually uses 1M context, not 128K)
-3. `FALLBACK = 128_000` (global safe default for unknown callers)
+1. `provider_cfg.context_window` if `> 0` — uncapped. Explicit opt-in past the sanity cap. Not the Test Connection probe field.
+2. `provider_cfg.max_tokens` if `> 0`, capped at `_MAX_SANE_WINDOW` (200_000)
+3. `caller_default_max_tokens(provider_cfg.caller)` — uncapped (MiniMax 1_048_576, Anthropic 200_000)
+4. `FALLBACK = 128_000`
 
 The `default_max_tokens` field on `ProviderConfig` records the *configured intent* (set by auxilium wizard from `CALLER_DEFAULT_MAX_TOKENS`); it's used as a sentinel marker so Test Connection's pre-fill logic doesn't overwrite a wizard's deliberate choice. See audit BUG #7.
 
@@ -1837,7 +1838,7 @@ before the next serialization.
 
 After an enforced write, the next model call is a compiled list: the system prompt, one user message (goal, live facts, hunk, checks), then messages appended after that write. `conv.messages` is not trimmed by this path.
 
-`agent/llm/jev_client.py` is the Decision Model transport. `post_decision(state, questions)` returns `(answers, error)`. The model and host come from the `DecisionModel` card. There is no baked-in model slug. `agent/repo_map.py` builds a Python definition/reference graph, keeps 30 symbols, reranks them with `post_decision`, and renders at most 2,000 tokens. The runtime attaches that block to the wire user message for the current goal. It is not part of `conv.system_prompt`.
+`agent/llm/jev_client.py` is the Decision Model transport. `post_decision(state, questions)` returns `(answers, error)`. `classify_mask_candidates` is a second consumer: one batched choice per mask cycle, confidence floor 0.6, and `None` on a failed call so the caller masks every candidate. It does not run above the provider compaction threshold. The model and host come from the `DecisionModel` card. There is no baked-in model slug. `agent/repo_map.py` builds a Python definition/reference graph, keeps 30 symbols, reranks them with `post_decision`, and renders at most 2,000 tokens. The runtime attaches that block to the wire user message for the current goal. It is not part of `conv.system_prompt`.
 
 **Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION):** All terminal transitions in `_run_loop` funnel through a single `_terminate_turn(result: TurnResult)` method. The state machine tracks per-turn status: `RUNNING → STREAMING → {COMPLETED | FAILED | CANCELLED}`. State is keyed by `(session_key, turn_token)` tuple (not session_key alone) so cancellation races don't clobber a new turn's state. A dedicated `_state_lock` (separate from `self._lock`) protects the compound read-decide-write operation — the GIL does NOT make this atomic. `_terminate_turn` deduplicates terminal transitions (at most one accepted terminal per turn) and rejects stale-token results (a result whose turn_token doesn't match the session's active token). `_check_and_stop_on_limit` is now a pure predicate returning `tuple[str, str] | None` (was: side-effecting with an undefined `turn_token` NameError). Public accessors `get_turn_state(sk)` and `get_last_turn_result(sk)` provide observability.
 
@@ -2151,6 +2152,8 @@ class DefaultContextStrategy:
    middle, and injects a summary message.
 3. **Layer 3 — manual fallback:** If the strategy cannot fit within budget,
    a final brute-force trim removes oldest messages.
+
+**SPEC-30 tiers:** The provider `compaction_threshold` (default 0.80) is only the heavy-compact trigger. Ordinary masking starts at `min(15% of the hard ceiling, 24_000)` tokens and, between that goal and the trigger, runs Tier 1 rules then one `classify_mask_candidates` batch. Above the trigger, `panic_prune` stubs tool results from before the latest user message, then `compact` aims at the landing goal and does not delete that turn or a protected path. A hot-path pin is `_hot_pins` (path plus `st_mtime_ns` and `st_size`), cleared by `drop_read_cache`, not a facts-board row.
 
 **Telemetry:** Each `compact()` call produces a `CompactionEvent` stored on
 `self._last_result`. The runtime reads this and appends it to

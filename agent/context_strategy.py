@@ -126,12 +126,15 @@ class DefaultContextStrategy:
         *,
         keep_first: int = 2,                # noqa: ARG002 — Phase 4 wires this
         protect_is_summary: bool = True,    # noqa: ARG002 — Phase 4 wires this
+        protect_paths: tuple[str, ...] = (),
+        preserve_current_turn: bool = False,
     ) -> None:
         """Compact the conversation to fit within ``token_budget``.
 
         Phase 1: extracted from the former Conversation trim/summary shims
         (removed in SPEC-AUDIT-CLEANUP-2 Phase 4). ``self`` → ``conv``
-        throughout. No behavior changes.
+        throughout. ``protect_paths`` and ``preserve_current_turn`` default
+        off, which keeps the historical trim. The heavy compact passes both.
         """
         # Audit-Fix-31 (Bug #8): guard against non-positive budgets. A
         # token_budget <= 0 would cause the trim loop to aggressively
@@ -157,7 +160,13 @@ class DefaultContextStrategy:
         # Runs before the trim loop (Layer 2) to preserve conversation structure
         # while reducing token usage. Returns tokens freed; we just call it for
         # its side effect.
-        self.prune_tool_outputs(conv, token_budget, protect_turns=2)
+        self.prune_tool_outputs(
+            conv,
+            token_budget,
+            protect_turns=2,
+            protect_paths=protect_paths,
+            preserve_current_turn=preserve_current_turn,
+        )
         # Re-snapshot tokens_after after Layer 1 for telemetry accuracy.
         tokens_after_layer1 = conv.get_token_estimate()
 
@@ -174,7 +183,12 @@ class DefaultContextStrategy:
         ):
             _iteration += 1
             idx = self._select_prune_candidate(
-                conv, keep_first, tail_preserve, protect_is_summary
+                conv,
+                keep_first,
+                tail_preserve,
+                protect_is_summary,
+                protect_paths=protect_paths,
+                preserve_current_turn=preserve_current_turn,
             )
             if idx is None:
                 break
@@ -347,6 +361,8 @@ class DefaultContextStrategy:
         conv: Conversation,
         target_tokens: int,
         protect_turns: int = 2,
+        protect_paths: tuple[str, ...] = (),
+        preserve_current_turn: bool = False,
     ) -> int:
         """Stub old tool results to free token budget. Returns tokens freed.
 
@@ -386,6 +402,7 @@ class DefaultContextStrategy:
         tokens_before = conv.get_token_estimate()
         if tokens_before <= target_tokens:
             return 0
+        last_user = self._last_user_index(conv)
 
         # Find TOOL_RESULT indices, most-recent-first.
         tool_result_indices: list[int] = []
@@ -409,6 +426,10 @@ class DefaultContextStrategy:
             if conv.get_token_estimate() <= target_tokens:
                 break
             msg = conv.messages[idx]
+            if self._kept_from_heavy(
+                conv, idx, protect_paths, preserve_current_turn, last_user,
+            ):
+                continue
             # Idempotence: skip already-stubbed or already-masked messages.
             if msg.content.startswith("[compacted \u2014") or msg.content.startswith("[masked \u2014"):
                 continue
@@ -452,49 +473,100 @@ class DefaultContextStrategy:
         tokens_after = conv.get_token_estimate()
         return tokens_before - tokens_after
 
-    def mask_old_observations(self, conv: Conversation, keep_last: int = 3) -> int:
-        """Replace tool results older than the last ``keep_last`` with a one-line mask.
+    def select_maskable(
+        self,
+        conv: Conversation,
+        keep_last: int = 3,
+        protect_paths: tuple[str, ...] = (),
+    ) -> list[int]:
+        """Tool-result indices eligible for masking.
 
-        Does not consult the token budget, insert a summary, or pop messages.
-        Returns the number of messages whose content was replaced.
+        Kept: the ``keep_last`` newest tool results, a path in
+        ``protect_paths``, a body under 500 characters, and anything
+        already masked or stubbed.
         """
         if keep_last < 0:
             keep_last = 0
+        protected = protect_paths or ()
         tool_result_indices: list[int] = []
         for i in range(len(conv.messages) - 1, -1, -1):
             if conv.messages[i].role == MessageRole.TOOL_RESULT:
                 tool_result_indices.append(i)
-        replaced = 0
+        maskable: list[int] = []
         for idx in tool_result_indices[keep_last:]:
             msg = conv.messages[idx]
-            if msg.content.startswith("[masked \u2014") or msg.content.startswith("[compacted \u2014"):
+            content = msg.content or ""
+            if content.startswith("[masked \u2014") or content.startswith("[compacted \u2014"):
                 continue
-            tool_name = "[unknown tool]"
-            path = ""
-            offset: object = 0
-            parent = None
-            if msg.tool_call_id and idx > 0:
-                for parent_idx in range(idx - 1, -1, -1):
-                    candidate = conv.messages[parent_idx]
-                    if candidate.role == MessageRole.ASSISTANT and candidate.tool_calls:
-                        for tc in candidate.tool_calls:
-                            if tc.call_id == msg.tool_call_id:
-                                tool_name = tc.tool_name or "[unknown tool]"
-                                parent = candidate
-                                args = tc.arguments if isinstance(tc.arguments, dict) else {}
-                                raw_path = args.get("path", "")
-                                path = raw_path if isinstance(raw_path, str) else ""
-                                offset = args.get("offset", 0)
-                                if offset is None:
-                                    offset = 0
-                                break
-                        if parent is not None:
-                            break
-            n = len(msg.content)
+            if len(content) < 500:
+                continue
+            _tool_name, path, _offset, _parent = self._tool_result_meta(conv, idx)
+            if path and path in protected:
+                continue
+            maskable.append(idx)
+        return maskable
+
+    def mask_old_observations(
+        self,
+        conv: Conversation,
+        keep_last: int = 3,
+        protect_paths: tuple[str, ...] = (),
+    ) -> int:
+        """Replace tool results older than the last ``keep_last`` with a one-line mask.
+
+        Does not consult the token budget, insert a summary, or pop messages.
+        Returns the number of messages whose content was replaced.
+        Short results and ``protect_paths`` are left in place.
+        """
+        if keep_last < 0:
+            keep_last = 0
+        return self.apply_mask_verdicts(
+            conv,
+            self.select_maskable(conv, keep_last, protect_paths),
+            None,
+        )
+
+    def apply_mask_verdicts(
+        self,
+        conv: Conversation,
+        indices: list[int],
+        verdicts: dict | None,
+    ) -> int:
+        """Mask ``indices``. ``None`` verdicts mask every index.
+
+        A dict maps ``candidate_{n}`` to keep / mask / summarize. A missing
+        or invalid choice is mask. summarize appends the first 200 characters
+        of the original body after the mask line.
+        """
+        if not isinstance(indices, list):
+            return 0
+        replaced = 0
+        for n, idx in enumerate(indices):
+            if not isinstance(idx, int) or idx < 0 or idx >= len(conv.messages):
+                continue
+            choice = "mask"
+            if isinstance(verdicts, dict):
+                raw = verdicts.get(f"candidate_{n}", "mask")
+                if raw in ("keep", "mask", "summarize"):
+                    choice = raw
+            if choice == "keep":
+                continue
+            msg = conv.messages[idx]
+            if msg.role != MessageRole.TOOL_RESULT:
+                continue
+            content = msg.content or ""
+            if content.startswith("[masked \u2014") or content.startswith("[compacted \u2014"):
+                continue
+            tool_name, path, offset, parent = self._tool_result_meta(conv, idx)
+            n_chars = len(content)
             path_shown = path.replace("\n", " ")
-            msg.content = (
-                f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n} chars removed)]"
+            masked = (
+                f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n_chars} chars removed)]"
             )
+            if choice == "summarize":
+                msg.content = masked + "\n" + content[:200]
+            else:
+                msg.content = masked
             if parent is not None:
                 for tc in parent.tool_calls:
                     if tc.call_id == msg.tool_call_id:
@@ -502,6 +574,101 @@ class DefaultContextStrategy:
             conv._token_estimate_cache = None
             replaced += 1
         return replaced
+
+    def panic_prune(
+        self,
+        conv: Conversation,
+        protect_paths: tuple[str, ...] = (),
+    ) -> int:
+        """Stub tool results from before the latest user message.
+
+        Tool results after that message, and paths in ``protect_paths``,
+        stay. No user message means nothing is stubbed. Same mask string
+        as ``mask_old_observations``.
+        """
+        last = self._last_user_index(conv)
+        if last is None:
+            return 0
+        protected = protect_paths or ()
+        indices: list[int] = []
+        for i, msg in enumerate(conv.messages):
+            if msg.role != MessageRole.TOOL_RESULT or i >= last:
+                continue
+            content = msg.content or ""
+            if content.startswith("[masked \u2014") or content.startswith("[compacted \u2014"):
+                continue
+            _tool_name, path, _offset, _parent = self._tool_result_meta(conv, i)
+            if path and path in protected:
+                continue
+            indices.append(i)
+        return self.apply_mask_verdicts(conv, indices, None)
+
+    def _last_user_index(self, conv: Conversation) -> int | None:
+        for i in range(len(conv.messages) - 1, -1, -1):
+            if conv.messages[i].role == MessageRole.USER:
+                return i
+        return None
+
+    def _tool_result_meta(self, conv: Conversation, idx: int):
+        """Return ``(tool_name, path, offset, parent)`` for a tool result."""
+        msg = conv.messages[idx]
+        tool_name = "[unknown tool]"
+        path = ""
+        offset: object = 0
+        parent = None
+        if msg.tool_call_id and idx > 0:
+            for parent_idx in range(idx - 1, -1, -1):
+                candidate = conv.messages[parent_idx]
+                if candidate.role == MessageRole.ASSISTANT and candidate.tool_calls:
+                    for tc in candidate.tool_calls:
+                        if tc.call_id == msg.tool_call_id:
+                            tool_name = tc.tool_name or "[unknown tool]"
+                            parent = candidate
+                            args = tc.arguments if isinstance(tc.arguments, dict) else {}
+                            raw_path = args.get("path", "")
+                            path = raw_path if isinstance(raw_path, str) else ""
+                            offset = args.get("offset", 0)
+                            if offset is None:
+                                offset = 0
+                            break
+                    if parent is not None:
+                        break
+        return tool_name, path, offset, parent
+
+    def _kept_from_heavy(
+        self,
+        conv: Conversation,
+        idx: int,
+        protect_paths: tuple[str, ...] | None,
+        preserve_current_turn: bool,
+        last_user: int | None,
+    ) -> bool:
+        """True when heavy compact must not stub or delete this message."""
+        if not preserve_current_turn and not protect_paths:
+            return False
+        # The request that opened the turn stays with the messages after it.
+        if preserve_current_turn and last_user is not None and idx >= last_user:
+            return True
+        msg = conv.messages[idx]
+        protected = protect_paths or ()
+        if msg.role == MessageRole.TOOL_RESULT and protected:
+            _tool_name, path, _offset, _parent = self._tool_result_meta(conv, idx)
+            if path and path in protected:
+                return True
+        if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+            call_ids = {tc.call_id for tc in msg.tool_calls}
+            j = idx + 1
+            while (
+                j < len(conv.messages)
+                and conv.messages[j].role == MessageRole.TOOL_RESULT
+                and conv.messages[j].tool_call_id in call_ids
+            ):
+                if self._kept_from_heavy(
+                    conv, j, protect_paths, preserve_current_turn, last_user,
+                ):
+                    return True
+                j += 1
+        return False
 
     # ── Phase 6: P5 _find_split_index + P6 _fit_summary ──────────────────────
 
@@ -677,6 +844,8 @@ class DefaultContextStrategy:
         keep_first: int,
         tail_preserve: int,
         protect_is_summary: bool,
+        protect_paths: tuple[str, ...] = (),
+        preserve_current_turn: bool = False,
     ) -> int | None:
         """Find the index of the best message to remove for budget trimming.
 
@@ -699,10 +868,15 @@ class DefaultContextStrategy:
         if trimmable_end <= keep_first:
             return None
 
+        last_user = self._last_user_index(conv)
         # Build the candidate list, non-protected first.
         non_protected: list[int] = []
         protected: list[int] = []
         for i in range(keep_first, trimmable_end):
+            if self._kept_from_heavy(
+                conv, i, protect_paths, preserve_current_turn, last_user,
+            ):
+                continue
             msg = conv.messages[i]
             is_protected = protect_is_summary and msg.is_summary
             if is_protected:

@@ -45,6 +45,34 @@ class TestEmptyState:
         assert d._empty_state.get_visible() is False
 
 
+class TestContextWindowCopy:
+    def test_save_form_keeps_context_window(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1", context_window=1_000_000))
+        d = SettingsDialog(parent=None, handler=h)
+        collected = d._cards[0]._collect_from_form()
+        assert collected.context_window == 1_000_000
+
+    def test_save_form_keeps_context_mode(self, tmp_config_dir):
+        from utils.providers_store import load_providers
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1", context_mode="preload"))
+        d = SettingsDialog(parent=None, handler=h)
+        collected = d._cards[0]._collect_from_form()
+        assert collected.context_mode == "preload"
+        h.add_or_update(collected)
+        assert load_providers()[0].context_mode == "preload"
+
+    def test_save_form_invalid_context_mode_becomes_auto(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1", context_mode="nope"))
+        d = SettingsDialog(parent=None, handler=h)
+        # The stored card was coerced to auto on the way into the file.
+        # Put a bad value on the in-memory provider the form copies from.
+        d._cards[0]._provider.context_mode = "nope"
+        assert d._cards[0]._collect_from_form().context_mode == "auto"
+
+
 class TestProviderCards:
     def test_one_provider_renders_one_card(self, tmp_config_dir):
         h = SettingsHandler()

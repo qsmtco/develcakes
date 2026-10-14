@@ -372,6 +372,11 @@ from agent.llm.streaming import (
 # The socket timeout is then min(attempt cap, remaining), so the try ends
 # inside the budget.
 _FAILOVER_ATTEMPT_FLOOR_S = 1.0
+# A fat max_tokens (often an output cap) must not inflate the context window.
+_MAX_SANE_WINDOW = 200_000
+# Ordinary masking starts here. Heavy compact lands here. Not a provider setting.
+_LANDING_FRACTION = 0.15
+_LANDING_CAP = 24_000
 
 # Label prefixed to the repo-map block at every attachment point (normal
 # turns via _prefix_repo_map, SPEC-24 compiled packets via _compiled_messages).
@@ -707,6 +712,11 @@ class AgentRuntime:
         # Cleared at turn end and on clear_conversation. Same-turn identical
         # reads become a one-line unchanged notice instead of a second body.
         self._read_fingerprints: dict[str, dict[tuple, tuple]] = {}
+        # Conversation-scoped, unlike _read_fingerprints (cleared every turn).
+        # Cleared only by drop_read_cache.
+        self._read_counts: dict[str, dict[str, int]] = {}
+        self._hot_pins: dict[str, dict[str, tuple[int, int]]] = {}
+        self._edited_paths: dict[str, set[str]] = {}
         # How many tool results have landed since the last observation mask.
         # Masking runs in batches of 4 so the prefix stays stable in between.
         self._obs_since_mask: dict[str, int] = {}
@@ -1538,14 +1548,15 @@ class AgentRuntime:
         """Return the model's context window for the current conversation's provider.
 
         Resolution order:
-          1. conv.model's provider's max_tokens in self._config.providers (when > 0)
-          2. caller_default_max_tokens(provider.caller) — per-caller static fallback
+          1. provider context_window when set and > 0 (uncapped opt-in)
+          2. provider max_tokens when > 0, capped at _MAX_SANE_WINDOW
+          3. caller_default_max_tokens(provider.caller) — uncapped
              (e.g. MiniMax = 1_048_576, Anthropic = 200_000)
-          3. 128_000 global fallback (matches the §4.15 default)
+          4. 128_000 global fallback
 
         Returns 128_000 when:
           - conv.model is None and self._config.default_provider is not configured
-          - the resolved provider config has max_tokens <= 0 or None AND the
+          - the resolved provider config has no positive window AND the
             caller is not in CALLER_DEFAULT_MAX_TOKENS
           - any exception during provider lookup
         """
@@ -1562,9 +1573,14 @@ class AgentRuntime:
             provider_cfg = self._config.providers.get(provider_name)
             if provider_cfg is None:
                 return FALLBACK
+            window = getattr(provider_cfg, "context_window", 0)
+            if isinstance(window, bool) or not isinstance(window, int):
+                window = 0
+            if window > 0:
+                return window
             max_tokens = getattr(provider_cfg, "max_tokens", None)
-            if max_tokens and int(max_tokens) > 0:
-                return int(max_tokens)
+            if max_tokens and not isinstance(max_tokens, bool) and int(max_tokens) > 0:
+                return min(int(max_tokens), _MAX_SANE_WINDOW)
             # BUG #3 fix: use caller-specific default before falling back to 128K.
             # The provider config exists but its max_tokens is unset — use the
             # per-caller static table to avoid wasting 87% of MiniMax-M3's
@@ -1616,6 +1632,17 @@ class AgentRuntime:
         hard_ceiling = self._compute_model_max(conv)
         soft_ceiling = int(hard_ceiling * threshold)
         return (soft_ceiling, hard_ceiling)
+
+    def _compute_landing_goal(self, hard_ceiling: int) -> int:
+        """Token budget ordinary masking starts at, and heavy compact lands at.
+
+        ``min(15% of the real window, 24_000)``. Not the provider threshold.
+        """
+        if not isinstance(hard_ceiling, int) or isinstance(hard_ceiling, bool):
+            return 0
+        if hard_ceiling <= 0:
+            return 0
+        return min(int(hard_ceiling * _LANDING_FRACTION), _LANDING_CAP)
 
     @property
     def _last_trim_removed(self) -> int:
@@ -1814,12 +1841,11 @@ class AgentRuntime:
                     logger.debug("[tool-loop] sk=%s iteration=%d/%d", session_key, iteration, max_iter)
 
                     # Observation mask is separate from budget prune. Every
-                    # four tool results, stub everything older than the last
-                    # three before the next compact + LLM call.
+                    # four tool results, consider masking before compact.
                     n_obs = self._obs_since_mask.get(session_key, 0)
                     if n_obs >= 4:
-                        self._context_strategy.mask_old_observations(conv, keep_last=3)
                         self._obs_since_mask[session_key] = 0
+                        self._maybe_mask_observations(session_key, conv)
 
                     # §0: Pluggable context strategy — compaction before each LLM call.
                     # The strategy lives in agent/context_strategy.py; the former
@@ -1831,7 +1857,7 @@ class AgentRuntime:
                     # threshold defaults to 0.80 (configurable per-provider).
                     soft_ceiling, hard_ceiling = self._compute_compaction_threshold(conv)
                     model_max = hard_ceiling  # preserve for breakdown dispatch below
-                    self._context_strategy.compact(conv, soft_ceiling)
+                    self._compact_before_llm(session_key, conv, soft_ceiling, hard_ceiling)
                     # §2.8: Telemetry — read strategy.last_result, append to history.
                     # Audit-Fix-7: Patch hard_ceiling — strategy doesn't know the real value
                     # (computed by _compute_compaction_threshold at the runtime level).
@@ -2406,6 +2432,8 @@ class AgentRuntime:
                 tool_result_text = self._dedup_read_output(
                     session_key, conv, args, tool_result_text,
                 )
+            if result.success:
+                self._note_tool_path(session_key, conv, tool_name, args)
             tc.result = None
 
             conv.add_tool_result(call_id, tool_result_text)
@@ -3590,6 +3618,148 @@ class AgentRuntime:
         """
         with self._tool_history_lock:
             self._read_fingerprints.pop(session_key, None)
+            self._read_counts.pop(session_key, None)
+            self._hot_pins.pop(session_key, None)
+            self._edited_paths.pop(session_key, None)
+
+    def _note_tool_path(self, session_key: str, conv, tool_name: str, args) -> None:
+        """Count a successful read, or remember a successful edit.
+
+        A read with an empty project path or a failed stat does not count.
+        The third counted read of a path stores ``(mtime_ns, size)``. A later
+        read of a changed file drops the pin and starts the count at 1.
+        """
+        if not isinstance(args, dict):
+            return
+        path = args.get("path", "")
+        if not isinstance(path, str) or not path:
+            return
+        if tool_name in ("edit_file", "write_file"):
+            with self._tool_history_lock:
+                self._edited_paths.setdefault(session_key, set()).add(path)
+            return
+        if tool_name != "read_file":
+            return
+        project = getattr(conv, "project_path", None) or ""
+        if not project:
+            return
+        try:
+            st = os.stat(os.path.join(project, path))
+        except OSError as exc:
+            logger.debug("hot-path pin skipped for %s: %s", path, exc)
+            return
+        fp = (st.st_mtime_ns, st.st_size)
+        with self._tool_history_lock:
+            pins = self._hot_pins.setdefault(session_key, {})
+            counts = self._read_counts.setdefault(session_key, {})
+            stored = pins.get(path)
+            if stored is not None and stored != fp:
+                pins.pop(path, None)
+                counts[path] = 1
+                return
+            if stored is not None:
+                return
+            counts[path] = counts.get(path, 0) + 1
+            if counts[path] >= 3:
+                pins[path] = fp
+
+    def _protect_paths(self, session_key: str, conv) -> tuple[str, ...]:
+        """Edited paths plus pins whose mtime and size still match."""
+        project = getattr(conv, "project_path", None) or ""
+        with self._tool_history_lock:
+            edited = set(self._edited_paths.get(session_key, ()))
+            pins = dict(self._hot_pins.get(session_key, {}))
+        live: list[str] = []
+        drop: list[str] = []
+        for path, fp in pins.items():
+            if not project:
+                drop.append(path)
+                continue
+            try:
+                st = os.stat(os.path.join(project, path))
+            except OSError:
+                drop.append(path)
+                continue
+            if (st.st_mtime_ns, st.st_size) != fp:
+                drop.append(path)
+                continue
+            live.append(path)
+        if drop:
+            with self._tool_history_lock:
+                bucket = self._hot_pins.get(session_key)
+                counts = self._read_counts.setdefault(session_key, {})
+                if bucket is not None:
+                    for path in drop:
+                        bucket.pop(path, None)
+                        counts[path] = 0
+        return tuple(edited | set(live))
+
+    def _mask_candidate_state(self, conv, indices: list[int]) -> tuple[str, list[dict]]:
+        """Path, size, tool, and a one-line preview. Not the full body."""
+        lines: list[str] = []
+        candidates: list[dict] = []
+        for idx in indices:
+            if not isinstance(idx, int) or idx < 0 or idx >= len(conv.messages):
+                candidates.append({"path": "", "size": 0, "tool": "", "preview": ""})
+                continue
+            tool_name, path, _offset, _parent = self._context_strategy._tool_result_meta(conv, idx)
+            content = conv.messages[idx].content or ""
+            preview = content.replace("\n", " ")[:120]
+            candidates.append({
+                "path": path,
+                "size": len(content),
+                "tool": tool_name,
+                "preview": preview,
+            })
+            lines.append(f"{tool_name} {path} size={len(content)} {preview}")
+        state = "\n".join(lines)
+        if len(state) > 4000:
+            state = state[:4000]
+        return state, candidates
+
+    def _maybe_mask_observations(self, session_key: str, conv) -> None:
+        """Tier 1 then one JEV batch, only between the landing goal and the trigger."""
+        soft_ceiling, hard_ceiling = self._compute_compaction_threshold(conv)
+        landing_goal = self._compute_landing_goal(hard_ceiling)
+        estimate = conv.get_token_estimate()
+        if not (landing_goal < estimate <= soft_ceiling):
+            return
+        protect = self._protect_paths(session_key, conv)
+        indices = self._context_strategy.select_maskable(
+            conv, keep_last=3, protect_paths=protect,
+        )
+        if not indices:
+            return
+        from agent.llm.jev_client import classify_mask_candidates
+        state, candidates = self._mask_candidate_state(conv, indices)
+        verdicts = classify_mask_candidates(state, candidates)
+        self._context_strategy.apply_mask_verdicts(conv, indices, verdicts)
+
+    def _compact_before_llm(
+        self,
+        session_key: str,
+        conv,
+        soft_ceiling: int,
+        hard_ceiling: int,
+    ) -> None:
+        """Under the provider line, compact toward that line (usually a no-op).
+
+        Over the line, stub older tool results and compact toward the landing goal
+        without deleting the current turn or a protected path.
+        """
+        landing_goal = self._compute_landing_goal(hard_ceiling)
+        estimate = conv.get_token_estimate()
+        if estimate > soft_ceiling and soft_ceiling > landing_goal:
+            protect = self._protect_paths(session_key, conv)
+            self._context_strategy.panic_prune(conv, protect_paths=protect)
+            self._context_strategy.compact(
+                conv,
+                landing_goal,
+                protect_paths=protect,
+                preserve_current_turn=True,
+            )
+            return
+        self._context_strategy.compact(conv, soft_ceiling)
 
     def _count_tool_observation(self, session_key: str) -> None:
         """Count one add_tool_result toward the next observation-mask batch."""

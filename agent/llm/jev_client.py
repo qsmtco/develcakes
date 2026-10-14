@@ -205,6 +205,68 @@ def classify_unknown(
     return FailureClass(choice)
 
 
+_MASK_VERDICTS = ("keep", "mask", "summarize")
+
+_MASK_INSTRUCTIONS = (
+    "Decide what to do with this old tool result. "
+    "keep: the path is still needed. "
+    "mask: the body can go. "
+    "summarize: keep a short excerpt of the body."
+)
+
+_MASK_CRITERIA = {
+    "keep": "The path or result is still needed for the task.",
+    "mask": "The body is a dump that can be dropped.",
+    "summarize": "A short excerpt is enough.",
+}
+
+
+def classify_mask_candidates(
+    state: str, candidates: list[dict],
+) -> dict[str, str] | None:
+    """One batched decision for mask candidates.
+
+    Returns ``None`` when the whole call fails. An empty candidate list
+    does not call ``post_decision`` and returns an empty dict. Each
+    surviving answer is ``candidate_{i}`` → keep / mask / summarize.
+    A candidate that fails validation is omitted; the caller masks it.
+    Never raises.
+    """
+    if not isinstance(candidates, list) or not candidates:
+        return {}
+    if not isinstance(state, str):
+        return None
+    questions: dict = {}
+    for i, _cand in enumerate(candidates):
+        questions[f"candidate_{i}"] = {
+            "type": "choice",
+            "instructions": _MASK_INSTRUCTIONS,
+            "criteria": dict(_MASK_CRITERIA),
+        }
+    answers, _error = post_decision(state, questions)
+    if answers is None:
+        return None
+    verdicts: dict[str, str] = {}
+    for i in range(len(candidates)):
+        key = f"candidate_{i}"
+        try:
+            answer = answers[key]
+            if not isinstance(answer, dict) or answer.get("type") != "choice":
+                continue
+            choice = answer.get("choice")
+            confidence = answer.get("confidence", 0.0)
+            if not isinstance(choice, str) or choice not in _MASK_VERDICTS:
+                continue
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                continue
+            if confidence < _DECISION_MIN_CONFIDENCE:
+                continue
+        except (KeyError, TypeError, AttributeError):
+            continue
+        verdicts[key] = choice
+    return verdicts
+
+
 def probe_decision_model(provider: object, timeout: float = 4.0):
     """Test Connection for the DecisionModel card — a REAL typed decision.
 

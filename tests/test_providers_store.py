@@ -98,6 +98,45 @@ class TestLoadSave:
         assert lp.reasoning_effort == "low"
         assert lp.supports_reasoning is True
 
+    def test_context_mode_round_trip(self, tmp_config_dir):
+        ps.save_providers([_make_provider("modey", context_mode="JIT")])
+        assert ps.load_providers()[0].context_mode == "jit"
+
+    def test_context_mode_invalid_loads_as_auto(self, tmp_config_dir):
+        path = ps.get_providers_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        path_yaml = path
+        import yaml
+        with open(path_yaml, "w", encoding="utf-8") as f:
+            yaml.dump([{
+                "name": "bad",
+                "base_url": "https://example.com",
+                "api_key": "k",
+                "default_model": "openai/m",
+                "context_mode": "nope",
+            }, {
+                "name": "blank",
+                "base_url": "https://example.com",
+                "api_key": "k",
+                "default_model": "openai/m",
+                "context_mode": None,
+            }, {
+                "name": "num",
+                "base_url": "https://example.com",
+                "api_key": "k",
+                "default_model": "openai/m",
+                "context_mode": 3,
+            }], f)
+        loaded = {p.name: p.context_mode for p in ps.load_providers()}
+        assert loaded == {"bad": "auto", "blank": "auto", "num": "auto"}
+
+    def test_llm_provider_copy_keeps_context_mode(self):
+        from agent.config import _to_llm_provider
+        kept = _to_llm_provider(_make_provider("jitty", context_mode="hybrid"))
+        assert kept.context_mode == "hybrid"
+        dropped = _to_llm_provider(_make_provider("bad", context_mode="nope"))
+        assert dropped.context_mode == "auto"
+
     def test_round_trip_json_fallback(self, tmp_config_dir):
         """If pyyaml is missing, write a JSON file and confirm load works."""
         try:

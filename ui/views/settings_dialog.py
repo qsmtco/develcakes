@@ -20,7 +20,11 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER as _DECISION_MODEL_PROVIDER
-from models.providers import ProviderConfig, validate_provider_reasoning_effort
+from models.providers import (
+    ProviderConfig,
+    coerce_provider_context_mode,
+    validate_provider_reasoning_effort,
+)
 
 # SPEC-22 §2.8: the structural handle the code looks the JEV card up by. The
 # Settings page pre-names its card with this; the general Providers list and
@@ -298,11 +302,15 @@ class _ProviderCard:
             supports_streaming=existing.supports_streaming if existing else True,
             max_tokens=int(self._max_tokens_spin.get_value()),
             default_max_tokens=existing.default_max_tokens if existing else 0,
+            context_window=getattr(existing, "context_window", 0) if existing else 0,
             compaction_threshold=float(
                 self._compaction_threshold_spin.get_value()
             ),  # Phase A
             last_verified_at=existing.last_verified_at if existing else None,
             last_error=existing.last_error if existing else None,
+            context_mode=coerce_provider_context_mode(
+                getattr(existing, "context_mode", "auto") if existing else "auto"
+            ),
             reasoning_effort=self._reasoning_level_from_dropdown(),
             supports_reasoning=bool(self._supports_reasoning_check.get_active()),
         )

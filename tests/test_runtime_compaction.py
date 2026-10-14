@@ -93,8 +93,23 @@ class TestCompactionThreshold:
         runtime = _make_runtime({"minimax": provider}, default_provider="minimax")
         conv = Conversation(agent_name="Coder", model="minimax/minimax-m3")
         soft, hard = runtime._compute_compaction_threshold(conv)
-        assert soft == int(1_048_576 * 0.90)  # 943,718
+        assert soft == int(200_000 * 0.90)
+        assert hard == 200_000
+
+    def test_context_window_bypasses_max_tokens_cap(self):
+        """An explicit context_window is the window, even above 200k."""
+        provider = LLMProviderConfig(
+            name="minimax", base_url="x", api_key="x",
+            default_model="minimax-m3", caller="minimax",
+            max_tokens=1_300_000,
+            context_window=1_048_576,
+            compaction_threshold=0.90,
+        )
+        runtime = _make_runtime({"minimax": provider}, default_provider="minimax")
+        conv = Conversation(agent_name="Coder", model="minimax/minimax-m3")
+        soft, hard = runtime._compute_compaction_threshold(conv)
         assert hard == 1_048_576
+        assert soft == int(1_048_576 * 0.90)
 
     def test_fallback_when_no_provider(self):
         """When model has no provider config, falls back to 0.80 × 128_000."""

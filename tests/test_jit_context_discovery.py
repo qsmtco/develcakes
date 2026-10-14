@@ -56,6 +56,15 @@ class TestProviderContextMode:
         with pytest.raises(ValueError, match="Invalid context_mode"):
             validate_provider_context_mode("invalid")
 
+    def test_coerce_provider_context_mode_never_raises(self):
+        from models.providers import coerce_provider_context_mode
+        assert coerce_provider_context_mode("JIT") == "jit"
+        assert coerce_provider_context_mode("  hybrid ") == "hybrid"
+        assert coerce_provider_context_mode("nope") == "auto"
+        assert coerce_provider_context_mode("") == "auto"
+        assert coerce_provider_context_mode(None) == "auto"
+        assert coerce_provider_context_mode(3) == "auto"
+
     def test_validate_provider_context_mode_normalizes_case(self):
         """'PRELOAD' normalizes to 'preload'."""
         assert validate_provider_context_mode("PRELOAD") == "preload"

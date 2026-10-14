@@ -49,6 +49,7 @@ class ProviderConfig:
     supports_streaming: bool = True
     max_tokens: int = 128_000
     default_max_tokens: int = 0
+    context_window: int = 0             # explicit context window; bypasses the max_tokens sanity cap
     compaction_threshold: float = 0.80  # fraction of max_tokens that triggers compaction
     last_verified_at: str | None = None
     last_error: str | None = None
@@ -61,6 +62,16 @@ class ProviderConfig:
 
 _VALID_CONTEXT_MODES = frozenset({"auto", "preload", "jit", "hybrid"})
 _VALID_REASONING_LEVELS = frozenset({"off", "low", "medium", "high"})
+
+
+def coerce_provider_context_mode(mode: object) -> str:
+    """Return a valid context mode. Anything else is ``auto``. Never raises."""
+    if not isinstance(mode, str):
+        return "auto"
+    try:
+        return validate_provider_context_mode(mode)
+    except ValueError:
+        return "auto"
 
 
 def validate_provider_context_mode(mode: str) -> str:

@@ -19,6 +19,8 @@ import stat
 from dataclasses import dataclass, field
 from typing import Any
 
+from models.providers import coerce_provider_context_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,10 +38,12 @@ class LLMProviderConfig:
     supports_tools: bool = True
     supports_streaming: bool = True
     max_tokens: int = 128_000          # context window size
+    context_window: int = 0            # explicit context window; bypasses the max_tokens sanity cap
     compaction_threshold: float = 0.80  # fraction of max_tokens that triggers compaction
     enabled: bool = True
     last_verified_at: str | None = None
     last_error: str | None = None
+    context_mode: str = "auto"         # "auto" | "preload" | "jit" | "hybrid"
     reasoning_effort: str = "off"       # "off" | "low" | "medium" | "high"
     supports_reasoning: bool = False    # send-side guard; card checkbox
 
@@ -152,10 +156,12 @@ def _to_llm_provider(p) -> LLMProviderConfig:
         supports_tools=p.supports_tools,
         supports_streaming=p.supports_streaming,
         max_tokens=p.max_tokens,
+        context_window=getattr(p, "context_window", 0) or 0,
         compaction_threshold=getattr(p, "compaction_threshold", 0.80),
         enabled=p.enabled,
         last_verified_at=p.last_verified_at,
         last_error=p.last_error,
+        context_mode=coerce_provider_context_mode(getattr(p, "context_mode", "auto")),
         reasoning_effort=getattr(p, "reasoning_effort", "off") or "off",
         supports_reasoning=bool(getattr(p, "supports_reasoning", False)),
     )

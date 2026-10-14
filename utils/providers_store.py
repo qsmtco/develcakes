@@ -22,6 +22,8 @@ from typing import Any
 from models.providers import (
     _VALID_REASONING_LEVELS,
     ProviderConfig,
+    coerce_provider_context_mode,
+    validate_provider_context_mode,
     validate_provider_reasoning_effort,
 )
 
@@ -61,9 +63,11 @@ def _to_dict(p: ProviderConfig) -> dict[str, Any]:
         "supports_streaming": p.supports_streaming,
         "max_tokens": p.max_tokens,
         "default_max_tokens": p.default_max_tokens,
+        "context_window": p.context_window,
         "compaction_threshold": p.compaction_threshold,
         "last_verified_at": p.last_verified_at,
         "last_error": p.last_error,
+        "context_mode": _normalize_context_mode_value(getattr(p, "context_mode", "auto")),
         "reasoning_effort": validate_provider_reasoning_effort(
             getattr(p, "reasoning_effort", "off")
         ),
@@ -101,6 +105,34 @@ def _normalize_supports_reasoning(d: dict[str, Any]) -> bool:
     return False
 
 
+def _normalize_context_mode_value(raw: object) -> str:
+    """Load-path coerce: missing, empty, or invalid → auto. Never raises."""
+    if raw in (None, ""):
+        return "auto"
+    mode = coerce_provider_context_mode(raw)
+    if isinstance(raw, str):
+        try:
+            validate_provider_context_mode(raw)
+        except ValueError:
+            _logger.warning(
+                "providers.yaml: invalid context_mode %r; coercing to 'auto'.",
+                raw,
+            )
+    else:
+        _logger.warning(
+            "providers.yaml: invalid context_mode %r; coercing to 'auto'.",
+            raw,
+        )
+    return mode
+
+
+def _context_window_value(raw: object) -> int:
+    """Optional YAML int. A bool, a float, or any non-int is 0."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    return raw
+
+
 def _from_dict(d: dict[str, Any]) -> ProviderConfig:
     """Convert a plain dict to a ProviderConfig. Tolerates missing optional fields.
 
@@ -134,9 +166,11 @@ def _from_dict(d: dict[str, Any]) -> ProviderConfig:
         supports_streaming=d.get("supports_streaming", True),
         max_tokens=d.get("max_tokens", 128_000),
         default_max_tokens=d.get("default_max_tokens", 0),
+        context_window=_context_window_value(d.get("context_window", 0)),
         compaction_threshold=d.get("compaction_threshold", 0.80),
         last_verified_at=d.get("last_verified_at"),
         last_error=d.get("last_error"),
+        context_mode=_normalize_context_mode_value(d.get("context_mode", "auto")),
         reasoning_effort=_normalize_reasoning_effort(d),
         supports_reasoning=_normalize_supports_reasoning(d),
     )

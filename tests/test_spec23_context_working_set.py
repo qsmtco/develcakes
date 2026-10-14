@@ -134,7 +134,7 @@ def test_stat_oserror_skips_dedup(tmp_path):
 def _five_tool_conv() -> Conversation:
     conv = Conversation(agent_name="Coder", model="gpt-4o")
     for i in range(5):
-        body = f"BODY{i}-" + ("x" * 40)
+        body = f"BODY{i}-" + ("x" * 520)
         tc = ToolCall(
             call_id=f"c{i}",
             tool_name="read_file",
@@ -182,15 +182,15 @@ def test_mask_negative_keep_last_masks_all():
 
 def test_mask_missing_parent_uses_unknown_tool():
     conv = Conversation(agent_name="Coder")
-    conv.add_tool_result("missing", "orphan body")
+    conv.add_tool_result("missing", "orphan " + ("x" * 520))
     n = DefaultContextStrategy().mask_old_observations(conv, keep_last=0)
     assert n == 1
     assert conv.messages[0].content.startswith("[masked \u2014 [unknown tool]  offset=0 ")
 
 
 def test_mask_batch_resets_so_later_calls_do_not_rewrite(tmp_path):
-    target = tmp_path / "a.txt"
-    target.write_text("abcdefghij")
+    for i in range(1, 8):
+        (tmp_path / f"a{i}.txt").write_text("x" * 600)
     cfg = _make_cfg()
     cfg.max_tool_iterations = 12
     rt = AgentRuntime(cfg)
@@ -207,15 +207,18 @@ def test_mask_batch_resets_so_later_calls_do_not_rewrite(tmp_path):
                 "function": {
                     "name": "read_file",
                     "arguments": json.dumps({
-                        "path": "a.txt",
-                        "offset": seen["n"] - 1,
-                        "limit": 1,
+                        "path": f"a{seen['n']}.txt",
+                        "offset": 0,
+                        "limit": 1000,
                     }),
                 },
             }])
         return _resp("done")
 
-    with patch.object(rt, "_call_llm", llm):
+    conv_live = rt.get_conversation(sk)
+    conv_live.get_token_estimate = lambda: 50_000
+    with patch.object(rt, "_call_llm", llm), \
+         patch("agent.llm.jev_client.classify_mask_candidates", return_value=None):
         rt._run_loop(sk, "read the file")
     conv = rt.get_conversation(sk)
     tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
