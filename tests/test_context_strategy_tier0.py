@@ -123,7 +123,10 @@ def test_select_maskable_keeps_short_recent_and_protected():
     n = strategy.mask_old_observations(conv, keep_last=1, protect_paths=("f2.py",))
     assert n == 1
     masked = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert masked[1].startswith("[masked \u2014 read_file f1.py offset=0 (520 chars removed)]")
+    assert masked[1].startswith(
+        "[masked \u2014 read_file f1.py offset=0 (520 chars removed)"
+        " \u2014 re-read to restore]"
+    )
     assert masked[0] == "B" * 480
     assert masked[2] == "B" * 520
 

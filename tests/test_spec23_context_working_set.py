@@ -216,13 +216,23 @@ def test_mask_batch_resets_so_later_calls_do_not_rewrite(tmp_path):
         return _resp("done")
 
     conv_live = rt.get_conversation(sk)
+    prior = "y" * 600
+    prior_call = ToolCall(
+        call_id="prior",
+        tool_name="read_file",
+        arguments={"path": "old.txt", "offset": 0},
+        result=prior,
+    )
+    conv_live.add_user_message("old turn")
+    conv_live.add_assistant_message("go", [prior_call])
+    conv_live.add_tool_result("prior", prior)
     conv_live.get_token_estimate = lambda: 50_000
     with patch.object(rt, "_call_llm", llm), \
-         patch("agent.llm.jev_client.classify_mask_candidates", return_value=None):
+         patch("agent.llm.jev_client.classify_mask_candidates", return_value={}):
         rt._run_loop(sk, "read the file")
     conv = rt.get_conversation(sk)
     tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert len(tools) == 7
+    assert len(tools) == 8
     assert tools[0].startswith("[masked \u2014")
     assert all(not body.startswith("[masked \u2014") for body in tools[1:])
     assert rt._obs_since_mask[sk] == 3

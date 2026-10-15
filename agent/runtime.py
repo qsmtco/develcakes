@@ -3746,16 +3746,26 @@ class AgentRuntime:
         estimate = conv.get_token_estimate()
         if not (landing_goal < estimate <= soft_ceiling):
             return
+        strategy = self._context_strategy
+        floor = strategy._last_user_index(conv)
+        if floor is None:
+            return  # no user message: nothing is "old" — mirror panic_prune
         protect = self._protect_paths(session_key, conv)
-        indices = self._context_strategy.select_maskable(
-            conv, keep_last=3, protect_paths=protect,
+        indices = strategy.select_maskable(
+            conv, keep_last=3, protect_paths=protect, after_index=floor,
         )
         if not indices:
             return
         from agent.llm.jev_client import classify_mask_candidates
         state, candidates = self._mask_candidate_state(conv, indices)
         verdicts = classify_mask_candidates(state, candidates)
-        self._context_strategy.apply_mask_verdicts(conv, indices, verdicts)
+        if verdicts is None:
+            logger.warning(
+                "[mask] JEV batch failed for sk=%s — keeping all %d candidates",
+                session_key, len(indices),
+            )
+            return
+        strategy.apply_mask_verdicts(conv, indices, verdicts)
 
     def _compact_before_llm(
         self,

@@ -478,11 +478,14 @@ class DefaultContextStrategy:
         conv: Conversation,
         keep_last: int = 3,
         protect_paths: tuple[str, ...] = (),
+        *,
+        after_index: int | None = None,
     ) -> list[int]:
         """Tool-result indices eligible for masking.
 
-        Kept: the ``keep_last`` newest tool results, a path in
-        ``protect_paths``, a body under 500 characters, and anything
+        Kept: the ``keep_last`` newest tool results, anything at or after
+        ``after_index`` (last user message — current turn is immune), a path
+        in ``protect_paths``, a body under 500 characters, and anything
         already masked or stubbed.
         """
         if keep_last < 0:
@@ -494,6 +497,8 @@ class DefaultContextStrategy:
                 tool_result_indices.append(i)
         maskable: list[int] = []
         for idx in tool_result_indices[keep_last:]:
+            if after_index is not None and idx >= after_index:
+                continue
             msg = conv.messages[idx]
             content = msg.content or ""
             if content.startswith("[masked \u2014") or content.startswith("[compacted \u2014"):
@@ -511,18 +516,24 @@ class DefaultContextStrategy:
         conv: Conversation,
         keep_last: int = 3,
         protect_paths: tuple[str, ...] = (),
+        *,
+        after_index: int | None = None,
     ) -> int:
         """Replace tool results older than the last ``keep_last`` with a one-line mask.
 
-        Does not consult the token budget, insert a summary, or pop messages.
-        Returns the number of messages whose content was replaced.
-        Short results and ``protect_paths`` are left in place.
+        ``after_index`` is the last user message. Results at or after that
+        index stay. ``None`` keeps the historical selection. Does not consult
+        the token budget, insert a summary, or pop messages. Returns the
+        number of messages whose content was replaced. Short results and
+        ``protect_paths`` are left in place.
         """
         if keep_last < 0:
             keep_last = 0
         return self.apply_mask_verdicts(
             conv,
-            self.select_maskable(conv, keep_last, protect_paths),
+            self.select_maskable(
+                conv, keep_last, protect_paths, after_index=after_index,
+            ),
             None,
         )
 
@@ -561,7 +572,8 @@ class DefaultContextStrategy:
             n_chars = len(content)
             path_shown = path.replace("\n", " ")
             masked = (
-                f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n_chars} chars removed)]"
+                f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n_chars} chars removed)"
+                " \u2014 re-read to restore]"
             )
             if choice == "summarize":
                 msg.content = masked + "\n" + content[:200]
