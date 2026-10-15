@@ -2071,7 +2071,12 @@ for large projects.
 Observation masking runs every four tool results, between the landing goal
 and the soft ceiling. It keeps the newest three tool results and every
 result at or after the last user message. A failed JEV batch keeps those
-candidates and logs a warning. Mask stubs end with `— re-read to restore]`.
+candidates and logs a warning. A `read_file` stub ends with `— re-read to
+restore]`. An `exec_command` stub, and any other tool, ends with `— re-run
+to restore]`. `exec_command` joins the retention walk: a masked shell result
+is detectable as dead, and the next run of the command returns the new
+output rather than an unchanged notice. The synthetic `<exec:session>` pin
+is dropped on stat failure, so a shell result is not path-protected.
 `panic_prune` still mask-alls on `None`. The session `task_card` is prefixed
 onto the last user message at serialization time and is not a new message.
 
@@ -2166,7 +2171,7 @@ class DefaultContextStrategy:
 3. **Layer 3 — manual fallback:** If the strategy cannot fit within budget,
    a final brute-force trim removes oldest messages.
 
-**SPEC-30 tiers:** The provider `compaction_threshold` (default 0.80) is only the heavy-compact trigger. Ordinary masking starts at `min(15% of the hard ceiling, 24_000)` tokens and, between that goal and the trigger, runs Tier 1 rules then one `classify_mask_candidates` batch. The sweep is turn-immune: it passes the last user-message index as `after_index` and does not mask results at or after it. A `None` verdict from that batch is fail-keep (warning, no masks). Stubs end with `— re-read to restore]`. Above the trigger, `panic_prune` still stubs tool results from before the latest user message and still mask-alls when it applies `None`, then `compact` aims at the landing goal and does not delete that turn or a protected path. A hot-path pin is `_hot_pins` (path plus `st_mtime_ns` and `st_size`), cleared by `drop_read_cache`, not a facts-board row.
+**SPEC-30 tiers:** The provider `compaction_threshold` (default 0.80) is only the heavy-compact trigger. Ordinary masking starts at `min(15% of the hard ceiling, 24_000)` tokens and, between that goal and the trigger, runs Tier 1 rules then one `classify_mask_candidates` batch. The sweep is turn-immune: it passes the last user-message index as `after_index` and does not mask results at or after it. A `None` verdict from that batch is fail-keep (warning, no masks). A `read_file` stub ends with `— re-read to restore]`; `exec_command` and any other tool end with `— re-run to restore]`. Above the trigger, `panic_prune` still stubs tool results from before the latest user message and still mask-alls when it applies `None`, then `compact` aims at the landing goal and does not delete that turn or a protected path. A hot-path pin is `_hot_pins` (path plus `st_mtime_ns` and `st_size`), stored on the first successful `read_file` and cleared by `drop_read_cache`, not a facts-board row. A later read of a changed file drops that pin and re-pins the new bytes at count 1. Edited paths stay protected either way.
 
 **Telemetry:** Each `compact()` call produces a `CompactionEvent` stored on
 `self._last_result`. The runtime reads this and appends it to

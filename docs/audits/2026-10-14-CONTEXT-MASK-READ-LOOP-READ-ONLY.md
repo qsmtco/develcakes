@@ -175,3 +175,12 @@ which instructs verification reads that masking then deletes. Keep the map; fix 
 - Method: read-only trace at HEAD `c30cb5e5`; live transcripts (`special:coder.json.migrated`,
   `special:supervisor.json`), `.crabcakes/feed.json` cards, and the runtime/strategy source.
   No files modified by this audit.
+
+---
+
+## Resolution (2026-10-15)
+
+- **Item 1** (turn immunity), **item 2** (JEV fail-keep), and **item 4** (actionable stubs) closed by SPEC-33 (`3a24d8c7`).
+- **Item 3** (exec retention parity) closed by SPEC-33b. A masked `exec_command` result is detectable as dead. The stub says re-run. The next run returns the new output. The synthetic `<exec:session>` pin is dropped on stat failure, so a shell result stays maskable.
+- **Item 5** (pin on first read) closed by SPEC-33b. One successful `read_file` pins the path. A changed file is dropped and re-pinned at count 1.
+- **Item 6** (near-duplicate stuck detection) is explicitly deferred. This round adds no `post_decision` call site.

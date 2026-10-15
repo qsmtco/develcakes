@@ -131,7 +131,7 @@ def test_select_maskable_keeps_short_recent_and_protected():
     assert masked[2] == "B" * 520
 
 
-def test_third_read_pins_a_dirty_file_and_a_change_drops_it(tmp_path):
+def test_first_read_pins_a_file_and_a_change_drops_it(tmp_path):
     target = tmp_path / "a.py"
     target.write_text("hello\n")
     rt = AgentRuntime(_make_cfg())
@@ -139,9 +139,6 @@ def test_third_read_pins_a_dirty_file_and_a_change_drops_it(tmp_path):
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     args = {"path": "a.py"}
-    rt._note_tool_path(sk, conv, "read_file", args)
-    rt._note_tool_path(sk, conv, "read_file", args)
-    assert "a.py" not in rt._protect_paths(sk, conv)
     rt._note_tool_path(sk, conv, "read_file", args)
     assert "a.py" in rt._protect_paths(sk, conv)
     stored = rt._hot_pins[sk]["a.py"]

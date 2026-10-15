@@ -3648,9 +3648,10 @@ class AgentRuntime:
         """Count a successful read or exec, or remember a successful edit.
 
         A read with an empty project path or a failed stat does not count.
-        The third counted read of a path stores ``(mtime_ns, size)``. A later
-        read of a changed file drops the pin and starts the count at 1.
-        ``exec_command`` is counted under ``<exec:session>`` and is not a file pin.
+        The first counted read of a path stores ``(mtime_ns, size)``. A later
+        read of a changed file drops that pin and re-pins the new bytes at
+        count 1. ``exec_command`` is counted under ``<exec:session>`` and is
+        not a file pin.
         """
         if not isinstance(args, dict):
             return
@@ -3682,11 +3683,12 @@ class AgentRuntime:
             if stored is not None and stored != fp:
                 pins.pop(path, None)
                 counts[path] = 1
+                pins[path] = fp
                 return
             if stored is not None:
                 return
             counts[path] = counts.get(path, 0) + 1
-            if counts[path] >= 3:
+            if counts[path] >= 1:
                 pins[path] = fp
 
     def _note_exec_pin(self, session_key: str, conv) -> None:
