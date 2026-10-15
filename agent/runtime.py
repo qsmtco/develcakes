@@ -3645,13 +3645,17 @@ class AgentRuntime:
             self._edited_paths.pop(session_key, None)
 
     def _note_tool_path(self, session_key: str, conv, tool_name: str, args) -> None:
-        """Count a successful read, or remember a successful edit.
+        """Count a successful read or exec, or remember a successful edit.
 
         A read with an empty project path or a failed stat does not count.
         The third counted read of a path stores ``(mtime_ns, size)``. A later
         read of a changed file drops the pin and starts the count at 1.
+        ``exec_command`` is counted under ``<exec:session>`` and is not a file pin.
         """
         if not isinstance(args, dict):
+            return
+        if tool_name == "exec_command":
+            self._note_exec_pin(session_key, conv)
             return
         path = args.get("path", "")
         if not isinstance(path, str) or not path:
@@ -3684,6 +3688,24 @@ class AgentRuntime:
             counts[path] = counts.get(path, 0) + 1
             if counts[path] >= 3:
                 pins[path] = fp
+
+    def _note_exec_pin(self, session_key: str, conv) -> None:
+        """Count a successful exec under ``<exec:session>``.
+
+        There is no file to stat. The pin is stored so ``_protect_paths``
+        can drop it on ``OSError`` — an exec result is not path-protected.
+        """
+        project = getattr(conv, "project_path", None) or ""
+        if not project:
+            return
+        path = f"<exec:{session_key}>"
+        with self._tool_history_lock:
+            pins = self._hot_pins.setdefault(session_key, {})
+            counts = self._read_counts.setdefault(session_key, {})
+            counts[path] = counts.get(path, 0) + 1
+            if counts[path] >= 3:
+                # Not a file fingerprint. _protect_paths stats this key and drops it.
+                pins[path] = (0, 0)
 
     def _protect_paths(self, session_key: str, conv) -> tuple[str, ...]:
         """Edited paths plus pins whose mtime and size still match."""
@@ -3847,13 +3869,20 @@ class AgentRuntime:
     def _key_body_in_transcript(
         self, conv: Any, path: str, offset: int | None, limit: int | None,
     ) -> bool:
-        """SPEC-32: does a real read_file body for this key still live here?
+        """SPEC-32 wrapper. Key is ``(path, offset or 0, limit)`` for read_file."""
+        return self._body_live_in_transcript(
+            conv, "read_file", (path, offset or 0, limit),
+        )
 
-        Newest to oldest. Skips [unchanged \u2014 notices and any tool that
-        is not read_file. The first remaining result for (path, offset or 0,
-        limit) decides: a [masked \u2014 or [compacted \u2014 stub is False;
-        any other content is True. Nothing left, or any exception, is False.
-        Called before add_tool_result, so the read in progress is not visible.
+    def _body_live_in_transcript(self, conv: Any, tool: str, key: tuple) -> bool:
+        """SPEC-33b: does a real body for this (tool, key) still live here?
+
+        Newest to oldest. Skips [unchanged \u2014 notices and any other tool.
+        The first remaining result for the key decides: a [masked \u2014 or
+        [compacted \u2014 stub is False; any other content is True.
+        Nothing left, or any exception, is False.
+        ``key`` is ``(path, offset or 0, limit)`` for read_file and
+        ``("", 0, None)`` for exec_command.
         """
         try:
             from models.conversation import MessageRole
@@ -3866,10 +3895,10 @@ class AgentRuntime:
                 if content.startswith("[unchanged \u2014"):
                     continue
                 name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
-                if name != "read_file":
+                if name != tool:
                     continue
                 rlimit = strategy._tool_result_limit(conv, i)
-                if rpath != path or roffset != (offset or 0) or rlimit != limit:
+                if (rpath, roffset, rlimit) != key:
                     continue
                 return not (
                     content.startswith("[masked \u2014")
@@ -3877,7 +3906,7 @@ class AgentRuntime:
                 )
         except Exception:
             try:
-                logger.debug("recovery walk failed for %s", path, exc_info=True)
+                logger.debug("recovery walk failed for %s", key, exc_info=True)
             except Exception:
                 pass
         return False

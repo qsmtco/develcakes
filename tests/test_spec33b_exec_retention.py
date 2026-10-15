@@ -1,0 +1,162 @@
+"""SPEC-33b item 3: exec_command retention parity."""
+from __future__ import annotations
+
+from agent.context_strategy import DefaultContextStrategy
+from agent.runtime import AgentRuntime
+from agent.tools import set_approval_callback
+from models.conversation import Conversation, MessageRole, ToolCall
+from tests.test_agent_runtime import _make_cfg
+
+_EXEC_KEY = ("", 0, None)
+
+
+def _runtime(project: str):
+    rt = AgentRuntime(_make_cfg())
+    sk = "special:coder"
+    rt.create_conversation("Coder", sk, project, defer_prompt_build=True)
+    return rt, sk, rt.get_conversation(sk)
+
+
+def _tool_bodies(conv):
+    return [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
+
+
+def _tool_indexes(conv):
+    return [
+        i for i, m in enumerate(conv.messages)
+        if m.role == MessageRole.TOOL_RESULT
+    ]
+
+
+def _exec(conv: Conversation, call_id: str, body: str, command: str = "echo hi") -> None:
+    tc = ToolCall(
+        call_id=call_id,
+        tool_name="exec_command",
+        arguments={"command": command},
+        result=body,
+    )
+    conv.add_assistant_message("go", [tc])
+    conv.add_tool_result(call_id, body)
+
+
+def test_tool_result_meta_is_tool_agnostic_for_exec():
+    conv = Conversation(agent_name="Coder")
+    _exec(conv, "c0", "hello\n")
+    name, path, offset, parent = DefaultContextStrategy()._tool_result_meta(
+        conv, _tool_indexes(conv)[0],
+    )
+    assert (name, path, offset) == ("exec_command", "", 0)
+    assert parent is conv.messages[0]
+
+
+def test_masked_exec_is_dead_and_a_live_one_is_not(tmp_path):
+    rt, _sk, conv = _runtime(str(tmp_path))
+    _exec(conv, "c0", "first\n")
+    assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is True
+    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
+    _exec(conv, "c1", "second\n")
+    assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is True
+
+
+def test_exec_stub_says_rerun_not_reread():
+    conv = Conversation(agent_name="Coder")
+    _exec(conv, "c0", "E" * 520)
+    n = DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    assert n == 1
+    body = _tool_bodies(conv)[0]
+    assert body.startswith("[masked \u2014 exec_command ")
+    assert "re-run to restore]" in body
+    assert "re-read to restore]" not in body
+
+
+def test_read_file_stub_still_says_reread():
+    conv = Conversation(agent_name="Coder")
+    body = "R" * 520
+    tc = ToolCall(
+        call_id="c0",
+        tool_name="read_file",
+        arguments={"path": "a.py", "offset": 0},
+        result=body,
+    )
+    conv.add_assistant_message("go", [tc])
+    conv.add_tool_result("c0", body)
+    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    assert _tool_bodies(conv)[0].endswith("\u2014 re-read to restore]")
+
+
+def test_masked_exec_rerun_returns_full_output(tmp_path, monkeypatch):
+    rt, sk, conv = _runtime(str(tmp_path))
+    monkeypatch.setattr(rt, "_dispatch_approval", lambda *a, **k: True)
+    set_approval_callback(lambda *a: True)
+    try:
+        assert rt._execute_tool_batch(
+            sk, None, conv, "run",
+            [("c1", "exec_command", {"command": "echo hello-spec33b"})],
+            1,
+        ) is False
+        DefaultContextStrategy().apply_mask_verdicts(
+            conv, [_tool_indexes(conv)[0]], None,
+        )
+        assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
+        assert rt._execute_tool_batch(
+            sk, None, conv, "run",
+            [("c2", "exec_command", {"command": "echo hello-spec33b"})],
+            2,
+        ) is False
+        body = _tool_bodies(conv)[-1]
+        assert "hello-spec33b" in body
+        assert not body.startswith("[unchanged")
+        assert not body.startswith("[masked")
+    finally:
+        set_approval_callback(None)
+
+
+def test_exec_pin_is_dropped_when_stat_fails(tmp_path):
+    rt, sk, conv = _runtime(str(tmp_path))
+    for _ in range(3):
+        rt._note_tool_path(sk, conv, "exec_command", {"command": "echo hi"})
+    key = f"<exec:{sk}>"
+    assert key in rt._hot_pins[sk]
+    protected = rt._protect_paths(sk, conv)
+    assert key not in protected
+    assert key not in rt._hot_pins.get(sk, {})
+
+
+def test_unmasked_exec_stays_maskable(tmp_path):
+    rt, sk, conv = _runtime(str(tmp_path))
+    body = "E" * 520
+    _exec(conv, "c0", body)
+    for _ in range(3):
+        rt._note_tool_path(sk, conv, "exec_command", {"command": "echo hi"})
+    protect = rt._protect_paths(sk, conv)
+    indices = DefaultContextStrategy().select_maskable(
+        conv, keep_last=0, protect_paths=protect,
+    )
+    assert len(indices) == 1
+    assert conv.messages[indices[0]].content == body
+
+
+def test_exec_without_project_or_dict_args_does_not_pin(tmp_path):
+    rt, sk, conv = _runtime(str(tmp_path))
+    conv.project_path = ""
+    rt._note_tool_path(sk, conv, "exec_command", {"command": "echo hi"})
+    rt._note_tool_path(sk, conv, "exec_command", "nope")  # type: ignore[arg-type]
+    assert rt._read_counts.get(sk, {}) == {}
+
+
+def test_exec_walk_does_not_treat_a_read_as_the_exec_body(tmp_path):
+    rt, _sk, conv = _runtime(str(tmp_path))
+    body = "file\n"
+    tc = ToolCall(
+        call_id="r0",
+        tool_name="read_file",
+        arguments={"path": "a.py", "offset": 0},
+        result=body,
+    )
+    conv.add_assistant_message("go", [tc])
+    conv.add_tool_result("r0", body)
+    _exec(conv, "c0", "ran\n")
+    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[1]], None)
+    assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
+    assert rt._key_body_in_transcript(conv, "a.py", 0, None) is True

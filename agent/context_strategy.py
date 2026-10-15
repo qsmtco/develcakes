@@ -21,6 +21,14 @@ from models.conversation import (
     _tiktoken_encoding_for,
 )
 
+# SPEC-33b: the stub tells the model how to get the body back.
+# read_file is re-read. exec_command, and anything else, is re-run.
+_RECOVERY_HINT = {
+    "exec_command": "re-run to restore]",
+    "read_file": "re-read to restore]",
+}
+_DEFAULT_RECOVERY_HINT = "re-run to restore]"
+
 
 # ── Telemetry dataclass ────────────────────────────────────────────────────────
 
@@ -571,9 +579,10 @@ class DefaultContextStrategy:
             tool_name, path, offset, parent = self._tool_result_meta(conv, idx)
             n_chars = len(content)
             path_shown = path.replace("\n", " ")
+            hint = _RECOVERY_HINT.get(tool_name, _DEFAULT_RECOVERY_HINT)
             masked = (
                 f"[masked \u2014 {tool_name} {path_shown} offset={offset} ({n_chars} chars removed)"
-                " \u2014 re-read to restore]"
+                f" \u2014 {hint}"
             )
             if choice == "summarize":
                 msg.content = masked + "\n" + content[:200]
