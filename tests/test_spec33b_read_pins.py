@@ -53,11 +53,12 @@ def test_empty_path_missing_project_and_stat_failure_skip(tmp_path):
     assert rt._read_counts.get(sk, {}) == {}
 
 
-def test_first_read_is_protected_from_masking(tmp_path):
+def test_first_read_is_protected_from_panic(tmp_path):
     target = tmp_path / "a.py"
     target.write_text("pinned\n")
     rt, sk, conv = _runtime(str(tmp_path))
     rt._note_tool_path(sk, conv, "read_file", {"path": "a.py"})
+    conv.add_user_message("old")
     body = "P" * 520
     other = "Q" * 520
     for call_id, path, text in (("c0", "a.py", body), ("c1", "b.py", other)):
@@ -69,18 +70,12 @@ def test_first_read_is_protected_from_masking(tmp_path):
         )
         conv.add_assistant_message("go", [tc])
         conv.add_tool_result(call_id, text)
+    conv.add_user_message("new")
     protect = rt._protect_paths(sk, conv)
-    strategy = DefaultContextStrategy()
-    indices = strategy.select_maskable(conv, keep_last=0, protect_paths=protect)
-    masked_paths = []
-    for idx in indices:
-        _name, path, _offset, _parent = strategy._tool_result_meta(conv, idx)
-        masked_paths.append(path)
-    assert masked_paths == ["b.py"]
-    strategy.mask_old_observations(conv, keep_last=0, protect_paths=protect)
+    DefaultContextStrategy().panic_prune(conv, protect_paths=protect)
     bodies = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
     assert bodies[0] == body
-    assert bodies[1].startswith("[masked \u2014")
+    assert bodies[1].startswith("[compacted \u2014")
 
 
 def test_unchanged_reread_keeps_the_same_pin(tmp_path):

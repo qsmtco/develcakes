@@ -37,7 +37,7 @@ def test_panic_stubs_only_before_the_last_user_message():
     n = DefaultContextStrategy().panic_prune(conv, protect_paths=())
     assert n == 1
     tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert tools[0].startswith("[masked \u2014 read_file old.py offset=0 ")
+    assert tools[0].startswith("[compacted \u2014 read_file output, ")
     assert tools[1] == _body()
 
 
@@ -146,3 +146,51 @@ def test_assistant_text_in_the_current_turn_is_not_trimmed():
     texts = [m.content for m in conv.messages]
     assert any(t.startswith("current answer") for t in texts)
     assert any(t == "current request" for t in texts)
+
+
+def test_over_ceiling_stubs_previous_turn_and_keeps_the_current_turn(tmp_path):
+    hot = tmp_path / "hot.py"
+    hot.write_text("pinned\n")
+    rt = AgentRuntime(_make_cfg())
+    sk = "special:panic"
+    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
+    conv = rt.get_conversation(sk)
+    rt._note_tool_path(sk, conv, "read_file", {"path": "hot.py"})
+    conv.add_user_message("old request")
+    huge = "U" * 800_000
+    pinned = "P" * 800
+    current = "C" * 800
+    for call_id, path, body in (("old", "old.py", huge), ("hot", "hot.py", pinned)):
+        tc = ToolCall(
+            call_id=call_id,
+            tool_name="read_file",
+            arguments={"path": path, "offset": 0},
+            result=body,
+        )
+        conv.add_assistant_message("go", [tc])
+        conv.add_tool_result(call_id, body)
+    conv.add_user_message("current request")
+    tc = ToolCall(
+        call_id="now",
+        tool_name="read_file",
+        arguments={"path": "now.py", "offset": 0},
+        result=current,
+    )
+    conv.add_assistant_message("go", [tc])
+    conv.add_tool_result("now", current)
+    soft, _hard = rt._compute_compaction_threshold(conv)
+    assert conv.get_token_estimate() > soft
+    rt._compact_before_llm(sk, conv, soft, _hard)
+    bodies = {
+        m.tool_call_id: m.content
+        for m in conv.messages
+        if m.role == MessageRole.TOOL_RESULT
+    }
+    assert bodies["now"] == current
+    assert bodies["hot"] == pinned
+    assert bodies["old"].startswith("[compacted \u2014")
+    assert any(
+        m.content == "current request"
+        for m in conv.messages
+        if m.role == MessageRole.USER
+    )

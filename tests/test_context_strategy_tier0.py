@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from agent.config import LLMProviderConfig
-from agent.context_strategy import DefaultContextStrategy
 from agent.runtime import AgentRuntime, _LANDING_CAP
-from models.conversation import Conversation, MessageRole, ToolCall
+from models.conversation import Conversation
 from tests.test_agent_runtime import _make_cfg
 from tests.test_runtime_compaction import _make_runtime
 from utils.providers_store import _context_window_value, load_providers, save_providers
@@ -97,40 +96,6 @@ def test_context_window_round_trips_and_reaches_runtime(tmp_config_dir):
     assert hard == 1_000_000
 
 
-def _long_conv() -> Conversation:
-    conv = Conversation(agent_name="Coder", model="gpt-4o")
-    for i, n in enumerate((480, 520, 520, 40)):
-        body = "B" * n
-        tc = ToolCall(
-            call_id=f"c{i}",
-            tool_name="read_file",
-            arguments={"path": f"f{i}.py", "offset": 0},
-            result=body,
-        )
-        conv.add_assistant_message("go", [tc])
-        conv.add_tool_result(f"c{i}", body)
-    return conv
-
-
-def test_select_maskable_keeps_short_recent_and_protected():
-    conv = _long_conv()
-    strategy = DefaultContextStrategy()
-    # newest is 40 chars (kept for length), then 520, 520, 480.
-    # keep_last=1 keeps the newest. 480 is short. f2.py is protected.
-    indices = strategy.select_maskable(conv, keep_last=1, protect_paths=("f2.py",))
-    bodies = [conv.messages[i].content for i in indices]
-    assert bodies == ["B" * 520]
-    n = strategy.mask_old_observations(conv, keep_last=1, protect_paths=("f2.py",))
-    assert n == 1
-    masked = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert masked[1].startswith(
-        "[masked \u2014 read_file f1.py offset=0 (520 chars removed)"
-        " \u2014 re-read to restore]"
-    )
-    assert masked[0] == "B" * 480
-    assert masked[2] == "B" * 520
-
-
 def test_first_read_pins_a_file_and_a_change_drops_it(tmp_path):
     target = tmp_path / "a.py"
     target.write_text("hello\n")
@@ -192,20 +157,6 @@ def test_edit_survives_pin_drop_and_clear_drops_both(tmp_path):
 def test_drop_read_cache_missing_session_is_noop():
     rt = AgentRuntime(_make_cfg())
     rt.drop_read_cache("special:missing")
-
-
-def test_under_landing_goal_does_not_mask(tmp_path):
-    rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
-    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
-    conv = rt.get_conversation(sk)
-    body = "B" * 520
-    tc = ToolCall(call_id="c0", tool_name="read_file", arguments={"path": "f.py"}, result=body)
-    conv.add_assistant_message("go", [tc])
-    conv.add_tool_result("c0", body)
-    conv.get_token_estimate = lambda: 100  # type: ignore[method-assign]
-    rt._maybe_mask_observations(sk, conv)
-    assert conv.messages[-1].content == body
 
 
 def test_compact_under_threshold_uses_soft_ceiling(tmp_path, monkeypatch):

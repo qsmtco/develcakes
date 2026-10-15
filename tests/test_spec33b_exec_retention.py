@@ -49,40 +49,20 @@ def test_tool_result_meta_is_tool_agnostic_for_exec():
     assert parent is conv.messages[0]
 
 
+def _plant_masked(conv, index: int) -> None:
+    conv.messages[index].content = (
+        "[masked \u2014 exec_command  offset=0 (6 chars removed)]"
+    )
+
+
 def test_masked_exec_is_dead_and_a_live_one_is_not(tmp_path):
     rt, _sk, conv = _runtime(str(tmp_path))
     _exec(conv, "c0", "first\n")
     assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is True
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
     _exec(conv, "c1", "second\n")
     assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is True
-
-
-def test_exec_stub_says_rerun_not_reread():
-    conv = Conversation(agent_name="Coder")
-    _exec(conv, "c0", "E" * 520)
-    n = DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
-    assert n == 1
-    body = _tool_bodies(conv)[0]
-    assert body.startswith("[masked \u2014 exec_command ")
-    assert "re-run to restore]" in body
-    assert "re-read to restore]" not in body
-
-
-def test_read_file_stub_still_says_reread():
-    conv = Conversation(agent_name="Coder")
-    body = "R" * 520
-    tc = ToolCall(
-        call_id="c0",
-        tool_name="read_file",
-        arguments={"path": "a.py", "offset": 0},
-        result=body,
-    )
-    conv.add_assistant_message("go", [tc])
-    conv.add_tool_result("c0", body)
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
-    assert _tool_bodies(conv)[0].endswith("\u2014 re-read to restore]")
 
 
 def test_masked_exec_rerun_returns_full_output(tmp_path, monkeypatch):
@@ -95,9 +75,7 @@ def test_masked_exec_rerun_returns_full_output(tmp_path, monkeypatch):
             [("c1", "exec_command", {"command": "echo hello-spec33b"})],
             1,
         ) is False
-        DefaultContextStrategy().apply_mask_verdicts(
-            conv, [_tool_indexes(conv)[0]], None,
-        )
+        _plant_masked(conv, _tool_indexes(conv)[0])
         assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
         assert rt._execute_tool_batch(
             sk, None, conv, "run",
@@ -123,18 +101,24 @@ def test_exec_pin_is_dropped_when_stat_fails(tmp_path):
     assert key not in rt._hot_pins.get(sk, {})
 
 
-def test_unmasked_exec_stays_maskable(tmp_path):
+def test_panic_stubs_previous_turn_exec(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
+    conv.add_user_message("old")
     body = "E" * 520
     _exec(conv, "c0", body)
+    conv.add_user_message("new")
+    _exec(conv, "c1", "kept\n")
     for _ in range(3):
         rt._note_tool_path(sk, conv, "exec_command", {"command": "echo hi"})
-    protect = rt._protect_paths(sk, conv)
-    indices = DefaultContextStrategy().select_maskable(
-        conv, keep_last=0, protect_paths=protect,
+    n = DefaultContextStrategy().panic_prune(
+        conv, protect_paths=rt._protect_paths(sk, conv),
     )
-    assert len(indices) == 1
-    assert conv.messages[indices[0]].content == body
+    bodies = _tool_bodies(conv)
+    assert n == 1
+    assert bodies[0].startswith("[compacted \u2014 exec_command output, ")
+    assert "re-run to restore" not in bodies[0]
+    assert "re-read to restore" not in bodies[0]
+    assert bodies[1] == "kept\n"
 
 
 def test_exec_without_project_or_dict_args_does_not_pin(tmp_path):
@@ -157,6 +141,6 @@ def test_exec_walk_does_not_treat_a_read_as_the_exec_body(tmp_path):
     conv.add_assistant_message("go", [tc])
     conv.add_tool_result("r0", body)
     _exec(conv, "c0", "ran\n")
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[1]], None)
+    _plant_masked(conv, _tool_indexes(conv)[1])
     assert rt._body_live_in_transcript(conv, "exec_command", _EXEC_KEY) is False
     assert rt._key_body_in_transcript(conv, "a.py", 0, None) is True

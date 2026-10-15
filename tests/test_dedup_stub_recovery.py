@@ -40,6 +40,12 @@ def _notice(path: str, offset, limit) -> str:
     )
 
 
+def _plant_masked(conv, index: int, text: str | None = None) -> None:
+    conv.messages[index].content = text or (
+        "[masked \u2014 read_file a.txt offset=0 (12 chars removed)]"
+    )
+
+
 def _assert_fingerprint(rt, sk, path: str, offset, limit, file_path: str):
     st = os.stat(file_path)
     key = (path, offset or 0, limit)
@@ -82,7 +88,7 @@ def test_masked_reread_returns_full_body(tmp_path):
     target.write_text("hello world\n")
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     assert _tool_bodies(conv)[0].startswith("[masked \u2014")
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
     assert _tool_bodies(conv)[1] == "hello world\n"
@@ -108,8 +114,10 @@ def test_summarize_stub_returns_full_body_not_tail(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     idx = _tool_indexes(conv)[0]
-    DefaultContextStrategy().apply_mask_verdicts(
-        conv, [idx], {"candidate_0": "summarize"},
+    original_body = conv.messages[idx].content
+    _plant_masked(
+        conv, idx,
+        "[masked \u2014 read_file a.txt offset=0 (600 chars removed)]\n" + original_body[:200],
     )
     stub = conv.messages[idx].content
     assert stub.startswith("[masked \u2014")
@@ -135,16 +143,14 @@ def test_other_window_does_not_decide(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     _read(rt, sk, conv, "c2", {"path": "a.txt", "limit": 5}, 2)
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
     assert _tool_bodies(conv)[2] == "hello world\n"
 
     rt2, sk2, conv2 = _runtime(str(tmp_path))
     _read(rt2, sk2, conv2, "c1", {"path": "a.txt"})
     _read(rt2, sk2, conv2, "c2", {"path": "a.txt", "offset": 6}, 2)
-    DefaultContextStrategy().apply_mask_verdicts(
-        conv2, [_tool_indexes(conv2)[1]], None,
-    )
+    _plant_masked(conv2, _tool_indexes(conv2)[1])
     _read(rt2, sk2, conv2, "c3", {"path": "a.txt"}, 3)
     assert _tool_bodies(conv2)[2] == _notice("a.txt", None, None)
 
@@ -156,7 +162,7 @@ def test_notice_does_not_shadow_masked_body(tmp_path):
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
     assert _tool_bodies(conv)[1] == _notice("a.txt", None, None)
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
     assert _tool_bodies(conv)[2] == "hello world\n"
 
@@ -166,13 +172,13 @@ def test_recovery_then_unchanged_then_remask_keeps_fingerprint(tmp_path):
     target.write_text("hello world\n")
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
     assert _tool_bodies(conv)[1] == "hello world\n"
     _assert_fingerprint(rt, sk, "a.txt", None, None, str(target))
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
     assert _tool_bodies(conv)[2] == _notice("a.txt", None, None)
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[1]], None)
+    _plant_masked(conv, _tool_indexes(conv)[1])
     _read(rt, sk, conv, "c4", {"path": "a.txt"}, 4)
     assert _tool_bodies(conv)[3] == "hello world\n"
     _assert_fingerprint(rt, sk, "a.txt", None, None, str(target))
@@ -226,7 +232,7 @@ def test_write_file_result_does_not_hide_masked_read(tmp_path):
     target.write_text("hello world\n")
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
-    DefaultContextStrategy().apply_mask_verdicts(conv, [_tool_indexes(conv)[0]], None)
+    _plant_masked(conv, _tool_indexes(conv)[0])
     tc = ToolCall(
         call_id="w1",
         tool_name="write_file",

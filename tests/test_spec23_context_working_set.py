@@ -1,14 +1,13 @@
-"""SPEC-23: one tool-message copy, same-turn read dedup, observation masks, task card."""
+"""SPEC-23: one tool-message copy, same-turn read dedup, task card."""
 from __future__ import annotations
 
 import json
 import os
 from unittest.mock import patch
 
-from agent.context_strategy import DefaultContextStrategy
 from agent.llm.convert import convert_messages_for_anthropic
 from agent.runtime import AgentRuntime
-from models.conversation import Conversation, MessageRole, ToolCall
+from models.conversation import Conversation, MessageRole
 from tests.test_agent_runtime import _make_cfg, _resp
 
 
@@ -131,113 +130,6 @@ def test_stat_oserror_skips_dedup(tmp_path):
     assert rt._read_fingerprints.get(sk, {}) == {}
 
 
-def _five_tool_conv() -> Conversation:
-    conv = Conversation(agent_name="Coder", model="gpt-4o")
-    for i in range(5):
-        body = f"BODY{i}-" + ("x" * 520)
-        tc = ToolCall(
-            call_id=f"c{i}",
-            tool_name="read_file",
-            arguments={"path": f"f{i}.py", "offset": i * 10},
-            result=body,
-        )
-        conv.add_assistant_message("go", [tc])
-        conv.add_tool_result(f"c{i}", body)
-    return conv
-
-
-def test_mask_keeps_last_three_and_message_count():
-    conv = _five_tool_conv()
-    before = len(conv.messages)
-    kept = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT][-3:]
-    n = DefaultContextStrategy().mask_old_observations(conv, keep_last=3)
-    assert n == 2
-    assert len(conv.messages) == before
-    tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert tools[0].startswith("[masked \u2014 read_file f0.py offset=0 ")
-    assert tools[1].startswith("[masked \u2014 read_file f1.py offset=10 ")
-    assert tools[2:] == kept
-    assert conv.messages[0].tool_calls[0].result is None
-    assert DefaultContextStrategy().mask_old_observations(conv, keep_last=3) == 0
-    assert tools[0] == [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT][0]
-
-
-def test_mask_keep_last_larger_than_history_replaces_nothing():
-    conv = _five_tool_conv()
-    before = [m.content for m in conv.messages]
-    assert DefaultContextStrategy().mask_old_observations(conv, keep_last=9) == 0
-    assert [m.content for m in conv.messages] == before
-
-
-def test_mask_negative_keep_last_masks_all():
-    conv = _five_tool_conv()
-    n = DefaultContextStrategy().mask_old_observations(conv, keep_last=-1)
-    assert n == 5
-    assert all(
-        m.content.startswith("[masked \u2014")
-        for m in conv.messages
-        if m.role == MessageRole.TOOL_RESULT
-    )
-
-
-def test_mask_missing_parent_uses_unknown_tool():
-    conv = Conversation(agent_name="Coder")
-    conv.add_tool_result("missing", "orphan " + ("x" * 520))
-    n = DefaultContextStrategy().mask_old_observations(conv, keep_last=0)
-    assert n == 1
-    assert conv.messages[0].content.startswith("[masked \u2014 [unknown tool]  offset=0 ")
-
-
-def test_mask_batch_resets_so_later_calls_do_not_rewrite(tmp_path):
-    for i in range(1, 8):
-        (tmp_path / f"a{i}.txt").write_text("x" * 600)
-    cfg = _make_cfg()
-    cfg.max_tool_iterations = 12
-    rt = AgentRuntime(cfg)
-    sk = "special:mask"
-    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
-    rt._running = True
-    seen = {"n": 0}
-
-    def llm(session_key, messages, tools, **kwargs):
-        seen["n"] += 1
-        if seen["n"] <= 7:
-            return _resp(tool_calls=[{
-                "id": f"c{seen['n']}",
-                "function": {
-                    "name": "read_file",
-                    "arguments": json.dumps({
-                        "path": f"a{seen['n']}.txt",
-                        "offset": 0,
-                        "limit": 1000,
-                    }),
-                },
-            }])
-        return _resp("done")
-
-    conv_live = rt.get_conversation(sk)
-    prior = "y" * 600
-    prior_call = ToolCall(
-        call_id="prior",
-        tool_name="read_file",
-        arguments={"path": "old.txt", "offset": 0},
-        result=prior,
-    )
-    conv_live.add_user_message("old turn")
-    conv_live.add_assistant_message("go", [prior_call])
-    conv_live.add_tool_result("prior", prior)
-    conv_live.get_token_estimate = lambda: 50_000
-    with patch.object(rt, "_call_llm", llm), \
-         patch("agent.llm.jev_client.classify_mask_candidates", return_value={}):
-        rt._run_loop(sk, "read the file")
-    conv = rt.get_conversation(sk)
-    tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert len(tools) == 8
-    assert tools[0].startswith("[masked \u2014")
-    assert all(not body.startswith("[masked \u2014") for body in tools[1:])
-    assert rt._obs_since_mask[sk] == 3
-
-
 def test_task_card_round_trip_and_wire_prefix(tmp_path, monkeypatch):
     from agent.persistence import load_conversation_from_disk, save_conversation_to_disk
 
@@ -318,33 +210,6 @@ def test_next_turn_rereads_instead_of_reporting_unchanged(tmp_path):
         rt._run_loop(sk, "second")
     bodies = _tool_bodies(rt.get_conversation(sk))
     assert bodies == ["hello world\n", "hello world\n"]
-
-
-def test_new_turn_does_not_mask_from_a_stale_counter(tmp_path):
-    rt, sk, conv = _runtime(str(tmp_path))
-    rt._running = True
-    for i in range(5):
-        tc = ToolCall(
-            call_id=f"c{i}",
-            tool_name="read_file",
-            arguments={"path": f"f{i}.py"},
-            result="keep",
-        )
-        conv.add_assistant_message("go", [tc])
-        conv.add_tool_result(f"c{i}", f"BODY{i}")
-    rt._obs_since_mask[sk] = 4
-    called = {"n": 0}
-
-    def llm(session_key, messages, tools, **kwargs):
-        called["n"] += 1
-        return _resp("done")
-
-    with patch.object(rt, "_call_llm", llm):
-        rt._run_loop(sk, "next")
-    assert called["n"] >= 1
-    tools = _tool_bodies(conv)
-    assert tools[:5] == [f"BODY{i}" for i in range(5)]
-    assert rt._obs_since_mask.get(sk, 0) == 0
 
 
 def test_task_card_prefixes_only_the_last_user_message():

@@ -184,3 +184,4 @@ which instructs verification reads that masking then deletes. Keep the map; fix 
 - **Item 3** (exec retention parity) closed by SPEC-33b. A masked `exec_command` result is detectable as dead. The stub says re-run. The next run returns the new output. The synthetic `<exec:session>` pin is dropped on stat failure, so a shell result stays maskable.
 - **Item 5** (pin on first read) closed by SPEC-33b. One successful `read_file` pins the path. A changed file is dropped and re-pinned at count 1.
 - **Item 6** (near-duplicate stuck detection) is explicitly deferred. This round adds no `post_decision` call site.
+- **SPEC-34** removed the periodic sweep. `panic_prune` now writes `[compacted — …]` instead of `[masked — … re-read|re-run to restore]`. Items 3 and 5 stay closed by SPEC-33b. Item 6 stays deferred.

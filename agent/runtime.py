@@ -726,9 +726,6 @@ class AgentRuntime:
         self._read_counts: dict[str, dict[str, int]] = {}
         self._hot_pins: dict[str, dict[str, tuple[int, int]]] = {}
         self._edited_paths: dict[str, set[str]] = {}
-        # How many tool results have landed since the last observation mask.
-        # Masking runs in batches of 4 so the prefix stays stable in between.
-        self._obs_since_mask: dict[str, int] = {}
         # session_key → compiled wire packet after an enforced write.
         # The stored transcript is kept; this dict is what the model sees.
         self._compile: dict[str, dict] = {}
@@ -1801,13 +1798,12 @@ class AgentRuntime:
                 self._dispatch(self._on_turn_start, session_key, _turn_token=turn_token)
 
             try:
-                # A new user message starts a new turn. Read fingerprints and
-                # the observation-mask counter must not survive from the
-                # previous turn: _cleanup_tool_history runs on cancel and
-                # failure, not on a completed turn.
+                # A new user message starts a new turn. Read fingerprints
+                # must not survive from the previous turn:
+                # _cleanup_tool_history runs on cancel and failure, not on
+                # a completed turn.
                 with self._tool_history_lock:
                     self._read_fingerprints.pop(session_key, None)
-                self._obs_since_mask.pop(session_key, None)
                 # Step 1: add user message
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
@@ -1854,13 +1850,6 @@ class AgentRuntime:
                             return
                     iteration += 1
                     logger.debug("[tool-loop] sk=%s iteration=%d/%d", session_key, iteration, max_iter)
-
-                    # Observation mask is separate from budget prune. Every
-                    # four tool results, consider masking before compact.
-                    n_obs = self._obs_since_mask.get(session_key, 0)
-                    if n_obs >= 4:
-                        self._obs_since_mask[session_key] = 0
-                        self._maybe_mask_observations(session_key, conv)
 
                     # §0: Pluggable context strategy — compaction before each LLM call.
                     # The strategy lives in agent/context_strategy.py; the former
@@ -2346,7 +2335,6 @@ class AgentRuntime:
                     text = tc.result or "denied"
                     tc.result = None
                     conv.add_tool_result(call_id, text)
-                    self._count_tool_observation(session_key)
                     self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
                     self._audit_log.record(tool_name, args, approved=False,
                                             user=getattr(self._config, "user_id", ""),
@@ -2369,7 +2357,6 @@ class AgentRuntime:
                         text = tc.result or "denied"
                         tc.result = None
                         conv.add_tool_result(call_id, text)
-                        self._count_tool_observation(session_key)
                         self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
                         self._audit_log.record(tool_name, args, approved=False,
                                                 user=getattr(self._config, "user_id", ""),
@@ -2452,7 +2439,6 @@ class AgentRuntime:
             tc.result = None
 
             conv.add_tool_result(call_id, tool_result_text)
-            self._count_tool_observation(session_key)
             self._maybe_compile(session_key, conv, tool_name, args, result)
             if result.success and tool_name in ("write_file", "edit_file"):
                 with self._repo_map_lock:
@@ -3740,57 +3726,6 @@ class AgentRuntime:
                         counts[path] = 0
         return tuple(edited | set(live))
 
-    def _mask_candidate_state(self, conv, indices: list[int]) -> tuple[str, list[dict]]:
-        """Path, size, tool, and a one-line preview. Not the full body."""
-        lines: list[str] = []
-        candidates: list[dict] = []
-        for idx in indices:
-            if not isinstance(idx, int) or idx < 0 or idx >= len(conv.messages):
-                candidates.append({"path": "", "size": 0, "tool": "", "preview": ""})
-                continue
-            tool_name, path, _offset, _parent = self._context_strategy._tool_result_meta(conv, idx)
-            content = conv.messages[idx].content or ""
-            preview = content.replace("\n", " ")[:120]
-            candidates.append({
-                "path": path,
-                "size": len(content),
-                "tool": tool_name,
-                "preview": preview,
-            })
-            lines.append(f"{tool_name} {path} size={len(content)} {preview}")
-        state = "\n".join(lines)
-        if len(state) > 4000:
-            state = state[:4000]
-        return state, candidates
-
-    def _maybe_mask_observations(self, session_key: str, conv) -> None:
-        """Tier 1 then one JEV batch, only between the landing goal and the trigger."""
-        soft_ceiling, hard_ceiling = self._compute_compaction_threshold(conv)
-        landing_goal = self._compute_landing_goal(hard_ceiling)
-        estimate = conv.get_token_estimate()
-        if not (landing_goal < estimate <= soft_ceiling):
-            return
-        strategy = self._context_strategy
-        floor = strategy._last_user_index(conv)
-        if floor is None:
-            return  # no user message: nothing is "old" — mirror panic_prune
-        protect = self._protect_paths(session_key, conv)
-        indices = strategy.select_maskable(
-            conv, keep_last=3, protect_paths=protect, after_index=floor,
-        )
-        if not indices:
-            return
-        from agent.llm.jev_client import classify_mask_candidates
-        state, candidates = self._mask_candidate_state(conv, indices)
-        verdicts = classify_mask_candidates(state, candidates)
-        if verdicts is None:
-            logger.warning(
-                "[mask] JEV batch failed for sk=%s — keeping all %d candidates",
-                session_key, len(indices),
-            )
-            return
-        strategy.apply_mask_verdicts(conv, indices, verdicts)
-
     def _compact_before_llm(
         self,
         session_key: str,
@@ -3816,10 +3751,6 @@ class AgentRuntime:
             )
             return
         self._context_strategy.compact(conv, soft_ceiling)
-
-    def _count_tool_observation(self, session_key: str) -> None:
-        """Count one add_tool_result toward the next observation-mask batch."""
-        self._obs_since_mask[session_key] = self._obs_since_mask.get(session_key, 0) + 1
 
     def _task_line(self, tool_name: str, args: dict, result) -> str:
         """One progress line for the session task card, or "" to skip."""
@@ -3963,7 +3894,6 @@ class AgentRuntime:
         with self._tool_history_lock:
             self._tool_history.pop(session_key, None)
             self._read_fingerprints.pop(session_key, None)
-        self._obs_since_mask.pop(session_key, None)
         # Phase CB-3: also clean up pending stuck messages
         self._pending_stuck_messages.pop(session_key, None)
 

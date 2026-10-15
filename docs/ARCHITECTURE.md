@@ -1840,7 +1840,7 @@ After an enforced write, the next model call is a compiled list: the system prom
 
 Same-turn `read_file` dedup keys `(path, offset or 0, limit)` to `(st_mtime_ns, st_size)` on `_read_fingerprints`, cleared at turn end and by `drop_read_cache`. A re-read returns the full body when no live `read_file` body for that key remains in the transcript (the newest real result is a mask or compact stub, the results were evicted, or the walk fails). `[unchanged]` applies only while a live copy of that same window remains. Notices and results from other tools do not count as that copy.
 
-`agent/llm/jev_client.py` is the Decision Model transport. `post_decision(state, questions)` returns `(answers, error)`. `classify_mask_candidates` is a second consumer: one batched choice per mask cycle, confidence floor 0.6, and `None` on a failed call. The periodic sweep treats that `None` as fail-keep: it logs a warning and masks nothing. `panic_prune` does not call JEV; it still applies `None` as mask-all. `classify_mask_candidates` does not run above the provider compaction threshold. The model and host come from the `DecisionModel` card. There is no baked-in model slug. `agent/repo_map.py` builds a Python definition/reference graph and renders at most 2,000 tokens. Dirty `.py` files from `git status` are ranked above clean files, with no top-N cap on that dirty set; the 2,000-token render budget can still end the block. The shown signature is the def covering the most lines of each `git diff --unified=0` hunk; the last def in a file runs to end of file, and a dirty `.py` path that is no longer on disk is scored with the other dirty files and shown as `(deleted)`. Untracked files use a goal-name match. Clean files keep graph order, capped at 30 symbols. Names that are test stubs under `tests/` are demoted. The decision model is not called. The runtime cache key is `(project, hash(goal), tree_version)`. `tree_version` increments after a `write_file` or `edit_file` that lands, so the next wire build refreshes the map. The block is attached to the wire user message for the current goal. It is not part of `conv.system_prompt`.
+`agent/llm/jev_client.py` is the Decision Model transport. `post_decision(state, questions)` returns `(answers, error)`. `classify_mask_candidates` remains in the client and is unused. The periodic observation-mask sweep has been removed. `panic_prune` does not call JEV. Over the soft ceiling it replaces previous-turn tool bodies with `[compacted — …]`; the bytes are not kept. A first-read pin protects that `read_file` path through the prune. The SPEC-32 walk still treats a historical `[masked —` prefix as a dead body. The model and host come from the `DecisionModel` card. There is no baked-in model slug. `agent/repo_map.py` builds a Python definition/reference graph and renders at most 2,000 tokens. Dirty `.py` files from `git status` are ranked above clean files, with no top-N cap on that dirty set; the 2,000-token render budget can still end the block. The shown signature is the def covering the most lines of each `git diff --unified=0` hunk; the last def in a file runs to end of file, and a dirty `.py` path that is no longer on disk is scored with the other dirty files and shown as `(deleted)`. Untracked files use a goal-name match. Clean files keep graph order, capped at 30 symbols. Names that are test stubs under `tests/` are demoted. The decision model is not called. The runtime cache key is `(project, hash(goal), tree_version)`. `tree_version` increments after a `write_file` or `edit_file` that lands, so the next wire build refreshes the map. The block is attached to the wire user message for the current goal. It is not part of `conv.system_prompt`.
 
 Guidance preambles on injected blocks (SPEC-31):
 
@@ -2068,17 +2068,17 @@ for large projects.
 - `"jit"` — file index only, no core files
 - `"hybrid"` — one stub line per existing core file (`[N bytes — use read_file(...)]`) plus `build_file_index`. It does not inline file bodies.
 
-Observation masking runs every four tool results, between the landing goal
-and the soft ceiling. It keeps the newest three tool results and every
-result at or after the last user message. A failed JEV batch keeps those
-candidates and logs a warning. A `read_file` stub ends with `— re-read to
-restore]`. An `exec_command` stub, and any other tool, ends with `— re-run
-to restore]`. `exec_command` joins the retention walk: a masked shell result
-is detectable as dead, and the next run of the command returns the new
-output rather than an unchanged notice. The synthetic `<exec:session>` pin
-is dropped on stat failure, so a shell result is not path-protected.
-`panic_prune` still mask-alls on `None`. The session `task_card` is prefixed
-onto the last user message at serialization time and is not a new message.
+The periodic observation-mask sweep is gone. Context control on every LLM
+call is `_compact_before_llm`: under the soft ceiling, `compact` is a no-op;
+over it, `panic_prune` replaces previous-turn tool bodies with
+`[compacted — {tool} output, {N} chars removed]` and `compact` aims at the
+landing goal. That stub does not keep the body. The current turn and a
+protected path are not stubbed. A `read_file` pin is stored on the first
+successful read, so that path survives the prune. `exec_command` is not
+path-protected. The SPEC-32 walk still treats `[masked —` and
+`[compacted —` as dead, so a later `read_file` can return the file again.
+The session `task_card` is prefixed onto the last user message at
+serialization time and is not a new message.
 
 Oversized core files (>50KB) get a size placeholder with `read_file()` hint
 instead of being silently dropped.
@@ -2171,7 +2171,7 @@ class DefaultContextStrategy:
 3. **Layer 3 — manual fallback:** If the strategy cannot fit within budget,
    a final brute-force trim removes oldest messages.
 
-**SPEC-30 tiers:** The provider `compaction_threshold` (default 0.80) is only the heavy-compact trigger. Ordinary masking starts at `min(15% of the hard ceiling, 24_000)` tokens and, between that goal and the trigger, runs Tier 1 rules then one `classify_mask_candidates` batch. The sweep is turn-immune: it passes the last user-message index as `after_index` and does not mask results at or after it. A `None` verdict from that batch is fail-keep (warning, no masks). A `read_file` stub ends with `— re-read to restore]`; `exec_command` and any other tool end with `— re-run to restore]`. Above the trigger, `panic_prune` still stubs tool results from before the latest user message and still mask-alls when it applies `None`, then `compact` aims at the landing goal and does not delete that turn or a protected path. A hot-path pin is `_hot_pins` (path plus `st_mtime_ns` and `st_size`), stored on the first successful `read_file` and cleared by `drop_read_cache`, not a facts-board row. A later read of a changed file drops that pin and re-pins the new bytes at count 1. Edited paths stay protected either way.
+**SPEC-34:** The periodic mask sweep is gone. The provider `compaction_threshold` (default 0.80) is the heavy-compact trigger. Under that line, `compact(soft_ceiling)` does not stub. Over it, `panic_prune` writes `[compacted — {tool} output, {N} chars removed]` on tool results from before the latest user message, skipping a protected path and any body already stubbed, then `compact` aims at `min(15% of the hard ceiling, 24_000)` without deleting the current turn or a protected path. The stub drops the body. A hot-path pin is `_hot_pins` (path plus `st_mtime_ns` and `st_size`), stored on the first successful `read_file` and cleared by `drop_read_cache`, not a facts-board row. A later read of a changed file drops that pin and re-pins the new bytes at count 1. Edited paths stay protected either way.
 
 **Telemetry:** Each `compact()` call produces a `CompactionEvent` stored on
 `self._last_result`. The runtime reads this and appends it to
