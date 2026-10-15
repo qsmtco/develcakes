@@ -134,7 +134,7 @@ def _isolated_config_home():
     the whole module. Every _make_runtime() construction and each FAILED
     turn's _auto_save writes a
     conversation JSON — without this the suite wrote fixture conversations
-    into the REAL ~/.config/crabcakes/conversations (supervisor measured
+    into the REAL ~/.config/develcakes/conversations (supervisor measured
     DELTA=4 per run).
 
     Module-scoped, so monkeypatch (function-scoped) can't be used — manual
@@ -168,7 +168,7 @@ def _hermetic_audit_flush():
     """_terminate_turn auto-flushes each runtime's AuditLog; the rollback
     tests below exercise real _run_loop → _terminate_turn paths, so without
     this guard a full-suite run would append test data to the REAL
-    ~/.config/crabcakes/audit-log.jsonl. Same guard as
+    ~/.config/develcakes/audit-log.jsonl. Same guard as
     tests/test_agent_runtime.py::_hermetic_audit_flush (module-scoped:
     manual patch/restore, since monkeypatch is function-scoped)."""
     from agent.audit import AuditLog
