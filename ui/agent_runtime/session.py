@@ -121,25 +121,6 @@ class RuntimeSessionMixin:
                 session_key, exc,
             )
 
-        # SPEC-08 store-mode load (SP4A): the JSON's absence makes the store
-        # the sole arbiter of history — without this, the next load
-        # resurrects the cleared conversation from transcript.db rows (the
-        # D2 delete_session is the store's designed surface for this).
-        # Best-effort, mirroring the JSON-delete tolerance: a store failure
-        # logs but does not fail the whole clear (in-memory is already reset).
-        try:
-            from agent.persistence import delete_session_rows
-            removed = delete_session_rows(session_key)
-            _mod().logger.info(
-                "clear_conversation: deleted %d transcript-store rows for %s",
-                removed, session_key,
-            )
-        except Exception as exc:  # noqa: BLE001 — clear must not fail wholesale
-            _mod().logger.warning(
-                "clear_conversation: could not delete store rows for %s: %s",
-                session_key, exc,
-            )
-
         return True
 
     def compact_conversation(

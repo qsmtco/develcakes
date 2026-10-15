@@ -5,7 +5,7 @@
 #
 # Contract under test (D3, docs/specs/phases/SPEC-11-PREFLIGHT-DECISIONS.md):
 #   - Copy list: agent.json, providers.yaml, config.json, audit-log.jsonl,
-#     feed-prefs.json, transcript.db (+ -wal/-shm sidecars) as files;
+#     feed-prefs.json as files;
 #     conversations/, agents/, projects/ as recursed directories.
 #   - No-op guards (return None, nothing created): v1 dir absent; marker file
 #     present; new dir already contains ANY copy-list entry (both-dirs case:
@@ -41,9 +41,6 @@ FULL_FILES = (
     "config.json",
     "audit-log.jsonl",
     "feed-prefs.json",
-    "transcript.db",
-    "transcript.db-wal",
-    "transcript.db-shm",
 )
 FULL_DIRS = ("conversations", "agents", "projects")
 FULL_ENTRIES = set(FULL_FILES) | set(FULL_DIRS)
@@ -58,9 +55,6 @@ def _content(entry: str) -> bytes:
         "config.json": 333,
         "audit-log.jsonl": 44,
         "feed-prefs.json": 55,
-        "transcript.db": 6666,
-        "transcript.db-wal": 77,
-        "transcript.db-shm": 88,
     }
     base = f"content-of-{entry}".encode()
     return (base * 8)[: sizes.get(entry, 99)]
@@ -241,7 +235,7 @@ class TestMigrateV1Config:
         """v1 missing some copy-list entries → they are listed in skipped,
         the present ones are copied, marker written (partial v1 is still a
         migration-worthy v1)."""
-        present_files = ("agent.json", "config.json", "transcript.db")
+        present_files = ("agent.json", "config.json", "feed-prefs.json")
         present_dirs = ("conversations", "agents")
         _seed_v1(xdg, files=present_files, dirs=present_dirs)
 
@@ -255,22 +249,21 @@ class TestMigrateV1Config:
         assert report["failed"] == []
         assert os.path.isfile(os.path.join(get_config_dir(), MIGRATION_MARKER))
 
-    def test_migration_transcript_sidecars(self, xdg):
-        """transcript.db + -wal + -shm all present → all three copied and
-        byte-count verified. The DB is copied as opaque bytes — the contract
-        forbids opening it (a live WAL mid-checkpoint is fine for a copy)."""
-        _seed_v1(xdg, files=("transcript.db", "transcript.db-wal",
+    def test_migration_does_not_copy_transcript_db(self, xdg):
+        """transcript.db and its sidecars stay in v1. They are not on the copy list."""
+        _seed_v1(xdg, files=("agent.json", "transcript.db", "transcript.db-wal",
                              "transcript.db-shm"), dirs=())
 
         report = migrate_v1_config()
 
         assert report is not None
+        assert "agent.json" in report["copied"]
+        new_dir = get_config_dir()
+        v1 = os.path.join(str(xdg), "crabcakes")
         for name in ("transcript.db", "transcript.db-wal", "transcript.db-shm"):
-            assert name in report["copied"], name
-            src = os.path.join(str(xdg), "crabcakes", name)
-            dst = os.path.join(get_config_dir(), name)
-            assert os.path.isfile(dst)
-            assert os.path.getsize(dst) == os.path.getsize(src)
+            assert name not in report["copied"]
+            assert os.path.isfile(os.path.join(v1, name))
+            assert not os.path.exists(os.path.join(new_dir, name))
 
     def test_migration_does_not_create_config_dir_on_noop(self, xdg):
         """No no-op guard path may create the new config dir.
@@ -1072,7 +1065,7 @@ class TestMigrateV1Config:
 class TestMigrationPreservesPermissions:
     """SPEC-11 live-test regression: migrate_v1_config() must PRESERVE source
     file modes. v1's key-bearing files are 0600 (agent.json, providers.yaml
-    per agent/config.py; transcript.db per SPEC-08). open(dst, "wb") creates
+    per agent/config.py). open(dst, "wb") creates
     at the process umask — silently LOOSENING 0600 to 0644/0664, a security
     regression on the one-time copy (found in live manual testing)."""
 
@@ -1085,7 +1078,6 @@ class TestMigrationPreservesPermissions:
             p = v1 / name
             p.write_bytes(b"key-material\n")
             os.chmod(p, 0o600)
-        # transcript.db triple, 0600
         for name in ("transcript.db", "transcript.db-wal", "transcript.db-shm"):
             p = v1 / name
             p.write_bytes(b"dbbytes")
@@ -1094,8 +1086,9 @@ class TestMigrationPreservesPermissions:
         migrate_v1_config()
 
         new = xdg / "develcakes"
-        for name in ("agent.json", "providers.yaml",
-                     "transcript.db", "transcript.db-wal", "transcript.db-shm"):
+        for name in ("transcript.db", "transcript.db-wal", "transcript.db-shm"):
+            assert not (new / name).exists()
+        for name in ("agent.json", "providers.yaml"):
             mode = os.stat(new / name).st_mode & 0o777
             assert mode == 0o600, (
                 f"{name} migrated with mode {oct(mode)} — key-bearing file "

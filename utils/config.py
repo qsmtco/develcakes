@@ -66,7 +66,6 @@ _MIGRATION_FILES = (
     "audit-log.jsonl",
     "feed-prefs.json",
 )
-_MIGRATION_DB_FILES = ("transcript.db", "transcript.db-wal", "transcript.db-shm")
 _MIGRATION_DIRS = ("conversations", "agents", "projects")
 
 
@@ -86,8 +85,8 @@ def _copy_file_verified(src: str, dst: str) -> None:
     with open(dst, "wb") as fh:
         fh.write(data)
     # Preserve the source file's permission mode. v1's key-bearing files are
-    # 0600 (agent.json, providers.yaml per agent/config.py; transcript.db per
-    # SPEC-08) — open(dst, "wb") creates at the process umask, silently
+    # 0600 (agent.json, providers.yaml per agent/config.py) — open(dst, "wb")
+    # creates at the process umask, silently
     # LOOSENING them to 0644/0664, a security regression on the one-time copy.
     # Best-effort: a perms failure (non-POSIX FS, read-only) must never break
     # the migration.
@@ -193,8 +192,7 @@ def migrate_v1_config() -> dict | None:
 
     D3 contract (docs/specs/phases/SPEC-11-PREFLIGHT-DECISIONS.md):
     - Copy list: agent.json, providers.yaml, config.json, conversations/,
-      agents/, audit-log.jsonl, projects/, transcript.db (+ -wal/-shm
-      sidecars if present), feed-prefs.json if present.
+      agents/, audit-log.jsonl, projects/, feed-prefs.json if present.
     - No-op guards (return None, no banner): marker file exists OR the new
       dir already contains ANY copy-list entry (both-dirs case: new wins).
     - Verify: per-file byte counts post-copy; directories recursed.
@@ -207,9 +205,6 @@ def migrate_v1_config() -> dict | None:
 
     Implementation notes:
     - Pure os/shutil (utils layer — no git, no GTK, no agent imports).
-    - transcript.db and its sidecars are copied as opaque bytes and
-      byte-count verified ONLY — the DB is never opened (a live WAL
-      mid-checkpoint is fine for a file copy; opening it is not).
     - Everything can raise internally; this function NEVER raises to its
       caller — failures return the report dict with "failed" populated
       (the caller decides banner text; this is utils, no UI).
@@ -257,7 +252,7 @@ def migrate_v1_config() -> dict | None:
         # dir, link, fifo) at a FILE/DB name IS content — an empty dir at
         # `config.json` would otherwise fail every retry with
         # IsADirectoryError forever (no marker, no recovery).
-        for name in _MIGRATION_FILES + _MIGRATION_DB_FILES + _MIGRATION_DIRS:
+        for name in _MIGRATION_FILES + _MIGRATION_DIRS:
             p = os.path.join(new_dir, name)
             if not os.path.lexists(p):
                 continue
@@ -270,7 +265,7 @@ def migrate_v1_config() -> dict | None:
             os.makedirs(new_dir)
             made_new_dir = True
 
-        for name in _MIGRATION_FILES + _MIGRATION_DB_FILES:
+        for name in _MIGRATION_FILES:
             src = os.path.join(v1_dir, name)
             if not os.path.lexists(src):
                 report["skipped"].append(name)

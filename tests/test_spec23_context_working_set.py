@@ -156,9 +156,7 @@ def test_task_card_round_trip_and_wire_prefix(tmp_path, monkeypatch):
     assert anth[0]["content"] == "SYS"
     assert anth[1]["content"].startswith("read a.py offset=0")
 
-    with patch("agent.persistence.conversations_dir", return_value=str(tmp_path)), \
-         patch("agent.persistence._get_store"), \
-         patch("agent.persistence._append_conversation_delta"):
+    with patch("agent.persistence.conversations_dir", return_value=str(tmp_path)):
         save_conversation_to_disk(conv, "special:card")
         loaded, _meta = load_conversation_from_disk("special:card")
         assert loaded.task_card == conv.task_card

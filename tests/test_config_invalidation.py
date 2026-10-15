@@ -500,8 +500,7 @@ class _CapturingProvider:
 
 
 def _make_runtime(providers: dict[str, LLMProviderConfig]) -> AgentRuntime:
-    """Headless AgentRuntime: no threads start until send_message is called;
-    migrate_conversation_files() failure is caught non-fatal (runtime :503)."""
+    """Headless AgentRuntime: no threads start until send_message is called."""
     return AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
 
 

@@ -18,20 +18,6 @@ elif not os.environ.get('DISPLAY') and not os.environ.get('GDK_BACKEND'):
 # Ensure crabcakes package is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# SPEC-08 SP4: production now defaults the migration flag ON (main.py
-# setdefault) — pin it OFF for the whole pytest process BEFORE any test
-# module is collected. Collection-time imports (e.g. test_cli_nudge imports
-# `main`) pull in agent.runtime, which reads CRABCAKES_MIGRATE_STORE at
-# module-import time and latches _MIGRATE_STORE_ON_INIT; a fixture-time pin
-# would run too late. Without this, an AgentRuntime() built later in the
-# process could sweep the REAL config dir (the 2026-10-01 incident class —
-# the autouse store override cannot prevent a sweep: the flag path clears
-# the override itself). Bare os.environ, not monkeypatch: the value must be
-# correct for every import of agent.runtime in this process — there is
-# nothing to restore. The flag-default-off unit test in test_migration.py
-# pins THIS behavior (module-level seam, import-order-dependent).
-os.environ["CRABCAKES_MIGRATE_STORE"] = "0"
-
 
 @pytest.fixture(autouse=True)
 def _clear_http_keepalive_gate(request, monkeypatch):
@@ -60,29 +46,6 @@ def _isolate_config_resolution(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
-
-
-@pytest.fixture(autouse=True)
-def isolate_transcript_store(tmp_path, tmp_path_factory, monkeypatch):
-    """Point the persistence wrapper's store seam at a per-test tmp DB.
-
-    SPEC-08 SP2: save_conversation_to_disk now dual-writes to a transcript
-    store. Without this fixture, any test that saves a conversation without
-    patching get_config_dir (e.g. tests/test_conversation.py patches only
-    conversations_dir) would create/append the REAL user DB under the real
-    config dir — test writes leaking into live user state.
-    """
-    from agent import persistence
-    from utils.transcript_store import TranscriptStore
-
-    # DB lives OUTSIDE tmp_path (shared base-temp sibling dir): the store
-    # constructor creates the file eagerly, and scan_directory()-style tests
-    # assert on their own tmp_path contents — a DB file there breaks them.
-    db_dir = tmp_path_factory.mktemp("store-db")  # numbered -> unique per test
-    store = TranscriptStore(db_path=str(db_dir / "transcript-test.db"))
-    monkeypatch.setattr(persistence, "_store_override", store)
-    yield
-    store.close()
 
 
 @pytest.fixture

@@ -269,62 +269,30 @@ def test_agent_prompts_document_the_live_protocol():
         assert "<script src>" in src, f"{name}: no-src rule not documented"
 
 
-# ── /clear store-plane (SPEC-08 /clear-store fix) ─────────────────────────
-
-
-def test_clear_conversation_deletes_store_rows(tmp_path, monkeypatch):
-    """The /clear data plane must delete transcript-store rows: the SP4A
-    store-mode load hydrates any session whose JSON is absent — a JSON-only
-    clear resurrects cleared history on the next load."""
-    import sqlite3
-
-    from utils.transcript_store import TranscriptStore
-    db = tmp_path / "transcript.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE turns (id INTEGER PRIMARY KEY, session_key TEXT, seq INTEGER, epoch INTEGER DEFAULT 0, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, tokens_used INTEGER DEFAULT 0, timestamp TEXT)")
-    con.execute("CREATE TABLE sessions (session_key TEXT PRIMARY KEY, watermark INTEGER, epoch INTEGER DEFAULT 0, updated_at TEXT)")
-    for i in range(5):
-        con.execute("INSERT INTO turns (session_key, seq, role, content) VALUES (?, ?, 'user', 'x')", ("special:t", i))
-    con.execute("INSERT INTO sessions (session_key, watermark) VALUES ('special:t', 4)")
-    con.commit(); con.close()
-
-    from agent import persistence
-    real = TranscriptStore(str(db))
-    monkeypatch.setattr(persistence, "_get_store", lambda: real)
-    assert real.load_all("special:t"), "precondition: rows present"
-    n = persistence.delete_session_rows("special:t")
-    assert n == 5
-    assert real.load_all("special:t") == []
-    real.close()
-
-
-def test_arh_clear_conversation_deletes_store_rows_behaviorally(tmp_path, monkeypatch):
-    """BEHAVIORAL: /clear (clear_conversation) must call delete_session_rows —
-    rows deleted on success; on store refusal the in-memory reset still lands
-    (best-effort tolerance) and the rows stay intact."""
-    import sqlite3, types
-    from utils.transcript_store import TranscriptStore
-
-    db = tmp_path / "t.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE turns (id INTEGER PRIMARY KEY, session_key TEXT, seq INTEGER, epoch INTEGER DEFAULT 0, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, tokens_used INTEGER DEFAULT 0, timestamp TEXT)")
-    con.execute("CREATE TABLE sessions (session_key TEXT PRIMARY KEY, watermark INTEGER, epoch INTEGER DEFAULT 0, updated_at TEXT)")
-    for i in range(3):
-        con.execute("INSERT INTO turns (session_key, seq, role, content) VALUES ('special:sk', ?, 'user', 'x')", (i,))
-    con.commit(); con.close()
-    store = TranscriptStore(str(db))
+def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
+    """/clear removes the session JSON. An active tool loop refuses and keeps it."""
+    import types
 
     from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+    conv_dir = tmp_path / "conversations"
+    conv_dir.mkdir()
+    json_path = conv_dir / "special:sk.json"
+    json_path.write_text("{}", encoding="utf-8")
+
     arh = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
-    # minimal attrs clear_conversation touches
     arh._agents = {"special:sk": types.SimpleNamespace(display_name="T")}
     arh._turn_attr = {}
-    arh._runtimes = {}
     arh._fh = None
 
-    conv = types.SimpleNamespace(messages=[1, 2, 3], step_count=2, total_tokens=9,
-                                 total_cost=1.0, _token_estimate_cache=None,
-                                 task_card="notes")
+    conv = types.SimpleNamespace(
+        messages=[1, 2, 3],
+        step_count=2,
+        total_tokens=9,
+        total_cost=1.0,
+        _token_estimate_cache=None,
+        task_card="notes",
+    )
     dropped: list[str] = []
     rt = types.SimpleNamespace(
         is_loop_active=lambda sk: False,
@@ -334,26 +302,21 @@ def test_arh_clear_conversation_deletes_store_rows_behaviorally(tmp_path, monkey
         drop_repo_map=lambda sk: dropped.append("map:" + sk),
     )
     arh._runtimes = {"T": rt}
-
-    monkeypatch.setattr("agent.persistence._get_store", lambda: store)
-    monkeypatch.setattr(
-        "utils.config.get_config_dir", lambda: str(tmp_path))  # no JSON file → FileNotFoundError path
+    monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
 
     assert arh.clear_conversation("special:sk") is True
     assert conv.messages == [] and conv.step_count == 0
     assert conv.task_card == ""
-    assert store.load_all("special:sk") == []  # THE regression pin: store rows GONE
+    assert not json_path.exists()
     assert dropped == ["special:sk", "compile:special:sk", "map:special:sk"]
 
-    # refusal path: active loop → rows INTACT (best-effort tolerance)
+    json_path.write_text("{}", encoding="utf-8")
     rt.is_loop_active = lambda sk: True
     conv.messages = [1]
     conv.task_card = "stay"
     dropped.clear()
-    store.append_turn("special:sk", "user", "keepme")
     assert arh.clear_conversation("special:sk") is False
     assert conv.messages == [1]
     assert conv.task_card == "stay"
     assert dropped == []
-    assert store.load_all("special:sk"), "refusal must not delete rows"
-    store.close()
+    assert json_path.exists()

@@ -124,8 +124,8 @@ _fixture_config_root: str | None = (
 @pytest.fixture(scope="module", autouse=True)
 def _isolated_config_home():
     """Fix round (audit #1, HIGH): redirect XDG_CONFIG_HOME to a temp dir for
-    the whole module. Every _make_runtime() construction runs
-    migrate_conversation_files() and each FAILED turn's _auto_save writes a
+    the whole module. Every _make_runtime() construction and each FAILED
+    turn's _auto_save writes a
     conversation JSON — without this the suite wrote fixture conversations
     into the REAL ~/.config/crabcakes/conversations (supervisor measured
     DELTA=4 per run).

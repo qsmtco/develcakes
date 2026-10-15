@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from agent.config import LLMProviderConfig
 
 from agent.audit import AuditLog
-from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 # Typed callback protocols (Phase 1 — SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
 # §2.1). The handler's `_on_*` methods already satisfy these structurally;
 # the type hints in `__init__` document the contract.
@@ -56,9 +55,7 @@ from agent.tool_middleware import (
 from agent.persistence import (
     conversations_dir,
     load_conversation_from_disk,
-    migrate_conversation_files,
     resolve_session_workspace,
-    run_store_migration_once,
     save_conversation_to_disk,
 )
 
@@ -107,69 +104,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-# SPEC-08 SP3/SP4A: the launch-time JSON→store migration is gated by env var.
-# SP4A enables it: main.py sets DEVELCAKES_MIGRATE_STORE=1 (setdefault — an
-# explicit =0 by the operator still wins) BEFORE importing ui.window, because
-# this flag is READ HERE at module-import time (ui.handlers.settings_handler
-# imports agent.runtime at ITS module top, so the gate would otherwise latch
-# before main() ever runs). SP4A's store-mode load makes rename safe: a
-# migrated session hydrates from store rows instead of loading as None.
-# SPEC-11 SP2: read via get_env — the old CRABCAKES_MIGRATE_STORE rides the
-# one-release fallback (conftest's pin depends on it).
-_MIGRATE_STORE_ON_INIT: bool = (
-    get_env("MIGRATE_STORE") == "1"
-)
-
-
-def _migrate_store_async(
-    on_complete: Callable[[dict], None] | None = None,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> threading.Thread:
-    """Start the once-per-process JSON→store migration on a daemon thread.
-
-    Returns the Thread (joined by tests; never joined in production).
-    ``on_complete`` (when given) is invoked ON THE DAEMON THREAD with the
-    stats dict — receivers that touch GTK must hop to the main loop
-    themselves (the runtime's _start_store_migration does this via
-    _dispatch). ``on_progress`` rides the same thread (SP4A Edit 2: the
-    heartbeat every-10-sessions cadence set by migrate_conversations_to_store).
-    """
-    def _run() -> None:
-        try:
-            run_store_migration_once(
-                on_complete=on_complete, on_progress=on_progress
-            )
-        except Exception:
-            # The sweep itself is per-session isolated; this catches only
-            # constructor-level failures (e.g. the store's corrupt-DB raise
-            # surfaces inside _get_store on first use). Never fatal.
-            logger.exception("[runtime] JSON→store migration sweep failed (non-fatal)")
-
-    t = threading.Thread(target=_run, name="store-migration", daemon=True)
-    t.start()
-    return t
-
-
-def _log_store_migration_banner(stats: dict) -> None:
-    """Default banner receiver: log the migration stats (runs on main loop).
-
-    The runtime owns no project_path and no feed handler, so it cannot build
-    the FeedCardData itself — the card emitter is receiver-owned wiring. This
-    logged fallback keeps the event non-silent until that wiring lands.
-    """
-    logger.info(
-        "[runtime] transcript migration complete: %d session(s) migrated "
-        "(%d turns), %d already current, %d kept on JSON (diverged), "
-        "%d error(s), %.1fs",
-        stats.get("migrated", 0),
-        stats.get("turns", 0),
-        stats.get("skipped", 0),
-        len(stats.get("kept_on_json", [])),
-        len(stats.get("errors", [])),
-        stats.get("seconds", 0.0),
-    )
-
 
 # ── Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2 Edit A) ──
 # Per-turn state machine. All terminal transitions in _run_loop funnel
@@ -629,41 +563,8 @@ class AgentRuntime:
         # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.3 (BUG #4 fix).
         self._pending_stuck_messages: dict[str, list[str]] = {}
 
-        # HIGH-3: one-time migration on startup — removes api_key from existing files
-        try:
-            migrate_conversation_files()
-        except Exception:
-            logger.exception("[runtime] conversation migration failed (non-fatal)")
-
-        # SPEC-08 SP3/SP4A: one-time JSON→store migration — OFF the UI
-        # thread. The banner card is emitted by the on_complete callback on
-        # the MAIN LOOP via _dispatch (GLib.idle_add when GLib is wired);
-        # the runtime itself builds no card. Flag state (BUG#3, SP4A fix
-        # round — this comment previously said "default OFF", stale since
-        # main.py's setdefault landed): DEFAULT ON in production (main.py
-        # sets DEVELCAKES_MIGRATE_STORE=1 above the window import; an
-        # explicit =0 by the operator skips the sweep), pinned OFF
-        # suite-wide by tests/conftest.py (module level — collection-time
-        # `import main` latches this flag before any fixture runs).
-        # BUG#2 (SP3 fix round 2): _running/_stopped are initialized HERE,
-        # BEFORE the migration call — the guard closure reads them, and a
-        # synchronous on_complete during __init__ must not AttributeError.
         self._running = False
         self._stopped = False
-        # SP4A: migration receiver defaults (set_on_store_migration may
-        # override) — _start_store_migration's dispatch prefers the receiver
-        # when set, the logged fallback otherwise. Progress defaults to the
-        # debug logger so the heartbeat is never a silent drop.
-        self._on_store_migration_callback: Callable[[dict], None] | None = None
-        self._on_store_migration_progress: (
-            Callable[[int, int], None] | None
-        ) = None
-        if _MIGRATE_STORE_ON_INIT:
-            self._start_store_migration()
-        else:
-            # SPEC-08 SP3: the migration daemon thread (None when the env gate
-            # is off — set unconditionally so tests can assert the gate state).
-            self._store_migration_thread: threading.Thread | None = None
 
         # conversation_key → Conversation
         self._conversations: dict[str, Any] = {}
@@ -805,73 +706,6 @@ class AgentRuntime:
         that was inline in _run_loop (spec §A.2.3).
         """
         self._dispatch(self._on_enforcement_status, session_key, tool_name, status)
-
-    def _start_store_migration(self) -> None:
-        """SPEC-08 SP3/SP4A: launch the once-per-process JSON→store migration.
-
-        Daemon thread (never blocks app start). The stats land as a banner
-        event ON THE MAIN LOOP through _dispatch (GLib.idle_add when GLib is
-        wired) — the runtime never touches GTK directly, and the card builder
-        is receiver-owned (the runtime has no project_path/feed handler; it
-        ships a logged fallback receiver). SP4A: when the handler wired a
-        receiver via set_on_store_migration, the dispatch prefers it over
-        the logged fallback — the receiver builds the FeedCardData.
-
-        BUG#6 (SP3 fix round): the completion dispatch guards on
-        ``self._stopped`` — a runtime STOPPED before the sweep finishes must
-        DROP the callback (log-and-drop) instead of scheduling GLib.idle_add
-        into a torn-down main loop. (_running is the tool-loop flag and is
-        False during __init__ — guarding on it would false-drop an
-        init-time completion.) start() clears _stopped, so a restart
-        reopens the dispatch window. The progress heartbeat rides the same
-        _stopped window: the handler-owned receiver (set_on_store_migration)
-        renders it; the runtime logs at debug when none is wired.
-        """
-        def _on_complete_guarded(stats: dict) -> None:
-            # BUG#2 (SP3 fix round 2): reads _stopped ONLY — never _running.
-            # Three states: during __init__ (_running False, _stopped False)
-            # → dispatch normally; pre-start (same) → dispatch; post-stop
-            # (_stopped True) → drop. _running False during init would have
-            # false-dropped an init-time completion.
-            if getattr(self, "_stopped", False):
-                logger.info(
-                    "[runtime] store migration finished after stop — "
-                    "dropping completion callback (%d migrated)",
-                    stats.get("migrated", 0),
-                )
-                return
-            # BUG#1 (SP4A fix round): read the receiver AT DISPATCH TIME —
-            # production wires set_on_store_migration AFTER __init__ starts
-            # the sweep, so a launch-time closure snapshot captures the
-            # pre-wire None and the banner silently falls to the log
-            # fallback forever. (_on_progress_guarded below already reads
-            # at fire time — this mirrors it.)
-            receiver = (
-                getattr(self, "_on_store_migration_callback", None)
-                or _log_store_migration_banner
-            )
-            self._dispatch(receiver, stats)
-
-        def _on_progress_guarded(done: int, total: int) -> None:
-            # Same window as the completion guard: a heartbeat scheduled
-            # after stop would idle_add into a torn-down loop (BUG#6's
-            # class, progress flavor).
-            if getattr(self, "_stopped", False):
-                return
-            progress = getattr(self, "_on_store_migration_progress", None)
-            if progress is not None:
-                self._dispatch(progress, done, total)
-            else:
-                logger.debug(
-                    "[runtime] store migration progress: %d/%d sessions",
-                    done,
-                    total,
-                )
-
-        thread = _migrate_store_async(
-            on_complete=_on_complete_guarded, on_progress=_on_progress_guarded
-        )
-        self._store_migration_thread = thread
 
     def _terminate_turn(self, result: TurnResult) -> TurnResult | None:
         """Single terminal transition function for all turn endings.
@@ -1179,19 +1013,12 @@ class AgentRuntime:
     def start(self) -> None:
         """Start the runtime. Loads saved conversations from disk."""
         self._running = True
-        # Restart reopens the migration-dispatch window: stop() latched
-        # _stopped to drop completion callbacks; a start() after stop() must
-        # clear it or every future migration completion is dropped forever
-        # (BUG#3, SP3 fix round 3). stop() re-latches on the way down.
         self._stopped = False
         logger.info("AgentRuntime started")
 
     def stop(self) -> None:
         """Stop the runtime. Saves all conversations."""
         with self._lock:
-            # _stopped FIRST: the migration drop-guard reads this flag only —
-            # a completion racing stop() must see the stop before anything
-            # else mutates (BUG#2, SP3 fix round 2).
             self._stopped = True
             self._running = False
             for sk, conv in list(self._conversations.items()):
@@ -1203,33 +1030,6 @@ class AgentRuntime:
 
     def is_running(self) -> bool:
         return self._running
-
-    def set_on_store_migration(
-        self,
-        on_complete: Callable[[dict], None] | None = None,
-        on_progress: Callable[[int, int], None] | None = None,
-    ) -> None:
-        """SP4A: wire the store-migration banner receiver + progress heartbeat.
-
-        ``on_complete`` (dict stats) — the handler-owned FeedCardData builder;
-        when set, the completion dispatch resolves it AT DISPATCH TIME
-        (BUG#1, SP4A fix round — never a launch-time closure snapshot:
-        production wires this AFTER __init__ has already started the sweep,
-        so a snapshot would capture None forever). Falls back to the
-        runtime's logged banner when unset. ``on_progress`` (done, total) —
-        the sweep's ≤-every-10-sessions heartbeat, likewise read at fire
-        time. Ruling 2 (handler-owned card): the runtime has no
-        project_path/feed handler, so it never builds the card itself. Both
-        dispatch through _stopped's window like every other completion path
-        (post-stop → dropped, restart → reopens).
-
-        Args:
-            on_complete: cb(stats: dict) — receives the full sweep stats
-                (migrated/turns/skipped/seconds/errors/kept_on_json/aborted).
-            on_progress: cb(done: int, total: int) — heartbeat, ≤ every 10.
-        """
-        self._on_store_migration_callback = on_complete
-        self._on_store_migration_progress = on_progress
 
     # ── Conversation management ─────────────────────────────────────────────────
 

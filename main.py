@@ -41,24 +41,6 @@ from utils.log_redaction import install as _install_log_redaction
 
 _install_log_redaction()
 
-# SPEC-08 SP4A: store-mode load (agent/persistence.py) hydrates migrated
-# sessions from transcript.db, so renaming the legacy JSON away no longer
-# orphans a conversation — the one-time JSON→store migration sweep is safe
-# to DEFAULT ON. The write is GATED on get_env (SPEC-11 SP2 fix round — a
-# bare setdefault of the NEW name defeated the old-name kill-switch: with
-# the operator holding CRABCAKES_MIGRATE_STORE=0 and the new name unset,
-# setdefault wrote DEVELCAKES_MIGRATE_STORE=1 anyway and get_env read the
-# new name first). Gated shape: the default lands ONLY when NEITHER name
-# is set — an explicit =0 by the operator (either name) still skips the
-# sweep. This MUST sit before the ui.window import below: agent.runtime
-# reads the flag at MODULE-IMPORT time (its settings_handler importer pulls
-# agent.runtime in at top level), so setting it inside main() would latch
-# too late. Tests are isolated: tests/conftest.py pins
-# CRABCAKES_MIGRATE_STORE=0 (old name — the gate must keep honoring it)
-# before any agent.runtime import.
-if get_env("MIGRATE_STORE") is None:
-    os.environ["DEVELCAKES_MIGRATE_STORE"] = "1"
-
 # Require GTK 4.0 — must be called before importing Gtk
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gio, Gtk
@@ -367,17 +349,6 @@ def main():
     be silently dropped). Verified empirically (GApplication probe +
     headless crash trace, 2026-09-13).
     """
-    # SPEC-08 SP3→SP4: the launch-time JSON→store migration is wired
-    # end-to-end (agent/runtime.py) and ENABLED by default since SP4 —
-    # main.py writes DEVELCAKES_MIGRATE_STORE=1 above the window import,
-    # gated on get_env so an explicit operator opt-out by EITHER name (new
-    # or old) suppresses it. SP4's store-mode load closed the rename-safety
-    # gap: a migrated (renamed) session hydrates from transcript.db rows
-    # with the exact JSON shape, so its first save passes the dual-anchor
-    # guard instead of diverged-flagging the store. Operator override:
-    # launch with MIGRATE_STORE=0 (DEVELCAKES_ or CRABCAKES_ name) to skip
-    # the sweep (JSON files stay authoritative; the banner card simply
-    # never fires).
     # SPEC-11 SP3 (D3 ordering): one-time v1→v2 config migration — BEFORE
     # the app object, before any window/config-reading import side effects.
     # No-op on marker/content guards; a report is parked on the app and the
