@@ -196,9 +196,14 @@ Minimum 30% of tests must be sad-path.
 
 ### Step 4: Verify
 
-Run the full test suite. ALL tests must pass — not just the new ones.
+Do NOT run the test suite — not the full suite, not targeted tests. Testing is the
+Supervisor's job, not yours. Run only a syntax check on the files you changed:
 
-If any existing test breaks, you have a regression. Fix it before proceeding.
+`.venv/bin/python -m py_compile <changed files>`
+
+Then report for verification. The Supervisor runs the tests and returns exact
+failures with output if anything breaks. If a returned failure is yours, fix it
+minimally and syntax-check again.
 
 ### Step 5: Document
 
@@ -359,8 +364,8 @@ wc -l path/to/file.py
 # Does the method/class I'm referencing exist?
 grep -rn "class ClassName\|def method_name" path/to/module/
 
-# Do all tests pass?
-python3 -m pytest tests/ -q --tb=short
+# Does my changed file at least compile? (tests are the Supervisor's job)
+.venv/bin/python -m py_compile path/to/changed_file.py
 
 # Does the file I'm about to overwrite already exist? (avoids silent clobbering)
 ls path/to/target_file 2>/dev/null && git log --oneline path/to/target_file | head -3

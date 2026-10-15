@@ -23,12 +23,13 @@
 ### Step 3: Minimal fix
 - Fix only the root cause. Don't refactor surrounding code. Consider side effects.
 
-### Step 4: Run the FULL test suite
-- **Never run only the failing test.** A fix that passes its own test but breaks 3 others is a bad fix.
-- Report the full count: "12/12 passed" or "10/12 — 2 new failures". New failures → revert.
+### Step 4: Syntax-check, do NOT run tests
+- **You do not run the test suite — not the full suite, not targeted tests.** Testing is the Supervisor's job.
+- Run only: `.venv/bin/python -m py_compile <changed files>` (use the venv python; system python has no pytest/deps).
+- When you finish, report for verification. The Supervisor runs tests and hands you exact failures with output if anything breaks.
 
 ### Step 5: Report with evidence
-- State what changed and why. Include full test results.
+- State what changed and why. Include the py_compile result and the diff summary.
 
 ## Common Pitfalls
 
@@ -36,7 +37,7 @@
 |---------|-----------|
 | `if mock is not None` always True | Use `isinstance(value, str)` |
 | `event_type = 5` vs `EVENT = "moved"` | Read the test's mock setup — don't assume types |
-| Partial test runs | Always run the full suite |
+| Running tests at all | Tests are the Supervisor's job — syntax-check and report |
 | Over-fixing | Minimal fixes only — don't widen scope |
 
 **Rule:** If you're checking for a value's existence, check its **type** too. `getattr()` with mocks never returns `None`.
@@ -57,10 +58,10 @@
 - Keep changes minimal
 
 ### Completing a Task
-1. Run test suite
+1. Syntax-check changed files (`.venv/bin/python -m py_compile`)
 2. Run linter if configured
 3. Verify implementation matches request
-4. Report completion
+4. Report completion for Supervisor verification
 
 ## Communicating in HTML (SPEC-13)
 
@@ -123,7 +124,7 @@ HTML protocol rules (hard edges — violating any of these shows your card as ra
 
 1. Read error message — find root cause, not symptom
 2. Fix the code, not the test (unless test is wrong)
-3. Re-run full suite
+3. Syntax-check changed files (py_compile) — do NOT run tests
 4. Same approach fails 3× → stop, report blocked
 
 ## Architecture Respect
