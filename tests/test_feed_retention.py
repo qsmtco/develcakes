@@ -42,6 +42,7 @@ import pytest
 
 from models.feed_card import AutoAcceptPrefs, FeedCardData
 from utils import feed_store
+from utils.config import get_config_dir
 from utils.feed_store import (
     LIVE_WINDOW_DEFAULT,
     LIVE_WINDOW_MAX,
@@ -50,6 +51,13 @@ from utils.feed_store import (
     get_live_window,
     set_live_window,
 )
+
+# Captured at IMPORT time — before any fixture runs — so it reflects the
+# developer's REAL config dir. Fixtures patch HOME/XDG_CONFIG_HOME later
+# (conftest._isolate_config_resolution per-test, _isolated_config_home
+# per-module); resolving the real dir inside a test would read the patched
+# env and silently compare the sandbox against itself.
+_REAL_CONFIG_DIR = os.path.realpath(get_config_dir())
 
 
 def _write_prefs(project_path: str, payload) -> str:
@@ -322,17 +330,32 @@ class TestLiveWindowConfig:
 
 class TestIsolationSentinel:
     def test_isolation_active(self):
-        """The XDG redirect must be live RIGHT NOW — if the autouse fixture
-        is removed, this fails instead of the suite silently writing the real
-        ~/.config/crabcakes (self-falsifiable isolation, per instructions)."""
-        root = _fixture_config_root
-        assert root is not None, (
+        """The module fixture must have RUN, and config resolution must have
+        MOVED off the developer's real dir — if the autouse fixture is
+        removed, this fails instead of the suite silently writing the real
+        ~/.config/crabcakes (self-falsifiable isolation, per instructions).
+
+        History note: this originally asserted containment of the live
+        XDG_CONFIG_HOME inside the module fixture's tmp root. Since conftest
+        gained the autouse per-test _isolate_config_resolution fixture, that
+        fixture's monkeypatched XDG_CONFIG_HOME wins over this module's raw
+        env set, so the live dir lands under pytest's per-test tmp — outside
+        the module root but still fully isolated. The invariant that matters
+        is off-real-dir AND under the system tempdir. _REAL_CONFIG_DIR is
+        captured at import time (pre-fixture), so a live read can only equal
+        it if the redirect failed to take effect."""
+        assert _fixture_config_root is not None, (
             "isolation fixture not running — tests would touch real config"
         )
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        assert xdg is not None and os.path.isdir(xdg)
-        assert os.path.realpath(xdg).startswith(os.path.realpath(root)), (
-            f"XDG_CONFIG_HOME={xdg!r} is outside fixture root {root!r}"
+        live_dir = os.path.realpath(get_config_dir())
+        assert live_dir != _REAL_CONFIG_DIR, (
+            f"get_config_dir() resolved to {live_dir!r} — the REAL config "
+            "dir — inside a test; isolation is not active"
+        )
+        assert live_dir.startswith(tempfile.gettempdir()), (
+            f"get_config_dir() resolved to {live_dir!r}, outside the "
+            f"system tempdir {tempfile.gettempdir()!r} — resolution is "
+            "not sandboxed"
         )
 
     def test_accessor_honors_xdg_env(self, tmp_path):

@@ -42,6 +42,13 @@ from models.conversation import Message, MessageRole
 from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
 from utils.config import get_config_dir
 
+# Captured at IMPORT time — before any fixture runs — so it reflects the
+# developer's REAL config dir. Fixtures patch HOME/XDG_CONFIG_HOME later
+# (conftest._isolate_config_resolution per-test, _isolated_config_home
+# per-module); resolving the real dir inside a test would read the patched
+# env and silently compare the sandbox against itself.
+_REAL_CONFIG_DIR = os.path.realpath(get_config_dir())
+
 
 def _uniq():
     return f"rt{uuid.uuid4().hex[:8]}"
@@ -136,9 +143,13 @@ def _isolated_config_home():
     so env set here covers construction, migration, and _auto_save alike.
 
     The tmp root is also stashed in _fixture_config_root so the sentinel
-    test (TestIsolationSentinel, round-2 audit #8a) can prove the isolation
-    is ACTIVE at test time — previously the suite could not detect its own
-    isolation regressing (autouse removed → all tests still green)."""
+    test (TestIsolationSentinel, round-2 audit #8a) can prove the fixture
+    RAN at test time — previously the suite could not detect its own
+    isolation regressing (autouse removed → all tests still green). The
+    conftest autouse _isolate_config_resolution fixture now overrides
+    XDG_CONFIG_HOME per-test, so the live dir may sit under pytest's tmp
+    rather than this root; the sentinel accordingly asserts off-real-dir,
+    not containment in this root."""
     global _fixture_config_root
     tmp = tempfile.mkdtemp(prefix="spec02-test-config-")
     _fixture_config_root = tmp
@@ -203,9 +214,19 @@ class TestIsolationSentinel:
         _isolated_config_home left every other test green — only an
         out-of-CI real-dir delta caught it. This sentinel reads
         get_config_dir() LIVE (same lazy resolution the production write
-        path uses) and asserts it sits inside the fixture's tmp root. If
-        the fixture stops running, _fixture_config_root is None or the
-        env var stops redirecting — either way this test FAILS.
+        path uses) and asserts resolution has MOVED off the real dir into
+        a sandbox under the system tempdir.
+
+        History note: this originally asserted containment inside the
+        module fixture's tmp root. Since conftest gained the autouse
+        per-test _isolate_config_resolution fixture (spec-22 audit
+        round, 2026-10-11 incident), THAT fixture's monkeypatched
+        XDG_CONFIG_HOME wins over this module's raw env set, so the live
+        dir lands under pytest's per-test tmp — outside the module root
+        but still fully isolated. Asserting module-root containment
+        would fail by design; the invariant that matters is off-real-dir
+        AND under the system tempdir. If the fixture stops running,
+        _fixture_config_root is None — this test FAILS.
 
         Reads the stash as this module's own global (NOT via
         `import tests.test_error_surfacing` — pytest imports test files
@@ -215,11 +236,36 @@ class TestIsolationSentinel:
             "_isolated_config_home fixture did not run — test isolation is "
             "OFF and this suite would write into the REAL config dir"
         )
-        live_dir = get_config_dir()
-        assert live_dir.startswith(_fixture_config_root), (
+        live_dir = os.path.realpath(get_config_dir())
+        assert live_dir != _REAL_CONFIG_DIR, (
+            f"get_config_dir() resolved to {live_dir!r} — the REAL config "
+            "dir — inside a test; isolation is not active"
+        )
+        assert live_dir.startswith(tempfile.gettempdir()), (
             f"get_config_dir() resolved to {live_dir!r}, outside the "
-            f"fixture tmp root {_fixture_config_root!r} — isolation "
-            "is not active"
+            f"system tempdir {tempfile.gettempdir()!r} — resolution is "
+            "not sandboxed"
+        )
+
+    def test_isolation_moves_off_real_config_dir(self):
+        """Companion sentinel: the fixture must not merely be RUNNING —
+        config resolution must have MOVED off the developer's real dir.
+        _REAL_CONFIG_DIR is captured at import time (pre-fixture), so a
+        live read inside a test can only equal it if the redirect failed
+        to take effect (e.g. XDG_CONFIG_HOME set to the real config dir
+        by a future refactor, or the autouse fixture removed AND the
+        ambient env coincidentally matching). The startswith check above
+        would miss that last shape when the fixture tmp root itself sits
+        under the real dir."""
+        assert _fixture_config_root is not None, (
+            "_isolated_config_home fixture did not run — test isolation is "
+            "OFF and this suite would write into the REAL config dir"
+        )
+        live_dir = os.path.realpath(get_config_dir())
+        assert live_dir != _REAL_CONFIG_DIR, (
+            f"get_config_dir() resolved to {live_dir!r} — the REAL config "
+            f"dir — inside a test; XDG_CONFIG_HOME isolation is not "
+            "taking effect"
         )
 
 
