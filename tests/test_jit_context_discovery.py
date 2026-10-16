@@ -286,7 +286,7 @@ class TestRunGrep:
         with tempfile.TemporaryDirectory() as proj:
             with open(os.path.join(proj, "test.py"), 'w') as f:
                 f.write("nothing here\n")
-            rc, out, err = _run_grep("nonexistent_pattern", proj)
+            rc, _out, _err = _run_grep("nonexistent_pattern", proj)
             assert rc == 1
 
     def test_run_grep_file_type_filter(self):
@@ -296,7 +296,7 @@ class TestRunGrep:
                 f.write("target\n")
             with open(os.path.join(proj, "b.md"), 'w') as f:
                 f.write("target\n")
-            rc, out, err = _run_grep("target", proj, file_type="py")
+            rc, out, _err = _run_grep("target", proj, file_type="py")
             assert rc == 0
             assert "a.py" in out
             assert "b.md" not in out
@@ -356,7 +356,7 @@ class TestFileSearch:
         """max_results caps number of files returned."""
         with tempfile.TemporaryDirectory() as proj:
             for i in range(5):
-                with open(os.path.join(proj, "file_%d.py" % i), 'w') as f:
+                with open(os.path.join(proj, f"file_{i}.py"), 'w') as f:
                     f.write("common_pattern\n")
             result = _file_search("common_pattern", proj, max_results=2)
             assert result.success
@@ -403,12 +403,12 @@ class TestFileSearchToolRegistration:
 
     def test_file_search_tool_description_includes_when_to_use(self):
         """Description contains 'WHEN TO USE'."""
-        ft = [t for t in get_all_tools() if t.name == "file_search"][0]
+        ft = next(t for t in get_all_tools() if t.name == "file_search")
         assert "WHEN TO USE" in ft.description
 
     def test_file_search_tool_requires_query(self):
         """JSON schema marks 'query' as required."""
-        ft = [t for t in get_all_tools() if t.name == "file_search"][0]
+        ft = next(t for t in get_all_tools() if t.name == "file_search")
         assert "query" in ft.parameters.get("required", [])
 
 
@@ -422,7 +422,7 @@ class TestComposeSystemPromptContextMode:
         with tempfile.TemporaryDirectory() as proj:
             # Create enough content that preload exceeds JIT significantly
             for i in range(20):
-                with open(os.path.join(proj, "file_%d.py" % i), 'w') as f:
+                with open(os.path.join(proj, f"file_{i}.py"), 'w') as f:
                     f.write("def f():\n    pass\n" * 100)
             with open(os.path.join(proj, "README.md"), 'w') as f:
                 f.write("# Test\n" * 500)
@@ -438,7 +438,7 @@ class TestComposeSystemPromptContextMode:
                 context_mode="jit",
             )
             assert len(jit) < len(preload), \
-                "JIT (%d) should be < preload (%d)" % (len(jit), len(preload))
+                f"JIT ({len(jit)}) should be < preload ({len(preload)})"
 
     def test_compose_prompt_hybrid_mode_stubs_core_files(self):
         """Hybrid prompt names the core file and does not paste its body."""
