@@ -46,11 +46,33 @@ class TestEmptyState:
 
 
 class TestContextWindowCopy:
-    def test_save_form_keeps_context_window(self, tmp_config_dir):
+    def test_save_dual_writes_spin_into_both_fields_on_disk(self, tmp_config_dir):
+        """SPEC-38: the Context Window spin is the single source of truth.
+
+        Stored provider has context_window=200_000 (the stale pre-SPEC-38
+        state). User sets the spin to 1_000_000 and saves: BOTH max_tokens
+        AND context_window on disk must read 1_000_000 — no save may leave
+        a stale context_window behind a changed max_tokens.
+        """
         h = SettingsHandler()
-        h.add_or_update(_make_provider("p1", context_window=1_000_000))
+        h.add_or_update(_make_provider("p1", context_window=200_000))
         d = SettingsDialog(parent=None, handler=h)
+        d._cards[0]._max_tokens_spin.set_value(1_000_000)
+        d._cards[0]._on_save_clicked()
+        stored = {p.name: p for p in h.list_providers()}["p1"]
+        assert stored.max_tokens == 1_000_000
+        assert stored.context_window == 1_000_000, (
+            "SPEC-38: dual-write violated — context_window not moved with max_tokens"
+        )
+
+    def test_collect_from_form_dual_writes_spin(self, tmp_config_dir):
+        """SPEC-38: _collect_from_form mirrors the spin into both fields."""
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        d = SettingsDialog(parent=None, handler=h)
+        d._cards[0]._max_tokens_spin.set_value(1_000_000)
         collected = d._cards[0]._collect_from_form()
+        assert collected.max_tokens == 1_000_000
         assert collected.context_window == 1_000_000
 
     def test_save_form_keeps_context_mode(self, tmp_config_dir):

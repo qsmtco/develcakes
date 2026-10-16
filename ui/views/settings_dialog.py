@@ -308,7 +308,10 @@ class _ProviderCard:
             supports_streaming=existing.supports_streaming if existing else True,
             max_tokens=int(self._max_tokens_spin.get_value()),
             default_max_tokens=existing.default_max_tokens if existing else 0,
-            context_window=getattr(existing, "context_window", 0) if existing else 0,
+            # SPEC-38: dual write — the "Context Window" spin IS the window.
+            # Both fields move together so no save can leave a stale
+            # context_window behind a changed max_tokens.
+            context_window=int(self._max_tokens_spin.get_value()),
             compaction_threshold=float(
                 self._compaction_threshold_spin.get_value()
             ),  # Phase A

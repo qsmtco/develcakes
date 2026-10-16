@@ -899,12 +899,29 @@ def test_connection(
 
 ### 3.11b `models/providers.py` — Per-Provider Context Window Resolution
 
-**Resolution chain in `agent/runtime.py::_compute_model_max` (SPEC-30):**
+**Resolution chain in `agent/runtime.py::_compute_model_max` (SPEC-30, SPEC-38):**
 
-1. `provider_cfg.context_window` if `> 0` — uncapped. Explicit opt-in past the sanity cap. Not the Test Connection probe field.
-2. `provider_cfg.max_tokens` if `> 0`, capped at `_MAX_SANE_WINDOW` (200_000)
+1. `provider_cfg.context_window` if `> 0` — uncapped (explicit opt-in; probe
+   field from Test Connection lands here after the SPEC-38 dual-write).
+2. `provider_cfg.max_tokens` if `> 0` — **UNCAPPED** (SPEC-38 removed the
+   `_MAX_SANE_WINDOW` (200_000) clamp: a fat max_tokens IS the window).
 3. `caller_default_max_tokens(provider_cfg.caller)` — uncapped (MiniMax 1_048_576, Anthropic 200_000)
 4. `FALLBACK = 128_000`
+
+**Settings dual-write (SPEC-38):** the Context Window spin is the single
+source of truth on save —
+`ui/views/settings_dialog.py::_collect_from_form` writes the spin value into
+BOTH `max_tokens` and `context_window` (no save may leave a stale
+`context_window` behind a changed `max_tokens`); and
+`ui/handlers/settings_handler.py` (Test Connection pre-fill) writes a
+discovered window into BOTH fields, preserving the `user_has_customized`
+sentinel exactly (audit BUG #7: when the user has customized, nothing is
+written to either field). Every runtime consumer — `_compute_model_max`,
+`_compute_compaction_threshold`, and the system-prompt budget via
+`_budget_window_and_mode` (create_conversation / _ensure_system_prompt /
+_rebuild_conversation_context) — resolves through this one chain for the
+CONVERSATION's provider (model prefix; default provider only as fallback
+when the conversation names none).
 
 The `default_max_tokens` field on `ProviderConfig` records the *configured intent* (set by auxilium wizard from `CALLER_DEFAULT_MAX_TOKENS`); it's used as a sentinel marker so Test Connection's pre-fill logic doesn't overwrite a wizard's deliberate choice. See audit BUG #7.
 

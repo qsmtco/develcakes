@@ -2,23 +2,23 @@
 from __future__ import annotations
 
 from agent.config import LLMProviderConfig
-from agent.runtime import AgentRuntime, _LANDING_CAP
+from agent.runtime import _LANDING_CAP, AgentRuntime
 from models.conversation import Conversation
+from models.providers import ProviderConfig
 from tests.test_agent_runtime import _make_cfg
 from tests.test_runtime_compaction import _make_runtime
 from utils.providers_store import _context_window_value, load_providers, save_providers
-from models.providers import ProviderConfig
 
 
 def _provider(**kwargs) -> LLMProviderConfig:
-    base = dict(
-        name="openai",
-        base_url="x",
-        api_key="x",
-        default_model="gpt-4o",
-        caller="openai",
-        max_tokens=128_000,
-    )
+    base = {
+        "name": "openai",
+        "base_url": "x",
+        "api_key": "x",
+        "default_model": "gpt-4o",
+        "caller": "openai",
+        "max_tokens": 128_000,
+    }
     base.update(kwargs)
     return LLMProviderConfig(**base)
 
@@ -27,13 +27,16 @@ def _conv(model: str) -> Conversation:
     return Conversation(agent_name="Coder", model=model)
 
 
-def test_fat_max_tokens_is_capped_without_context_window():
+def test_fat_max_tokens_is_uncapped_without_context_window():
+    # SPEC-38: the 200k clamp is gone — a fat max_tokens IS the window.
     provider = _provider(name="weird", caller="not-a-caller", max_tokens=1_300_000)
     runtime = _make_runtime({"weird": provider}, default_provider="weird")
     conv = _conv("weird/m")
     soft, hard = runtime._compute_compaction_threshold(conv)
-    assert hard == 200_000
-    assert soft == 160_000
+    assert hard == 1_300_000
+    assert soft == int(1_300_000 * 0.80) == 1_040_000
+    # Landing goal unchanged: min(15% of window, 24_000).
+    assert min(int(1_300_000 * 0.15), 24_000) == 24_000
     assert runtime._compute_landing_goal(hard) == 24_000
 
 

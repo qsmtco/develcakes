@@ -306,8 +306,6 @@ from agent.llm.streaming import (
 # The socket timeout is then min(attempt cap, remaining), so the try ends
 # inside the budget.
 _FAILOVER_ATTEMPT_FLOOR_S = 1.0
-# A fat max_tokens (often an output cap) must not inflate the context window.
-_MAX_SANE_WINDOW = 200_000
 # Ordinary masking starts here. Heavy compact lands here. Not a provider setting.
 _LANDING_FRACTION = 0.15
 _LANDING_CAP = 24_000
@@ -1088,14 +1086,24 @@ class AgentRuntime:
         else:
             tools = get_all_tools()
             tool_names = [t.name for t in tools]
-        # Phase CB-2: pass the model's context window so the system prompt budget
-        # can cap file context. Resolve from the default provider's config.
-        default_provider_name = self._config.default_provider
-        default_provider_cfg = self._config.providers.get(default_provider_name) if default_provider_name else None
-        if default_provider_cfg and getattr(default_provider_cfg, "max_tokens", None):
-            model_max_for_budget = int(default_provider_cfg.max_tokens)
-        else:
-            model_max_for_budget = 128_000  # fallback per CB-1
+        # SPEC-38: construct the conversation first, then resolve the budget
+        # window FROM IT via the shared resolver — the conversation's provider
+        # (model prefix), never a raw max_tokens off the default provider.
+        conv = Conversation(
+            agent_name=agent_name,
+            agent_role=agent_role,
+            project_path=project_path,
+            allowed_tools=allowed_tools,
+            mcp_servers=mcp_servers if mcp_servers else [],
+            model=model,
+            system_prompt="",
+            si_enforcement=si_enforcement,
+            api_key=api_key,
+            app_title=app_title,
+            fallback_provider=fallback_provider or self._config.fallback_provider,
+            fallback_model=fallback_model or self._config.fallback_model,
+        )
+        model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
 
         if defer_prompt_build:
             system_prompt = ""
@@ -1104,28 +1112,14 @@ class AgentRuntime:
                 agent_name, project_path, tool_names,
                 agent_role=agent_role,
                 model_max_tokens=model_max_for_budget,
-                context_mode=getattr(default_provider_cfg, "context_mode", "auto") or "auto",
+                context_mode=context_mode,
             )
         # TODO: P10.8 — mid-session re-escalation. Currently the system prompt
         # is built once here and never reassigned. P10.8 will add a
         # _maybe_rebuild_system_prompt() check in the tool loop that calls
         # resolve_context_mode(turn_count, token_estimate) before each LLM call
         # and rebuilds if the effective mode changes.
-
-        conv = Conversation(
-            agent_name=agent_name,
-            agent_role=agent_role,
-            project_path=project_path,
-            allowed_tools=allowed_tools,
-            mcp_servers=mcp_servers if mcp_servers else [],
-            model=model,
-            system_prompt=system_prompt,
-            si_enforcement=si_enforcement,
-            api_key=api_key,
-            app_title=app_title,
-            fallback_provider=fallback_provider or self._config.fallback_provider,
-            fallback_model=fallback_model or self._config.fallback_model,
-        )
+        conv.system_prompt = system_prompt
 
         with self._lock:
             self._conversations[session_key] = conv
@@ -1155,13 +1149,9 @@ class AgentRuntime:
         from agent.tools import get_all_tools
 
         tool_names = [t.name for t in get_all_tools() if t.name in (conv.allowed_tools or [])]
-        default_provider_name = self._config.default_provider
-        default_provider_cfg = self._config.providers.get(default_provider_name) if default_provider_name else None
-        if default_provider_cfg and getattr(default_provider_cfg, "max_tokens", None):
-            model_max_for_budget = int(default_provider_cfg.max_tokens)
-        else:
-            model_max_for_budget = 128_000
-        context_mode = getattr(default_provider_cfg, "context_mode", "auto") or "auto"
+        # SPEC-38: budget window via the shared resolver for THIS conversation's
+        # provider — never a raw max_tokens read off the default provider.
+        model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
 
         # build_system_prompt is pure file I/O — safe outside the lock
         new_prompt = build_system_prompt(
@@ -1356,12 +1346,33 @@ class AgentRuntime:
 
     # ── Tool loop ─────────────────────────────────────────────────────────────
 
+    def _budget_window_and_mode(self, conv: "Conversation") -> tuple[int, str]:
+        """SPEC-38: one resolution path for the system-prompt budget window.
+
+        Returns (model_max_tokens, context_mode) where the window comes from
+        the shared _compute_model_max resolver for THIS conversation's provider
+        (model prefix; default provider only as fallback). Every system-prompt
+        build site — create_conversation, _ensure_system_prompt,
+        _rebuild_conversation_context — must derive its budget here, never
+        from a raw max_tokens read off the default provider.
+        """
+        provider_name = (
+            conv.model.split("/")[0]
+            if conv.model and "/" in conv.model
+            else self._config.default_provider
+        )
+        provider_cfg = (
+            self._config.providers.get(provider_name) if provider_name else None
+        )
+        context_mode = getattr(provider_cfg, "context_mode", "auto") or "auto"
+        return self._compute_model_max(conv), context_mode
+
     def _compute_model_max(self, conv: "Conversation") -> int:
         """Return the model's context window for the current conversation's provider.
 
         Resolution order:
           1. provider context_window when set and > 0 (uncapped opt-in)
-          2. provider max_tokens when > 0, capped at _MAX_SANE_WINDOW
+          2. provider max_tokens when > 0 (uncapped)
           3. caller_default_max_tokens(provider.caller) — uncapped
              (e.g. MiniMax = 1_048_576, Anthropic = 200_000)
           4. 128_000 global fallback
@@ -1392,7 +1403,7 @@ class AgentRuntime:
                 return window
             max_tokens = getattr(provider_cfg, "max_tokens", None)
             if max_tokens and not isinstance(max_tokens, bool) and int(max_tokens) > 0:
-                return min(int(max_tokens), _MAX_SANE_WINDOW)
+                return int(max_tokens)
             # BUG #3 fix: use caller-specific default before falling back to 128K.
             # The provider config exists but its max_tokens is unset — use the
             # per-caller static table to avoid wasting 87% of MiniMax-M3's
@@ -3806,16 +3817,10 @@ class AgentRuntime:
         if conv.project_path == project_path and conv.system_prompt:
             return  # Already in sync; skip the rebuild (cheap short-circuit).
 
-        # Resolve model context window for the system prompt budget.
-        # Mirrors the logic in create_conversation() — keep these in sync
-        # so create and rebuild produce equivalent prompts.
-        default_provider_name = self._config.default_provider
-        default_provider_cfg = self._config.providers.get(default_provider_name) if default_provider_name else None
-        if default_provider_cfg and getattr(default_provider_cfg, "max_tokens", None):
-            model_max_for_budget = int(default_provider_cfg.max_tokens)
-        else:
-            model_max_for_budget = 128_000  # fallback per CB-1
-        context_mode = getattr(default_provider_cfg, "context_mode", "auto") or "auto"
+        # SPEC-38: resolve the budget window via the shared resolver for THIS
+        # conversation's provider — same path as create_conversation() and
+        # _ensure_system_prompt(), so all three produce equivalent prompts.
+        model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
 
         try:
             from agent.context import build_system_prompt

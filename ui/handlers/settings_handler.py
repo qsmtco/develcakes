@@ -269,9 +269,20 @@ class SettingsHandler:
                             if (result.context_window and not user_has_customized)
                             else p.max_tokens
                         )
+                        # SPEC-38: dual write — a discovered window lands in
+                        # BOTH max_tokens and context_window so the resolver's
+                        # context_window-first order sees the same number the
+                        # user sees. BUG #7 sentinel is honored above: when the
+                        # user has customized, neither field changes.
+                        new_context_window = (
+                            result.context_window
+                            if (result.context_window and not user_has_customized)
+                            else p.context_window
+                        )
                         providers[i] = replace(
                             p,
                             max_tokens=new_max_tokens,
+                            context_window=new_context_window,
                             last_verified_at=datetime.now(timezone.utc).isoformat(),
                             last_error=None,
                         )

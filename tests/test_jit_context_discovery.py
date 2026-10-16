@@ -8,31 +8,30 @@
 # - P10.4: compose_system_prompt context_mode parameter
 # - P10.5: build_system_prompt forwards context_mode
 
+import inspect
 import os
 import tempfile
-import subprocess
-import inspect
+
 import pytest
 
+from agent.context import (
+    build_file_context_with_core_files,
+    build_file_index,
+    build_system_prompt,
+    resolve_context_mode,
+)
+from agent.tools import (
+    ToolResult,
+    _file_search,
+    _run_grep,
+    _search_files,
+    get_all_tools,
+)
 from models.providers import (
     ProviderConfig,
     validate_provider_context_mode,
 )
-from agent.context import (
-    build_file_index,
-    resolve_context_mode,
-    build_file_context_with_core_files,
-    build_system_prompt,
-)
-from agent.tools import (
-    _run_grep,
-    _search_files,
-    _file_search,
-    get_all_tools,
-    ToolResult,
-)
 from utils.prompt_loader import compose_system_prompt
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  P10.1 — ProviderConfig.context_mode
@@ -241,10 +240,10 @@ class TestBuildFileContextModes:
         with tempfile.TemporaryDirectory() as proj:
             for name in ("README.md", "AGENTS.md", "CONVENTIONS.md", "ARCHITECTURE.md"):
                 with open(os.path.join(proj, name), 'w') as f:
-                    f.write("# Content for %s\n" % name)
+                    f.write(f"# Content for {name}\n")
             result = build_file_context_with_core_files(proj, context_mode="jit")
             for name in ("README.md", "AGENTS.md", "CONVENTIONS.md", "ARCHITECTURE.md"):
-                assert "# Content for %s" % name not in result
+                assert f"# Content for {name}" not in result
 
     def test_build_file_context_invalid_mode_raises(self):
         """Invalid mode raises ValueError."""
@@ -532,26 +531,62 @@ class TestEdgeCases:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestRuntimeContextModeWiring:
-    """Spec §3.21m: runtime passes context_mode from ProviderConfig."""
+    """Spec §3.21m + SPEC-38 §4: runtime passes context_mode from ProviderConfig."""
 
     def test_runtime_passes_context_mode_from_provider(self):
-        """Runtime reads context_mode from ProviderConfig and passes to build_system_prompt."""
-        # Verify the runtime code path: getattr(default_provider_cfg, 'context_mode', 'auto')
-        # is present in runtime.py create_conversation
-        import ast
-        with open("agent/runtime.py") as f:
-            tree = ast.parse(f.read())
-        src = open("agent/runtime.py").read()
-        assert 'context_mode=getattr(default_provider_cfg, "context_mode", "auto")' in src or \
-               "context_mode=getattr(default_provider_cfg, 'context_mode', 'auto')" in src, \
-               "Runtime must pass context_mode from ProviderConfig"
+        """SPEC-38 §4 replaced the inline getattr(default_provider_cfg, ...)
+        wiring with _budget_window_and_mode(conv), which resolves BOTH the
+        budget window and context_mode from the CONVERSATION's provider
+        (model prefix). Pin the new wiring: it exists and returns the
+        provider's context_mode alongside the resolved window."""
+        from agent.config import AgentConfig, LLMProviderConfig
+        from agent.runtime import AgentRuntime
+        from models.conversation import Conversation
+
+        provider = LLMProviderConfig(
+            name="openai",
+            base_url="x",
+            api_key="x",
+            default_model="openai/gpt-4o",
+            caller="openai",
+            context_window=1_000_000,
+            context_mode="hybrid",  # valid mode per models/providers.py
+        )
+        runtime = AgentRuntime.__new__(AgentRuntime)
+        runtime._config = AgentConfig(
+            providers={"openai": provider}, default_provider="openai",
+        )
+        conv = Conversation(agent_name="Coder", model="openai/gpt-4o")
+        assert runtime._budget_window_and_mode(conv) == (1_000_000, "hybrid")
 
     def test_runtime_defaults_context_mode_auto(self):
         """When ProviderConfig has no context_mode, runtime defaults to 'auto'."""
+        from agent.config import AgentConfig, LLMProviderConfig
+        from agent.runtime import AgentRuntime
+        from models.conversation import Conversation
         from models.providers import ProviderConfig
         cfg = ProviderConfig(name="test", base_url="http://x", api_key="k", default_model="m")
         mode = getattr(cfg, "context_mode", "auto") or "auto"
         assert mode == "auto"
+        # Runtime level: an unset context_mode resolves to "auto" alongside
+        # the budget window (SPEC-38 §4 wiring).
+        provider = LLMProviderConfig(
+            name="openai",
+            base_url="x",
+            api_key="x",
+            default_model="openai/gpt-4o",
+            caller="openai",
+            max_tokens=1_000_000,  # no context_window → window from max_tokens
+        )
+        runtime = AgentRuntime.__new__(AgentRuntime)
+        runtime._config = AgentConfig(
+            providers={"openai": provider}, default_provider="openai",
+        )
+        window, auto_mode = runtime._budget_window_and_mode(
+            Conversation(agent_name="Coder", model="openai/gpt-4o"),
+        )
+        assert window == 1_000_000
+        assert auto_mode == "auto"
 
 
 class TestBackwardCompat:

@@ -9,12 +9,11 @@ Covers:
   _last_trim_removed @property, and per-iteration flag semantics.
 """
 import threading
-import pytest
-from agent.config import AgentConfig, LLMProviderConfig
-from agent.runtime import AgentRuntime
-from agent.context_strategy import CompactionEvent, DefaultContextStrategy
-from models.conversation import Conversation, Message, MessageRole
 
+from agent.config import AgentConfig, LLMProviderConfig
+from agent.context_strategy import CompactionEvent, DefaultContextStrategy
+from agent.runtime import AgentRuntime
+from models.conversation import Conversation
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -93,8 +92,9 @@ class TestCompactionThreshold:
         runtime = _make_runtime({"minimax": provider}, default_provider="minimax")
         conv = Conversation(agent_name="Coder", model="minimax/minimax-m3")
         soft, hard = runtime._compute_compaction_threshold(conv)
-        assert soft == int(200_000 * 0.90)
-        assert hard == 200_000
+        # SPEC-38: max_tokens is uncapped — a fat max_tokens IS the window.
+        assert soft == int(1_048_576 * 0.90)
+        assert hard == 1_048_576
 
     def test_context_window_bypasses_max_tokens_cap(self):
         """An explicit context_window is the window, even above 200k."""
