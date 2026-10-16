@@ -2,7 +2,7 @@
 # Speech-to-text via OpenRouter cloud STT — push-to-talk with stop_async pattern.
 #
 #   arecord (ALSA/PipeWire, 16kHz mono WAV) → base64 → POST OpenRouter
-#   /api/v1/audio/transcriptions (microsoft/mai-transcribe-2) → callback.
+#   /api/v1/audio/transcriptions (model from stt_config, SPEC-37) → callback.
 #
 # Local transcription (faster-whisper) is GONE. Capture stays local; audio leaves
 # the machine for transcription (see SPEC-36 for the privacy/threat-model note).
@@ -15,8 +15,12 @@
 #
 # Environment:
 #   OPENROUTER_API_KEY — bearer token; falls back to get_api_key("openrouter").
+#   STT_MODEL          — non-blank value overrides stt.yaml for THIS process
+#                        (debug/testing); see utils/stt_config.py (SPEC-37).
 #   STT_PHRASES        — comma-separated keyword-bias list. Overrides the default;
-#                        empty string → send NO phraseList at all.
+#                        empty string → send NO phraseList at all. The phraseList
+#                        is also gated per model: only bias-supporting models
+#                        (is_bias_supported) ever receive it.
 
 import base64
 import io
@@ -34,9 +38,10 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 
-# OpenRouter cloud STT
+# OpenRouter cloud STT. The model is NOT a module constant (SPEC-37): it is
+# resolved per transcription from stt_config (stt.yaml, env STT_MODEL override)
+# so a Settings change applies on the NEXT dictation without an app restart.
 _STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
-_STT_MODEL = "microsoft/mai-transcribe-2"
 _TIMEOUT_SECONDS = 20
 _BODY_PREVIEW_CHARS = 500
 
@@ -188,13 +193,27 @@ class STTEngine:
         self._capture_proc.terminate()
         self._capture_proc.wait()
 
-    def _build_request_body(self, wav_b64: str) -> dict:
-        """Build the OpenRouter STT request body; phraseList only when phrases exist."""
+    def _build_request_body(self, wav_b64: str, model: str | None = None) -> dict:
+        """Build the OpenRouter STT request body for `model` (SPEC-37).
+
+        model=None resolves the model here via stt_config (env STT_MODEL →
+        stt.yaml → default) so direct callers stay source-compatible. The
+        phraseList block is emitted ONLY when phrases exist AND the model is
+        measured to accept it (is_bias_supported) — every other model must
+        never receive provider.options.azure (OpenRouter 400s or drops it).
+        """
+        # Lazy import inside the request path (SPEC-37): the model is resolved
+        # per transcription, never cached on the engine, so a Settings change
+        # applies on the NEXT dictation without an app restart.
+        from utils import stt_config
+
+        if model is None:
+            model = stt_config.get_stt_model()
         body = {
-            "model": _STT_MODEL,
+            "model": model,
             "input_audio": {"data": wav_b64, "format": "wav"},
         }
-        if self._phrases:
+        if self._phrases and stt_config.is_bias_supported(model):
             body["provider"] = {
                 "options": {"azure": {"phraseList": {"phrases": list(self._phrases)}}}
             }

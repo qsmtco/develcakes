@@ -1,8 +1,8 @@
-# Crabcakes — Architecture Document
+# Develcakes — Architecture Document
 
-**Purpose:** This document is the authoritative reference for the Crabcakes codebase. It defines the structure, patterns, and principles that all contributors — human or agent — must follow. Before writing any code, read this document. When in doubt, consult this document.
+**Purpose:** This document is the authoritative reference for the Develcakes codebase. It defines the structure, patterns, and principles that all contributors — human or agent — must follow. Before writing any code, read this document. When in doubt, consult this document.
 
-**Project root:** `/path/to/projects/crabcakes`
+**Project root:** `/path/to/projects/develcakes`
 **Project status:** See `docs/PROJECT_STATUS.md` for current progress, completed phases, and planned work.
 
 ---
@@ -34,34 +34,34 @@ When you change code, you **must** update this document in the same commit. If y
 
 ## 1. Project Overview
 
-Crabcakes is a GTK4 desktop application that connects to an OpenClaw gateway via WebSocket, enabling multi-agent chat management. It provides:
+Develcakes is a GTK4 desktop application that connects to an OpenClaw gateway via WebSocket, enabling multi-agent chat management. It provides:
 
 - A split-panel UI: left sidebar (Prompts/Agents/Projects notebook) + right main content (chat tabs + input)
 - Prompt library: load `.md` files from the `prompts/` directory (system prompts in `prompts/system/`)
 
 ### Per-Project Prompt Library (SPEC-PROJECT-PROMPTS-DIRECTORY)
 
-Crabcakes maintains a **two-tier prompt storage** architecture:
+Develcakes maintains a **two-tier prompt storage** architecture:
 
 | Tier | Location | Content | Consumers |
 |------|----------|---------|-----------|
-| App-level | `<crabcakes>/prompts/system/` | Agent personality templates (`coder.md`, `debugger.md`, etc.) | `utils/prompt_loader.py` → system prompt composition |
-| Per-project | `<project>/.crabcakes/prompts/` | User-facing prompt library (`README.md`, `steelFramedCodeWriter.md`, subdirs) | `PromptsHandler` tab, `InputToolbarHandler` picker, agent file context |
+| App-level | `<develcakes>/prompts/system/` | Agent personality templates (`coder.md`, `debugger.md`, etc.) | `utils/prompt_loader.py` → system prompt composition |
+| Per-project | `<project>/.develcakes/prompts/` | User-facing prompt library (`README.md`, `steelFramedCodeWriter.md`, subdirs) | `PromptsHandler` tab, `InputToolbarHandler` picker, agent file context |
 
-**Seeding:** `seed_project_prompts(project_path)` (in `utils/project_awareness.py`) copies the app's user-facing prompt library into `<project>/.crabcakes/prompts/` on project create and on first open of legacy projects. Copy-only-if-missing semantics: existing project edits are never overwritten.
+**Seeding:** `seed_project_prompts(project_path)` (in `utils/project_awareness.py`) copies the app's user-facing prompt library into `<project>/.develcakes/prompts/` on project create and on first open of legacy projects. Copy-only-if-missing semantics: existing project edits are never overwritten.
 
 **Resolution:** `get_project_prompts_dir(project_path)` (`utils/prompt_paths.py`) returns the per-project dir when it exists, otherwise falls back to the app-level `prompts/` directory. This ensures agents in a project can read `prompts/steelFramedCodeWriter.md` via the sandbox-resolved project path.
 
-**Write-side resolver:** `ensure_project_prompts_dir(project_path)` (also in `utils/prompt_paths.py`) is the write-side counterpart: unseeded-project writes CREATE `<project>/.crabcakes/prompts/` rather than falling back to the app-level library, so a user's saved/imported prompt always lands in the active project (Phase 3 audit BUG #1). Callers: `InputToolbarHandler.save_as_prompt`, `PromptsHandler.import_prompt`.
+**Write-side resolver:** `ensure_project_prompts_dir(project_path)` (also in `utils/prompt_paths.py`) is the write-side counterpart: unseeded-project writes CREATE `<project>/.develcakes/prompts/` rather than falling back to the app-level library, so a user's saved/imported prompt always lands in the active project (Phase 3 audit BUG #1). Callers: `InputToolbarHandler.save_as_prompt`, `PromptsHandler.import_prompt`.
 
-**Agent file context:** `agent/context.py:_load_project_prompts_context()` injects up to 30 `.md` files (≤20KB each) from `.crabcakes/prompts/` into the agent's file context as `## .crabcakes/prompts/{stem}` sections, appearing after the core `.crabcakes/` docs and before the project tree/key files; the size filter runs BEFORE the 30-file cap so oversized files never consume slots. This makes the prompt library visible to the agent without requiring an explicit `read_file` tool call.
+**Agent file context:** `agent/context.py:_load_project_prompts_context()` injects up to 30 `.md` files (≤20KB each) from `.develcakes/prompts/` into the agent's file context as `## .develcakes/prompts/{stem}` sections, appearing after the core `.develcakes/` docs and before the project tree/key files; the size filter runs BEFORE the 30-file cap so oversized files never consume slots. This makes the prompt library visible to the agent without requiring an explicit `read_file` tool call.
 
 **Favorites:** `utils/favorites.py` keys favorites by **stem** (not full path), so a favorited prompt persists across project switches and re-seeds.
 
 **Out of scope:** `prompts/system/*` (app-level agent personality) and `prompts/claude-code-clean/` (human reference only) are never seeded into projects.
 
 - Agent discovery: connect to gateway, discover agents, open chat tabs per agent
-- Project browser: browse directories from `CRABCAKES_PROJECTS_DIR` via TreeView
+- Project browser: browse directories from `DEVELCAKES_PROJECTS_DIR` via TreeView
 - **Project group chat**: open a project → fan-out message to all project members → responses routed back to the project tab
 - **Membership toggles**: +/− buttons in the Agents tab add/remove agents from the active project
 - **Crabcake Special Agents**: local agent runtime — Coder and Debugger agents run directly against OpenAI/MiniMax/Anthropic APIs with file/exec tools, no gateway required
@@ -78,8 +78,8 @@ Crabcakes maintains a **two-tier prompt storage** architecture:
 ## 2. Directory Structure
 
 ```
-crabcakes/
-├── main.py                    # Entry point — creates CrabcakesApp, runs Gtk.main() (~56 lines)
+develcakes/
+├── main.py                    # Entry point — creates DevelcakesApp, runs Gtk.main() (~56 lines)
 │
 ├── gateway/                   # WebSocket client — self-contained, no UI dependencies
 │   ├── __init__.py           # Exports: GatewayClient, SnapshotValidationError
@@ -122,7 +122,7 @@ crabcakes/
 │   ├── context.py            # System prompt builder (via prompts/system/ templates) + file context builder + .gitignore parsing
 │   ├── context_strategy.py   # Pluggable context compaction strategy (Phase 4–9; ContextStrategy protocol + DefaultContextStrategy)
 │   ├── tool_middleware.py    # Tool middleware chain: EnforcementMiddleware + StuckDetectionMiddleware (Phase A1 extraction)
-│   ├── special_agents.py     # Coder + Debugger + Crabcakes agent definitions (auto_open, api_key_built_in, auto_add_to_projects fields)
+│   ├── special_agents.py     # Coder + Debugger + Develcakes agent definitions (auto_open, api_key_built_in, auto_add_to_projects fields)
 │   ├── enforcement.py        # Post-write verification: syntax guard, test runner, lint check (Phase 3)
 │   └── llm/                  # LLM provider abstraction package (Phase B1–B6 extraction)
 │       ├── __init__.py       # Public API: get_provider, list_providers, LLMProvider, LLMResponse
@@ -190,10 +190,10 @@ crabcakes/
 │       ├── agent_builder.py     # AgentBuilderDialog — modal dialog for creating/editing agents
 │       └── auxilium_wizard.py  # Auxilium first-run wizard view (Tier 1, D7)
 │
-├── knowledge/                # User-facing documentation files (read by Crabcakes agent via web_fetch)
+├── knowledge/                # User-facing documentation files (read by Develcakes agent via web_fetch)
 │   ├── setup.md              # Installation and first-run guide
 │   ├── configuration.md      # Configuration options and agent.json
-│   ├── agents.md             # How agents work (Coder, Debugger, Crabcakes, custom)
+│   ├── agents.md             # How agents work (Coder, Debugger, Develcakes, custom)
 │   ├── features.md           # Feature overview and how-tos
 │   ├── commands.md           # Slash command reference
 │   ├── gateway.md            # OpenClaw gateway connection
@@ -207,7 +207,7 @@ crabcakes/
 │   │                          #   APP-LEVEL: not seeded per-project; defines agent personality
 │   └── default_agents/        # Default agent YAML definitions
 │
-# NOTE: Per-project prompt library lives at <project>/.crabcakes/prompts/
+# NOTE: Per-project prompt library lives at <project>/.develcakes/prompts/
 # (see §X below). The app-level prompts/ directory above contains system
 # templates only; the user-facing library is per-project.
 │
@@ -227,7 +227,7 @@ crabcakes/
     ├── env_security.py          # get_scrubbed_env() — allowlisted env dict for subprocesses (MED-2 / CRIT-2)
     ├── escaping.py              # escape_for_pango(), xml_escape_text() — Pango-aware XML escape
     ├── favorites.py             # favorites persistence (favorites.json)
-    ├── feed_store.py            # Feed JSON persistence — load/save/append/update to .crabcakes/feed.json (Phase 5)
+    ├── feed_store.py            # Feed JSON persistence — load/save/append/update to .develcakes/feed.json (Phase 5)
     ├── feedback_processor.py    # Audit report file I/O — write structured audit reports to agent bug journals
     ├── file_security.py         # assert_secure_file() — config file permission validation (MED-6)
     ├── git_ops.py               # GitPython wrapper — git add/commit/diff/checkout/log/status/push via GitResult (Phase 7)
@@ -239,8 +239,8 @@ crabcakes/
     ├── markdown.py              # format_markdown() — inline markdown → Pango Markup
     ├── mcp_client.py            # MCP client library — asyncio-to-threading bridge, stdio transport, connection pooling, tool discovery/call
     ├── mcp_config.py            # MCP server configuration loader — YAML/JSON deserialization with schema validation
-    ├── project_awareness.py     # Project awareness system — manages .crabcakes/ directory per project (team, workflow, context; seed_project_prompts)
-    ├── project_trust.py         # HIGH-5: per-project trust gate for .crabcakes/ rule/bug ingestion
+    ├── project_awareness.py     # Project awareness system — manages .develcakes/ directory per project (team, workflow, context; seed_project_prompts)
+    ├── project_trust.py         # HIGH-5: per-project trust gate for .develcakes/ rule/bug ingestion
     ├── prompt_loader.py         # System prompt template loader — loads/fills/composes prompts/system/*.md
     ├── prompt_paths.py          # Per-project prompts dir resolvers (get_project_prompts_dir read-side, ensure_project_prompts_dir write-side)
     ├── prompts.py               # load_prompts() — reads .md from prompts/
@@ -250,10 +250,11 @@ crabcakes/
     ├── quoting.py               # _parse_quoted_payload() — quoted-payload parsing with escape handling (A2A_QUOTED_PAYLOAD_SPEC)
     ├── review_log.py            # Review log persistence — append/retrieve review entries per project
     ├── spellcheck.py            # Spell check engine — Enchant-based misspelling detection and suggestion
-    ├── stt.py                   # STTEngine — OpenRouter cloud STT (microsoft/mai-transcribe-2); arecord 16kHz mono capture + STT_PHRASES keyword biasing
+    ├── stt.py                   # STTEngine — OpenRouter cloud STT (model from stt_config, SPEC-37); arecord 16kHz mono capture + STT_PHRASES keyword biasing
+    ├── stt_config.py            # STT model setting store — stt.yaml, env STT_MODEL override, per-model bias gating (SPEC-37)
     ├── syntax_highlight.py      # highlight() — Pygments → Pango markup (Tokyo Night color scheme)
-    ├── work_persistence.py      # .crabcakes/work.json source of truth + generated tasks.md + legacy migration
-    └── workflow_state.py        # Workflow state tracker — manages .crabcakes/workflow.md per project
+    ├── work_persistence.py      # .develcakes/work.json source of truth + generated tasks.md + legacy migration
+    └── workflow_state.py        # Workflow state tracker — manages .develcakes/workflow.md per project
 ```
 
 **Top-level packages and their rules:**
@@ -294,7 +295,7 @@ here and justifying why the file cannot live in `ui/`.
 **Responsibility:** Bootstrap the GTK application.
 
 ```python
-class CrabcakesApp(Gtk.Application):
+class DevelcakesApp(Gtk.Application):
     def on_activate(self, app):
         win = MainWindow(application=app)
         win.present()
@@ -672,7 +673,7 @@ class InputToolbarHandler:
 
 **Responsibility:** Three-tab notebook: Prompts, Agents, Projects.
 
-**Prompts tab:** PromptsHandler-backed list with search, favorites, and rich metadata rows. Star/favorite persisted to `~/.config/crabcakes/favorites.json`. Double-click or `+` button calls `on_prompt_loaded(filepath, name, content)`, which loads content into chat input. Search filters by name (case-insensitive). Favorites sort to top. Right-click on a prompt row opens a 2-item popover menu ("Copy path" / "Copy prompt"); the selection is copied to the system clipboard via `Gdk.Display.get_clipboard()` and a transient "Copied path" / "Copied prompt" confirmation appears in the tab header for 2.5s (auto-cleared via `GLib.timeout_add`).
+**Prompts tab:** PromptsHandler-backed list with search, favorites, and rich metadata rows. Star/favorite persisted to `~/.config/develcakes/favorites.json`. Double-click or `+` button calls `on_prompt_loaded(filepath, name, content)`, which loads content into chat input. Search filters by name (case-insensitive). Favorites sort to top. Right-click on a prompt row opens a 2-item popover menu ("Copy path" / "Copy prompt"); the selection is copied to the system clipboard via `Gdk.Display.get_clipboard()` and a transient "Copied path" / "Copied prompt" confirmation appears in the tab header for 2.5s (auto-cleared via `GLib.timeout_add`).
 
 **Agents tab:** Initially empty placeholder. After `set_agents()` is called, builds avatar cards (colored circle + initials + name + +/− toggle button). Double-click calls `on_agent_selected(session_key, name)`. CSS for agent rows is scoped to `left_panel`. When a project is open, the toggle button is visible — `+` adds the agent to the project, `−` removes them. Toggle button uses `.agent-add-btn` (green) or `.agent-remove-btn` (red) CSS classes.
 
@@ -744,7 +745,7 @@ The FileTree underwent a phased enhancement transforming it from a simple Gtk.Tr
 
 ```
 ui/handlers/file_tree_handler.py    (NO GTK)
-├── sort preference persistence     (.crabcakes/file_tree_prefs.json, whitelist-validated)
+├── sort preference persistence     (.develcakes/file_tree_prefs.json, whitelist-validated)
 └── git status cache                (status_porcelain, dirty flag, refresh/invalidate)
 
 ui/views/file_tree.py               (GTK widgets)
@@ -827,7 +828,7 @@ is_favorite(filepath) -> bool
 toggle_favorite(filepath) -> bool   # True if now favorited
 ```
 
-**Security:** No secrets. File I/O only — reads/writes favorites set to `~/.config/crabcakes/favorites.json`.
+**Security:** No secrets. File I/O only — reads/writes favorites set to `~/.config/develcakes/favorites.json`.
 
 ### 3.11 `utils/` — Utilities
 
@@ -836,15 +837,15 @@ toggle_favorite(filepath) -> bool   # True if now favorited
 | Function | File | Responsibility |
 |----------|------|---------------|
 | `load_prompts()` | `prompts.py` | Returns `[(name, content), ...]` from `prompts/` |
-| `load_projects()` | `projects.py` | Returns `[(name, full_path), ...]` from `CRABCAKES_PROJECTS_DIR` |
+| `load_projects()` | `projects.py` | Returns `[(name, full_path), ...]` from `DEVELCAKES_PROJECTS_DIR` (`DEVELCAKES_PROJECTS_DIR` when the new name is unset) |
 | `scan_directory(path)` | `projects.py` | Returns `[(name, full_path, is_dir), ...]` for one level, filtered (skips `__pycache__`, `.git`, etc.) |
-| `load_members(project_name)` | `projects.py` | Returns `[{session_key}, ...]` from `~/.config/crabcakes/projects/<name>/members.json` |
+| `load_members(project_name)` | `projects.py` | Returns `[{session_key}, ...]` from `~/.config/develcakes/projects/<name>/members.json` |
 | `save_members(project_name, members)` | `projects.py` | Writes members list to `members.json`, creates dir if needed |
 | `improve_prompt(text, callback, GLib)` | `improve.py` | Loads template from `prompts/system/improve.md`, injects user text at `{{USER_INPUT}}` marker (or legacy split), sends to MiniMax API, calls `callback(improved, error)` with GLib dispatch |
 | `load_prompt_template(name)` | `prompt_loader.py` | Load `prompts/system/<name>.md` template, return raw string or None |
 | `fill_template(template, variables)` | `prompt_loader.py` | Replace `{{KEY}}` markers with values from dict |
-| `compose_system_prompt(agent_name, ...)` | `prompt_loader.py` | Compose full system prompt from templates: (1) default.md, (1b) collab.md, (1c) crabcakes-context.md, (2) project-awareness.md, (3) crabcakes-commands.md, (4) project-onboarding.md, (5) code-review.md, (6) coder.md/debugger.md, (7) {role}-bugs.md/{role}-rules.md |
-| `STTEngine` class | `stt.py` | Push-to-talk STT via OpenRouter cloud — arecord (16kHz mono WAV) → base64 → POST `/api/v1/audio/transcriptions` (microsoft/mai-transcribe-2, Azure `phraseList` biasing) → stop_async callback |
+| `compose_system_prompt(agent_name, ...)` | `prompt_loader.py` | Compose full system prompt from templates: (1) default.md, (1b) collab.md, (1c) develcakes-context.md, (2) project-awareness.md, (3) develcakes-commands.md, (4) project-onboarding.md, (5) code-review.md, (6) coder.md/debugger.md, (7) {role}-bugs.md/{role}-rules.md |
+| `STTEngine` class | `stt.py` | Push-to-talk STT via OpenRouter cloud — arecord (16kHz mono WAV) → base64 → POST `/api/v1/audio/transcriptions` (model resolved per-call from `stt_config`, SPEC-37; Azure `phraseList` biasing gated on `is_bias_supported`) → stop_async callback |
 | `show_session_menu(parent, agent_name, sessions, on_select)` | `session_menu.py` | GTK popover menu listing sessions; clicking fires `on_select(session_key)` |
 
 ### 3.11a `utils/provider_test.py` — LLM Provider Connectivity Probe + Context Window Discovery
@@ -1019,7 +1020,7 @@ from utils.escaping import escape_for_pango, xml_escape_text
 # Unknown tags (including HTML void elements <br>, <hr>, <img>) are escaped — prevents Pango from silently
 # rendering the ENTIRE message as empty when it encounters an unknown tag, and prevents
 # cascade-failure markup errors when literal <br>/<hr>/<img> appear inside <tt> code spans
-# (regression fixed 2026-07-10; see Bug #N in .crabcakes/coder-bugs.md).
+# (regression fixed 2026-07-10; see Bug #N in .develcakes/coder-bugs.md).
 safe = escape_for_pango("<b>bold</b> and <script>x</script>")
 # → "<b>bold</b> and &lt;script&gt;x&lt;/script&gt;"
 safe = escape_for_pango("line1<br>line2")
@@ -1323,7 +1324,7 @@ def dispatch(fn: Callable, *args, **kwargs) -> None:
 - `STTEngine` instance (`_stt_engine`) — owns its own background capture thread; transcription is a cloud POST to OpenRouter
 - Sync callback (`_sync_callback`) — window sets this to trigger `ChatHandler.on_send()` after voice input
 
-**STT backend:** capture stays local (`arecord` 16kHz mono WAV via the PipeWire ALSA plugin); transcription moved from local faster-whisper to OpenRouter's cloud STT endpoint (`POST /api/v1/audio/transcriptions`, model `microsoft/mai-transcribe-2`). The public `STTEngine` API (`start`/`stop_async`/`stop`/`is_recording`/`on_result`) is unchanged, so this handler requires no STT changes. Keyword biasing uses Azure `provider.options.azure.phraseList` (default `["DevelCakes", "Crabcakes", "crabcakes"]`, overridable via `STT_PHRASES`; empty string → no phraseList). API key: `OPENROUTER_API_KEY` env, else `agent.config.get_api_key("openrouter")`; absent key ⇒ `start()` logs a WARNING and refuses to record.
+**STT backend:** capture stays local (`arecord` 16kHz mono WAV via the PipeWire ALSA plugin); transcription moved from local faster-whisper to OpenRouter's cloud STT endpoint (`POST /api/v1/audio/transcriptions`). The dictation model is **user-configurable** (SPEC-37): resolved **per transcription** via `utils/stt_config.get_stt_model()` — env `STT_MODEL` → `<config_dir>/stt.yaml` `model:` → `microsoft/mai-transcribe-2` default — so a Settings → STT Model change applies on the NEXT dictation without an app restart. The phraseList bias block is emitted only when phrases exist **and** `stt_config.is_bias_supported(model)` — non-Azure models never receive `provider.options.azure` (OpenRouter 400s or drops it). The public `STTEngine` API (`start`/`stop_async`/`stop`/`is_recording`/`on_result`) is unchanged, so this handler requires no STT changes. Keyword biasing default `["DevelCakes", "Develcakes", "develcakes"]`, overridable via `STT_PHRASES`; empty string → no phraseList. API key: `OPENROUTER_API_KEY` env, else `agent.config.get_api_key("openrouter")`; absent key ⇒ `start()` logs a WARNING and refuses to record.
 
 **Thread safety:** the transcription result fires from the STT background thread. GTK calls go through `GLib.idle_add()`.
 
@@ -1374,7 +1375,7 @@ def improve_prompt(raw_text, callback, GLib=None)
     # callback(improved_text, error) — GLib.idle_add dispatched if GLib provided
 ```
 
-**Config:** Reads `apiKey`, `baseUrl`, `model` from `~/.config/crabcakes/config.json`. Defaults: MiniMax API, `MiniMax-M2.5-Lightning`.
+**Config:** Reads `apiKey`, `baseUrl`, `model` from `~/.config/develcakes/config.json`. Defaults: MiniMax API, `MiniMax-M2.5-Lightning`.
 
 ### 3.18 `models/colors.py` — Color Palette
 
@@ -1773,15 +1774,18 @@ status(project_path) -> GitResult
 
 **Public API:**
 ```python
-get_config_dir() -> str                         # ~/.config/crabcakes (or $XDG_CONFIG_HOME)
-get_config_file() -> str                       # config.json path
-get_projects_config_dir() -> str               # ~/.config/crabcakes/projects
-get_projects_dir() -> str                      # ~/projects (or $CRABCAKES_PROJECTS_DIR)
-get_gateway_url() -> str                        # ws://localhost:18789 (or $CRABCAKES_GATEWAY_URL)
+get_config_dir() -> str                         # ~/.config/develcakes, or $XDG_CONFIG_HOME/develcakes
+get_v1_config_dir() -> str                      # ~/.config/develcakes — migration source only; never read for runtime config
+get_config_file() -> str                        # <config dir>/config.json
+get_projects_config_dir() -> str                # <config dir>/projects
+get_projects_dir() -> str                       # ~/projects, or $DEVELCAKES_PROJECTS_DIR ($DEVELCAKES_PROJECTS_DIR when the new name is unset)
+get_gateway_url() -> str                        # ws://localhost:18789 (or $DEVELCAKES_GATEWAY_URL)
 get_identity_dir() -> str                       # ~/.openclaw/identity/
 
 COMMAND_PREFIX = "/"                            # slash command prefix
 ```
+
+Runtime config (providers, agents, conversations, favorites, trust, MCP) is read from `get_config_dir()`. `~/.config/develcakes` is the v1 directory copied once by `migrate_v1_config()`. After that copy, the running app does not read it.
 
 ### 3.21l `models/conversation.py` — Conversation Data Models (Agent Runtime Phase 1.1)
 
@@ -2044,13 +2048,13 @@ def get_api_key(provider_name) -> str | None
 **Public API:**
 ```python
 def build_system_prompt(agent_name, project_path, tools, review_mode, agent_role="", model_max_tokens=None, *, context_mode="auto") -> str
-def build_file_context(project_path, query=None) -> str    # respects .gitignore, capped ~50K chars; §4.4a prepends .crabcakes/ docs
+def build_file_context(project_path, query=None) -> str    # respects .gitignore, capped ~50K chars; §4.4a prepends .develcakes/ docs
 def build_file_context_with_core_files(project_path, query=None, max_chars=50_000, *, context_mode="preload") -> str  # Phase CB-2 + P10
 def build_file_index(project_path, max_entries=200, include_line_counts=True) -> str  # P10: compact file index for JIT/hybrid
 def resolve_context_mode(explicit_mode: str, model_max_tokens: int | None) -> str  # P10: resolves "auto" → preload|hybrid|jit
 def _find_matching_files(project_path, query, patterns, max_files=20) -> list[str]  # P10: filename search for file_search tool
-def _read_crabcakes_docs(project_path) -> str               # §4.4a — always include project docs in context
-def load_custom_system_prompt(project_path) -> str | None  # .crabcakes/agent-system-prompt.md → AGENTS.md → None
+def _read_develcakes_docs(project_path) -> str               # §4.4a — always include project docs in context
+def load_custom_system_prompt(project_path) -> str | None  # .develcakes/agent-system-prompt.md → AGENTS.md → None
 ```
 
 **Context discovery (P10).** `resolve_context_mode()` resolves `"auto"` to
@@ -2271,14 +2275,14 @@ def is_kb_server_running() -> bool
 
 **Fail-soft behavior:** If `kb_lookup()` raises, returns `[KB_OUT_OF_SCOPE]` (graceful degradation). If index is unavailable, `start_kb_server()` returns `None` (server does not start).
 
-**Synthesis layer (KB Enhancement):** Before returning formatted KB chunks, `do_POST` calls `_try_synthesize(question, chunks)` which POSTs to a free, no-auth Llama-3.2-3B endpoint (`_SYNTHESIS_ENDPOINT_URL`, default `https://devtoolbox-api.devtoolbox-api.workers.dev/ai/generate`) with a 1.5s timeout. If the synthesis returns a non-empty string, the response content is the synthesized answer. If synthesis fails for any reason (timeout, network error, HTTP error, body-level error, empty response, error-shaped response), the server falls back to the raw formatted chunks. The toggle `CRABCAKES_KB_SYNTHESIS=0` (env var) disables synthesis entirely, restoring the pre-enhancement behavior. Synthesis is opt-in by default; the response shape is unchanged from the OpenAI Chat Completions contract — only the `content` field differs in style.
+**Synthesis layer (KB Enhancement):** Before returning formatted KB chunks, `do_POST` calls `_try_synthesize(question, chunks)` which POSTs to a free, no-auth Llama-3.2-3B endpoint (`_SYNTHESIS_ENDPOINT_URL`, default `https://devtoolbox-api.devtoolbox-api.workers.dev/ai/generate`) with a 1.5s timeout. If the synthesis returns a non-empty string, the response content is the synthesized answer. If synthesis fails for any reason (timeout, network error, HTTP error, body-level error, empty response, error-shaped response), the server falls back to the raw formatted chunks. The toggle `DEVELCAKES_KB_SYNTHESIS=0` (env var) disables synthesis entirely, restoring the pre-enhancement behavior. Synthesis is opt-in by default; the response shape is unchanged from the OpenAI Chat Completions contract — only the `content` field differs in style.
 
 **Synthesis-layer public API additions:**
 ```python
-_SYNTHESIS_ENDPOINT_DEFAULT: str  # constant, overridden via CRABCAKES_KB_SYNTHESIS_URL
+_SYNTHESIS_ENDPOINT_DEFAULT: str  # constant, overridden via DEVELCAKES_KB_SYNTHESIS_URL
 _SYNTHESIS_TIMEOUT_SECONDS: float  # 1.5
 def _get_synthesis_url() -> str  # reads env var at call time
-def _synthesis_enabled() -> bool  # reads CRABCAKES_KB_SYNTHESIS env var
+def _synthesis_enabled() -> bool  # reads DEVELCAKES_KB_SYNTHESIS env var
 def _try_synthesize(question: str, chunks: list, formatted_chunks: str | None = None) -> str | None
 ```
 
@@ -2363,7 +2367,7 @@ class AuxiliumWizard(Gtk.Box):
 
 ### 3.21q `agent/special_agents.py` — Special Agent Definitions (Phase 1.4 → User-Defined Agents)
 
-**Responsibility:** Agent definition registry — loads agent definitions from `~/.config/crabcakes/agents/*.yaml` (or `.json`). Built-in defaults (Coder, Debugger, Crabcakes) are seeded from `prompts/default_agents/` on first launch. New agents are created via the Agent Builder UI.
+**Responsibility:** Agent definition registry — loads agent definitions from `~/.config/develcakes/agents/*.yaml` (or `.json`). Built-in defaults (Coder, Debugger, Develcakes) are seeded from `prompts/default_agents/` on first launch. New agents are created via the Agent Builder UI.
 
 **Public API:**
 ```python
@@ -2391,7 +2395,7 @@ def reload_registry() -> None   # force reload after create/edit/delete
 
 **Self-improvement:** Each agent carries `self_improvement` toggles (bug_journal, project_rules, enforcement, structured_feedback, dream_consolidation). Defaults from `utils/agent_defs.get_default_si_config()`. Override via YAML.
 
-**Auto-open agents:** Agents with `auto_open=True` (currently only Crabcakes 🦀) get a chat tab created automatically on every app launch. See `ui/window.py` Phase 4.
+**Auto-open agents:** Agents with `auto_open=True` (currently only Develcakes 🦀) get a chat tab created automatically on every app launch. See `ui/window.py` Phase 4.
 
 **Project onboarding agents:** Agents with `auto_add_to_projects=True` are automatically added to every new project's team. See `ui/handlers/project_handler.py` Phase 5. No current default agent opts into this; Supervisor is deliberately `auto_add_to_projects=False` so the user manually adds it from the Agents tab.
 
@@ -2410,7 +2414,7 @@ def reload_registry() -> None   # force reload after create/edit/delete
 
 ### 3.21r `utils/agent_defs.py` — Agent Definition I/O (User-Defined Agents)
 
-**Responsibility:** Load, validate, save, and list agent definition files from `~/.config/crabcakes/agents/`. Pure Python — no GTK, no network. Follows the `utils/projects.py` pattern.
+**Responsibility:** Load, validate, save, and list agent definition files from `~/.config/develcakes/agents/`. Pure Python — no GTK, no network. Follows the `utils/projects.py` pattern.
 
 **Public API:**
 ```python
@@ -2509,7 +2513,7 @@ def wire_settings_handler(
 **LOW-7 env-var helpers:** The module also contains the active-project path
 wiring for the image viewer:
 ```python
-ACTIVE_PROJECT_ENV = "CRABCAKES_ACTIVE_PROJECT_PATH"
+ACTIVE_PROJECT_ENV = "DEVELCAKES_ACTIVE_PROJECT_PATH"
 
 def set_active_project_path(project_path: str) -> None   # publish for chat_bubble.py
 def clear_active_project_path() -> None                   # clear on project close
@@ -2554,7 +2558,7 @@ def check(tool_name, tool_args, tool_result, project_path, config) -> Enforcemen
 **Internal functions:**
 ```python
 def _detect_venv_prefix(project_path, venv_path) -> str   # POSIX "." activation prefix or ""
-def _load_test_config(project_path) -> TestConfig | None   # TTL-cached loader from .crabcakes/enforcement.json test section
+def _load_test_config(project_path) -> TestConfig | None   # TTL-cached loader from .develcakes/enforcement.json test section
 def _find_related_test(file_path, project_path, test_dir, naming_pattern) -> str | None
 def _check_tests(file_path, project_path, config, syntax_passed) -> EnforcementCheck | None
 ```
@@ -2564,12 +2568,12 @@ def _check_tests(file_path, project_path, config, syntax_passed) -> EnforcementC
 2. Test runner (`_check_tests`): detect framework (pytest, jest, make test), find related test file, run it. Skipped if syntax fails. Uses per-project `TestConfig` for custom command templates, venv activation (`_detect_venv_prefix`), configurable test directory and naming patterns, and timeout overrides.
 3. Lint check (`_check_lint`): detect linter (ruff, mypy, eslint), run on changed file. Skipped if syntax fails.
 
-**Per-project override (§F):** `.crabcakes/enforcement.json` overrides global enforcement config. Two caches:
+**Per-project override (§F):** `.develcakes/enforcement.json` overrides global enforcement config. Two caches:
 - `_ENFORCEMENT_CONFIG_CACHE` — tier toggles (syntax_check, test_run, lint_check, skip_patterns)
 - `_TEST_CONFIG_CACHE` — per-project test configuration (command, venv, naming, timeout)
 Both use 30-second TTL. Applied BEFORE all tier checks so `syntax_check: false` actually skips syntax.
 
-**Test config schema (`.crabcakes/enforcement.json` → `test` section):**
+**Test config schema (`.develcakes/enforcement.json` → `test` section):**
 ```json
 "test": {
   "command": ". .venv/bin/activate && python3 -m pytest {test_file} -v --tb=short",
@@ -2629,8 +2633,8 @@ class MCPServerConfig:
 ```
 
 **Config location (actual code):**
-- `get_mcp_servers_path()` returns `~/.config/crabcakes/mcp-servers.json` (exact path: see `utils/mcp_config.py:87`)
-- `os.path.expanduser("~")/.config/crabcakes/mcp-servers.json`
+- `get_mcp_servers_path()` returns `~/.config/develcakes/mcp-servers.json` (exact path: see `utils/mcp_config.py:87`)
+- `os.path.expanduser("~")/.config/develcakes/mcp-servers.json`
 
 **Rationale:** Single config file keeps MCP registration explicit and user-scoped. Projects can extend via `mcp_servers` field in agent definitions; servers are added/removed via config edits or future UI.
 
@@ -2971,7 +2975,7 @@ def css_class_for_type(card_type: str) -> str:
 
 **Owns:** `_cards` (dict: card_id → FeedCardData), `_card_widgets` (dict: card_id → Gtk.Widget), `_project_cards` (dict: project_name → [card_ids]), `_project_paths` (dict: project_name → abs_path), `_recent_git_paths` (dict: file_path → monotonic timestamp for echo suppression), `_lock` (threading.Lock), plus the background-persistence state: `_persist_queue` (dict: (project_path, card_id) → coalesced updates), `_persist_deferred` (dict: same key → (payload, tries)), `_persist_compactions` (list: (project_path, tries)), `_persist_queue_lock`, `_persist_wakeup` (threading.Event), `_persist_writer` (threading.Thread | None), `_persist_stop` (bool).
 
-**Background feed writer (SPEC-UI-RESPONSIVENESS-2 Phases 1 + 3):** the GTK main thread never does feed disk I/O. `update_card` mutates `_cards` under `_lock` and calls `_enqueue_card_update` (coalesced per `(project_path, card_id)`, last-write-wins, <1 ms, no disk); the daemon `crabcakes-feed-writer` thread drains it via `feed_store.update_feed_card`, moving failures to `_persist_deferred` (retry cap 3 → ERROR drop, in-place retries preserving the try count). Accept/reject clicks ride the same queue. `shutdown_persist_writer()` (wired to project-close and window close-request) joins with a size-scaled timeout, empties within one bounded drain pass, and classifies leftovers.
+**Background feed writer (SPEC-UI-RESPONSIVENESS-2 Phases 1 + 3):** the GTK main thread never does feed disk I/O. `update_card` mutates `_cards` under `_lock` and calls `_enqueue_card_update` (coalesced per `(project_path, card_id)`, last-write-wins, <1 ms, no disk); the daemon `develcakes-feed-writer` thread drains it via `feed_store.update_feed_card`, moving failures to `_persist_deferred` (retry cap 3 → ERROR drop, in-place retries preserving the try count). Accept/reject clicks ride the same queue. `shutdown_persist_writer()` (wired to project-close and window close-request) joins with a size-scaled timeout, empties within one bounded drain pass, and classifies leftovers.
 
 **Drain pass order (`_drain_persist_queue`):** compactions → deferred updates → queued updates. Compactions are **snapshotted at pass start** (≤1 attempt per path per pass, whatever the source) and run `feed_store.compact_feed(path, window=FEED_WINDOW_DEFAULT)`; a failure re-enqueues **only-if-absent** with `tries+1` so it can never clobber a concurrent external trigger, and drops at 3 failures. Compactions ride their own list — a sentinel inside the update-keyed dict would be unpacked as a `(project_path, card_id)` pair (invariant: a compaction path never reaches `update_feed_card` as a `card_id`).
 
@@ -3126,17 +3130,17 @@ Tab routing uses `agent_to_project` (AgentRoutingTable). In ChatHandler this is 
 
 ### 3.22d `utils/feed_store.py` — Feed Persistence (Phase 5; read/write paths rebuilt in SPEC-UI-RESPONSIVENESS-2 Phases 2-3)
 
-**Responsibility:** JSON + JSONL persistence for feed cards. Pure functions — no classes, no GTK, no state (one documented deviation: the compaction rate-limit table). Loads/saves `FeedCardData` lists from `.crabcakes/feed.json` per project, plus the append-only update journal `.crabcakes/feed-updates.jsonl`.
+**Responsibility:** JSON + JSONL persistence for feed cards. Pure functions — no classes, no GTK, no state (one documented deviation: the compaction rate-limit table). Loads/saves `FeedCardData` lists from `.develcakes/feed.json` per project, plus the append-only update journal `.develcakes/feed-updates.jsonl`.
 
 **Two-file model (§2.2):**
 | File | Role |
 |------|------|
-| `.crabcakes/feed.json` | Snapshot — the full card list, written atomically (`.tmp` + `os.replace`, compact JSON, 0o600) |
-| `.crabcakes/feed-updates.jsonl` | Update journal — one `{"card_id", "updates"}` JSON line per update, O(1) append, folded into the snapshot at compaction |
+| `.develcakes/feed.json` | Snapshot — the full card list, written atomically (`.tmp` + `os.replace`, compact JSON, 0o600) |
+| `.develcakes/feed-updates.jsonl` | Update journal — one `{"card_id", "updates"}` JSON line per update, O(1) append, folded into the snapshot at compaction |
 
 An update is recorded without the card having to exist yet (the journal is the source of truth for pending changes for a card); replay is idempotent and a torn final line is tolerated (replay stops at the first unparseable line).
 
-**Lock discipline — the uniform rule (§2.2.3):** **every** `feed_store` mutation, snapshot or journal, holds the **feed flock** (`.crabcakes/feed.json.lock`) for its whole critical section. `fcntl.flock` is per-inode, so one lock inode for all mutations is what makes "a concurrent compaction can never truncate between an append and its fold" true. There is no separate journal lock. `_acquire_lock` is **bounded** (2 s default deadline, non-blocking attempts in a loop, returns `None`) — no unbounded blocking lock on any path reachable from the main thread; `load_feed` uses a size-scaled timeout (`min(60.0, 10.0 + size_bytes/1_000_000)`) because a large compaction is slow. On `None`: write paths skip + WARNING (the journal/queue keeps the data safe), read paths fall back to a lock-free read + WARNING (documented narrow residual race — the next load re-reads consistently).
+**Lock discipline — the uniform rule (§2.2.3):** **every** `feed_store` mutation, snapshot or journal, holds the **feed flock** (`.develcakes/feed.json.lock`) for its whole critical section. `fcntl.flock` is per-inode, so one lock inode for all mutations is what makes "a concurrent compaction can never truncate between an append and its fold" true. There is no separate journal lock. `_acquire_lock` is **bounded** (2 s default deadline, non-blocking attempts in a loop, returns `None`) — no unbounded blocking lock on any path reachable from the main thread; `load_feed` uses a size-scaled timeout (`min(60.0, 10.0 + size_bytes/1_000_000)`) because a large compaction is slow. On `None`: write paths skip + WARNING (the journal/queue keeps the data safe), read paths fall back to a lock-free read + WARNING (documented narrow residual race — the next load re-reads consistently).
 
 **Retention (window + pins, §2.3.2):** `compact_feed` keeps the **newest `window`** cards (`FEED_WINDOW_DEFAULT = 2000`) by list order, then additionally keeps every **pinned** card from outside that slice. A card is pinned — never pruned — if any of: `accepted is not None` (a recorded decision; pruning would orphan it and the `seq_num` narrative), it is a `git_commit` card, or it is **genuinely undecided** — `metadata.needs_review` / `metadata.needs_approval` AND `accepted is None` AND `metadata.status not in ("approved", "denied")` (F1 amendment: the transient `needs_approval` flag is never cleared on resolution, so it pins only while no decision is recorded anywhere; the durable record `metadata.status` is written by `approve_exec`, and `update_card` also persists `accepted` when it is set). Pruning preserves chronological order and logs a WARNING with the prune count **and** how many outside-window cards the pins rescued.
 
@@ -3145,11 +3149,11 @@ An update is recorded without the card having to exist yet (the journal is the s
 **Public API:**
 ```python
 def load_feed(project_path: str) -> list[FeedCardData]
-    # Load cards from .crabcakes/feed.json + replay the journal. Chronological (oldest first).
+    # Load cards from .develcakes/feed.json + replay the journal. Chronological (oldest first).
     # Snapshot and journal are read under ONE feed-flock hold. Empty list if missing/invalid.
 
 def save_feed(project_path: str, cards: list[FeedCardData]) -> None
-    # Save cards to .crabcakes/feed.json. Creates .crabcakes/ if needed. Takes the feed lock.
+    # Save cards to .develcakes/feed.json. Creates .develcakes/ if needed. Takes the feed lock.
 
 def append_feed_card(project_path: str, card: FeedCardData) -> None
     # Append single card (lock → load → append → write), then a lock-free rate-limited
@@ -3254,7 +3258,7 @@ class CrabWatchHandler:
 | `DELETED` (dir) | `dir_deleted` | "Deleted directory <filename>" |
 
 **Ignored paths (no events):**
-- `.crabcakes/`, `.git/`, `node_modules/`, `__pycache__/`
+- `.develcakes/`, `.git/`, `node_modules/`, `__pycache__/`
 - `*.pyc` files, `.DS_Store`, dotfiles (names starting with `.`)
 
 **Debouncing:** Events on the same relative path within 200ms are batched — only the final state fires a card.
@@ -3316,17 +3320,17 @@ class CrabWatchHandler:
 
 ### 3.27 `utils/project_awareness.py` — Project Awareness System
 
-**Responsibility:** Manages the `.crabcakes/` directory per project. Reads/writes project metadata, team membership, workflow state, git context, and awareness documents. Pure Python — no GTK, no network. This is the authoritative source for project context; `utils/projects.py` deprecated its membership functions in favor of this module.
+**Responsibility:** Manages the `.develcakes/` directory per project. Reads/writes project metadata, team membership, workflow state, git context, and awareness documents. Pure Python — no GTK, no network. This is the authoritative source for project context; `utils/projects.py` deprecated its membership functions in favor of this module.
 
 **Manifest:**
-- Reads: `.crabcakes/*` (project.md, team.json, context.md, facts.json, awareness.json, workflow.md)
-- Writes: `.crabcakes/*` (same files)
+- Reads: `.develcakes/*` (project.md, team.json, context.md, facts.json, awareness.json, workflow.md)
+- Writes: `.develcakes/*` (same files)
 
 `facts.json` is one-line evidence scoped to a git sha, the files it names, and the session that recorded it. Live facts (those whose files still match that sha) are what `PROJECT_MEMORY` carries, inside the untrusted fence, under a preamble that they are sha-scoped and self-invalidate when files change. `context.md` remains the diary and still supplies `CURRENT_TASK`. A git error while checking a fact keeps the fact.
 
 **Public API:**
 ```python
-def get_crabcakes_dir(project_path: str) -> str
+def get_develcakes_dir(project_path: str) -> str
 def load_team(project_path: str) -> ProjectTeam
 def save_team(project_path: str, team: ProjectTeam) -> None
 def is_project_onboarded(project_path: str) -> bool
@@ -3353,7 +3357,7 @@ def clean_manifest_skeleton(project_path: str) -> bool    # SPEC-SUPERVISOR-ONBO
 `build_awareness_dict()` uses the **project-bound loader** `_work_units_for_awareness(project_path)` to load
 the project's Work Units on demand into a throwaway `WorkUnitStore` (returns `None` on any error — awareness
 is best-effort and never crashes the system-prompt build). It does NOT thread a `work_store` through its
-callers and remains read-only (no snapshot writes; the `.crabcakes/` mtime cache governs invalidation).
+callers and remains read-only (no snapshot writes; the `.develcakes/` mtime cache governs invalidation).
 
 **Phase CB-3 — Awareness variable caps (BUG #6 fix).** `build_awareness_dict()` caps
 `TEAM_ROSTER` at 500 chars and `CURRENT_STATE` at 1,000 chars, matching the existing
@@ -3371,12 +3375,12 @@ See `docs/specs/SPEC-CONTEXT-MD-SYSTEM-FIX.md` and post-mortem `docs/post-mortem
 
 ### 3.27a `utils/project_trust.py` — Per-Project Trust Gate (HIGH-5)
 
-**Responsibility:** Gates `.crabcakes/` rule/bug file ingestion behind a
+**Responsibility:** Gates `.develcakes/` rule/bug file ingestion behind a
 per-project trust prompt on first open. After the user approves once, the
 project path is recorded in the trust store and subsequent loads skip the
-gate. If denied, the project's `.crabcakes/` content is silently skipped.
+gate. If denied, the project's `.develcakes/` content is silently skipped.
 
-**Storage:** `~/.config/crabcakes/trusted_projects.json` — maps absolute
+**Storage:** `~/.config/develcakes/trusted_projects.json` — maps absolute
 project path to `{trusted: bool, ts: ISO8601, reason: str}`.
 
 **Public API:**
@@ -3399,11 +3403,11 @@ layer supplies the `prompt_fn` callback (e.g., a dialog).
 
 ### 3.27b `utils/work_persistence.py` — Work Unit Persistence
 
-**Responsibility:** Owns `.crabcakes/work.json` as the **source of truth** for Work Units and the
-generated `.crabcakes/tasks.md` summary. Handles legacy `tasks.md` → `work.json` migration.
+**Responsibility:** Owns `.develcakes/work.json` as the **source of truth** for Work Units and the
+generated `.develcakes/tasks.md` summary. Handles legacy `tasks.md` → `work.json` migration.
 Pure file I/O — no GTK, no network (SPEC-TASK-SYSTEM-FULL-REDESIGN §3.2, §14).
 
-**Source-of-truth rule:** `.crabcakes/work.json` is authoritative. `.crabcakes/tasks.md` is a
+**Source-of-truth rule:** `.develcakes/work.json` is authoritative. `.develcakes/tasks.md` is a
 **generated** summary (for humans only) and is never hand-edited — it is regenerated from
 `work.json` on every save/load.
 
@@ -3425,7 +3429,7 @@ def load_or_migrate_work_units(project_path: str) -> list[WorkUnit]  # authorita
 
 **Atomicity / error handling (spec §3.1):** writes are atomic (temp file + `os.replace`); the JSON is
 persisted before `tasks.md` is regenerated, so a failed summary write never corrupts or rolls back
-`work.json`. A corrupt project state (`.crabcakes` is a regular file) raises `RuntimeError` that is
+`work.json`. A corrupt project state (`.develcakes` is a regular file) raises `RuntimeError` that is
 caught and logged — never crashes project open. All load paths are best-effort and never raise.
 
 **Used by:** `ui/handlers/work_handler.py` (all `/work` mutations), `models/work_unit.py` consumers,
@@ -3520,7 +3524,7 @@ def is_available() -> bool
 
 ### 3.33 `utils/workflow_state.py` — Workflow State Tracker
 
-**Responsibility:** Manage `.crabcakes/workflow.md` per project. Tracks which workflow phases are complete, which is current, and timestamps. Pure file I/O — no GTK, no network.
+**Responsibility:** Manage `.develcakes/workflow.md` per project. Tracks which workflow phases are complete, which is current, and timestamps. Pure file I/O — no GTK, no network.
 
 **Public API:**
 ```python
@@ -3655,7 +3659,7 @@ User double-clicks project directory
 
 ```
 User creates project via ProjectHandler.create_project(name, path)
-  → init_project_config() creates .crabcakes/ skeleton
+  → init_project_config() creates .develcakes/ skeleton
   → init_workflow() creates workflow state
   → git init + initial commit
   → awareness refresh (build_awareness_snapshot / save_awareness_snapshot)
@@ -3985,7 +3989,7 @@ Tool result (runtime thread)
     → feed_handler.update_card [main]
         mutate self._cards under _lock; rebuild/replace widget     [main, ~ms]
         _enqueue_card_update(project_path, card_id, {body, metadata})  [main, <1 ms, no disk]
-  → crabcakes-feed-writer thread [background]
+  → develcakes-feed-writer thread [background]
     → feed_store.update_feed_card
         append_card_update → 1 JSONL line (feed flock held briefly)   [O(1)]
         if journal ≥ 500 lines → compact_feed(window=2000)             [no lock held here]
@@ -4171,7 +4175,7 @@ Tests live in `tests/` — one file per module being tested.
 
 **Run tests:**
 ```bash
-cd /path/to/projects/crabcakes
+cd /path/to/projects/develcakes
 pytest              # auto-discovers tests/ via pytest.ini
 ```
 
@@ -4218,7 +4222,7 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_mcp_integration.py` — end-to-end MCP tool execution flow
 - `tests/test_missing_message_fix.py` — regression test for missing message recovery
 - `tests/test_phase4.py` — Phase 4 event card rendering
-- `tests/test_project_awareness.py` — project awareness system: .crabcakes/ management
+- `tests/test_project_awareness.py` — project awareness system: .develcakes/ management
 - `tests/test_project_handler.py` — ProjectHandler: tab lifecycle, membership routing
 - `tests/test_project_list_handler.py` — ProjectListHandler: project card data
 - `tests/test_project_search.py` — project directory search
@@ -4377,11 +4381,12 @@ Agent and project avatars use a 10-color round-robin palette defined in `models/
 
 | Variable | Default | Purpose |
 |---------|---------|---------|
-| `CRABCAKES_DEBUG` | (unset) | Set to `1` to enable `logging.DEBUG` for all modules — agent runtime, handlers, utilities |
-| `CRABCAKES_GATEWAY_DEBUG` | (unset) | Set to `1` to enable raw WebSocket message dump in `gateway/client.py` — independent of `CRABCAKES_DEBUG` |
-| `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
-| `CRABCAKES_PROJECTS_DIR` | `~/projects` | Directory containing project folders for the Projects tab |
-| `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | Comma-separated Azure `phraseList` keyword-bias phrases for OpenRouter STT. Empty string → no `phraseList` sent (see `utils/stt.py`, SPEC-36) |
+| `DEVELCAKES_DEBUG` | (unset) | Set to `1` to enable `logging.DEBUG` for all modules — agent runtime, handlers, utilities |
+| `DEVELCAKES_GATEWAY_DEBUG` | (unset) | Set to `1` to enable raw WebSocket message dump in `gateway/client.py` — independent of `DEVELCAKES_DEBUG` |
+| `DEVELCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
+| `DEVELCAKES_PROJECTS_DIR` | `~/projects` | Directory containing project folders for the Projects tab |
+| `STT_MODEL` | — | Non-blank value overrides `<config_dir>/stt.yaml` for THIS process — debug/testing escape hatch; it is never written back to disk (see `utils/stt_config.py`, SPEC-37) |
+| `STT_PHRASES` | `DevelCakes,Develcakes,develcakes` | Comma-separated Azure `phraseList` keyword-bias phrases for OpenRouter STT. Empty string → no `phraseList` sent (see `utils/stt.py`, SPEC-36) |
 
 **External binaries required for STT:**
 - `arecord` — ALSA audio capture (part of alsa-utils)
@@ -4447,7 +4452,7 @@ else:
 ```
 
 **Project membership storage:**
-- Path: `~/.config/crabcakes/projects/<project-name>/members.json`
+- Path: `~/.config/develcakes/projects/<project-name>/members.json`
 - Format: `["agent:qat:main", "agent:qtr:telegram:direct:7478874934", ...]`
 - Each entry is a session key string
 
@@ -4478,7 +4483,7 @@ As of PHASE-10, the API caller for a provider is resolved via `provider_cfg.call
 > Counts drift over time — treat `~` values as approximate snapshots.
 
 ```
-crabcakes/
+develcakes/
 ├── main.py                         # 56 lines — bootstrap only
 │
 ├── gateway/
@@ -4615,6 +4620,7 @@ crabcakes/
     ├── review_log.py             # ~146 lines — review log persistence
     ├── spellcheck.py             # ~100 lines — spell check engine (Enchant)
     ├── stt.py                    # ~286 lines — STTEngine (OpenRouter cloud STT; GTK carve-out: lazy GLib import)
+    ├── stt_config.py             # STT model setting store — stt.yaml + env override (SPEC-37; pure Python)
     ├── syntax_highlight.py       # ~164 lines — Pygments → Pango (Tokyo Night)
     ├── work_persistence.py       # ~435 lines — work.json source of truth + generated tasks.md + legacy migration
     └── workflow_state.py         # ~226 lines — workflow state tracker
@@ -4626,9 +4632,9 @@ prompts/                         # System prompt templates for agent runtime
         ├── code-review.md
         ├── coder.md               # Coder agent system prompt
         ├── collab.md              # A2A collaboration protocol
-        ├── crabcakes-commands.md  # Slash command reference
-        ├── crabcakes-context.md   # Platform context for agents
-        ├── crabcakes.md           # Crabcakes help agent context
+        ├── develcakes-commands.md  # Slash command reference
+        ├── develcakes-context.md   # Platform context for agents
+        ├── develcakes.md           # Develcakes help agent context
         ├── debugger.md            # Debugger agent system prompt
         ├── default.md             # Default system prompt
         ├── improve.md             # Prompt improvement template
@@ -4636,7 +4642,7 @@ prompts/                         # System prompt templates for agent runtime
         ├── project-awareness.md   # Project context awareness prompt
         └── project-onboarding.md  # Project onboarding prompt
 
-knowledge/                       # User-facing documentation (read by Crabcakes agent via web_fetch)
+knowledge/                       # User-facing documentation (read by Develcakes agent via web_fetch)
     ├── agents.md
     ├── commands.md
     ├── configuration.md

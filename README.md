@@ -171,7 +171,7 @@ Every prompt in the library can be refined before loading. The built-in prompt i
 
 ### <img src="icons/emoji/studio_mic.png" width="80" height="80" alt="studio_mic" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Voice Input
 
-Push-to-talk dictation backed by **OpenRouter's cloud STT** (`microsoft/mai-transcribe-2`). Capture stays local — `arecord` records 16kHz mono audio — then the WAV is sent to OpenRouter's transcription endpoint and your words land in the input box. Keyword biasing (`STT_PHRASES`) nudges the model toward project jargon like "DevelCakes". Requires an OpenRouter API key. Built for when you're mid-flow and reaching for the keyboard would break your concentration.
+Push-to-talk dictation backed by **OpenRouter's cloud STT** — the model is configurable in **Settings → STT Model** (default `microsoft/mai-transcribe-2`). Capture stays local — `arecord` records 16kHz mono audio — then the WAV is sent to OpenRouter's transcription endpoint and your words land in the input box. Keyword biasing (`STT_PHRASES`) nudges the model toward project jargon like "DevelCakes" (supported on mai-transcribe-2 only). Requires an OpenRouter API key. Built for when you're mid-flow and reaching for the keyboard would break your concentration.
 
 ### <img src="icons/emoji/plug.png" width="80" height="80" alt="plug" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> MCP Server Integration
 
@@ -551,6 +551,7 @@ openclaw gateway start
 | `DEVELCAKES_MIGRATE_STORE` | `1` | JSON→store migration at launch (0 skips) |
 | `DEVELCAKES_PROMPT_DEBUG` | _(off)_ | Dump the full composed prompt to stderr |
 | `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | comma-separated OpenRouter STT keyword-bias phrases; any all-blank value (empty, whitespace-only, commas-only) disables biasing |
+| `STT_MODEL` | — | overrides the configured dictation model for THIS process (debug/testing; never written to disk) |
 
 Every `DEVELCAKES_*` variable also answers to its legacy `CRABCAKES_*` name
 for one release (config migration included: your v1 `~/.config/crabcakes/`

@@ -16,7 +16,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import gi
+
 gi.require_version('Gtk', '4.0')
+
 from gi.repository import Gtk
 
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER as _DECISION_MODEL_PROVIDER
@@ -25,11 +27,15 @@ from models.providers import (
     coerce_provider_context_mode,
     validate_provider_reasoning_effort,
 )
+from utils import stt_config as _stt_config
 
 # SPEC-22 §2.8: the structural handle the code looks the JEV card up by. The
 # Settings page pre-names its card with this; the general Providers list and
 # agent-provider dropdowns filter it out (it is not a chat model).
 _REASONING_LEVELS = ("off", "low", "medium", "high")
+
+# SPEC-37: the "STT Model" page reads through the _stt_config MODULE (never
+# `from … import` names) so tests can monkeypatch stt_config.* cleanly.
 if TYPE_CHECKING:
     from ui.handlers.settings_handler import SettingsHandler
     from utils.provider_test import TestResult
@@ -410,11 +416,11 @@ class _ProviderCard:
             # a stale "Untested" label. Use a fresh ISO timestamp since the
             # test succeeded just now — the handler's exact timestamp will be
             # reconciled on the next refresh_providers() call.
-            from datetime import datetime, timezone
+            from datetime import UTC, datetime
             self._provider = replace(
                 self._provider,
                 max_tokens=new_max_tokens,
-                last_verified_at=datetime.now(timezone.utc).isoformat(),
+                last_verified_at=datetime.now(UTC).isoformat(),
                 last_error=None,
             )
         else:
@@ -550,6 +556,10 @@ class SettingsDialog:
         # ── Decision Model page (SPEC-22 §2.8) ────────────────────────
         self._decision_page = self._build_decision_page()
         self._stack.add_titled(self._decision_page, "decision-model", "Decision Model")
+
+        # ── STT Model page (SPEC-37) ─────────────────────────────────
+        self._stt_page = self._build_stt_page()
+        self._stack.add_titled(self._stt_page, "stt", "STT Model")
 
         content.append(self._stack)
         self._window.set_child(content)
@@ -854,6 +864,173 @@ class SettingsDialog:
 
         import threading
         threading.Thread(target=_worker, daemon=True, name="decision-model-probe").start()
+
+    # ── STT Model section (SPEC-37) ─────────────────────────────────────
+
+    def _build_stt_page(self) -> Gtk.Box:
+        """Build the "STT Model" page: dropdown + Custom… free-text entry.
+
+        Pure view — every read/write goes through the ``_stt_config`` module
+        (imported as a module handle, never `from … import`, so tests can
+        monkeypatch stt_config.*). When the store is degraded the section
+        renders inert (Telegram pattern: honest, no dead controls).
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "The model used for push-to-talk dictation (OpenRouter cloud "
+            "STT, ~$0.0004 per 15s typical). The choice applies on the NEXT "
+            "dictation — no app restart needed."
+        )
+        page.append(intro)
+
+        # Model dropdown: measured choices + a trailing "Custom…" entry that
+        # reveals a free-text field. Selection is stored as an index; the
+        # mapping back to model ids lives in self._stt_model_ids.
+        self._stt_model_ids: list[str] = [
+            m for m, _label in _stt_config.STT_MODEL_CHOICES
+        ]
+        labels = [label for _m, label in _stt_config.STT_MODEL_CHOICES]
+        labels.append("Custom…")
+        self._stt_dropdown = Gtk.DropDown.new_from_strings(labels)
+        self._stt_dropdown.set_hexpand(True)
+        self._stt_custom_entry = Gtk.Entry()
+        self._stt_custom_entry.set_placeholder_text("provider/model-id")
+        self._stt_custom_entry.set_hexpand(True)
+        self._stt_apply_btn = Gtk.Button(label="Apply")
+        self._stt_apply_btn.add_css_class("suggested-action")
+        self._stt_apply_btn.connect("clicked", self._on_stt_apply_clicked)
+        custom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        custom_box.append(self._stt_custom_entry)
+        custom_box.append(self._stt_apply_btn)
+        page.append(self._labeled_row("Model", self._stt_dropdown))
+        page.append(self._labeled_row("Custom", custom_box))
+
+        self._stt_hint_label = Gtk.Label()
+        self._stt_hint_label.set_xalign(0.0)
+        self._stt_hint_label.set_wrap(True)
+        self._stt_hint_label.add_css_class("dim-label")
+        self._stt_hint_label.set_text(
+            "Keyword biasing (DevelCakes/Crabcakes) applies only to "
+            "mai-transcribe-2."
+        )
+        page.append(self._stt_hint_label)
+
+        # Status line: save feedback, or the degradation reason when inert.
+        self._stt_status_label = Gtk.Label(label="")
+        self._stt_status_label.set_xalign(0.0)
+        self._stt_status_label.set_wrap(True)
+        page.append(self._stt_status_label)
+
+        self._stt_dropdown_handler_id = self._stt_dropdown.connect(
+            "notify::selected", self._on_stt_dropdown_changed
+        )
+        self._refresh_stt_section()
+        return page
+
+    def _refresh_stt_section(self) -> None:
+        """Sync dropdown/entry with stt.yaml; render inert on degraded store.
+
+        ``load_stt_model_state()`` returns (model, error). error is not None
+        means the stored file exists but is unusable — controls go
+        insensitive with the reason in the status label (honest UI).
+        """
+        if getattr(self, "_stt_dropdown", None) is None:
+            return
+        model, error = _stt_config.load_stt_model_state()
+        inert = error is not None
+        self._stt_dropdown.set_sensitive(not inert)
+        self._stt_custom_entry.set_sensitive(not inert)
+        self._stt_apply_btn.set_sensitive(not inert)
+        if inert:
+            self._stt_status_label.set_text(f"⚠ STT model store unusable: {error}")
+            self._stt_status_label.remove_css_class("settings-status-ok")
+            self._stt_status_label.add_css_class("settings-status-fail")
+            return
+        self._stt_status_label.remove_css_class("settings-status-fail")
+
+        index = (
+            self._stt_model_ids.index(model)
+            if model in self._stt_model_ids
+            else len(self._stt_model_ids)  # unknown/custom id → "Custom…"
+        )
+        self._stt_dropdown.handler_block(self._stt_dropdown_handler_id)
+        try:
+            self._stt_dropdown.set_selected(index)
+        finally:
+            self._stt_dropdown.handler_unblock(self._stt_dropdown_handler_id)
+        # ROUND 2 (SPEC-37 audit BUG #2): BOTH custom-row widgets share ONE
+        # visibility flag. A visible Apply wired to a hidden empty entry would
+        # surface a raw ValueError on click. This holds on fresh open
+        # (build → _refresh_stt_section) and after the handler_block-wrapped
+        # set_selected above.
+        show_custom = index == len(self._stt_model_ids)
+        if show_custom:
+            self._stt_custom_entry.set_text(model)
+        self._stt_custom_entry.set_visible(show_custom)
+        self._stt_apply_btn.set_visible(show_custom)
+
+    def _on_stt_dropdown_changed(self, dropdown, _pspec) -> None:
+        """Custom… reveals the free-text row; a KNOWN model persists now.
+
+        ROUND 2 (SPEC-37 audit BUG #1): the dropdown is the primary control —
+        picking a known model must persist it immediately, not merely toggle
+        the Custom row. Refresh-time selections pass through here only while
+        the handler is unblocked (see _refresh_stt_section).
+        """
+        del dropdown  # signal payload; index is read from self._stt_dropdown
+        selected = self._stt_dropdown.get_selected()
+        is_custom = selected == len(self._stt_model_ids)
+        self._stt_custom_entry.set_visible(is_custom)
+        self._stt_apply_btn.set_visible(is_custom)
+        if is_custom:
+            return
+        # Known model index → persist (same write path as the Apply button).
+        try:
+            _stt_config.set_stt_model(self._stt_model_ids[selected])
+        except ValueError as e:
+            self._stt_status_label.set_text(f"❌ {e}")
+            self._stt_status_label.remove_css_class("settings-status-ok")
+            self._stt_status_label.add_css_class("settings-status-fail")
+            return
+        except OSError as e:
+            self._stt_status_label.set_text(f"❌ write failed: {e}")
+            self._stt_status_label.remove_css_class("settings-status-ok")
+            self._stt_status_label.add_css_class("settings-status-fail")
+            return
+        self._stt_status_label.remove_css_class("settings-status-fail")
+        self._stt_status_label.add_css_class("settings-status-ok")
+        self._stt_status_label.set_text(
+            f"✓ Saved: {self._stt_model_ids[selected]}. Applies on the next dictation."
+        )
+
+    def _on_stt_apply_clicked(self, _btn) -> None:
+        """Persist the Custom… entry through stt_config; surface the result."""
+        raw = self._stt_custom_entry.get_text()
+        try:
+            _stt_config.set_stt_model(raw)
+        except ValueError as e:
+            self._stt_status_label.set_text(f"❌ {e}")
+            self._stt_status_label.remove_css_class("settings-status-ok")
+            self._stt_status_label.add_css_class("settings-status-fail")
+            return
+        except OSError as e:
+            self._stt_status_label.set_text(f"❌ write failed: {e}")
+            self._stt_status_label.remove_css_class("settings-status-ok")
+            self._stt_status_label.add_css_class("settings-status-fail")
+            return
+        self._stt_status_label.remove_css_class("settings-status-fail")
+        self._stt_status_label.add_css_class("settings-status-ok")
+        self._stt_status_label.set_text("✓ Saved. Applies on the next dictation.")
+        self._refresh_stt_section()
 
     def _labeled_row(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
         """Label + widget row (mirrors _ProviderCard._labeled)."""
