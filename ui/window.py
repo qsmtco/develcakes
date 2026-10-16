@@ -311,7 +311,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Wire AgentRoutingTable so _is_ui_active can resolve project tabs for agent keys
         self._activity_handler.set_agent_routing(self._agent_to_project)
 
-        # Media handler — owns STT (whisper.cpp push-to-talk) + improve (Phase 4)
+        # Media handler — owns STT (OpenRouter cloud push-to-talk) + improve (Phase 4)
         self._media_handler = MediaHandler(
             main_content=self._main_content,
             improve_module=__import__("utils.improve", fromlist=["improve"]),

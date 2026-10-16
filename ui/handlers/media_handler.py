@@ -9,7 +9,7 @@ from typing import Callable
 
 
 class MediaHandler:
-    """Handles STT (faster-whisper push-to-talk) and prompt improvement."""
+    """Handles STT (OpenRouter cloud push-to-talk) and prompt improvement."""
 
     def __init__(
         self,
@@ -36,8 +36,13 @@ class MediaHandler:
             self._mc.update_stt_state("idle")
             self._stt_engine.stop_async(on_done=self._on_result)
         else:
-            self._mc.update_stt_state("recording")
             self._stt_engine.start()
+            # BUG #2 (SPEC-36 round 2): start() may refuse to record (no API key) —
+            # re-read is_recording so the button never sticks on "recording".
+            if self._stt_engine.is_recording:
+                self._mc.update_stt_state("recording")
+            else:
+                self._mc.update_stt_state("idle")
 
     def set_on_send_callback(self, cb: Callable):
         """Window calls this so MediaHandler can trigger ChatHandler.on_send() after voice input."""

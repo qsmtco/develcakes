@@ -250,7 +250,7 @@ crabcakes/
     ├── quoting.py               # _parse_quoted_payload() — quoted-payload parsing with escape handling (A2A_QUOTED_PAYLOAD_SPEC)
     ├── review_log.py            # Review log persistence — append/retrieve review entries per project
     ├── spellcheck.py            # Spell check engine — Enchant-based misspelling detection and suggestion
-    ├── stt.py                   # STTEngine — faster-whisper push-to-talk; respects STT_MODEL_SIZE env var (default tiny.en)
+    ├── stt.py                   # STTEngine — OpenRouter cloud STT (microsoft/mai-transcribe-2); arecord 16kHz mono capture + STT_PHRASES keyword biasing
     ├── syntax_highlight.py      # highlight() — Pygments → Pango markup (Tokyo Night color scheme)
     ├── work_persistence.py      # .crabcakes/work.json source of truth + generated tasks.md + legacy migration
     └── workflow_state.py        # Workflow state tracker — manages .crabcakes/workflow.md per project
@@ -280,7 +280,7 @@ narrowly-scoped exceptions that have been reviewed and accepted:
 | `utils/gtk_containers.py` | `gi.repository.Gtk` (module-level) | Pure widget-container queries — no widget construction, no signals, no windows | GTK4 removed `Gtk.Container`; this helper wraps sibling-walk containment checks (`is_in_container`) that only make sense against `Gtk.Widget`. No ui/agent/gateway/models imports |
 | `utils/icons.py` | `gi.repository.Gdk` (module-level) | Pure texture rendering — no widget hierarchy, no layout, no signals | `Gdk.Texture` is the only way to render SVGs to pixel buffers; callers pass textures as plain objects |
 | `utils/gtk_safe_link.py` | `gi.repository.Gtk, Pango` (lazy, inside functions) | Link-safety guard; callers are GTK-bound labels | Function-level import minimizes the GTK surface; the logic is scheme-string validation that happens to need Pango markup parsing |
-| `utils/stt.py` | `gi.repository.GLib` (lazy, inside thread callback) | `GLib.idle_add` marshals STT results from the whisper thread to the main loop | Thread-dispatch mechanism only — no widgets, no windows, no signals. Has `except ImportError` fallback |
+| `utils/stt.py` | `gi.repository.GLib` (lazy, inside thread callback) | `GLib.idle_add` marshals STT results from the transcription thread to the main loop | Thread-dispatch mechanism only — no widgets, no windows, no signals. Has `except ImportError` fallback |
 
 **Rule:** Do not add new GTK imports to `utils/` without documenting them
 here and justifying why the file cannot live in `ui/`.
@@ -844,7 +844,7 @@ toggle_favorite(filepath) -> bool   # True if now favorited
 | `load_prompt_template(name)` | `prompt_loader.py` | Load `prompts/system/<name>.md` template, return raw string or None |
 | `fill_template(template, variables)` | `prompt_loader.py` | Replace `{{KEY}}` markers with values from dict |
 | `compose_system_prompt(agent_name, ...)` | `prompt_loader.py` | Compose full system prompt from templates: (1) default.md, (1b) collab.md, (1c) crabcakes-context.md, (2) project-awareness.md, (3) crabcakes-commands.md, (4) project-onboarding.md, (5) code-review.md, (6) coder.md/debugger.md, (7) {role}-bugs.md/{role}-rules.md |
-| `STTEngine` class | `stt.py` | Push-to-talk STT via faster-whisper — arecord → PCM buffer → faster-whisper (tiny.en model) → stop_async callback |
+| `STTEngine` class | `stt.py` | Push-to-talk STT via OpenRouter cloud — arecord (16kHz mono WAV) → base64 → POST `/api/v1/audio/transcriptions` (microsoft/mai-transcribe-2, Azure `phraseList` biasing) → stop_async callback |
 | `show_session_menu(parent, agent_name, sessions, on_select)` | `session_menu.py` | GTK popover menu listing sessions; clicking fires `on_select(session_key)` |
 
 ### 3.11a `utils/provider_test.py` — LLM Provider Connectivity Probe + Context Window Discovery
@@ -1317,13 +1317,15 @@ def dispatch(fn: Callable, *args, **kwargs) -> None:
 
 ### 3.16 `ui/handlers/media_handler.py` — Media Handler (Phase 4)
 
-**Responsibility:** All media I/O — STT (whisper.cpp push-to-talk) and prompt improvement. Extracted from `window.py` in Phase 4.
+**Responsibility:** All media I/O — STT (cloud push-to-talk) and prompt improvement. Extracted from `window.py` in Phase 4.
 
 **Owns:**
-- `STTEngine` instance (`_stt_engine`) — owns its own background capture thread
+- `STTEngine` instance (`_stt_engine`) — owns its own background capture thread; transcription is a cloud POST to OpenRouter
 - Sync callback (`_sync_callback`) — window sets this to trigger `ChatHandler.on_send()` after voice input
 
-**Thread safety:** `_on_stt_partial` fires from the STT background thread. GTK calls go through `GLib.idle_add()`.
+**STT backend:** capture stays local (`arecord` 16kHz mono WAV via the PipeWire ALSA plugin); transcription moved from local faster-whisper to OpenRouter's cloud STT endpoint (`POST /api/v1/audio/transcriptions`, model `microsoft/mai-transcribe-2`). The public `STTEngine` API (`start`/`stop_async`/`stop`/`is_recording`/`on_result`) is unchanged, so this handler requires no STT changes. Keyword biasing uses Azure `provider.options.azure.phraseList` (default `["DevelCakes", "Crabcakes", "crabcakes"]`, overridable via `STT_PHRASES`; empty string → no phraseList). API key: `OPENROUTER_API_KEY` env, else `agent.config.get_api_key("openrouter")`; absent key ⇒ `start()` logs a WARNING and refuses to record.
+
+**Thread safety:** the transcription result fires from the STT background thread. GTK calls go through `GLib.idle_add()`.
 
 **Public API:**
 ```python
@@ -4379,12 +4381,12 @@ Agent and project avatars use a 10-color round-robin palette defined in `models/
 | `CRABCAKES_GATEWAY_DEBUG` | (unset) | Set to `1` to enable raw WebSocket message dump in `gateway/client.py` — independent of `CRABCAKES_DEBUG` |
 | `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
 | `CRABCAKES_PROJECTS_DIR` | `~/projects` | Directory containing project folders for the Projects tab |
-| `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size — "tiny.en", "base.en", "small.en", "medium.en", etc. Respects env var or explicit param; defaults to "tiny.en". |
+| `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | Comma-separated Azure `phraseList` keyword-bias phrases for OpenRouter STT. Empty string → no `phraseList` sent (see `utils/stt.py`, SPEC-36) |
 
 **External binaries required for STT:**
 - `arecord` — ALSA audio capture (part of alsa-utils)
-- `faster-whisper` Python package (already installed; downloads tiny.en model on first use)
-- Model: `Systran/faster-whisper-tiny.en` (~75MB, HuggingFace cache)
+- `requests` Python package (already a project dep — OpenRouter STT POST)
+- OpenRouter account + API key (`OPENROUTER_API_KEY` env, else the `openrouter` provider key from `agent.config.get_api_key`)
 
 ---
 
@@ -4551,7 +4553,7 @@ crabcakes/
 │   │   ├── forward_handler.py    # ~194 lines — ForwardHandler (Phase 3b)
 │   │   ├── gateway_handler.py    # ~234 lines — connect, agents, lifecycle (Phase 2)
 │   │   ├── input_toolbar_handler.py # ~485 lines — find/replace, spell check, word count
-│   │   ├── media_handler.py      # ~99 lines — STT + improve (Phase 4)
+│   │   ├── media_handler.py      # ~104 lines — STT + improve (Phase 4)
 │   │   ├── project_handler.py    # ~568 lines — active project + routing
 │   │   ├── project_list_handler.py # ~86 lines — project card data
 │   │   ├── prompts_handler.py    # ~208 lines — favorites, search, last-used
@@ -4612,7 +4614,7 @@ crabcakes/
     ├── quoting.py                # ~78 lines — quoted-payload parsing
     ├── review_log.py             # ~146 lines — review log persistence
     ├── spellcheck.py             # ~100 lines — spell check engine (Enchant)
-    ├── stt.py                    # ~219 lines — STTEngine (GTK carve-out: lazy GLib import)
+    ├── stt.py                    # ~286 lines — STTEngine (OpenRouter cloud STT; GTK carve-out: lazy GLib import)
     ├── syntax_highlight.py       # ~164 lines — Pygments → Pango (Tokyo Night)
     ├── work_persistence.py       # ~435 lines — work.json source of truth + generated tasks.md + legacy migration
     └── workflow_state.py         # ~226 lines — workflow state tracker

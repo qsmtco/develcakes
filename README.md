@@ -171,7 +171,7 @@ Every prompt in the library can be refined before loading. The built-in prompt i
 
 ### <img src="icons/emoji/studio_mic.png" width="80" height="80" alt="studio_mic" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> Voice Input
 
-Push-to-talk via **faster-whisper** — a Python-native speech-to-text engine. No separate CLI binary, no cloud, no latency. Hold a key, speak, release — your words land in the input box. Model size is configurable via `STT_MODEL_SIZE` (default: `tiny.en` for fastest CPU inference). Built for when you're mid-flow and reaching for the keyboard would break your concentration.
+Push-to-talk dictation backed by **OpenRouter's cloud STT** (`microsoft/mai-transcribe-2`). Capture stays local — `arecord` records 16kHz mono audio — then the WAV is sent to OpenRouter's transcription endpoint and your words land in the input box. Keyword biasing (`STT_PHRASES`) nudges the model toward project jargon like "DevelCakes". Requires an OpenRouter API key. Built for when you're mid-flow and reaching for the keyboard would break your concentration.
 
 ### <img src="icons/emoji/plug.png" width="80" height="80" alt="plug" style="vertical-align:middle; margin-top:-0.5em; margin-bottom:-0.5em" /> MCP Server Integration
 
@@ -512,7 +512,7 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 libgirepository1.0-d
 
 # Python packages
 pip install pygobject websockets cryptography gitpython \
-    tiktoken faster-whisper sentence-transformers httpx pyyaml
+    tiktoken requests sentence-transformers httpx pyyaml
 ```
 
 ### Run
@@ -550,12 +550,11 @@ openclaw gateway start
 | `DEVELCAKES_NO_WEBKIT` | _(off)_ | Force the TextView fallback chat surface |
 | `DEVELCAKES_MIGRATE_STORE` | `1` | JSON→store migration at launch (0 skips) |
 | `DEVELCAKES_PROMPT_DEBUG` | _(off)_ | Dump the full composed prompt to stderr |
-| `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size (tiny, base, small, ...) |
+| `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | comma-separated OpenRouter STT keyword-bias phrases; any all-blank value (empty, whitespace-only, commas-only) disables biasing |
 
 Every `DEVELCAKES_*` variable also answers to its legacy `CRABCAKES_*` name
 for one release (config migration included: your v1 `~/.config/crabcakes/`
-is copied to `~/.config/develcakes/` on first launch). `STT_MODEL_SIZE` is
-not part of the renamed family — it keeps its name.
+is copied to `~/.config/develcakes/` on first launch).
 
 Agent configs live in `~/.config/develcakes/`. LLM provider settings in `agent.json`. MCP server registry in `mcp-servers.json`. Everything is plain files — version-controllable, diffable, greppable.
 
@@ -659,7 +658,7 @@ develcakes/
 │   ├── git_ops.py                   # GitPython wrapper
 │   ├── diff_parser.py               # Unified diff parser
 │   ├── prompt_loader.py             # System prompt composer
-│   ├── stt.py                       # Voice input (faster-whisper)
+│   ├── stt.py                       # Voice input (OpenRouter cloud STT)
 │   ├── mcp_client.py                # MCP stdio transport
 │   ├── mcp_config.py                # MCP server registry
 │   ├── agent_defs.py                # User agent YAML loader
