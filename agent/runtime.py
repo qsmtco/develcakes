@@ -1169,8 +1169,11 @@ class AgentRuntime:
         ``allowed_tools is None`` means every registered tool. A list is
         filtered in registry order.
         """
-        from agent.tools import get_all_tools
-        all_tools = get_all_tools()
+        from agent.tools import _API_SCHEMA_HIDDEN, get_all_tools
+        # C1: the prompt TOOL_LIST must show exactly what the API schema
+        # offers. Schema-hidden tools (file_search) stay executable via the
+        # allowed_tools permit (B1 replay) but must not be advertised here.
+        all_tools = [t for t in get_all_tools() if t.name not in _API_SCHEMA_HIDDEN]
         if conv.allowed_tools is None:
             return [t.name for t in all_tools]
         allowed = conv.allowed_tools

@@ -6922,3 +6922,72 @@ class TestProviderFailureCarrier:
         ))
         assert len(recent()) == 1
         assert recent()[0].failure_class == FailureClass.TRANSIENT
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  C1: prompt TOOL_LIST must match the API schema (BUG #5)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestPromptToolNamesSchemaHidden:
+    """C1 (audit BUG #5, supervisor-verified).
+
+    ``file_search`` is registered and executable but schema-hidden
+    (``_API_SCHEMA_HIDDEN`` in agent/tools.py): the B1 replay permit keeps
+    it in ``conv.allowed_tools`` while ``get_tool_definitions_for_api``
+    omits it from the API schema. The system prompt TOOL_LIST is built by
+    ``_prompt_tool_names`` from ``get_all_tools()`` unfiltered, so the
+    model was told it has a tool the schema never offers. The two halves
+    must stay in lockstep — and ``execute_tool`` must still honor the
+    replay permit.
+    """
+
+    def test_file_search_hidden_from_prompt_and_schema_but_executable(self, tmp_path):
+        from agent.tools import execute_tool, get_tool_definitions_for_api
+
+        rt = AgentRuntime(_make_cfg())
+        rt.start()
+        sk = _uniq()
+        allowed = ["read_file", "file_search"]
+        rt.create_conversation("Coder", sk, str(tmp_path), allowed_tools=allowed)
+
+        try:
+            conv = rt.get_conversation(sk)
+            prompt_names = rt._prompt_tool_names(conv)
+
+            # 1. Prompt half: schema-hidden tool must not be advertised.
+            assert "file_search" not in prompt_names, (
+                f"prompt TOOL_LIST advertises schema-hidden file_search: "
+                f"{prompt_names}"
+            )
+            # Sanity: the filter must not have emptied the list.
+            assert "read_file" in prompt_names, (
+                f"prompt TOOL_LIST lost ordinary tools: {prompt_names}"
+            )
+
+            # 2. API-schema half: lockstep with the same allowed list.
+            api_names = [
+                d["function"]["name"]
+                for d in get_tool_definitions_for_api(allowed)
+            ]
+            assert "file_search" not in api_names, (
+                f"API schema advertises schema-hidden file_search: {api_names}"
+            )
+            assert "read_file" in api_names
+
+            # 3. Replay preserved: the execute gate still honors the permit
+            # even though neither the prompt nor the schema lists the tool.
+            (tmp_path / "marker_c1.py").write_text("C1_MARKER_TOKEN = 1\n")
+            result = execute_tool(
+                "file_search",
+                {"query": "C1_MARKER_TOKEN"},
+                project_path=str(tmp_path),
+                allowed_tools=allowed,
+            )
+            assert result.success, (
+                f"file_search replay broken: {result.error}"
+            )
+            assert "marker_c1.py" in (result.output or ""), (
+                f"file_search did not find the marker file: {result.output!r}"
+            )
+        finally:
+            rt.stop()
