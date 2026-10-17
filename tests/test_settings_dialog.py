@@ -65,6 +65,68 @@ class TestContextWindowCopy:
             "SPEC-38: dual-write violated — context_window not moved with max_tokens"
         )
 
+    def test_untouched_asymmetric_card_saves_both_fields_unchanged(
+        self, tmp_config_dir
+    ):
+        """Data-loss regression: an untouched card must not collapse the window.
+
+        Stored card is asymmetric: max_tokens=128_000 (the output-intent
+        default) but context_window=1_000_000 (the window the resolver
+        actually reads, context_window-first). The spin displays the
+        EFFECTIVE window, so it opens on 1_000_000.
+
+        The user presses Save without touching the spin. Both stored fields
+        must still read 1_000_000. Before the _effective_context_window fix
+        the spin opened on the raw max_tokens (128_000), and the single-field
+        write silently DOWNGRADED a 1M-window provider to 128K — the card
+        displayed one number while the resolver used another.
+        """
+        h = SettingsHandler()
+        h.add_or_update(
+            _make_provider(
+                "p1", max_tokens=128_000, context_window=1_000_000
+            )
+        )
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+
+        # The spin must show the effective window, not the max_tokens cap.
+        assert int(card._max_tokens_spin.get_value()) == 1_000_000, (
+            "BUG #1: spin must display the context_window-first effective window"
+        )
+
+        # Save WITHOUT touching the spin.
+        card._on_save_clicked()
+        stored = {p.name: p for p in h.list_providers()}["p1"]
+        assert stored.max_tokens == 1_000_000, (
+            f"data loss: max_tokens downgraded to {stored.max_tokens:,} "
+            "on an untouched save"
+        )
+        assert stored.context_window == 1_000_000, (
+            f"data loss: context_window downgraded to {stored.context_window:,} "
+            "on an untouched save"
+        )
+
+    def test_asymmetric_card_is_not_dirty_on_construction(self, tmp_config_dir):
+        """Dirty-state trap: a clean asymmetric card must not read as dirty.
+
+        _is_dirty() compares the spin against the stored value. Comparing
+        against raw max_tokens while the spin displays the effective
+        (context_window-first) window made every asymmetric card look
+        permanently edited — a spurious unsaved-changes state the moment
+        the dialog opened.
+        """
+        h = SettingsHandler()
+        h.add_or_update(
+            _make_provider(
+                "p1", max_tokens=128_000, context_window=1_000_000
+            )
+        )
+        d = SettingsDialog(parent=None, handler=h)
+        assert d._cards[0]._is_dirty() is False, (
+            "BUG #1: untouched asymmetric card reported as dirty on open"
+        )
+
     def test_collect_from_form_dual_writes_spin(self, tmp_config_dir):
         """SPEC-38: _collect_from_form mirrors the spin into both fields."""
         h = SettingsHandler()

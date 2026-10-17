@@ -133,10 +133,13 @@ class _ProviderCard:
         caller_row = self._labeled("Caller", self._caller_label)
         vbox.append(caller_row)
 
-        # Context window (max_tokens) — editable; pre-filled by Test Connection.
+        # Context window — editable; pre-filled by Test Connection.
         # Default 128_000 matches the dataclass default and runtime fallback.
+        # Show the EFFECTIVE window: the resolver is context_window-first,
+        # so a card holding max_tokens=128k + context_window=1M must display
+        # 1M — not the max_tokens output cap (retro-audit BUG #1).
         self._max_tokens_spin = Gtk.SpinButton.new_with_range(1_000, 10_000_000, 1_000)
-        self._max_tokens_spin.set_value(self._provider.max_tokens or 128_000)
+        self._max_tokens_spin.set_value(self._effective_context_window(self._provider))
         self._max_tokens_spin.set_hexpand(True)
         max_tokens_row = self._labeled("Context Window", self._max_tokens_spin)
         vbox.append(max_tokens_row)
@@ -210,6 +213,21 @@ class _ProviderCard:
         vbox.append(btn_row)
         self._frame.set_child(vbox)
 
+    @staticmethod
+    def _effective_context_window(p: ProviderConfig | None) -> int:
+        """The window the resolver actually uses: context_window-first.
+
+        The "Context Window" spin displays and writes the EFFECTIVE window
+        (retro-audit BUG #1): a card holding max_tokens=128k (output intent)
+        plus context_window=1M (window) must display and preserve 1M — the
+        resolver reads context_window first, so the window is the value Save
+        must not destroy. Falls back to max_tokens, then the dataclass/
+        runtime default of 128_000.
+        """
+        if p is None:
+            return 128_000
+        return int(p.context_window or p.max_tokens or 128_000)
+
     def _reasoning_level_from_dropdown(self) -> str:
         idx = int(self._reasoning_dropdown.get_selected())
         if 0 <= idx < len(_REASONING_LEVELS):
@@ -252,7 +270,9 @@ class _ProviderCard:
             self._caller_label.set_text(
                 f"  {p.caller}" if p.caller else "  (auto-detected on save)"
             )
-            self._max_tokens_spin.set_value(p.max_tokens or 128_000)
+            # Effective window, not raw max_tokens — see
+            # _effective_context_window (retro-audit BUG #1).
+            self._max_tokens_spin.set_value(self._effective_context_window(p))
             self._compaction_threshold_spin.set_value(p.compaction_threshold or 0.80)
             self._supports_reasoning_check.set_active(bool(p.supports_reasoning))
             level = validate_provider_reasoning_effort(
@@ -275,7 +295,11 @@ class _ProviderCard:
             or self._base_url_entry.get_text().strip() != (p.base_url or "")
             or self._model_entry.get_text().strip() != (p.default_model or "")
             or self._api_key_entry.get_text().strip() != (p.api_key or "")
-            or int(self._max_tokens_spin.get_value()) != (p.max_tokens or 128_000)
+            # Compare against the EFFECTIVE window: the spin displays
+            # context_window-or-max_tokens, so an untouched asymmetric card
+            # must not read as dirty (retro-audit BUG #1).
+            or int(self._max_tokens_spin.get_value())
+            != self._effective_context_window(p)
             or float(self._compaction_threshold_spin.get_value()) != (p.compaction_threshold or 0.80)
             or bool(self._supports_reasoning_check.get_active()) != bool(p.supports_reasoning)
             or self._reasoning_level_from_dropdown() != (
@@ -308,9 +332,13 @@ class _ProviderCard:
             supports_streaming=existing.supports_streaming if existing else True,
             max_tokens=int(self._max_tokens_spin.get_value()),
             default_max_tokens=existing.default_max_tokens if existing else 0,
-            # SPEC-38: dual write — the "Context Window" spin IS the window.
-            # Both fields move together so no save can leave a stale
-            # context_window behind a changed max_tokens.
+            # SPEC-38: dual write — the "Context Window" spin IS the window,
+            # and max_tokens and context_window are irrevocably unified: every
+            # save writes BOTH fields to the spin's value, so an inverted-
+            # asymmetric card (max_tokens > context_window) collapses to the
+            # window on save. That narrowing is accepted by design — do NOT
+            # "restore" a separate output-cap control on the assumption the
+            # old max_tokens value survives; it does not.
             context_window=int(self._max_tokens_spin.get_value()),
             compaction_threshold=float(
                 self._compaction_threshold_spin.get_value()
@@ -403,6 +431,7 @@ class _ProviderCard:
             # stamped default_max_tokens, the value is intentional and we
             # leave it alone (audit BUG #7).
             new_max_tokens = self._provider.max_tokens
+            new_context_window = self._provider.context_window
             user_has_customized = (
                 self._provider.max_tokens != 128_000
                 or (self._provider.default_max_tokens or 0) > 0
@@ -410,6 +439,14 @@ class _ProviderCard:
             if result.context_window and not user_has_customized:
                 self._max_tokens_spin.set_value(result.context_window)
                 new_max_tokens = result.context_window
+                # Mirror the handler's dual-write (settings_handler dual-writes
+                # BOTH max_tokens and context_window). Updating only max_tokens
+                # here left the in-memory context_window stale, so the spin —
+                # which displays the EFFECTIVE window, context_window-first —
+                # no longer matched _is_dirty()'s comparison after a successful
+                # test on an asymmetric card: the card read as dirty forever
+                # (retro-audit BUG #2).
+                new_context_window = result.context_window
                 self._status_label.set_text(
                     f"✅ {result.latency_ms}ms · context: {result.context_window:,}"
                 )
@@ -423,6 +460,11 @@ class _ProviderCard:
             self._provider = replace(
                 self._provider,
                 max_tokens=new_max_tokens,
+                # Mirror the handler's dual-write on the in-memory copy too —
+                # omitting it leaves context_window stale, so _effective_context_window()
+                # keeps returning the old number while the spin shows the new
+                # one, and the card reads as permanently dirty (retro-audit BUG #2).
+                context_window=new_context_window,
                 last_verified_at=datetime.now(UTC).isoformat(),
                 last_error=None,
             )
