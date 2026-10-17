@@ -238,7 +238,13 @@ def cancel_all_processes(session_key: str | None = None) -> tuple[int, int]:
 
 # ── Path sandbox ───────────────────────────────────────────────────────────────
 
-MAX_READ_SIZE = 50 * 1024       # 50 KB
+MAX_READ_SIZE = 16 * 1024       # 16 KB — matches CONV_OUTPUT_CAP
+                                 # (CONTEXT-EFFICIENCY-INSTRUCTIONS §5).
+                                 # read_file is in _ALREADY_WINDOWED, so the
+                                 # window is never head/tail-bounded and its
+                                 # offset= continuation notice survives; the
+                                 # window itself no longer overhangs what the
+                                 # conversation keeps.
 MAX_READ_LINES = 2000
 MAX_LIST_ENTRIES = 400
 MAX_WRITE_SIZE = 2 * 1024 * 1024  # 2 MB
@@ -896,15 +902,10 @@ def _file_search(
         except OSError:
             size_str = "?KB"
 
-        # Best-effort line count
-        try:
-            with open(full_path, "rb") as f:
-                lc = sum(1 for _ in f)
-            lc_str = f"{lc:,} lines"
-        except (OSError, UnicodeDecodeError):
-            lc_str = "?"
-
-        lines.append(f"{fpath} ({lc_str}, {size_str})")
+        # Path + size only. Counting lines meant reading every hit file to
+        # EOF; the preview lines already come from grep, and bound_tool_output
+        # cuts the whole result to 16KB regardless (CONTEXT-EFFICIENCY §2).
+        lines.append(f"{fpath} ({size_str})")
 
         if fpath in grep_hits:
             for lineno, content in grep_hits[fpath][:preview_lines]:
@@ -1106,28 +1107,19 @@ def _register_tools() -> None:
         ToolDefinition(
             name="read_file",
             description=(
-                "Read a file's text content from the project directory.\n\n"
-                "WHEN TO USE: Always read a file BEFORE modifying it. Use to understand\n"
-                "existing code, check imports, verify structure, or review tests.\n\n"
-                "WHEN NOT TO USE: For listing directory contents (use list_files).\n"
-                "For searching across files (use search_files).\n\n"
-                "BEHAVIOR: Returns UTF-8 text. Binary files return an error.\n"
-                "Truncates at 50KB. Use offset/limit for reading specific sections\n"
-                "of large files without loading everything.\n\n"
-                "COMMON PATTERNS:\n"
-                "- Read a file before writing: understand context, imports, style\n"
-                "- Read tests before implementing: understand expected behavior\n"
-                "- Read architecture.md first when starting a new task"
+                "Read a file's text, a window capped at 16KB; use "
+                "offset/limit for more."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path within the project directory"},
-                    "offset": {"type": "integer", "description": "Byte offset to start reading from (optional)"},
-                    "limit": {"type": "integer", "description": "Maximum bytes to read (optional)"},
+                    "path": {"type": "string", "description": "Relative path"},
+                    "offset": {"type": "integer", "description": "Byte offset"},
+                    "limit": {"type": "integer", "description": "Max bytes"},
                 },
                 "required": ["path"],
             },
+            # NOTE: descriptions below stay one line each; do not expand.
             requires_approval=False,
         ),
         lambda path, project_path, offset=None, limit=None, **kwargs:  # type: ignore
@@ -1139,23 +1131,15 @@ def _register_tools() -> None:
         ToolDefinition(
             name="write_file",
             description=(
-                "Write content to a file in the project directory.\n\n"
-                "WHEN TO USE: To create new files, or a full rewrite you already have in hand.\n\n"
-                "WHEN NOT TO USE: For running commands (use exec_command).\n"
-                "For reading files (use read_file). For changing part of an existing file\n"
-                "(use edit_file).\n\n"
-                "BEHAVIOR: Creates parent directories if needed. Overwrites existing\n"
-                "files entirely — there is no partial edit. Max 2MB.\n"
-                "All paths are sandboxed to the project directory.\n\n"
-                "To change part of an existing file, use edit_file. write_file replaces "
-                "the entire file and is for new files or a full rewrite you already have "
-                "in hand. read_file returns a window, not the whole file."
+                "Write a file (max 2MB), creating parent dirs; overwrites. "
+                "Full rewrites only — read_file returns a window, so use "
+                "edit_file for targeted changes."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path within the project directory"},
-                    "content": {"type": "string", "description": "Text content to write"},
+                    "path": {"type": "string", "description": "Relative path"},
+                    "content": {"type": "string", "description": "Text to write"},
                 },
                 "required": ["path", "content"],
             },
@@ -1170,29 +1154,15 @@ def _register_tools() -> None:
         ToolDefinition(
             name="edit_file",
             description=(
-                "Make a targeted edit to a file by replacing exact text with new text.\n\n"
-                "WHEN TO USE: To change a specific section of a file without rewriting\n"
-                "the whole thing. Use when you know the exact text surrounding the change.\n\n"
-                "WHEN NOT TO USE: For creating new files (use write_file).\n"
-                "For a full rewrite you already have in hand (use write_file).\n"
-                "read_file returns a window, not the whole file.\n\n"
-                "BEHAVIOR: Finds old_text exactly in the file (no regex, no fuzzy matching).\n"
-                "Replaces only the first unique occurrence. Must be unique in the file\n"
-                "or the edit is rejected. All paths are sandboxed to the project directory.\n\n"
-                "IMPORTANT: Both old_text and new_text are matched literally.\n"
-                "Copy the exact surrounding context (including whitespace and newlines)\n"
-                "to ensure the match succeeds. Use write_file if the text is not unique\n"
-                "or you already have a full rewrite in hand.\n\n"
-                "COMMON PATTERNS:\n"
-                "- Change a function body: include the def line so context is unique\n"
-                "- Add a new import: include adjacent imports so the match is unique\n"
-                "- Fix a bug: include the buggy lines plus a few lines of surrounding context"
+                "Replace old_text with new_text; literal match, old_text must be "
+                "unique. read_file returns a window — use write_file for a full "
+                "rewrite you already have in hand."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path within the project directory"},
-                    "old_text": {"type": "string", "description": "Exact text to find and replace — must be unique in the file"},
+                    "path": {"type": "string", "description": "Relative path"},
+                    "old_text": {"type": "string", "description": "Exact text to replace; must be unique"},
                     "new_text": {"type": "string", "description": "Replacement text"},
                 },
                 "required": ["path", "old_text", "new_text"],
@@ -1208,30 +1178,15 @@ def _register_tools() -> None:
         ToolDefinition(
             name="exec_command",
             description=(
-                "Run a shell command in the project directory.\n\n"
-                "WHEN TO USE: Running tests, linters, build scripts, git commands,\n"
-                "checking environment (python version, installed packages).\n\n"
-                "WHEN NOT TO USE: Creating files (use write_file). Reading files\n"
-                "(use read_file). Listing directories (use list_files).\n\n"
-                "BEHAVIOR: PM must approve each call before execution.\n"
-                "Blocked commands (rm -rf /, mkfs, fork bombs) are always denied.\n"
-                "Default timeout 30s, max 120s. Output is truncated at 100KB.\n\n"
-                "RESULT FORMAT (exec_command always returns all four fields):\n"
-                "  - output: stdout + stderr combined (shown to the model)\n"
-                "  - stdout: raw stdout text\n"
-                "  - stderr: raw stderr text\n"
-                "  - exit_code: integer exit code (0 = success)\n"
-                "  - error: non-empty on failure (contains exit_code reason)\n\n"
-                "COMMON PATTERNS:\n"
-                "- Run tests: exec_command with 'pytest' or 'python -m pytest'\n"
-                "- Check git status: exec_command with 'git status'\n"
-                "- Install deps: exec_command with 'pip install -e .'"
+                "Run a shell command; needs PM approval per call (dangerous "
+                "ones denied). Returns output, stdout, stderr, exit_code, "
+                "error. Timeout 30s (max 120); output truncated at 100KB."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to execute"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 30, max 120)"},
+                    "timeout": {"type": "integer", "description": "Seconds; default 30, max 120"},
                 },
                 "required": ["command"],
             },
@@ -1246,20 +1201,14 @@ def _register_tools() -> None:
         ToolDefinition(
             name="list_files",
             description=(
-                "List files and subdirectories in a project directory.\n\n"
-                "WHEN TO USE: Understanding project structure before diving into code.\n"
-                "Finding test files related to a module. Exploring an unfamiliar project.\n\n"
-                "WHEN NOT TO USE: Reading file contents (use read_file).\n"
-                "Searching for text patterns (use search_files).\n\n"
-                "BEHAVIOR: Non-recursive by default. Use recursive=True for full tree.\n"
-                "Skips .git, node_modules, __pycache__, .pytest_cache.\n"
-                "Shows file sizes for context."
+                "List files/subdirs with sizes; recursive=True for full tree. "
+                "Skips .git, node_modules, __pycache__, .pytest_cache."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Relative path within the project (default '.')"},
-                    "recursive": {"type": "boolean", "description": "Recurse into subdirectories (default False)"},
+                    "path": {"type": "string", "description": "Relative path (default '.')"},
+                    "recursive": {"type": "boolean", "description": "Recurse (default False)"},
                 },
                 "required": [],
             },
@@ -1274,26 +1223,15 @@ def _register_tools() -> None:
         ToolDefinition(
             name="search_files",
             description=(
-                "Search for text patterns in project files using grep.\n\n"
-                "WHEN TO USE: Finding all callers of a function. Finding all imports\n"
-                "of a module. Finding usages of a variable or class. Finding error\n"
-                "strings to locate where they originate.\n\n"
-                "WHEN NOT TO USE: Finding files by name (use list_files).\n"
-                "Reading a specific file (use read_file).\n\n"
-                "BEHAVIOR: Returns matching lines with file paths and line numbers.\n"
-                "Supports regex. Use file_type to filter by extension (e.g. 'py').\n"
-                "Times out after 10s.\n\n"
-                "COMMON PATTERNS:\n"
-                "- Find function definition: search_files with 'def my_function'\n"
-                "- Find all usages: search_files with 'my_function(' file_type='py'\n"
-                "- Find import references: search_files with 'from mymodule import'"
+                "Grep project files; returns matching file:line. "
+                "Times out after 10s."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Text pattern or regex to search for"},
-                    "path": {"type": "string", "description": "Relative path to search within (default '.')"},
-                    "file_type": {"type": "string", "description": "Only match files with this extension (e.g. 'py', 'js')"},
+                    "pattern": {"type": "string", "description": "Text or regex"},
+                    "path": {"type": "string", "description": "Search path (default '.')"},
+                    "file_type": {"type": "string", "description": "Extension filter, e.g. 'py'"},
                 },
                 "required": ["pattern"],
             },
@@ -1308,19 +1246,15 @@ def _register_tools() -> None:
         ToolDefinition(
             name="file_search",
             description=(
-                "Find files by name or content pattern. Returns grouped results\n"
-                "with file metadata and preview lines.\n\n"
-                "WHEN TO USE: Discovering which files contain a function, class,\n"
-                "or concept before reading them. Replaces browsing the file index.\n\n"
-                "BEHAVIOR: Groups matches by file. Shows line count + size per file.\n"
-                "Returns up to 5 preview lines per match.\n"
-                "Use read_file() to get full contents after finding the right file."
+                "Find files by name or content; grouped per file with size and up to\n"
+                "5 preview lines. Reads no full bodies — use read_file to open one.\n"
+                "search_files is plain grep."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Filename fragment or text/regex pattern"},
-                    "file_type": {"type": "string", "description": "Filter by extension (e.g. 'py', 'md')"},
+                    "query": {"type": "string", "description": "Filename fragment or regex"},
+                    "file_type": {"type": "string", "description": "Extension filter, e.g. 'py'"},
                     "max_results": {"type": "integer", "description": "Max files to return (default 20)"},
                 },
                 "required": ["query"],
@@ -1336,13 +1270,9 @@ def _register_tools() -> None:
         ToolDefinition(
             name="web_search",
             description=(
-                "Search the web using Brave Search.\n\n"
-                "WHEN TO USE: Looking up API documentation, library references,\n"
-                "error message solutions, or current best practices.\n\n"
-                "WHEN NOT TO USE: Searching project files (use search_files).\n"
-                "Reading a URL's content (use web_fetch).\n\n"
-                "BEHAVIOR: Returns title, URL, and snippet for each result.\n"
-                "Default 5 results, max 10. Requires BRAVE_API_KEY env var."
+                "Search the web via Brave. Returns title, URL, and snippet per\n"
+                "result, 5 by default and 10 max. Needs BRAVE_API_KEY. For\n"
+                "project files use search_files; to read a URL use web_fetch."
             ),
             parameters={
                 "type": "object",
@@ -1362,14 +1292,9 @@ def _register_tools() -> None:
         ToolDefinition(
             name="web_fetch",
             description=(
-                "Fetch and extract readable text from a URL.\n\n"
-                "WHEN TO USE: Reading documentation pages, API references,\n"
-                "or GitHub repos that you found via web_search.\n\n"
-                "WHEN NOT TO USE: Searching the web (use web_search).\n"
-                "Reading local files (use read_file).\n\n"
-                "BEHAVIOR: Strips HTML tags, returns plain text.\n"
-                "Truncated at 10,000 chars by default (adjustable via max_chars).\n"
-                "Only works on HTML/text pages, not PDFs or binaries."
+                "Fetch a URL and return its readable text (HTML tags stripped, "
+                "10,000 chars by default). HTML/text pages only — not PDFs or "
+                "binaries. Local files: read_file."
             ),
             parameters={
                 "type": "object",
@@ -1389,20 +1314,19 @@ def _register_tools() -> None:
         ToolDefinition(
             name="provider_events",
             description=(
-                "Read recent provider failures (auth, rate limit, model rejection, "
-                "malformed request). Use this when asked whether an agent is alive "
-                "or why a turn stopped. Read-only. Does not retry or change providers."
+                "Read-only provider failure log: auth, rate limit, model rejection, "
+                "malformed request. Answers is-an-agent-alive / why-a-turn-stopped."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "session_key": {
                         "type": "string",
-                        "description": "Optional session key filter, e.g. special:coder",
+                        "description": "Session key filter, e.g. special:coder",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "How many recent events to return (default 20)",
+                        "description": "Recent events to return (default 20)",
                     },
                 },
                 "required": [],

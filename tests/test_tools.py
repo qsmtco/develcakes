@@ -7,10 +7,13 @@
 #   - Truncation: output > limit must be truncated
 #   - Approval: exec_command requires approval callback
 
+import json
 import os
 import tempfile
+from typing import ClassVar
 
 import pytest
+import yaml
 
 from agent.tools import (
     execute_tool,
@@ -18,7 +21,6 @@ from agent.tools import (
     get_tool_definitions_for_api,
     set_approval_callback,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Tool registry
@@ -194,7 +196,7 @@ class TestReadFile:
             assert r.success is False
             assert "Not a file" in r.error or "not" in r.error.lower()
 
-    def test_read_truncates_at_50kb(self):
+    def test_read_truncates_at_cap(self):
         from agent.tools import MAX_READ_SIZE
         with tempfile.TemporaryDirectory() as proj:
             large = os.path.join(proj, "large.txt")
@@ -204,9 +206,10 @@ class TestReadFile:
             assert r.success is True
             assert "truncated" in r.output
             assert len(r.output) <= MAX_READ_SIZE + 200
-            assert len(r.output) > 16 * 1024  # not the 16KB conversation head/tail
             assert r.output.count("x") == MAX_READ_SIZE
-            assert "offset=51200" in r.output
+            # Window fills the read cap exactly; continuation points at the cap.
+            assert f"offset={MAX_READ_SIZE}" in r.output
+            assert "chars omitted" not in r.output  # not the conversation head/tail cutter
 
     def test_read_explicit_limit_cannot_exceed_cap(self):
         from agent.tools import MAX_READ_SIZE
@@ -540,7 +543,7 @@ class TestWebFetch:
         class FakeRedirectResponse:
             """Simulates a 302 redirect response."""
             status_code = 302
-            headers = {"location": "http://127.0.0.1/private", "content-type": "text/html"}
+            headers: ClassVar[dict] = {"location": "http://127.0.0.1/private", "content-type": "text/html"}
             text = ""
             url = "http://initial.example.com/"
 
@@ -549,8 +552,9 @@ class TestWebFetch:
 
         # Patch _reject_restricted_url so the initial URL passes but loopback is blocked
         def fake_reject(url):
-            from agent.tools import ToolResult
             from urllib.parse import urlparse as _up
+
+            from agent.tools import ToolResult
             p = _up(url)
             host = (p.hostname or "").lower()
             if host in ("127.0.0.1", "localhost", "::1"):
@@ -577,7 +581,7 @@ class TestWebFetch:
 
         class FakeRedirectResponse:
             status_code = 302
-            headers = {"location": "http://10.0.0.5/internal", "content-type": "text/html"}
+            headers: ClassVar[dict] = {"location": "http://10.0.0.5/internal", "content-type": "text/html"}
             text = ""
             url = "http://initial.example.com/"
 
@@ -585,9 +589,10 @@ class TestWebFetch:
                 pass
 
         def fake_reject(url):
-            from agent.tools import ToolResult
             import ipaddress as _ip
             from urllib.parse import urlparse as _up
+
+            from agent.tools import ToolResult
             p = _up(url)
             host = p.hostname or ""
             try:
@@ -618,7 +623,7 @@ class TestWebFetch:
         class FakeOkResponse:
             status_code = 200
             url = "http://example.com/"
-            headers = {"content-type": "text/html"}
+            headers: ClassVar[dict] = {"content-type": "text/html"}
             text = "<html>ok</html>"
 
             def raise_for_status(self):
@@ -646,7 +651,7 @@ class TestWebFetch:
 
         class FakeRedirectResponse:
             status_code = 302
-            headers = {"location": "http://127.0.0.1/private", "content-type": "text/html"}
+            headers: ClassVar[dict] = {"location": "http://127.0.0.1/private", "content-type": "text/html"}
             text = ""
             url = "http://initial.example.com/"
 
@@ -766,7 +771,7 @@ class TestWebFetch:
         class FakeErrorResponse:
             status_code = 404
             url = "http://example.com/notfound"
-            headers = {"content-type": "text/html"}
+            headers: ClassVar[dict] = {"content-type": "text/html"}
             text = "<html>not found</html>"
 
             def raise_for_status(self):
@@ -797,7 +802,7 @@ class TestWebFetch:
 
         class FakeAlwaysRedirect:
             status_code = 302
-            headers = {"location": "http://example.com/next"}
+            headers: ClassVar[dict] = {"location": "http://example.com/next"}
             text = ""
             url = "http://example.com/"
 
@@ -956,3 +961,38 @@ class TestAllowedToolsGate:
             )
         assert r.success is False
         assert "edit_file" in r.error
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Tool-schema payload size budget
+# ═══════════════════════════════════════════════════════════════════
+
+DEFAULT_AGENTS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "prompts", "default_agents"
+)
+
+# The provider gate rejects a tool payload >= this many characters. Each
+# default agent's serialized tool schema must stay under it.
+TOOL_PAYLOAD_BUDGET = 4_000
+
+
+class TestToolSchemaSizeBudget:
+    """Guard the per-agent tool-schema budgets in prompts/default_agents/*.yaml.
+
+    The provider rejects a tool payload at/over 4,000 chars, so each default
+    agent's serialized ``get_tool_definitions_for_api`` output must stay under
+    that ceiling with margin to spare."""
+
+    @pytest.mark.parametrize("agent", ["coder", "debugger", "supervisor"])
+    def test_default_agent_tool_payload_under_budget(self, agent):
+        cfg_path = os.path.join(DEFAULT_AGENTS_DIR, f"{agent}.yaml")
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        tools = cfg["tools"]
+        defs = get_tool_definitions_for_api(tools)
+        blob = json.dumps(defs, separators=(",", ":"))
+        assert len(blob) < TOOL_PAYLOAD_BUDGET, (
+            f"{agent} tool-schema JSON is {len(blob)} chars "
+            f"(budget {TOOL_PAYLOAD_BUDGET}, over by "
+            f"{len(blob) - TOOL_PAYLOAD_BUDGET})"
+        )
