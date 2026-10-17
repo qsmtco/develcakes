@@ -22,6 +22,11 @@ from agent.tools import (
     set_approval_callback,
 )
 
+# Path to the default agent yaml configs (used by supervisor-list tests).
+DEFAULT_AGENTS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "prompts", "default_agents"
+)
+
 # ═══════════════════════════════════════════════════════════════════
 #  Tool registry
 # ═══════════════════════════════════════════════════════════════════
@@ -961,6 +966,33 @@ class TestAllowedToolsGate:
             )
         assert r.success is False
         assert "edit_file" in r.error
+
+    def test_file_search_replay_permitted_by_supervisor_list(self):
+        """B1 replay-compat contract (audit BUG #2): old transcripts that
+        stored a file_search call must still execute. The supervisor yaml
+        tools: list is the execute permit; _API_SCHEMA_HIDDEN only controls
+        schema visibility. Loads the real supervisor.yaml so a future removal
+        of the permit fails this test, not the replay."""
+        cfg_path = os.path.join(DEFAULT_AGENTS_DIR, "supervisor.yaml")
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        allowed = cfg["tools"]
+        assert "file_search" in allowed
+        assert "file_search" not in [
+            item["function"]["name"] for item in get_tool_definitions_for_api(allowed)
+        ]
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "replayed.py"), "w", encoding="utf-8") as fh:
+                fh.write("FILESEARCH_REPLAY_2026 = 1\n")
+            r = execute_tool(
+                "file_search",
+                {"query": "FILESEARCH_REPLAY_2026"},
+                proj,
+                allowed_tools=allowed,
+            )
+            assert r.success is True
+            assert "replayed.py" in r.output
+            assert "FILESEARCH_REPLAY_2026" in r.output
 
 
 # ═══════════════════════════════════════════════════════════════════

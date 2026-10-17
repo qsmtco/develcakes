@@ -15,6 +15,7 @@ tools:
   - exec_command
   - list_files
   - search_files
+  - file_search  # execute permit for replayed transcript calls; hidden from API schema (_API_SCHEMA_HIDDEN)
   - provider_events
 auto_open: false
 auto_add_to_projects: false  # deliberately manual — user clicks + in the Agents tab
