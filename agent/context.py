@@ -465,6 +465,39 @@ def _project_root_mtime(project_path: str) -> float:
         return 0.0
 
 
+def _project_tree_fingerprint(project_path: str) -> tuple:
+    """Structural fingerprint of the project tree (audit BUG #1, bugfix B2).
+
+    Counts files per top-level directory plus a total, from a single
+    ``os.walk`` that prunes the same directories ``build_file_index`` prunes
+    (``skip_dirs``, ``EXCLUDED_DIRS`` unless ``_include_docs()``, hidden
+    dirs/files). Stat-free: only names are inspected. A file added to or
+    removed from a subdirectory — invisible to ``_project_root_mtime``,
+    which stats only the root — changes this tuple, so the system-prompt
+    fingerprint changes and the prompt (with its file index) is rebuilt.
+    """
+    if not project_path or not os.path.isdir(project_path):
+        return (0, ())
+
+    include_docs = _include_docs()
+    skip_dirs = {"__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".tox"}
+    if not include_docs:
+        skip_dirs |= EXCLUDED_DIRS
+
+    per_top: dict[str, int] = {}
+    total = 0
+    for root, dirs, files in os.walk(project_path):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
+        names = [f for f in files if not f.startswith(".")]
+        if not names:
+            continue
+        rel_root = os.path.relpath(root, project_path)
+        top = "(root)" if rel_root == "." else rel_root.split(os.sep)[0]
+        per_top[top] = per_top.get(top, 0) + len(names)
+        total += len(names)
+    return (total, tuple(sorted(per_top.items())))
+
+
 def build_file_context(
     project_path: str,
     query: str | None = None,

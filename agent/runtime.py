@@ -1181,9 +1181,16 @@ class AgentRuntime:
 
         Project path, resolved context mode, budget window, role, tool
         names, review mode, the awareness cache token (``.crabcakes`` mtime
-        plus content hash), and the file-context cache mtime.
+        plus content hash), and the file-context slot: the project-root
+        mtime plus the tree fingerprint (file counts per top-level
+        directory), so add/remove inside subdirectories — invisible to the
+        root-only stat — still rebuild the prompt (audit BUG #1).
         """
-        from agent.context import _project_root_mtime, resolve_context_mode
+        from agent.context import (
+            _project_root_mtime,
+            _project_tree_fingerprint,
+            resolve_context_mode,
+        )
         from utils.project_awareness import (
             _awareness_dir_mtime,
             awareness_content_fingerprint,
@@ -1197,10 +1204,13 @@ class AgentRuntime:
                 _awareness_dir_mtime(project),
                 awareness_content_fingerprint(project),
             )
-            file_mtime = _project_root_mtime(project)
+            # Root mtime catches content edits to the fixed files; the tree
+            # fingerprint catches add/remove inside subdirectories, which a
+            # root-only stat never sees (audit BUG #1, bugfix B2).
+            file_slot = (_project_root_mtime(project), _project_tree_fingerprint(project))
         else:
             awareness = (0.0, "")
-            file_mtime = 0.0
+            file_slot = 0.0
         return (
             project,
             resolved,
@@ -1209,7 +1219,7 @@ class AgentRuntime:
             tuple(self._prompt_tool_names(conv)),
             "off",
             awareness,
-            file_mtime,
+            file_slot,
         )
 
     def _rebuild_system_prompt_if_inputs_changed(self, session_key: str) -> None:

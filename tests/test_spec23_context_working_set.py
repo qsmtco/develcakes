@@ -303,3 +303,29 @@ def test_deferred_prompt_builds_once_on_the_first_turn(tmp_path):
             rt._run_loop(sk, "first")
             rt._run_loop(sk, "second")
         assert calls["n"] == 1
+
+
+def test_fingerprint_catches_subdir_add_and_delete(tmp_path):
+    """Bugfix B2 (audit BUG #1): the fingerprint file slot is blind to files
+    added/removed inside subdirectories when it stats only the project root —
+    a root-only stat never sees ``pkg/newmod.py`` appear or vanish.
+
+    Sequence: two snapshots on an unchanged project must be equal; adding a
+    file in a subdirectory must change the fingerprint; deleting it must
+    change it again.
+    """
+    rt, _sk, conv = _runtime(str(tmp_path))
+    (tmp_path / "pkg").mkdir()
+
+    before_a = rt._system_prompt_fingerprint(conv)
+    before_b = rt._system_prompt_fingerprint(conv)
+    assert before_a == before_b
+
+    (tmp_path / "pkg" / "newmod.py").write_text("x = 1\n")
+    with_new = rt._system_prompt_fingerprint(conv)
+    assert with_new != before_a
+
+    (tmp_path / "pkg" / "newmod.py").unlink()
+    after_delete = rt._system_prompt_fingerprint(conv)
+    assert after_delete != with_new
+    assert after_delete == before_a
