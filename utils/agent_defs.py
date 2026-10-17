@@ -402,7 +402,16 @@ def validate_agent_def(agent_def: dict) -> list[str]:
 
     # Validate tool names against known tools
     if isinstance(tools, list) and tools:
-        known_names = {t["name"] for t in get_available_tools()}
+        # B4 Option B (supervisor ruling): _API_SCHEMA_HIDDEN tools stay
+        # executable (B1's file_search execute permit in supervisor.yaml)
+        # while hidden from the Builder surface. The validator gates what the
+        # runtime can run, so it accepts the hidden superset.
+        try:
+            from agent.tools import _API_SCHEMA_HIDDEN
+            known_names = {t["name"] for t in get_available_tools()} | set(_API_SCHEMA_HIDDEN)
+        except ImportError:
+            logger.warning("agent.tools unavailable — validating visible tools only")
+            known_names = {t["name"] for t in get_available_tools()}
         for tool_name in tools:
             if tool_name not in known_names:
                 errors.append(f"Unknown tool: {tool_name}")
@@ -488,8 +497,16 @@ def get_available_tools() -> list[dict]:
     Used by the UI to show tool checkboxes.
     """
     try:
-        from agent.tools import get_all_tools
-        return [{"name": t.name, "description": t.description} for t in get_all_tools()]
+        # _API_SCHEMA_HIDDEN is agent.tools' private set, imported here as the
+        # single source of truth (B4): tools hidden from the API schema must
+        # not appear as Builder checkboxes either, or a tick re-creates the
+        # B1 permit-visible/schema-hidden confusion.
+        from agent.tools import _API_SCHEMA_HIDDEN, get_all_tools
+        return [
+            {"name": t.name, "description": t.description}
+            for t in get_all_tools()
+            if t.name not in _API_SCHEMA_HIDDEN
+        ]
     except ImportError:
         logger.warning("Cannot import agent.tools — returning empty tool list")
         return []

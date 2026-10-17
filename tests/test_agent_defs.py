@@ -278,6 +278,23 @@ class TestValidateAgentDef:
         errors = ad.validate_agent_def(agent)
         assert any("not_a_real_tool" in e for e in errors)
 
+    def test_validate_accepts_schema_hidden_permit_b4(self):
+        """B4 Option B: the validator gates what the runtime can execute, so
+        the B1 permit shape (file_search listed in tools) validates clean,
+        while the Builder surface (get_available_tools) still hides it."""
+        agent = {
+            "name": "PermitAgent",
+            "prompts": ["system/coder.md"],
+            "tools": ["read_file", "file_search"],
+            "llm_name": "openrouter",
+            "fallback_provider": "openrouter",
+        }
+        errors = ad.validate_agent_def(agent)
+        assert errors == []
+        names = [t["name"] for t in ad.get_available_tools()]
+        assert "file_search" not in names
+        assert "search_files" in names
+
     def test_unknown_provider(self, monkeypatch, tmp_path):
         # Set up providers.yaml so get_available_providers returns known names
         config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
@@ -333,6 +350,14 @@ class TestAvailableOptions:
         names = [t["name"] for t in tools]
         assert "read_file" in names
         assert "write_file" in names
+
+    def test_get_available_tools_hides_schema_hidden_b4(self):
+        """B4: file_search is _API_SCHEMA_HIDDEN, so the Builder surface
+        (which renders get_available_tools as checkboxes) must not list it.
+        search_files — the visible replacement — must remain."""
+        names = [t["name"] for t in ad.get_available_tools()]
+        assert "search_files" in names
+        assert "file_search" not in names
 
     def test_get_available_prompts(self):
         prompts = ad.get_available_prompts()
