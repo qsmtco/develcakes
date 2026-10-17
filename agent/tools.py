@@ -887,6 +887,7 @@ def _search_files(
         _norm_search_rel(rel)
         for rel in _find_matching_files(
             project_path, pattern, patterns, max_files=max_results,
+            file_type=file_type, root_rel=root_rel,
         )
     ]
     name_matches = [

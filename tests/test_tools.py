@@ -501,6 +501,40 @@ class TestSearchFiles:
             assert "a.py" in r.output
             assert "b.txt" not in r.output
 
+    def test_search_file_type_filter_survives_name_cap(self):
+        # B3: 25 .txt name-matches must not crowd a smaller .py match out of
+        # the max_files cap — the type filter applies BEFORE capping.
+        # Sizes matter: each .txt is 100B (larger than the 14B .py, per spec)
+        # but small enough that 20 of them fit the max_total_chars budget —
+        # that is what lets the early-return cap fire and hide zpkg/big.py.
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(25):
+                with open(os.path.join(proj, f"big{i:02d}.txt"), "w") as f:
+                    f.write("x" * 100)
+            os.makedirs(os.path.join(proj, "zpkg"))
+            # Content deliberately avoids the pattern so only the NAME
+            # matches — a content grep hit must not rescue the assertion.
+            with open(os.path.join(proj, "zpkg", "big.py"), "w") as f:
+                f.write("WANTED = True\n")
+            filtered = execute_tool(
+                "search_files", {"pattern": "big", "file_type": "py"}, proj
+            )
+            assert filtered.success is True
+            assert "zpkg/big.py" in filtered.output
+            assert ".txt" not in filtered.output
+            # Control: without file_type the file is still found. The output
+            # layer sorts lexicographically and caps at max_results, so raise
+            # it past the 26 candidates. Called via _search_files directly:
+            # the search_files execute_tool registration swallows **kwargs
+            # and never forwards max_results, so the kwarg would be silently
+            # dropped and the default 20-cap would hide zpkg/big.py again.
+            from agent.tools import _search_files
+            control = _search_files(
+                "big", proj, path=".", file_type=None, max_results=30
+            )
+            assert control.success is True
+            assert "zpkg/big.py" in control.output
+
 
 class TestWebSearch:
     def test_web_search_without_api_key(self):

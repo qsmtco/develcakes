@@ -920,14 +920,35 @@ def build_file_context_with_core_files(
     return _append_project_prompt_names(base, project_path)
 
 
+def _matches_file_type(rel_path: str, file_type: str | None) -> bool:
+    """Extension filter — mirrors agent/tools.py (this module is stdlib-only)."""
+    if not file_type:
+        return True
+    ext = file_type.lower().lstrip(".")
+    return rel_path.lower().endswith("." + ext)
+
+
+def _under_search_root(rel_path: str, root_rel: str) -> bool:
+    """Search-root scoping — mirrors agent/tools.py (this module is stdlib-only)."""
+    if not root_rel:
+        return True
+    return rel_path == root_rel or rel_path.startswith(root_rel + "/")
+
+
 def _find_matching_files(
     project_path: str,
     query: str,
     patterns: list[str],
     max_files: int = 20,
     max_total_chars: int = 40_000,
+    file_type: str | None = None,
+    root_rel: str = "",
 ) -> list[str]:
-    """Find files matching query (by name) within project."""
+    """Find files matching query (by name) within project.
+
+    ``file_type`` and ``root_rel`` filter candidates BEFORE the ``max_files``
+    cap, so the cap counts only surviving files (B3: cap-then-filter ordering).
+    """
     query_lower = query.lower()
     matches: list[tuple[str, int]] = []  # (rel_path, size)
     total = 0
@@ -951,6 +972,10 @@ def _find_matching_files(
             if _is_ignored(rel_path, project_path, patterns):
                 continue
             if query_lower in name.lower():
+                if not _under_search_root(rel_path, root_rel):
+                    continue
+                if not _matches_file_type(rel_path, file_type):
+                    continue
                 try:
                     size = os.path.getsize(os.path.join(root, name))
                 except OSError:
