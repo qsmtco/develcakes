@@ -468,3 +468,40 @@ class TestLoadProjectPromptsContextBudget:
             for name in ("020_small_a", "030_small_b", "040_small_c"):
                 assert f"## .crabcakes/prompts/{name}" in out, f"{name} dropped"
             assert "## .crabcakes/prompts/010_big" not in out
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  build_file_context — preload cache invalidation
+# ═══════════════════════════════════════════════════════════════════
+
+class TestBuildFileContextCacheInvalidation:
+    def test_subdir_add_invalidates_preload_cache(self):
+        """Bugfix C2 (audit BUG #1): a subdirectory add must rebuild.
+
+        The preload cache keyed on ``(project_path, max_chars)`` validated on
+        ``_project_root_mtime`` alone — root + 4 fixed files. Adding a file
+        inside a directory that already exists leaves that mtime untouched,
+        so the second call used to return byte-identical stale text forever.
+        The cached tuple now also stores the tree fingerprint, which changes.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            # pkg/ exists BEFORE the first call: creating it later would
+            # itself bump the root mtime and mask the fingerprint guard.
+            pkg = os.path.join(proj, "pkg")
+            os.makedirs(pkg)
+            with open(os.path.join(pkg, "existing.py"), "w") as f:
+                f.write("x = 1\n")
+
+            first = build_file_context(proj, max_chars=50_000)
+            assert "brand_new_module" not in first, "fixture must start clean"
+
+            with open(os.path.join(pkg, "brand_new_module.py"), "w") as f:
+                f.write("y = 2\n")
+
+            second = build_file_context(proj, max_chars=50_000)
+
+            assert "brand_new_module" in second, (
+                "subdir add must invalidate the preload cache; "
+                "second call served stale text"
+            )
+            assert second != first, "second output must not be byte-identical"

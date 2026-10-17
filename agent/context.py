@@ -439,7 +439,10 @@ def _read_key_files(project_path: str) -> str:
     return "\n".join(sections)
 
 
-_FILE_CONTEXT_CACHE: dict[str, tuple[float, str]] = {}
+# Value tuple: (root mtime, rendered text, tree fingerprint). The third
+# element is the C2 fix — a subdirectory add changes the fingerprint even
+# though the root mtime is unchanged (bugfix C2, audit BUG #1).
+_FILE_CONTEXT_CACHE: dict[str, tuple[float, str, tuple]] = {}
 
 
 def _project_root_mtime(project_path: str) -> float:
@@ -525,12 +528,15 @@ def build_file_context(
     if not project_path or not os.path.isdir(project_path):
         return ""
 
-    # Cache check (only for non-query calls)
+    # Cache check (only for non-query calls). Root mtime alone is blind to
+    # subdirectory changes (root + 4 fixed files only), so the tree
+    # fingerprint is checked too (bugfix C2, audit BUG #1).
     if not query:
         cache_key = f"{project_path}::{max_chars}"
         mtime = _project_root_mtime(project_path)
+        tree_fp = _project_tree_fingerprint(project_path)
         cached = _FILE_CONTEXT_CACHE.get(cache_key)
-        if cached and cached[0] >= mtime:
+        if cached and cached[0] >= mtime and cached[2] == tree_fp:
             return cached[1]
 
     # §7: the assembly cap reserves the tail. Prompt bodies sit at the front
@@ -579,7 +585,9 @@ def build_file_context(
     if len(full) <= max_chars:
         if not query:
             cache_key = f"{project_path}::{max_chars}"
-            _FILE_CONTEXT_CACHE[cache_key] = (_project_root_mtime(project_path), full)
+            _FILE_CONTEXT_CACHE[cache_key] = (
+                _project_root_mtime(project_path), full, tree_fp,
+            )
         return full
 
     # Keep the tail. A head slice would drop the tree the smart truncator
@@ -596,7 +604,9 @@ def build_file_context(
     truncated = (full[-keep:] if keep else "") + marker
     if not query:
         cache_key = f"{project_path}::{max_chars}"
-        _FILE_CONTEXT_CACHE[cache_key] = (_project_root_mtime(project_path), truncated)
+        _FILE_CONTEXT_CACHE[cache_key] = (
+            _project_root_mtime(project_path), truncated, tree_fp,
+        )
     return truncated
 
 
