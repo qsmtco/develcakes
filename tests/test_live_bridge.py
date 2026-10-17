@@ -10,7 +10,6 @@ from utils.live_bridge import (
     LiveBridge,
 )
 
-
 # ── 1. Pure unit tests ───────────────────────────────────────────────────
 
 
@@ -136,7 +135,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 try:
     gi.require_version("WebKit", "6.0")
-    from gi.repository import Gtk, GLib  # noqa: F401
+    from gi.repository import GLib, Gtk
 except (ValueError, ImportError):  # pragma: no cover
     pytest.skip("WebKit 6.0 unavailable", allow_module_level=True)
 
@@ -258,15 +257,23 @@ class TestE2EApproval:
 # ── F2 prompt source-shape guards (SPEC-19 SP4 Part D) ────────────────────
 
 def test_agent_prompts_document_the_live_protocol():
-    """All three agent prompts carry the SPEC-19 live-section protocol:
-    the ```live fence, the no-src rule, and the develcakes.call bridge."""
+    """The shared context prompt carries the SPEC-19 live-section protocol:
+    the ```live fence, the no-src rule, and the develcakes.call bridge.
+
+    Context-efficiency item 3: the HTML/live rules live once, in
+    crabcakes-context.md (loaded by every agent via prompt_loader identity
+    set), instead of being duplicated in each role file.
+    """
     import pathlib
+    src = pathlib.Path("prompts/system", "crabcakes-context.md").read_text()
+    assert "SPEC-19" in src, "no SPEC-19 section"
+    assert "```live" in src, "live fence not documented"
+    assert "develcakes.call" in src, "bridge not documented"
+    assert "<script src>" in src, "no-src rule not documented"
+    # Role files must NOT duplicate it (single-copy rule).
     for name in ("coder.md", "debugger.md", "supervisor.md"):
-        src = pathlib.Path("prompts/system", name).read_text()
-        assert "SPEC-19" in src, f"{name}: no SPEC-19 section"
-        assert "```live" in src, f"{name}: live fence not documented"
-        assert "develcakes.call" in src, f"{name}: bridge not documented"
-        assert "<script src>" in src, f"{name}: no-src rule not documented"
+        role = pathlib.Path("prompts/system", name).read_text()
+        assert "SPEC-19" not in role, f"{name}: duplicate live-section copy"
 
 
 def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):

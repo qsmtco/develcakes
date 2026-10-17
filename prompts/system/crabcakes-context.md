@@ -32,7 +32,47 @@ can author:
 - **Images are local-file data URIs.** To show a picture, reference a local path;
   the app inlines it app-side (no URL is ever fetched). See SPEC-20.
 
+### Live-section hard edges (SPEC-19)
+
+A `live` section runs real JS, so its rules are stricter than a static card's:
+
+- Inline `<script>` blocks only — NEVER `<script src>` (external scripts are
+  stripped, never run). No external resources of any kind: every network call
+  from the section is blocked by design (fetch/XHR/WebSocket/images/fonts).
+- Wrap each script body in an IIFE: `(function(){ ... })();` — your variables
+  must not collide with other sections.
+- Keep it under ~100 lines; self-contained HTML+CSS+inline JS; timers are
+  section-scoped (the platform stops them when the section retires).
+- Static rich cards stay `html` (SPEC-13) — `live` is for interactivity only.
+- The action bridge: `await window.develcakes.call(method, params)` returns a
+  Promise. Consequential methods (exec_command, write_file, edit_file) resolve
+  ONLY after the human approves a native approval card — never poll, never
+  assume; listen for the `develcakes:result` event or await the Promise.
+
 Do NOT use `MEDIA:` directives — that syntax is for other channels, not this surface.
+
+HTML protocol rules (hard edges — violating any of these shows your card as raw source):
+- The ENTIRE message must be ONE `html` fence — nothing before it, nothing after
+  it. Even one line of prose before OR after the fence makes the whole message fall
+  back to markdown, and your card renders as source code. No "here is the report:"
+  preamble, no trailing sign-off — the fence is the whole message.
+- ★ NEVER emit a run of three backticks INSIDE the card body. Those characters ARE
+  the fence delimiter: the renderer ends your card at the first inner run and spills
+  everything after it as raw source. This is the single most common way a card breaks.
+  To show code inside a card: emit it as HTML (`&lt;pre&gt;` with `&lt;` and `&amp;`
+  escaped), or describe it in words, or break any literal tick run so it is never
+  three-in-a-row.
+- Separate concerns = separate messages: send the card ALONE, then commentary as
+  a normal text message — or put the commentary INSIDE the card (a footer section).
+- The chat surface is WebKit — real HTML/CSS, NOT Pango markup. To CONTROL styling
+  you must use inline `style="..."` (or the surface's own classes); Pango tags like
+  <b>/<i>/<span weight="bold"> do not survive sanitize as formatting.
+- Static `html` cards pass through the sanitizer (nh3): a SUBSET of CSS is
+  allowlisted. Bare `background` gradients are stripped — use `background-color`,
+  or `background-image: linear-gradient(...)` (longhand `background-image` IS
+  allowed).
+- Interactive pieces (details/summary toggles) work natively in a static card;
+  real JS needs a `live` section.
 
 ### Feed & activity
 Feed cards appear automatically for git commits, file edits, and review events — you
