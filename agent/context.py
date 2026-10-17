@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -478,9 +479,12 @@ def _project_tree_fingerprint(project_path: str) -> tuple:
     removed from a subdirectory — invisible to ``_project_root_mtime``,
     which stats only the root — changes this tuple, so the system-prompt
     fingerprint changes and the prompt (with its file index) is rebuilt.
+    A rename within a directory keeps the counts identical but still
+    changes the tuple: a rolling blake2b hash of the walked relative paths
+    is folded in (audit BUG #2, bugfix C4). Still stat-free.
     """
     if not project_path or not os.path.isdir(project_path):
-        return (0, ())
+        return (0, (), "")
 
     include_docs = _include_docs()
     skip_dirs = {"__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".tox"}
@@ -489,6 +493,7 @@ def _project_tree_fingerprint(project_path: str) -> tuple:
 
     per_top: dict[str, int] = {}
     total = 0
+    h = hashlib.blake2b(digest_size=8)
     for root, dirs, files in os.walk(project_path):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
         names = [f for f in files if not f.startswith(".")]
@@ -498,7 +503,10 @@ def _project_tree_fingerprint(project_path: str) -> tuple:
         top = "(root)" if rel_root == "." else rel_root.split(os.sep)[0]
         per_top[top] = per_top.get(top, 0) + len(names)
         total += len(names)
-    return (total, tuple(sorted(per_top.items())))
+        for name in names:
+            rel_path = name if rel_root == "." else os.path.join(rel_root, name)
+            h.update(rel_path.encode("utf-8", "replace"))
+    return (total, tuple(sorted(per_top.items())), h.hexdigest())
 
 
 def build_file_context(

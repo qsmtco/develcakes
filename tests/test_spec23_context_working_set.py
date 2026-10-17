@@ -329,3 +329,29 @@ def test_fingerprint_catches_subdir_add_and_delete(tmp_path):
     after_delete = rt._system_prompt_fingerprint(conv)
     assert after_delete != with_new
     assert after_delete == before_a
+
+
+def test_fingerprint_catches_rename_within_subdir(tmp_path):
+    """Bugfix C4 (audit BUG #2): renaming pkg/a.py → pkg/b.py keeps the
+    per-top counts identical, so the count-only tuple missed it while the
+    file index (which lists names) did change. A rolling blake2b of the
+    walked relative paths folds the rename into the fingerprint. The counts
+    slot must be unchanged across the rename — proving the new hash slot is
+    what catches it.
+    """
+    from agent.context import _project_tree_fingerprint
+
+    rt, _sk, conv = _runtime(str(tmp_path))
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "a.py").write_text("x = 1\n")
+
+    before_a = rt._system_prompt_fingerprint(conv)
+    before_b = rt._system_prompt_fingerprint(conv)
+    assert before_a == before_b
+    counts_a = _project_tree_fingerprint(str(tmp_path))[1]
+
+    (pkg / "a.py").rename(pkg / "b.py")
+
+    assert rt._system_prompt_fingerprint(conv) != before_a
+    assert _project_tree_fingerprint(str(tmp_path))[1] == counts_a
