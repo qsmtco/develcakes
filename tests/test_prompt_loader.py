@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from utils.prompt_loader import load_prompt_template, fill_template, compose_system_prompt, SYSTEM_DIR
+from utils.prompt_loader import (
+    SYSTEM_DIR,
+    compose_system_prompt,
+    fill_template,
+    load_prompt_template,
+)
 
 
 class TestLoadPromptTemplate:
@@ -219,7 +224,7 @@ class TestVariableContractIntegration:
 
     def test_project_awareness_template_variables_match_dict(self):
         """All {{VAR}} in project-awareness.md must be covered by build_awareness_dict."""
-        from utils.prompt_loader import load_prompt_template, _VAR_RE
+        from utils.prompt_loader import _VAR_RE, load_prompt_template
         template = load_prompt_template("project-awareness")
         assert template is not None, "project-awareness.md not found"
 
@@ -239,7 +244,7 @@ class TestVariableContractIntegration:
 
     def test_default_template_variables_match_dict(self):
         """All {{VAR}} in default.md must be covered by compose_system_prompt variables."""
-        from utils.prompt_loader import load_prompt_template, _VAR_RE
+        from utils.prompt_loader import _VAR_RE, load_prompt_template
         template = load_prompt_template("default")
         assert template is not None, "default.md not found"
 
@@ -254,7 +259,7 @@ class TestVariableContractIntegration:
         assert not unresolved, f"Template variables not in compose dict: {unresolved}"
 
     def test_coder_template_variables_match_dict(self):
-        from utils.prompt_loader import load_prompt_template, _VAR_RE
+        from utils.prompt_loader import _VAR_RE, load_prompt_template
         template = load_prompt_template("coder")
         assert template is not None, "coder.md not found"
 
@@ -269,7 +274,7 @@ class TestVariableContractIntegration:
         assert not unresolved, f"Template variables not in compose dict: {unresolved}"
 
     def test_debugger_template_variables_match_dict(self):
-        from utils.prompt_loader import load_prompt_template, _VAR_RE
+        from utils.prompt_loader import _VAR_RE, load_prompt_template
         template = load_prompt_template("debugger")
         assert template is not None, "debugger.md not found"
 
@@ -518,7 +523,13 @@ class TestSystemPromptBudget:
             assert "file.txt" in prompt
 
     def test_core_files_preserved_at_end(self):
-        """README, AGENTS are preserved even when the file context is truncated."""
+        """README, AGENTS are preserved even when the file context is truncated.
+
+        Pinned to context_mode="preload": core-file body preservation is a
+        preload-path behavior. "auto" on a 50k window resolves to hybrid,
+        which lists core files as read_file stubs and never inlines bodies
+        (agent/context.py build_file_context_with_core_files).
+        """
         with tempfile.TemporaryDirectory() as proj:
             (Path(proj) / "huge.txt").write_text("x" * 50_000)
             (Path(proj) / "README.md").write_text("# Project Readme")
@@ -526,6 +537,7 @@ class TestSystemPromptBudget:
             prompt = compose_system_prompt(
                 agent_name="Coder", agent_role="coder",
                 project_path=proj, model_max_tokens=50_000,
+                context_mode="preload",
             )
             assert "Project Readme" in prompt
             assert "Agent Specs" in prompt

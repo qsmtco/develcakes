@@ -23,10 +23,6 @@ If this project recently completed a workflow phase, suggest the next phase to t
 
 Keep suggestions brief — one line. Don't repeat if already suggested this session.
 
-## Agent Communication (A2A)
-
-When consulting other agents via `/ask @Agent "question"`, payloads are capped at **4,096 characters**. Use `\"` for literal quotes and `\\` for literal backslashes. Slash commands need no closing delimiter — just the `/` prefix. For large content, write to a file and reference the path instead. See `prompts/system/collab.md` for the full protocol.
-
 ## Current State
 {{CURRENT_STATE}}
 

@@ -1,18 +1,14 @@
 # CrabCakes Commands Reference
 
-These are **CrabCakes slash commands**, typed in the project feed chat input. They are NOT shell/terminal commands — do not run them in a terminal.
-
-All commands start with `/`. Syntax: `/command args`, `@agent` mentions, `#task` refs, `— text` for freeform body.
-
-## Quick reference
+Slash commands typed in the project feed chat input — **not** shell commands; never run them in a terminal. All start with `/`: `/command args`, `@agent` mentions, `#task` refs, `— text` for a freeform body.
 
 | Cmd | Args | What |
 |-----|------|------|
-| `/ask` | `@agent — q` | Ask agent a question. Alias `/a`. |
-| `/delegate` | `@agent — task` | Assign work. Alias `/d`. |
-| `/tell` | `@agent — info` | Share info, no response expected. |
-| `/stop` | (none) | Stop current agent. |
-| `/work` | `subcommand …` | Work Unit commands (see below). |
+| `/ask` | `@agent "q"` | Ask an agent a question. Alias `/a`. |
+| `/delegate` | `@agent "task"` | Assign work. Alias `/d`. |
+| `/tell` | `@agent "info"` | Share info; no response expected. |
+| `/stop` | (none) | Stop the current agent. |
+| `/work` | `subcommand …` | Work Unit commands (below). |
 | `/review` | (none) | Git checkpoint. |
 | `/check` | (none) | Show diff since checkpoint. |
 | `/accept` | `[--file path]` | Accept changes. |
@@ -22,48 +18,23 @@ All commands start with `/`. Syntax: `/command args`, `@agent` mentions, `#task`
 | `/cost` | (none) | Spending summary. |
 | `/help` | `[command]` | Help. Alias `/?`. |
 
-## Work Unit commands (`/work`)
+## Work Units (`/work`)
 
-Work Units live in `.crabcakes/work.json`; `.crabcakes/tasks.md` is a generated summary, not a source of truth.
+State lives in `.crabcakes/work.json`; `.crabcakes/tasks.md` is a generated summary, not a source of truth.
 
-| Command | What |
-|---------|------|
-| `/work "Title"` | Create a Work Unit (status `draft`). |
-| `/work list` | List all Work Units. |
-| `/work start #N` | Start a Work Unit — validates its spec file + deps, then hands off to the Supervisor (implementation loop). |
-| `/work done #N — notes` | Complete a Work Unit. |
-| `/work blocked #N — reason` | Block a Work Unit. |
-| `/work unblock #N` | Clear a blocker; restore to spec-ready (PM/Supervisor only). |
-| `/work cancel #N` | Cancel a Work Unit. |
-| `/work assign #N @agent` | Assign supervisor/builder/auditor. |
-| `/work priority #N level` | Set priority (low/med/high/critical). |
-| `/work spec-ready #N <path>` | Validate the spec path and mark ready (PM/Supervisor only). |
-| `/work status #N` | Show a Work Unit's status. |
+Subcommands: `/work "Title"` (create, status `draft`) · `/work list` · `/work start #N` (validate the spec file + deps, then hand off to the Supervisor) · `/work done #N — notes` · `/work blocked #N — reason` · `/work unblock #N` (clear a blocker, restore to spec-ready; PM/Supervisor only) · `/work cancel #N` · `/work assign #N @agent` (supervisor/builder/auditor) · `/work priority #N level` (low/med/high/critical) · `/work spec-ready #N <path>` (validate the spec path; PM/Supervisor only) · `/work status #N`
 
-**Do NOT use `/task add` in a terminal — that command does not exist.** `@mentions` in commands route to specific agents; they do NOT trigger @mention notifications.
+**There is no `/task add` — that command does not exist.** `@mentions` in a command route to a specific agent; they do **not** trigger @mention notifications.
 
 ### Legacy aliases
 
-The old task-centric commands are still accepted and route to the Work Handler:
-
-| Legacy command | Maps to |
-|----------------|---------|
-| `/task` | `/work` (create) |
-| `/tasks` | `/work list` |
-| `/start` | `/work start` |
-| `/done` | `/work done` |
-| `/blocked` | `/work blocked` |
-| `/cancel` | `/work cancel` |
-| `/assign` | `/work assign` |
-| `/priority` | `/work priority` |
+The legacy task-centric commands are still accepted and route to the Work Handler: `/task` → `/work` (create), `/tasks` → `/work list`, `/start` → `/work start`, `/done` → `/work done`, `/blocked` → `/work blocked`, `/cancel` → `/work cancel`, `/assign` → `/work assign`, `/priority` → `/work priority`.
 
 The legacy `/t` alias for `/task` is **gone** (SPEC-TASK-SYSTEM-FULL-REDESIGN §5.1) — use `/work`.
 
-## Crabcards — Project Feed Cards
+## Crabcards
 
-When you modify project files, emit a crabcard so the PM can review in the Project Feed.
-
-### Format
+Emit a crabcard when you modify a project file, so the PM can review it in the Project Feed.
 
     ```crabcard
     type: diff
@@ -76,28 +47,8 @@ When you modify project files, emit a crabcard so the PM can review in the Proje
     + new line
     ```
 
-### Required
-- `type` — always `diff` when changing files
-- `title` — short description
-
-### Optional
-- `file` — relative path
-- `additions` / `deletions` — line counts
-- `commit_sha`, `task_id`
-
-### When to emit
-
-| Action | Card type | Required? |
-|--------|-----------|-----------|
-| Write/modify a file | `diff` | **Yes** — include actual diff |
-| Delete a file | `diff` | **Yes** — show removed lines |
-| Start/complete a task | `agent_action` | Optional |
-| Decision or finding | `agent_action` | Optional |
-
-Do NOT emit for `file_created/modified/deleted` (CrabWatch detects), `git_commit` (auto), `system` (internal).
-
-### Diff body
-Unified diff with `+`/`-` prefixes. Context lines have no prefix.
-
-    - def old(): return None
-    + def new(): return True
+- **Required:** `type` (always `diff` when changing files) and `title`.
+- **Optional:** `file`, `additions`, `deletions`, `commit_sha`, `task_id`.
+- Emit `diff` for a write **or** a delete (show the removed lines). `agent_action` is optional for task start/complete, decisions, and findings.
+- Do **not** emit for `file_created/modified/deleted` (CrabWatch detects those), `git_commit` (auto), or `system` (internal).
+- Diff body: unified diff, `+`/`-` prefixes, context lines unprefixed.
