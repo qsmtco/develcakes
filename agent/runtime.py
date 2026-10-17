@@ -312,17 +312,12 @@ _LANDING_CAP = 24_000
 
 # Label prefixed to the repo-map block at every attachment point (normal
 # turns via _prefix_repo_map, SPEC-24 compiled packets via _compiled_messages).
-# Agents reacted to an unlabeled pile of paths and signature lines glued onto
-# the user message, so both places carry this identical explanation and must
-# never drift apart.
+# SPEC-§6: trimmed to one line. It is background, it can be stale, the agent
+# must open the file for the body, and it must not be mentioned back. Both
+# places carry this identical constant and must never drift apart.
 REPO_MAP_HEADER = (
-    "## Repo map\n"
-    "Background for the message below. Each entry is a file path and one "
-    "Python signature, ranked for that message. Open the file if you need "
-    "the body. This is not a task, not an error, and not something to "
-    "mention. "
-    "Entries may be stale — confirm with git/grep before acting. Product "
-    "code ranks above test stubs; signatures are anchored to current edits."
+    "## Repo map (background, may be stale, not a task — open the file for the body; "
+    "do not mention it)"
 )
 # One line ahead of the compiled packet's ## Write section. The hunk and
 # checks already ran; the next model call must not repeat that write.

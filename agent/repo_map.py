@@ -24,6 +24,11 @@ _LINE_CAP = 200
 _RECENCY_COMMITS = 50        # commits considered "recent" for the recency bonus
 _RECENCY_WEIGHT = 3.0        # personalization weight for recently-committed files
 _STUB_PENALTY = 0.1          # multiplier for mock/stub defs in test files
+# SPEC-§6: every tests/ path sorts behind product code. A test node keeps
+# whatever score the graph gave it, multiplied down, so a goal that names a
+# test file or a test function can still lift it into view. Demote, never drop.
+_TEST_DIR_PENALTY = 0.25
+_TEST_DIR = "tests/"
 _DIRTY_WEIGHT = 50.0
 _HUNK_LINE_CAP = 20_000
 _DELETED_SIG = "(deleted)"
@@ -53,6 +58,182 @@ _PARSE_CACHE: dict[str, tuple] = {}
 _PARSE_LOCAL = threading.local()
 _LANG = None
 _LANG_FAILED = False
+
+# SPEC-§6 walk cache. Keyed on (project_path, tree_fingerprint). Holds the
+# goal-independent inputs to a build: the def/ref walk, the git metadata, and
+# the derived graph (nodes, by_name, edges). A new goal re-enters with the same
+# fingerprint and only re-ranks and re-renders. The fingerprint is a stat
+# sweep, so it is far cheaper than the walk it guards and it changes on a
+# commit, a checkout, or any on-disk edit.
+_WALK_CACHE: dict[tuple, _WalkInputs] = {}
+_WALK_CACHE_CAP = 4
+# Guards _WALK_CACHE for reads, writes, and eviction. build_repo_map can be
+# called from the worker thread and the GTK main thread at the same time; a
+# torn or missing entry must never produce a wrong map, only a slower one.
+_WALK_CACHE_LOCK = threading.Lock()
+
+
+class _WalkInputs:
+    """Goal-independent build inputs, computed once per tree fingerprint.
+
+    Attributes are populated in ``_build_walk_inputs``; this class exists so
+    the cache stores one object per (project, fingerprint) rather than a loose
+    tuple that every caller has to index.
+    """
+
+    __slots__ = (
+        "anchors",
+        "by_name",
+        "defs",
+        "deleted",
+        "dirty",
+        "edge_index",
+        "edges",
+        "graph_nodes",
+        "node_pos",
+        "nodes",
+        "out_degree",
+        "present",
+        "recent",
+        "refs",
+    )
+
+    def __init__(self) -> None:
+        self.defs: list = []
+        self.refs: list = []
+        self.dirty: set[str] = set()
+        self.recent: set[str] = set()
+        self.anchors: dict = {}
+        self.present: set[str] = set()
+        self.deleted: set[str] = set()
+        self.nodes: dict[str, tuple] = {}
+        self.by_name: dict[str, list[str]] = {}
+        self.edges: list[tuple[str, str]] = []
+        self.graph_nodes: list[str] = []
+        self.out_degree: dict[str, int] = {}
+        # SPEC-§6 warm-path index, derived once per tree fingerprint so
+        # ``_rank_inputs`` never re-resolves node names inside the PageRank
+        # loop. ``edge_index`` is (src_pos, dst_pos, out_degree) aligned with
+        # ``edges``; ``node_pos`` maps a graph node to its vector slot.
+        self.edge_index: list[tuple[int, int, int]] = []
+        self.node_pos: dict[str, int] = {}
+
+
+def _tree_fingerprint(project_path: str) -> str:
+    """Cheap stat-only identity for the current tree state.
+
+    Deliberately does not shell out to git: it must stay cheaper than the walk
+    it guards, and a HEAD change alters every tracked file's stat, so commits
+    and checkouts are caught without paying for a subprocess. When stat is
+    unavailable or the sweep is empty the fingerprint still changes, so the
+    worst case is a rebuild rather than a stale map.
+    """
+    parts: list[tuple] = []
+    try:
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".") and d not in _PRUNE_DIRS
+            ]
+            rel_root = os.path.relpath(root, project_path)
+            if rel_root == ".":
+                rel_root = ""
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                abs_path = os.path.join(root, name)
+                try:
+                    st = os.stat(abs_path)
+                except OSError:
+                    parts.append((abs_path, None))
+                    continue
+                parts.append((rel_root, name, st.st_mtime_ns, st.st_size))
+    except OSError:
+        return "unreadable"
+    if not parts:
+        return "empty"
+    digest = hash(tuple(sorted(parts)))
+    return f"{len(parts)}:{digest}"
+
+
+def _build_walk_inputs(project_path: str) -> _WalkInputs:
+    """Run the expensive goal-independent half of a build.
+
+    This is the cold path: git metadata, diff anchors, the tree-sitter walk,
+    and the graph derived from it. ``build_repo_map`` reaches this only on a
+    fingerprint miss.
+    """
+    inputs = _WalkInputs()
+    lang = _language()
+    if lang is None:
+        return inputs
+    inputs.dirty, inputs.recent = _git_metadata(project_path)
+    inputs.anchors = _diff_anchors(project_path, inputs.dirty)
+    inputs.defs, inputs.refs = _walk(project_path, lang)
+    inputs.present = {rel for rel, _name, _sig, _line_no in inputs.defs}
+    for rel in inputs.dirty:
+        if rel in inputs.present:
+            continue
+        abs_path = os.path.join(project_path, *rel.split("/"))
+        if not os.path.isfile(abs_path):
+            inputs.deleted.add(rel)
+    nodes = inputs.nodes
+    by_name = inputs.by_name
+    for rel, name, line, line_no in inputs.defs:
+        node = f"{rel}:{name}"
+        nodes[node] = (rel, name, line, line_no)
+        by_name.setdefault(name, []).append(node)
+    for rel in inputs.deleted:
+        if not isinstance(rel, str) or not rel:
+            continue
+        node = f"{rel}:{_DELETED_SIG}"
+        nodes.setdefault(node, (rel, _DELETED_SIG, _DELETED_SIG, 0))
+    edges: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for rel, name in inputs.refs:
+        targets = by_name.get(name) or []
+        if len(targets) != 1:
+            continue
+        dst = targets[0]
+        if rel == nodes[dst][0]:
+            continue
+        key = (rel, dst)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(key)
+    inputs.edges = edges
+    graph_nodes = set(nodes)
+    graph_nodes.update(src for src, _dst in edges)
+    inputs.graph_nodes = sorted(graph_nodes)
+    out_degree = inputs.out_degree
+    for src, _dst in edges:
+        out_degree[src] = out_degree.get(src, 0) + 1
+    return inputs
+
+
+def _walk_inputs(project_path: str) -> _WalkInputs:
+    """Cached goal-independent inputs for ``project_path``.
+
+    The fingerprint is computed under the lock, then the cache is checked and
+    possibly repopulated. The lock is held across the cold build so two threads
+    arriving together do not both walk the tree; the second one then finds a
+    warm entry and returns immediately.
+    """
+    fingerprint = _tree_fingerprint(project_path)
+    key = (project_path, fingerprint)
+    with _WALK_CACHE_LOCK:
+        cached = _WALK_CACHE.get(key)
+        if cached is not None:
+            return cached
+        inputs = _build_walk_inputs(project_path)
+        if len(_WALK_CACHE) >= _WALK_CACHE_CAP:
+            # Drop the oldest insertion; dicts preserve insertion order. The
+            # previous fingerprint for the same project is now stale anyway.
+            oldest = next(iter(_WALK_CACHE))
+            _WALK_CACHE.pop(oldest, None)
+        _WALK_CACHE[key] = inputs
+        return inputs
 
 
 def _language():
@@ -183,8 +364,7 @@ def _hunk_range(header: str) -> tuple[int, int] | None:
     start = int(match.group(1))
     raw_count = match.group(2)
     count = 1 if raw_count is None else int(raw_count)
-    if start < 1:
-        start = 1
+    start = max(start, 1)
     if count <= 0:
         return (start, start)
     count = min(count, _HUNK_LINE_CAP)
@@ -342,51 +522,31 @@ def _walk(project_path: str, lang) -> tuple[list, list]:
     return defs, refs
 
 
-def _rank(defs: list, refs: list, goal: str, git_meta=None, anchors=None, deleted=None) -> list:
-    """Score every def. Returns ``(rel, name, signature, line_no)`` best first.
+def _rank_inputs(inputs: _WalkInputs, goal: str) -> list:
+    """Score every def in ``inputs``. Returns ``(rel, name, sig, line_no)`` best first.
 
-    ``anchors`` is accepted so the build call site can pass diff hunks
-    through. Selection uses every def in the file, so it runs in ``_render``
-    rather than on this ranked list. ``_render`` caps only the clean tail
-    at ``_TOP_N``. A deleted path is one synthetic node with the dirty
-    weight, so it sorts with the other dirty files instead of after them.
+    This is the warm half of a build: it touches only the cached graph, never
+    the filesystem or a subprocess, so a new goal on an unchanged tree costs
+    this function alone.
+
+    Selection uses every def in the file, so capping happens in ``_render``
+    rather than on this ranked list. ``_render`` caps only the clean tail at
+    ``_TOP_N``. A deleted path is one synthetic node with the dirty weight, so
+    it sorts with the other dirty files instead of after them.
     """
-    del anchors
-    by_name: dict[str, list[str]] = {}
-    nodes: dict[str, tuple] = {}
-    for rel, name, line, line_no in defs:
-        node = f"{rel}:{name}"
-        nodes[node] = (rel, name, line, line_no)
-        by_name.setdefault(name, []).append(node)
-    for rel in deleted or ():
-        if not isinstance(rel, str) or not rel:
-            continue
-        node = f"{rel}:{_DELETED_SIG}"
-        nodes.setdefault(node, (rel, _DELETED_SIG, _DELETED_SIG, 0))
-    edges: set[tuple[str, str]] = set()
-    for rel, name in refs:
-        targets = by_name.get(name) or []
-        if len(targets) != 1:
-            continue
-        src = rel
-        dst = targets[0]
-        if src == dst:
-            continue
-        edges.add((src, dst))
-    goal_names = {m.group(0) for m in _GOAL_NAME.finditer(goal or "") if len(m.group(0)) >= 3}
-    graph_nodes = set(nodes)
-    graph_nodes.update(src for src, _dst in edges)
+    nodes = inputs.nodes
     if not nodes:
         return []
-    dirty_paths: set[str] = set()
-    recent_paths: set[str] = set()
-    if git_meta:
-        dirty_paths, recent_paths = git_meta
+    goal_names = {m.group(0) for m in _GOAL_NAME.finditer(goal or "") if len(m.group(0)) >= 3}
+    graph_nodes = inputs.graph_nodes
+    dirty_paths = inputs.dirty
+    recent_paths = inputs.recent
     personal = {}
     for node in graph_nodes:
         weight = 1.0
-        if node in nodes:
-            rel, name = nodes[node][0], nodes[node][1]
+        entry = nodes.get(node)
+        if entry is not None:
+            rel, name = entry[0], entry[1]
             if name in goal_names:
                 weight = 10.0
             if rel in dirty_paths:
@@ -396,21 +556,88 @@ def _rank(defs: list, refs: list, goal: str, git_meta=None, anchors=None, delete
         personal[node] = weight
     total = sum(personal.values()) or 1.0
     personal = {node: weight / total for node, weight in personal.items()}
-    out_degree: dict[str, int] = {}
-    for src, _dst in edges:
-        out_degree[src] = out_degree.get(src, 0) + 1
+    out_degree = inputs.out_degree
     score = dict(personal)
     for _ in range(_ITERATIONS):
         new = {node: (1 - _DAMPING) * personal[node] for node in graph_nodes}
-        for src, dst in edges:
+        for src, dst in inputs.edges:
             degree = out_degree.get(src) or 1
             new[dst] = new.get(dst, 0.0) + _DAMPING * score.get(src, 0.0) / degree
         score = new
     for node, (rel, name, _line, _line_no) in nodes.items():
-        if rel.startswith("tests/") and _looks_like_stub(name):
+        if not rel.startswith(_TEST_DIR):
+            continue
+        if _looks_like_stub(name):
             score[node] = score.get(node, 0.0) * _STUB_PENALTY
+        else:
+            # SPEC-§6: demote, never drop. The node keeps its graph score
+            # multiplied down, so a goal that names a test file or a test
+            # function still lifts it into view, and _TOP_N can still reach it.
+            score[node] = score.get(node, 0.0) * _TEST_DIR_PENALTY
     ordered = sorted(nodes, key=lambda node: (-score.get(node, 0.0), node))
     return [nodes[node] for node in ordered]
+
+
+def _rank(defs: list, refs: list, goal: str, git_meta=None, anchors=None, deleted=None) -> list:
+    """Score every def. Returns ``(rel, name, signature, line_no)`` best first.
+
+    The direct-list entry point, kept for callers and tests that hand it raw
+    ``defs``/``refs``. It assembles the same ``_WalkInputs`` the cached path
+    uses and defers to ``_rank_inputs``, so both share one ranking.
+    """
+    del anchors
+    inputs = _WalkInputs()
+    inputs.defs = defs
+    inputs.refs = refs
+    if git_meta:
+        inputs.dirty, inputs.recent = git_meta
+    if deleted:
+        inputs.deleted = set(deleted)
+    _derive_graph(inputs)
+    return _rank_inputs(inputs, goal)
+
+
+def _derive_graph(inputs: _WalkInputs) -> None:
+    """Populate nodes/by_name/edges/graph_nodes/out_degree from defs+refs+deleted.
+
+    Split out of ``_build_walk_inputs`` so the direct ``_rank`` path builds the
+    identical graph the cached path serves. An edge source is the *calling
+    file* path and an edge target is a ``rel:name`` def node, so the
+    self-reference test compares the caller's path against the target's path,
+    not against the node string.
+    """
+    nodes = inputs.nodes
+    by_name = inputs.by_name
+    for rel, name, line, line_no in inputs.defs:
+        node = f"{rel}:{name}"
+        nodes[node] = (rel, name, line, line_no)
+        by_name.setdefault(name, []).append(node)
+    for rel in inputs.deleted:
+        if not isinstance(rel, str) or not rel:
+            continue
+        node = f"{rel}:{_DELETED_SIG}"
+        nodes.setdefault(node, (rel, _DELETED_SIG, _DELETED_SIG, 0))
+    edges: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for rel, name in inputs.refs:
+        targets = by_name.get(name) or []
+        if len(targets) != 1:
+            continue
+        dst = targets[0]
+        if rel == nodes[dst][0]:
+            continue
+        key = (rel, dst)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(key)
+    inputs.edges = edges
+    graph_nodes = set(nodes)
+    graph_nodes.update(src for src, _dst in edges)
+    inputs.graph_nodes = sorted(graph_nodes)
+    out_degree = inputs.out_degree
+    for src, _dst in edges:
+        out_degree[src] = out_degree.get(src, 0) + 1
 
 
 def _overlap(line_no: int, end: int | None, start: int, stop: int) -> int:
@@ -443,9 +670,7 @@ def _anchored_def(file_defs: list, hunks: list):
     last = len(file_defs) - 1
     for index, (name, sig, line_no) in enumerate(file_defs):
         if index < last:
-            end = file_defs[index + 1][2]
-            if end < line_no:
-                end = line_no
+            end = max(file_defs[index + 1][2], line_no)
         else:
             end = None
         spans.append((name, sig, line_no, end))
@@ -510,8 +735,8 @@ def _display_entries(ranked: list, anchors, dirty, defs, goal: str) -> list:
     by_file: dict[str, list] = {}
     for rel, name, sig, line_no in defs or ():
         by_file.setdefault(rel, []).append((name, sig, line_no))
-    for rel in by_file:
-        by_file[rel].sort(key=lambda item: (item[2], item[0]))
+    for file_defs in by_file.values():
+        file_defs.sort(key=lambda item: (item[2], item[0]))
     fallback: dict[str, tuple] = {}
     for rel, name, sig, line_no in ranked:
         fallback.setdefault(rel, (rel, name, sig, line_no))
@@ -582,29 +807,23 @@ def build_repo_map(project_path: str, goal: str) -> str:
     if not isinstance(goal, str):
         goal = ""
     try:
-        lang = _language()
-        if lang is None:
+        if _language() is None:
             return ""
-        dirty, recent = _git_metadata(project_path)
-        anchors = _diff_anchors(project_path, dirty)
-        defs, refs = _walk(project_path, lang)
-        present = {rel for rel, _name, _sig, _line_no in defs}
-        deleted = set()
-        for rel in dirty:
-            if rel in present:
-                continue
-            abs_path = os.path.join(project_path, *rel.split("/"))
-            if not os.path.isfile(abs_path):
-                deleted.add(rel)
-        ranked = _rank(
-            defs, refs, goal, git_meta=(dirty, recent), anchors=anchors, deleted=deleted,
-        )
+        # SPEC-§6: the git metadata, diff anchors, tree-sitter walk, and the
+        # graph derived from them are all goal-independent, so they are cached
+        # on (project, tree fingerprint). A new goal on an unchanged tree
+        # re-enters warm and pays only the rank + render below.
+        inputs = _walk_inputs(project_path)
+        ranked = _rank_inputs(inputs, goal)
         if not ranked:
             return ""
         # Dirty files rank first. Their signature follows the hunk, or a
         # goal-name match when the file has no hunks. A deleted path is a
         # scored dirty node, not a tail entry. The decision model is not called.
-        return _render(ranked, anchors=anchors, dirty=dirty, defs=defs, goal=goal)
+        return _render(
+            ranked, anchors=inputs.anchors, dirty=inputs.dirty,
+            defs=inputs.defs, goal=goal,
+        )
     except Exception:
         _logger.warning("build_repo_map failed", exc_info=True)
         return ""
