@@ -17,7 +17,7 @@ from gi.repository import Gtk, Gio, GLib
 
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER
 from models.providers import ProviderConfig
-from utils.agent_defs import VALID_COMPACTION_STRATEGIES
+from utils.agent_defs import VALID_COMPACTION_STRATEGIES, merge_preserved_tools
 from utils.mcp_config import load_mcp_servers, MCPConfigError
 
 
@@ -58,6 +58,11 @@ class AgentBuilderDialog:
         self._tool_checks: dict[str, Gtk.CheckButton] = {}
         self._tool_count_label: Gtk.Label | None = None
         self._mcp_checks: dict[str, Gtk.CheckButton] = {}
+        # Bugfix C3 (audit BUG #3): tools the load path cannot tick because
+        # they have no Builder checkbox (B4 hides file_search). Stashed by
+        # _fill_form, merged back by _get_selected_tools, so a save never
+        # silently drops the B1 replay permit from the yaml.
+        self._hidden_tools_preserved: set[str] = set()
         self._providers: list = []  # list[ProviderConfig] — populated via set_provider_options()
 
         # ── Window setup ──────────────────────────────────────────────
@@ -620,7 +625,11 @@ class AgentBuilderDialog:
         self._tool_count_label.set_label(f"{selected}/{total} tools")
 
     def _get_selected_tools(self) -> list[str]:
-        return [name for name, check in self._tool_checks.items() if check.get_active()]
+        visible_ticked = [name for name, check in self._tool_checks.items() if check.get_active()]
+        # Bugfix C3 (audit BUG #3): re-attach tools preserved from the loaded
+        # yaml that have no Builder checkbox (B4 hides file_search), so an
+        # unrelated edit + save never drops the B1 replay permit.
+        return merge_preserved_tools(visible_ticked, self._hidden_tools_preserved)
 
     # ── MCP Servers section ────────────────────────────────────────────
 
@@ -713,6 +722,14 @@ class AgentBuilderDialog:
         selected_tools = set(agent_def.get("tools", []))
         for name, check in self._tool_checks.items():
             check.set_active(name in selected_tools)
+
+        # Bugfix C3 (audit BUG #3): tools the Builder cannot show (B4 hides
+        # file_search) have no checkbox, so the loop above never ticks them
+        # and a save would silently drop them from the yaml. Stash the
+        # subset so _get_selected_tools can merge it back. Assigning (not
+        # extending) also resets the stash whenever a different agent def —
+        # or none — is loaded, so permits never leak across sessions.
+        self._hidden_tools_preserved = selected_tools - set(self._tool_checks)
 
         self._update_tool_count()
 

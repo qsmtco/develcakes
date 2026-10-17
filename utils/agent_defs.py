@@ -512,6 +512,39 @@ def get_available_tools() -> list[dict]:
         return []
 
 
+def merge_preserved_tools(
+    visible_ticked: list[str] | set[str],
+    hidden_preserved: str | set[str] | list[str],
+) -> list[str]:
+    """Merge Builder-visible ticked tools with tools preserved from the yaml.
+
+    Bugfix C3 (audit BUG #3): the Builder hides some tools (B4 hides
+    file_search), so an agent def can carry tools no checkbox represents.
+    On load, AgentBuilderDialog stashes those in ``_hidden_tools_preserved``;
+    on save it passes the visible ticks plus the stash here so the yaml
+    never silently drops them.
+
+    Deduplicates, preserves first-seen order (visible tools first), and
+    tolerates non-string junk defensively so a malformed stash can never
+    corrupt the saved tools list.
+
+    Pure function — no GTK, no I/O. GTK-free tests live in
+    tests/test_agent_builder_preserve_tools.py.
+    """
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    for name in list(visible_ticked) + list(hidden_preserved):
+        if not isinstance(name, str) or not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        merged.append(name)
+
+    return merged
+
+
 def get_available_prompts() -> list[dict]:
     """Scan prompts/ directory for .md files → [{name, filepath}].
 
