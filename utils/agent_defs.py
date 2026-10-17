@@ -410,11 +410,17 @@ def validate_agent_def(agent_def: dict) -> list[str]:
             from agent.tools import _API_SCHEMA_HIDDEN
             known_names = {t["name"] for t in get_available_tools()} | set(_API_SCHEMA_HIDDEN)
         except ImportError:
-            logger.warning("agent.tools unavailable — validating visible tools only")
-            known_names = {t["name"] for t in get_available_tools()}
-        for tool_name in tools:
-            if tool_name not in known_names:
-                errors.append(f"Unknown tool: {tool_name}")
+            # Bugfix C5 (audit BUG #4): get_available_tools() swallows its own
+            # ImportError and returns [], so validating against it here would
+            # reject every tool as "Unknown tool". Skip the check instead —
+            # this branch is only reachable with a broken install, and a hard
+            # fail of every agent def is actively misleading there.
+            logger.warning("agent.tools unavailable — skipping tool-name validation")
+            known_names = None
+        if known_names is not None:
+            for tool_name in tools:
+                if tool_name not in known_names:
+                    errors.append(f"Unknown tool: {tool_name}")
 
     # Validate prompt files exist
     if isinstance(prompts, list):

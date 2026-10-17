@@ -5,9 +5,9 @@
 # Uses temp directories for file I/O tests.
 
 import json
+import logging
 import os
-import tempfile
-import shutil
+import sys
 
 import pytest
 
@@ -295,13 +295,45 @@ class TestValidateAgentDef:
         assert "file_search" not in names
         assert "search_files" in names
 
+    def test_import_failure_skips_tool_validation_c5(self, monkeypatch, tmp_path, caplog):
+        """Bugfix C5 (audit BUG #4): with agent.tools unimportable,
+        get_available_tools() swallows its own ImportError and returns [],
+        so validating against it would flag every tool "Unknown tool".
+        The fallback must skip the name check (and log why) instead."""
+        monkeypatch.setitem(sys.modules, "agent.tools", None)
+        assert ad.get_available_tools() == []  # the bug's premise: empty set
+
+        # Hermetic provider check: validate_agent_def's llm_name validation
+        # reads providers.yaml, so "openrouter" must exist there regardless
+        # of the developer's real config (same setup as test_unknown_provider).
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
+        save_providers([
+            ProviderConfig(name="openrouter", base_url="https://openrouter.ai/api/v1",
+                           api_key="sk-test", default_model="deepseek/deepseek-v4-pro"),
+        ])
+
+        agent = {
+            "name": "BrokenInstall",
+            "prompts": ["system/coder.md"],
+            "tools": ["read_file"],
+            "llm_name": "openrouter",
+            "fallback_provider": "openrouter",
+        }
+        with caplog.at_level(logging.WARNING, logger="utils.agent_defs"):
+            errors = ad.validate_agent_def(agent)
+        assert errors == []
+        assert not any("Unknown tool" in e for e in errors)
+        assert any("skipping tool-name validation" in r.message for r in caplog.records)
+
     def test_unknown_provider(self, monkeypatch, tmp_path):
         # Set up providers.yaml so get_available_providers returns known names
         config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
-        from utils.providers_store import save_providers
         from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
         save_providers([
             ProviderConfig(name="minimax", base_url="https://api.minimax.chat/v1",
                            api_key="sk-test", default_model="MiniMax-M2.7"),
@@ -369,8 +401,8 @@ class TestAvailableOptions:
         config_dir = str(tmp_path / ".config" / "develcakes")  # SPEC-11 D4
         os.makedirs(config_dir, exist_ok=True)
         monkeypatch.setenv("HOME", str(tmp_path))
-        from utils.providers_store import save_providers
         from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
         save_providers([
             ProviderConfig(name="openrouter", base_url="https://openrouter.ai/api/v1",
                            api_key="sk-test", default_model="deepseek/deepseek-v4-pro"),
