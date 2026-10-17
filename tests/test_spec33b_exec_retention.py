@@ -115,7 +115,8 @@ def test_panic_stubs_previous_turn_exec(tmp_path):
     )
     bodies = _tool_bodies(conv)
     assert n == 1
-    assert bodies[0].startswith("[compacted \u2014 exec_command output, ")
+    assert bodies[0].startswith("[compacted \u2014 exec_command ")
+    assert "chars removed" not in bodies[0]
     assert "re-run to restore" not in bodies[0]
     assert "re-read to restore" not in bodies[0]
     assert bodies[1] == "kept\n"

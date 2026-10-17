@@ -165,7 +165,7 @@ def test_no_new_tool_name():
     names = {item["function"]["name"] for item in get_tool_definitions_for_api()}
     assert names == {
         "read_file", "write_file", "edit_file", "exec_command", "list_files",
-        "search_files", "file_search", "web_search", "web_fetch", "provider_events",
+        "search_files", "web_search", "web_fetch", "provider_events",
     }
 
 

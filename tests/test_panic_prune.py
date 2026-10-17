@@ -37,7 +37,8 @@ def test_panic_stubs_only_before_the_last_user_message():
     n = DefaultContextStrategy().panic_prune(conv, protect_paths=())
     assert n == 1
     tools = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
-    assert tools[0].startswith("[compacted \u2014 read_file output, ")
+    assert tools[0].startswith("[compacted \u2014 read_file ")
+    assert "chars removed" not in tools[0]
     assert tools[1] == _body()
 
 

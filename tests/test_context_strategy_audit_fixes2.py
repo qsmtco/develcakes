@@ -129,7 +129,7 @@ class TestFix13NoRedundantCacheInvalidation:
         # tokens_freed equals tokens_before - tokens_after.
         assert freed == tokens_before - tokens_after
         # And the stubbed message has correct content.
-        assert "[compacted \u2014 search output," in conv.messages[1].content
+        assert conv.messages[1].content == "[compacted \u2014 search 5000]"
 
 
 # ── Fix 14: _summary uses conv.get_token_estimate() not token_budget ──────────
