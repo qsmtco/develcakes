@@ -290,6 +290,23 @@ def _include_docs() -> bool:
     """Whether to include the docs/ directory in file context. Defaults False."""
     return get_env("INCLUDE_DOCS") == "1"
 
+
+# Non-text extensions: build_file_index neither lists nor line-counts these
+# (CONTEXT-EFFICIENCY-INSTRUCTIONS §1). Newline counts on binaries were
+# garbage ("A PNG was reported as 139 lines") and the reads were pure waste.
+BINARY_EXTENSIONS = frozenset({
+    "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tar",
+    "wasm", "so", "dll", "exe",
+})
+
+# Top-level directories that lose file-index slots to source directories
+# (CONTEXT-EFFICIENCY-INSTRUCTIONS §1): they are listed only after every
+# other top-level directory, and size is a tiebreak within — not across — a
+# directory. docs/ is normally walked away entirely (EXCLUDED_DIRS); it stays
+# deprioritized when explicitly included via _include_docs().
+LOW_PRIORITY_DIRS = frozenset({"tests", "docs", "prompts"})
+
+
 def _read_key_files(project_path: str) -> str:
     """
     Read key project files for context: README, ARCHITECTURE, package.json, etc.
@@ -498,7 +515,7 @@ def resolve_context_mode(
 def build_file_index(
     project_path: str,
     max_entries: int = 200,
-    include_line_counts: bool = True,
+    include_line_counts: bool = False,
 ) -> str:
     """Build a compact file index for the system prompt.
 
@@ -507,11 +524,28 @@ def build_file_index(
     size + (optionally) line count. Capped at max_entries; if more files exist,
     appends a directory-level summary.
 
+    Per CONTEXT-EFFICIENCY-INSTRUCTIONS §1:
+      - EXCLUDED_DIRS (docs/) are pruned DURING the walk unless
+        DEVELCAKES_INCLUDE_DOCS=1, so an excluded subtree never consumes a
+        slot in the max_entries cut.
+      - Non-text files (BINARY_EXTENSIONS) are neither listed nor line-counted.
+      - Ranking is tiered: source directories first, then repo-root files,
+        then LOW_PRIORITY_DIRS (tests/, docs/, prompts/). Size is a tiebreak
+        WITHIN a directory, not the global sort key. Root files sit in their
+        own middle tier so a scratch file at the repo root cannot outrank a
+        large source file just because '(' sorts below every letter.
+      - The default path does NOT open file bodies: sizes come from stat only.
+        Line counts cost a full read per file (up to 1MB each) to produce
+        numbers the model does not act on, and they were what put a 305KB test
+        file at the top of the list.
+
     Args:
         project_path: Absolute path to the project root.
         max_entries: Maximum number of files to list (default 200).
-        include_line_counts: Whether to count lines per file (default True).
-            Setting False reduces I/O for very large projects.
+        include_line_counts: Whether to count lines per file (default False).
+            OFF by default so the system-prompt path stays stat-only. Callers
+            that genuinely need per-file line counts opt in explicitly and pay
+            the read cost.
 
     Returns:
         Formatted text block. Empty string if project_path is invalid.
@@ -520,10 +554,18 @@ def build_file_index(
         return ""
 
     patterns = _load_gitignore_patterns(project_path)
+    include_docs = _include_docs()
+
+    # Directory-level pruning happens DURING the walk, so an excluded subtree
+    # can never consume a slot in the max_entries cut
+    # (CONTEXT-EFFICIENCY-INSTRUCTIONS §1). Matches _build_directory_tree, so
+    # the index and the tree no longer disagree about docs/.
+    skip_dirs = {"__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".tox"}
+    if not include_docs:
+        skip_dirs |= EXCLUDED_DIRS
 
     # Collect all files
-    all_files: list[tuple[str, int]] = []  # (rel_path, size)
-    dir_stats: dict[str, list[int]] = {}   # top_dir -> [file_count, total_size]
+    all_files: list[tuple[str, int, str]] = []  # (rel_path, size, top_dir)
 
     for root, dirs, files in os.walk(project_path):
         rel_root = os.path.relpath(root, project_path)
@@ -531,15 +573,16 @@ def build_file_index(
             dirs[:] = []
             continue
 
-        dirs[:] = [
-            d for d in dirs
-            if not d.startswith(".") and d not in {
-                "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".tox",
-            }
-        ]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip_dirs]
 
         for name in files:
             if name.startswith("."):
+                continue
+            # Non-text files are neither listed nor line-counted. A PNG read
+            # for newlines was reported as "139 lines" — garbage that cost a
+            # full file read per image.
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext in BINARY_EXTENSIONS:
                 continue
             rel_path = os.path.join(rel_root, name) if rel_root != "." else name
             if _is_ignored(rel_path, project_path, patterns):
@@ -548,20 +591,30 @@ def build_file_index(
                 size = os.path.getsize(os.path.join(root, name))
             except OSError:
                 size = 0
-            all_files.append((rel_path, size))
 
-            # Track directory stats for large-project summary
             top_dir = rel_path.split("/")[0] if "/" in rel_path else "(root)"
-            if top_dir not in dir_stats:
-                dir_stats[top_dir] = [0, 0]
-            dir_stats[top_dir][0] += 1
-            dir_stats[top_dir][1] += size
+            all_files.append((rel_path, size, top_dir))
 
     if not all_files:
         return ""
 
-    # Sort by size descending
-    all_files.sort(key=lambda x: x[1], reverse=True)
+    # Rank in three tiers (CONTEXT-EFFICIENCY BUG #1 fix):
+    #   tier 0 — source directories (not "(root)", not in LOW_PRIORITY_DIRS)
+    #   tier 1 — repo-root files (top_dir == "(root)")
+    #   tier 2 — LOW_PRIORITY_DIRS (tests/, docs/, prompts/)
+    # Within a tier, size is a tiebreak WITHIN a directory, not the global
+    # sort key. The previous two-tier key ranked "(root)" ahead of every
+    # source directory because '(' (ASCII 40) sorts below all letters AND the
+    # sentinel is not in LOW_PRIORITY_DIRS — so a 1KB scratch file at the repo
+    # root outranked agent/runtime.py (192KB).
+    def _tier(top_dir: str) -> int:
+        if top_dir == "(root)":
+            return 1
+        if top_dir in LOW_PRIORITY_DIRS:
+            return 2
+        return 0
+
+    all_files.sort(key=lambda x: (_tier(x[2]), x[2], -x[1]))
 
     # Determine which files to show and which are truncated
     shown_files = all_files[:max_entries]
@@ -569,7 +622,7 @@ def build_file_index(
 
     # Group shown files by extension
     ext_groups: dict[str, list[tuple[str, int]]] = {}
-    for rel_path, size in shown_files:
+    for rel_path, size, _top_dir in shown_files:
         if "." in os.path.basename(rel_path):
             ext = rel_path.rsplit(".", 1)[-1].lower()
         else:
@@ -622,7 +675,7 @@ def build_file_index(
         omitted_count = len(omitted_files)
         # Recompute dir stats for omitted files only
         omitted_dirs: dict[str, list[int]] = {}
-        for rel_path, size in omitted_files:
+        for rel_path, size, _top_dir in omitted_files:
             top_dir = rel_path.split("/")[0] if "/" in rel_path else "(root)"
             if top_dir not in omitted_dirs:
                 omitted_dirs[top_dir] = [0, 0]
@@ -641,7 +694,11 @@ def build_file_index(
                 ts_str = f"{ts // (1024 * 1024)}MB"
             pad = max(2, 20 - len(dir_name))
             lines.append(f"{dir_name}/{'.' * pad}{fc:,} files / {ts_str}")
-        lines.append('[Use file_search("symbol") to find specific files within these directories.]')
+        # search_files, not file_search: Coder and Debugger have search_files
+        # and do NOT have file_search, so naming file_search here pointed the
+        # agent at a tool it cannot call
+        # (CONTEXT-EFFICIENCY-INSTRUCTIONS §1).
+        lines.append('[Use search_files to grep these directories, or list_files to walk them.]')
         lines.append("")
 
     return "\n".join(lines)

@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import subprocess
 
-from agent.repo_map import _HUNK_LINE_CAP, _diff_anchors, _git_metadata, _hunk_range, build_repo_map
+from agent.repo_map import (
+    _HUNK_LINE_CAP,
+    _diff_anchors,
+    _git_metadata,
+    _hunk_range,
+    build_repo_map,
+)
 from agent.runtime import REPO_MAP_HEADER, WRITE_REPLAY_PREAMBLE, AgentRuntime
 from models.conversation import Conversation
 from tests.test_agent_runtime import _make_cfg
-from utils.project_awareness import build_awareness_dict, init_project_config, record_fact
 from utils.git_ops import get_head_sha
+from utils.project_awareness import (
+    build_awareness_dict,
+    init_project_config,
+    record_fact,
+)
 
 
 def _git_init(path):
@@ -293,9 +303,12 @@ def test_tree_version_invalidates_cache(tmp_path):
 
 
 def test_preambles_present(tmp_path):
-    assert "This is not a task, not an error" in REPO_MAP_HEADER
-    assert "Entries may be stale — confirm with git/grep before acting." in REPO_MAP_HEADER
-    assert "signatures are anchored to current edits." in REPO_MAP_HEADER
+    # SPEC-§6: REPO_MAP_HEADER is trimmed to one line — background, may be
+    # stale, open the file for the body, do not mention it.
+    assert "background" in REPO_MAP_HEADER
+    assert "may be stale" in REPO_MAP_HEADER
+    assert "open the file for the body" in REPO_MAP_HEADER
+    assert "\n" not in REPO_MAP_HEADER
 
     _git_init(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n")

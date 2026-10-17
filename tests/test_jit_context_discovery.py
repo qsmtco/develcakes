@@ -144,17 +144,100 @@ class TestBuildFileIndex:
             assert "### PY" in idx or "### py" in idx
             assert "### MD" in idx or "### md" in idx or "### Markdown" in idx
 
-    def test_build_file_index_sorted_by_size(self):
-        """Within a group, largest files first."""
+    def test_build_file_index_small_source_survives_docs_and_png_cut(self):
+        """§1: a small source file is listed; docs/ and .png rows are absent.
+
+        Replaces the old pure-size-order test. A size sort put giant
+        tests/ and docs/ files at the top and pushed small source files into
+        the "1,355 more" bucket — that WAS the bug. docs/ is now pruned during
+        the walk and BINARY_EXTENSIONS are never listed, so the small source
+        file must survive while neither of those appears.
+        """
         with tempfile.TemporaryDirectory() as proj:
+            os.makedirs(os.path.join(proj, "docs"))
             with open(os.path.join(proj, "small.py"), 'w') as f:
                 f.write("x\n")
-            with open(os.path.join(proj, "big.py"), 'w') as f:
-                f.write("x" * 5000 + "\n")
+            with open(os.path.join(proj, "docs", "guide.md"), 'w') as f:
+                f.write("# guide\n" * 2000)
+            with open(os.path.join(proj, "logo.png"), 'wb') as f:
+                f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 5000)
+
             idx = build_file_index(proj)
-            big_pos = idx.index("big.py")
-            small_pos = idx.index("small.py")
-            assert big_pos < small_pos, "big.py should appear before small.py"
+            assert "small.py" in idx, "small source file must be listed"
+            assert "guide.md" not in idx, (
+                "EXCLUDED_DIRS (docs/) must be pruned during the walk, "
+                "not after the 200-slot cut (§1)"
+            )
+            assert "logo.png" not in idx, (
+                "BINARY_EXTENSIONS must never be listed (§1)"
+            )
+
+    def test_build_file_index_ranks_source_above_low_priority_dirs(self):
+        """§1: tests/ and prompts/ lose slots to source directories.
+
+        Size is a tiebreak WITHIN a directory, not the global sort key. A
+        300KB test file must not outrank a 10-byte source file just because
+        it is bigger.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            os.makedirs(os.path.join(proj, "tests"))
+            os.makedirs(os.path.join(proj, "prompts"))
+            with open(os.path.join(proj, "tiny.py"), 'w') as f:
+                f.write("x = 1\n")
+            with open(os.path.join(proj, "tests", "huge.py"), 'w') as f:
+                f.write("x" * 300_000 + "\n")
+            with open(os.path.join(proj, "prompts", "big.md"), 'w') as f:
+                f.write("prompt\n" * 20_000)
+
+            # max_entries=1 leaves exactly one row: the source file.
+            idx = build_file_index(proj, max_entries=1)
+            assert "tiny.py" in idx, (
+                "source directory must win the last slot over a 300KB "
+                "tests/ file (LOW_PRIORITY_DIRS, §1)"
+            )
+            assert "huge.py" not in idx
+            assert "big.md" not in idx
+
+    def test_build_file_index_root_file_loses_to_source_dir(self):
+        """Debugger regression (Batch A item 1): a tiny scratch file at the
+        repo root must not outrank a large source file. The old two-tier key
+        ranked "(root)" ahead of every source directory because '(' (ASCII
+        40) sorts below all letters AND the sentinel is not in
+        LOW_PRIORITY_DIRS — live proof: tmp_measure_tools.py (1KB) beat
+        agent/runtime.py (192KB). Root files are tier 1, source dirs tier 0.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            os.makedirs(os.path.join(proj, "agent"))
+            with open(os.path.join(proj, "tmp_measure_tools.py"), 'w') as f:
+                f.write("x = 1\n")
+            with open(os.path.join(proj, "agent", "runtime.py"), 'w') as f:
+                f.write("x" * 192_000 + "\n")
+
+            # max_entries=1 leaves exactly one row: the agent/ source file.
+            idx = build_file_index(proj, max_entries=1)
+            assert os.path.join("agent", "runtime.py") in idx, (
+                "source directory file must win the slot over a tiny "
+                "repo-root scratch file (tier 0 source dirs beat tier 1 "
+                "root files)"
+            )
+            assert "tmp_measure_tools.py" not in idx
+
+    def test_build_file_index_includes_docs_when_env_override_set(
+        self, tmp_path, monkeypatch
+    ):
+        """§1: DEVELCAKES_INCLUDE_DOCS=1 restores docs/ (and still demotes it)."""
+        os.makedirs(tmp_path / "docs")
+        (tmp_path / "docs" / "guide.md").write_text("# guide\n")
+        (tmp_path / "app.py").write_text("x = 1\n")
+
+        monkeypatch.setenv("DEVELCAKES_INCLUDE_DOCS", "1")
+        idx = build_file_index(str(tmp_path))
+        assert "guide.md" in idx, "override must re-admit docs/"
+
+        # Still deprioritized: with one slot, source wins over docs/.
+        idx_one = build_file_index(str(tmp_path), max_entries=1)
+        assert "app.py" in idx_one
+        assert "guide.md" not in idx_one
 
     def test_build_file_index_handles_invalid_path(self):
         """Empty string for missing directory."""
@@ -401,10 +484,27 @@ class TestFileSearchToolRegistration:
         tool_names = [t.name for t in get_all_tools()]
         assert "file_search" in tool_names
 
-    def test_file_search_tool_description_includes_when_to_use(self):
-        """Description contains 'WHEN TO USE'."""
+    def test_file_search_description_states_result_not_essay(self):
+        """Description says what it returns — no WHEN TO USE/WHEN NOT TO USE essays.
+
+        CONTEXT-EFFICIENCY-INSTRUCTIONS §2 deletes the multi-paragraph
+        heading block from every tool description (they ride on every API
+        call) and requires the replacement to state what the tool returns
+        and the limit that matters. For file_search that is the grouping by
+        file and the short preview.
+        """
         ft = next(t for t in get_all_tools() if t.name == "file_search")
-        assert "WHEN TO USE" in ft.description
+        assert ft.description, "description must not be empty"
+        assert "WHEN TO USE" not in ft.description, (
+            "WHEN TO USE essay headings were removed from tool descriptions "
+            "(CONTEXT-EFFICIENCY-INSTRUCTIONS §2)"
+        )
+        assert "WHEN NOT TO USE" not in ft.description
+        assert "COMMON PATTERNS" not in ft.description
+        assert "read_file" in ft.description, (
+            "must point at read_file for the full body — the description "
+            "states the result, the preview is capped, the body is not read"
+        )
 
     def test_file_search_tool_requires_query(self):
         """JSON schema marks 'query' as required."""
@@ -643,7 +743,13 @@ class TestBuildFileIndexBinary:
     """Spec §7: build_file_index handles binary files gracefully."""
 
     def test_build_file_index_handles_binary_files(self):
-        """build_file_index skips line count for binary files without crashing."""
+        """build_file_index skips line count for binary files without crashing.
+
+        Line counts are OFF on the default path (CONTEXT-EFFICIENCY-INSTRUCTIONS
+        §1: the system-prompt path is stat-only and must not read file bodies),
+        so this opts in explicitly to exercise the line-count branch — that is
+        where a binary read can blow up.
+        """
         with tempfile.TemporaryDirectory() as proj:
             # Create a binary file
             with open(os.path.join(proj, "data.bin"), "wb") as f:
@@ -652,9 +758,21 @@ class TestBuildFileIndexBinary:
             with open(os.path.join(proj, "code.py"), "w") as f:
                 f.write("x = 1\n")
 
-            result = build_file_index(proj)
+            result = build_file_index(proj, include_line_counts=True)
             assert isinstance(result, str)
             # Binary file should appear in index (by extension)
             assert "data.bin" in result or "data" in result
             # Python file should have line count
             assert "1 lines" in result
+
+    def test_build_file_index_default_path_is_stat_only(self):
+        """Default call reads no file bodies — no line counts in the output."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "code.py"), "w") as f:
+                f.write("x = 1\n")
+            idx = build_file_index(proj)
+            assert "code.py" in idx
+            assert "lines" not in idx, (
+                "default path must not read file bodies for line counts "
+                "(CONTEXT-EFFICIENCY-INSTRUCTIONS §1)"
+            )
