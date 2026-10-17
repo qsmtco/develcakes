@@ -4,15 +4,11 @@
 # Covers: init, load/save team, load/save context, awareness block building,
 # tech stack detection, legacy migration.
 
-import json
 import os
-import pytest
 
 from models.team import ProjectTeam, TeamMember
 from models.work_unit import WorkUnit, WorkUnitStore
 from utils.project_awareness import (
-    CRABCAKES_DIR_NAME,
-    CONTEXT_READ_CAP,
     _ensure_crabcakes_dir,
     _get_task_info,
     append_project_context,
@@ -28,7 +24,6 @@ from utils.project_awareness import (
     load_project_context,
     load_project_manifest,
     load_team,
-    save_awareness_snapshot,
     save_project_context,
     save_team,
 )
@@ -387,6 +382,47 @@ class TestAwarenessCaps:
         assert len(state) <= CURRENT_STATE_MAX_CHARS + len("\n") + len(marker), \
             f"CURRENT_STATE length {len(state)} exceeds cap+marker"
 
+    def test_workflow_status_capped_keeps_tail(self, tmp_path):
+        """A long workflow.md is capped at 2,000 chars, keeping the TAIL.
+
+        The current phase lives at the end of workflow.md, so head-truncation
+        would drop exactly the part the agent needs. See
+        CONTEXT-EFFICIENCY-INSTRUCTIONS §9.
+        """
+        from utils.project_awareness import WORKFLOW_STATUS_MAX_CHARS
+        init_project_config(str(tmp_path), "testproj")
+        wf_dir = get_crabcakes_dir(str(tmp_path))
+        os.makedirs(wf_dir, exist_ok=True)
+        # Head marker must be cut; tail marker must survive.
+        with open(os.path.join(wf_dir, "workflow.md"), "w", encoding="utf-8") as f:
+            f.write("HEAD_MARKER_SHOULD_BE_CUT\n")
+            f.write("F" * (WORKFLOW_STATUS_MAX_CHARS * 2))
+            f.write("\nTAIL_MARKER_CURRENT_PHASE_MUST_SURVIVE\n")
+
+        d = build_awareness_dict(str(tmp_path))
+        wf = d["WORKFLOW_STATUS"]
+        marker = "[... workflow status truncated ...]"
+        assert marker in wf, f"Expected truncation marker. Length was {len(wf)}"
+        assert "TAIL_MARKER_CURRENT_PHASE_MUST_SURVIVE" in wf, \
+            "Tail (current phase) must survive truncation"
+        assert "HEAD_MARKER_SHOULD_BE_CUT" not in wf, \
+            "Head must be dropped when the value is capped"
+        assert len(wf) <= WORKFLOW_STATUS_MAX_CHARS + len("\n") + len(marker), \
+            f"WORKFLOW_STATUS length {len(wf)} exceeds cap+marker"
+
+    def test_workflow_status_uncapped_when_small(self, tmp_path):
+        """A short workflow.md passes through verbatim — no marker, no cut."""
+        init_project_config(str(tmp_path), "testproj")
+        wf_dir = get_crabcakes_dir(str(tmp_path))
+        os.makedirs(wf_dir, exist_ok=True)
+        body = "## Phase History\n| 0 | onboarding | done |\n"
+        with open(os.path.join(wf_dir, "workflow.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+
+        d = build_awareness_dict(str(tmp_path))
+        assert d["WORKFLOW_STATUS"] == body
+        assert "truncated" not in d["WORKFLOW_STATUS"]
+
 
 class TestAwarenessCacheFixes:
     """Regression tests for audit BUG #2 (staleness) and BUG #3 (alias)."""
@@ -396,6 +432,8 @@ class TestAwarenessCacheFixes:
         init_project_config(str(tmp_path), "p")
         save_project_context(str(tmp_path), "## Task1 complete\n")
         d1 = build_awareness_dict(str(tmp_path))
+        assert d1["CURRENT_TASK"] == "Task1 complete", \
+            f"Baseline wrong: {d1['CURRENT_TASK']!r}"
         # Write again immediately (same filesystem second)
         save_project_context(str(tmp_path), "## Task1 complete\n\n## Task2 in progress\n")
         d2 = build_awareness_dict(str(tmp_path))
@@ -425,6 +463,8 @@ class TestAwarenessCacheFixes:
         assert len(content_a) == len(content_b)
         save_project_context(str(tmp_path), content_a)
         d1 = build_awareness_dict(str(tmp_path))
+        assert d1["CURRENT_TASK"] == "Task A complete now", \
+            f"Baseline wrong: {d1['CURRENT_TASK']!r}"
         # Grab the reference mtime BEFORE the second write
         crab_dir = os.path.join(str(tmp_path), ".crabcakes")
         all_paths = [crab_dir] + [

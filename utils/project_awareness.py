@@ -96,6 +96,10 @@ def _awareness_dir_mtime(project_path: str) -> float:
 # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.4.
 TEAM_ROSTER_MAX_CHARS = 500
 CURRENT_STATE_MAX_CHARS = 1000
+# SPEC-§9: workflow.md was injected whole on every turn, and it lives in the
+# template half that _apply_system_prompt_budget never truncates. A long
+# workflow file grew the prompt without bound.
+WORKFLOW_STATUS_MAX_CHARS = 2000
 
 
 # ── Path helpers ─────────────────────────────────────────────────────────────
@@ -1170,6 +1174,26 @@ def detect_tech_stack(project_path: str) -> list[str]:
 # ── Awareness dict (for prompt_loader template variables) ────────────────
 
 
+def awareness_content_fingerprint(project_path: str) -> str:
+    """SHA1 over the awareness inputs (context.md + facts.json contents).
+
+    Cheap to call repeatedly: reads two small files and hashes them. Used by
+    build_awareness_dict's cache key and by AgentRuntime's system-prompt
+    fingerprint, so both invalidate together when `.crabcakes/` content
+    changes. Never raises on missing files — missing pieces hash as b"".
+    """
+    ctx = load_project_context(project_path)
+    facts = b""
+    try:
+        with open(_facts_path(project_path), "rb") as facts_file:
+            facts = facts_file.read()
+    except OSError:
+        facts = b""
+    return hashlib.sha1(
+        ctx.encode("utf-8", errors="replace") + b"\0" + facts
+    ).hexdigest()
+
+
 def build_awareness_dict(project_path: str) -> dict[str, str]:
     """Return awareness data as a dict of template variables.
 
@@ -1184,16 +1208,7 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         # Cache key includes context.md content hash (SHA1) so same-second writes
         # with different content invalidate the cache (filesystem mtime is
         # typically 1-second granularity). See FIX audit BUG #2 + BUG #8.
-        _ctx_for_fp = load_project_context(project_path)
-        _facts_for_fp = b""
-        try:
-            with open(_facts_path(project_path), "rb") as _facts_file:
-                _facts_for_fp = _facts_file.read()
-        except OSError:
-            _facts_for_fp = b""
-        _content_fp = hashlib.sha1(
-            _ctx_for_fp.encode("utf-8", errors="replace") + b"\0" + _facts_for_fp
-        ).hexdigest()
+        _content_fp = awareness_content_fingerprint(project_path)
         if cached and cached[0] >= mtime and cached[2] == _content_fp:
             return cached[1]
 
@@ -1274,7 +1289,17 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
     try:
         from utils.workflow_state import get_workflow_content
         wf = get_workflow_content(project_path)
-        parts["WORKFLOW_STATUS"] = wf if wf.strip() else "(workflow.md not yet initialized)"
+        if not wf.strip():
+            parts["WORKFLOW_STATUS"] = "(workflow.md not yet initialized)"
+        elif len(wf) > WORKFLOW_STATUS_MAX_CHARS:
+            # Keep the TAIL: the current phase is at the end of workflow.md,
+            # and that is what the agent needs to act on.
+            parts["WORKFLOW_STATUS"] = (
+                wf[-WORKFLOW_STATUS_MAX_CHARS:]
+                + "\n[... workflow status truncated ...]"
+            )
+        else:
+            parts["WORKFLOW_STATUS"] = wf
     except Exception:
         parts["WORKFLOW_STATUS"] = "(workflow state unavailable)"
 
