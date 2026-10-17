@@ -163,7 +163,7 @@ class TestFix4BackwardWalkParent:
         strategy.prune_tool_outputs(conv, target_tokens=100, protect_turns=0)
         # The stub should say "search", not "tool".
         tool_result = conv.messages[3]
-        assert "[compacted \u2014 search output," in tool_result.content, (
+        assert tool_result.content == "[compacted \u2014 search 5000]", (
             f"Expected tool name 'search' in stub, got: {tool_result.content}"
         )
 
@@ -175,7 +175,7 @@ class TestFix4BackwardWalkParent:
         conv.add_tool_result("call_1", "x" * 5000)
         strategy = DefaultContextStrategy()
         strategy.prune_tool_outputs(conv, target_tokens=100, protect_turns=0)
-        assert "[compacted \u2014 exec_command output," in conv.messages[1].content
+        assert conv.messages[1].content == "[compacted \u2014 exec_command 5000]"
 
     def test_no_parent_falls_back_to_unknown_tool(self):
         """Orphaned TOOL_RESULT (no parent) gets generic '[unknown tool]' name.
@@ -192,7 +192,7 @@ class TestFix4BackwardWalkParent:
         ))
         strategy = DefaultContextStrategy()
         strategy.prune_tool_outputs(conv, target_tokens=100, protect_turns=0)
-        assert "[compacted \u2014 [unknown tool] output," in conv.messages[1].content
+        assert conv.messages[1].content == "[compacted \u2014 [unknown tool] 5000]"
 
 
 # ── Fix 5: _fit_summary token-based truncation ─────────────────────────────────
@@ -475,6 +475,8 @@ class TestInterleavedMessages:
         # Check that both stubbed messages reference the correct tool.
         stubbed = [m for m in conv.messages if m.content.startswith("[compacted")]
         for msg in stubbed:
-            assert msg.content.startswith("[compacted \u2014") and (
-                "search output" in msg.content or "read output" in msg.content
+            assert (
+                msg.content.startswith("[compacted \u2014 search ")
+                or msg.content.startswith("[compacted \u2014 read ")
             ), f"Unexpected stub: {msg.content}"
+            assert "chars removed" not in msg.content

@@ -11,6 +11,7 @@
 import inspect
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
@@ -25,7 +26,9 @@ from agent.tools import (
     _file_search,
     _run_grep,
     _search_files,
+    execute_tool,
     get_all_tools,
+    get_tool_definitions_for_api,
 )
 from models.providers import (
     ProviderConfig,
@@ -88,19 +91,20 @@ class TestResolveContextMode:
         assert resolve_context_mode("preload", 1_000_000) == "preload"
 
     def test_resolve_context_mode_small_window_jit(self):
-        """Small window (<=32K) resolves to jit."""
+        """Known windows from 1 through 128K resolve to jit."""
         assert resolve_context_mode("auto", 32_000) == "jit"
         assert resolve_context_mode("auto", 16_000) == "jit"
+        assert resolve_context_mode("auto", 128_000) == "jit"
 
     def test_resolve_context_mode_typical_window_hybrid(self):
-        """Typical window (128K-256K) resolves to hybrid."""
-        assert resolve_context_mode("auto", 128_000) == "hybrid"
+        """A window above 128K resolves to hybrid. 128K itself is jit."""
         assert resolve_context_mode("auto", 200_000) == "hybrid"
 
     def test_resolve_context_mode_auto_no_model_returns_hybrid(self):
-        """model_max_tokens=None defaults to 128K → hybrid."""
+        """None, 0, and negative stay hybrid. They are not classified as 128K."""
         assert resolve_context_mode("auto", None) == "hybrid"
         assert resolve_context_mode("auto", 0) == "hybrid"
+        assert resolve_context_mode("auto", -1) == "hybrid"
 
     def test_resolve_context_mode_invalid_raises(self):
         """Invalid mode string raises ValueError."""
@@ -304,6 +308,42 @@ class TestBuildFileContextModes:
             result = build_file_context_with_core_files(proj, context_mode="jit")
             assert "File index" in result
             assert "# Test Project" not in result  # no file contents
+            assert "## Project prompts" not in result  # no prompts/ directory
+
+    def test_hybrid_and_jit_list_prompt_names_not_bodies(self):
+        """Prompt stems are listed. Bodies are not read or inlined."""
+        with tempfile.TemporaryDirectory() as proj:
+            prompts = os.path.join(proj, ".crabcakes", "prompts")
+            os.makedirs(prompts)
+            sentence = "UNIQUE_PROMPT_BODY_SENTENCE_z9"
+            for stem in ("alpha", "beta", "gamma"):
+                body = sentence if stem == "beta" else "small"
+                with open(os.path.join(prompts, f"{stem}.md"), "w", encoding="utf-8") as fh:
+                    fh.write(body + "\n")
+            with open(os.path.join(prompts, "huge.md"), "wb") as fh:
+                fh.write(b"H" * (20 * 1024 + 1))
+            opened: list[str] = []
+            real_open = open
+
+            def tracking(file, *args, **kwargs):
+                opened.append(os.fspath(file))
+                return real_open(file, *args, **kwargs)
+
+            with patch("builtins.open", tracking):
+                hybrid = build_file_context_with_core_files(proj, context_mode="hybrid")
+                jit = build_file_context_with_core_files(proj, context_mode="jit")
+            for result in (hybrid, jit):
+                assert "## Project prompts" in result
+                for stem in ("alpha", "beta", "gamma"):
+                    assert stem in result
+                assert "huge" not in result
+                assert sentence not in result
+                assert "## .crabcakes/prompts/" not in result
+            prompt_hits = [
+                path for path in opened
+                if os.path.basename(path) in {"alpha.md", "beta.md", "gamma.md", "huge.md"}
+            ]
+            assert prompt_hits == []
 
     def test_build_file_context_hybrid_mode_stubs_core_files(self):
         """Hybrid mode is a stub line per core file plus the index. No body."""
@@ -484,27 +524,40 @@ class TestFileSearchToolRegistration:
         tool_names = [t.name for t in get_all_tools()]
         assert "file_search" in tool_names
 
-    def test_file_search_description_states_result_not_essay(self):
-        """Description says what it returns — no WHEN TO USE/WHEN NOT TO USE essays.
+    def test_search_files_is_the_only_search_schema(self):
+        """The model sees search_files once. file_search still executes.
 
-        CONTEXT-EFFICIENCY-INSTRUCTIONS §2 deletes the multi-paragraph
-        heading block from every tool description (they ride on every API
-        call) and requires the replacement to state what the tool returns
-        and the limit that matters. For file_search that is the grouping by
-        file and the short preview.
+        Both names call the same function, so one fixture returns the same
+        grouped shape, and the hit file is not opened to count lines.
         """
-        ft = next(t for t in get_all_tools() if t.name == "file_search")
-        assert ft.description, "description must not be empty"
-        assert "WHEN TO USE" not in ft.description, (
-            "WHEN TO USE essay headings were removed from tool descriptions "
-            "(CONTEXT-EFFICIENCY-INSTRUCTIONS §2)"
-        )
-        assert "WHEN NOT TO USE" not in ft.description
-        assert "COMMON PATTERNS" not in ft.description
-        assert "read_file" in ft.description, (
-            "must point at read_file for the full body — the description "
-            "states the result, the preview is capped, the body is not read"
-        )
+        defs = get_tool_definitions_for_api()
+        names = [item["function"]["name"] for item in defs]
+        assert names.count("search_files") == 1
+        assert "file_search" not in names
+        with tempfile.TemporaryDirectory() as proj:
+            hit = os.path.join(proj, "mod.py")
+            with open(hit, "w", encoding="utf-8") as fh:
+                fh.write("UNIQUE_SENTINEL_42\n")
+            opened: list[str] = []
+            real_open = open
+
+            def tracking(file, *args, **kwargs):
+                opened.append(os.fspath(file))
+                return real_open(file, *args, **kwargs)
+
+            with patch("builtins.open", tracking):
+                by_search = execute_tool(
+                    "search_files", {"pattern": "UNIQUE_SENTINEL_42"}, proj,
+                )
+                by_file = execute_tool(
+                    "file_search", {"query": "UNIQUE_SENTINEL_42"}, proj,
+                )
+            assert by_search.success and by_file.success
+            assert by_search.output == by_file.output
+            assert "mod.py" in by_search.output
+            assert "UNIQUE_SENTINEL_42" in by_search.output
+            assert "(no matches)" not in by_search.output
+            assert not any(path.endswith("mod.py") for path in opened)
 
     def test_file_search_tool_requires_query(self):
         """JSON schema marks 'query' as required."""
@@ -612,7 +665,7 @@ class TestBuildSystemPromptContextMode:
 
 class TestEdgeCases:
     def test_context_mode_auto_with_none_model_max(self):
-        """auto + model_max_tokens=None → hybrid (128K default)."""
+        """auto + an unknown window stays hybrid. None is not the 128K default."""
         assert resolve_context_mode("auto", None) == "hybrid"
 
     def test_file_search_empty_query_returns_error(self):
@@ -733,10 +786,10 @@ class TestPerSessionContextMode:
         # The mode is fixed: same inputs always produce same output
         mode1 = resolve_context_mode("auto", 128_000)
         mode2 = resolve_context_mode("auto", 128_000)
-        assert mode1 == mode2 == "hybrid"
+        assert mode1 == mode2 == "jit"
         # Verify it's deterministic (no randomness)
         for _ in range(10):
-            assert resolve_context_mode("auto", 128_000) == "hybrid"
+            assert resolve_context_mode("auto", 128_000) == "jit"
 
 
 class TestBuildFileIndexBinary:

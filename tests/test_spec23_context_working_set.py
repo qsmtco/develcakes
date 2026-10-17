@@ -33,8 +33,7 @@ def test_second_identical_read_is_unchanged_notice(tmp_path):
     bodies = _tool_bodies(conv)
     assert bodies[0] == "hello world\n"
     assert bodies[1] == (
-        "[unchanged \u2014 read_file a.txt offset=0 limit=None; "
-        "same mtime and size as the earlier read this turn]"
+        "[unchanged \u2014 read_file a.txt offset=0 limit=None]"
     )
     for msg in conv.messages:
         for tc in msg.tool_calls:
@@ -177,11 +176,12 @@ def test_task_card_waits_until_a_user_message_exists():
     assert msgs == [{"role": "system", "content": "SYS"}]
 
 
-def test_note_task_trims_to_last_2000_on_a_newline(tmp_path):
+def test_note_task_trims_to_last_500_on_a_newline(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
-    rt._note_task(sk, "a" * 1500)
-    rt._note_task(sk, "b" * 1500)
-    assert len(conv.task_card) <= 2000
+    rt._note_task(sk, "a" * 400)
+    rt._note_task(sk, "b" * 400)
+    assert len(conv.task_card) <= 500
+    assert conv.task_card == "b" * 400
     assert conv.task_card.startswith("b")
     assert "\n" not in conv.task_card[:1]
 
@@ -239,3 +239,67 @@ def test_successful_read_appends_task_line(tmp_path):
         2,
     )
     assert conv.task_card == ""
+
+
+def _llm_done(session_key, messages, tools, **kwargs):
+    return _resp("done")
+
+
+def test_system_prompt_rebuilds_only_when_inputs_change(tmp_path):
+    """Two turns on an unchanged project build the prompt once.
+
+    Writing .crabcakes/context.md changes the awareness fingerprint and
+    the next turn builds exactly once more.
+    """
+    from agent.context import build_system_prompt as real_build
+
+    crab = tmp_path / ".crabcakes"
+    crab.mkdir()
+    (crab / "context.md").write_text("# start\n")
+    rt = AgentRuntime(_make_cfg())
+    sk = "special:coder"
+    calls = {"n": 0}
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    rt._running = True
+    with patch("agent.context.build_system_prompt", side_effect=counting):
+        rt.create_conversation(
+            "Coder", sk, str(tmp_path), agent_role="coder",
+        )
+        assert calls["n"] == 1
+        with patch.object(rt, "_call_llm", _llm_done):
+            rt._run_loop(sk, "first")
+            rt._run_loop(sk, "second")
+        assert calls["n"] == 1
+        (crab / "context.md").write_text("# changed\nunique-awareness-token\n")
+        with patch.object(rt, "_call_llm", _llm_done):
+            rt._run_loop(sk, "third")
+        assert calls["n"] == 2
+
+
+def test_deferred_prompt_builds_once_on_the_first_turn(tmp_path):
+    """defer_prompt_build fills the prompt on the first turn, not twice."""
+    from agent.context import build_system_prompt as real_build
+
+    rt = AgentRuntime(_make_cfg())
+    sk = "special:coder"
+    calls = {"n": 0}
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    rt._running = True
+    with patch("agent.context.build_system_prompt", side_effect=counting):
+        rt.create_conversation(
+            "Coder", sk, str(tmp_path), agent_role="coder",
+            defer_prompt_build=True,
+        )
+        assert calls["n"] == 0
+        with patch.object(rt, "_call_llm", _llm_done):
+            rt._run_loop(sk, "first")
+            rt._run_loop(sk, "second")
+        assert calls["n"] == 1

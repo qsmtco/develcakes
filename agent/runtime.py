@@ -1073,14 +1073,6 @@ class AgentRuntime:
         if model is None:
             model = self._config.default_model
 
-        # Build tool list — use allowed_tools if provided, otherwise all tools
-        from agent.tools import get_all_tools
-        if allowed_tools is not None:
-            all_tools = get_all_tools()
-            tool_names = [t.name for t in all_tools if t.name in allowed_tools]
-        else:
-            tools = get_all_tools()
-            tool_names = [t.name for t in tools]
         # SPEC-38: construct the conversation first, then resolve the budget
         # window FROM IT via the shared resolver — the conversation's provider
         # (model prefix), never a raw max_tokens off the default provider.
@@ -1099,22 +1091,23 @@ class AgentRuntime:
             fallback_model=fallback_model or self._config.fallback_model,
         )
         model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
+        tool_names = self._prompt_tool_names(conv)
 
         if defer_prompt_build:
             system_prompt = ""
         else:
             system_prompt = build_system_prompt(
                 agent_name, project_path, tool_names,
+                review_mode="off",
                 agent_role=agent_role,
                 model_max_tokens=model_max_for_budget,
                 context_mode=context_mode,
             )
-        # TODO: P10.8 — mid-session re-escalation. Currently the system prompt
-        # is built once here and never reassigned. P10.8 will add a
-        # _maybe_rebuild_system_prompt() check in the tool loop that calls
-        # resolve_context_mode(turn_count, token_estimate) before each LLM call
-        # and rebuilds if the effective mode changes.
+        # Rebuilt at the start of a user turn when the prompt inputs change
+        # (_rebuild_system_prompt_if_inputs_changed). Not inside the tool loop.
         conv.system_prompt = system_prompt
+        if system_prompt:
+            conv._system_prompt_fingerprint = self._system_prompt_fingerprint(conv)
 
         with self._lock:
             self._conversations[session_key] = conv
@@ -1141,30 +1134,122 @@ class AgentRuntime:
             return
 
         from agent.context import build_system_prompt
-        from agent.tools import get_all_tools
 
-        tool_names = [t.name for t in get_all_tools() if t.name in (conv.allowed_tools or [])]
-        # SPEC-38: budget window via the shared resolver for THIS conversation's
-        # provider — never a raw max_tokens read off the default provider.
+        # Same arguments create_conversation uses. Fingerprint is taken
+        # after the build so the turn-start check sees the same inputs and
+        # does not build a second time.
         model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
+        tool_names = self._prompt_tool_names(conv)
 
         # build_system_prompt is pure file I/O — safe outside the lock
         new_prompt = build_system_prompt(
             conv.agent_name,
             conv.project_path,
             tool_names,
+            review_mode="off",
             agent_role=conv.agent_role or "",
             model_max_tokens=model_max_for_budget,
             context_mode=context_mode,
         )
+        fingerprint = self._system_prompt_fingerprint(conv)
 
         # Slow path: acquire lock, re-fetch conv, identity check, write
         with self._lock:
             conv_now = self._conversations.get(session_key)
             if conv_now is conv and not conv_now.system_prompt:
                 conv_now.system_prompt = new_prompt
+                conv_now._system_prompt_fingerprint = fingerprint
+                conv_now._token_estimate_cache = None
                 logger.info("System prompt built for %s in background thread (len=%d)",
                             session_key, len(new_prompt))
+
+    def _prompt_tool_names(self, conv: "Conversation") -> list[str]:
+        """Tool names create_conversation passes to build_system_prompt.
+
+        ``allowed_tools is None`` means every registered tool. A list is
+        filtered in registry order.
+        """
+        from agent.tools import get_all_tools
+        all_tools = get_all_tools()
+        if conv.allowed_tools is None:
+            return [t.name for t in all_tools]
+        allowed = conv.allowed_tools
+        return [t.name for t in all_tools if t.name in allowed]
+
+    def _system_prompt_fingerprint(self, conv: "Conversation") -> tuple:
+        """Inputs that change the system prompt.
+
+        Project path, resolved context mode, budget window, role, tool
+        names, review mode, the awareness cache token (``.crabcakes`` mtime
+        plus content hash), and the file-context cache mtime.
+        """
+        from agent.context import _project_root_mtime, resolve_context_mode
+        from utils.project_awareness import (
+            _awareness_dir_mtime,
+            awareness_content_fingerprint,
+        )
+
+        model_max, raw_mode = self._budget_window_and_mode(conv)
+        resolved = resolve_context_mode(raw_mode, model_max)
+        project = conv.project_path or ""
+        if project and os.path.isdir(project):
+            awareness = (
+                _awareness_dir_mtime(project),
+                awareness_content_fingerprint(project),
+            )
+            file_mtime = _project_root_mtime(project)
+        else:
+            awareness = (0.0, "")
+            file_mtime = 0.0
+        return (
+            project,
+            resolved,
+            model_max,
+            conv.agent_role or "",
+            tuple(self._prompt_tool_names(conv)),
+            "off",
+            awareness,
+            file_mtime,
+        )
+
+    def _rebuild_system_prompt_if_inputs_changed(self, session_key: str) -> None:
+        """Rebuild once, at the start of a user turn, when inputs changed.
+
+        A matching fingerprint skips ``build_system_prompt``. A failed build
+        keeps the previous string and the previous fingerprint. Callers must
+        not invoke this inside the tool loop.
+        """
+        conv = self.get_conversation(session_key)
+        if conv is None:
+            return
+        fingerprint = self._system_prompt_fingerprint(conv)
+        if conv.system_prompt and fingerprint == conv._system_prompt_fingerprint:
+            return
+        previous_prompt = conv.system_prompt
+        previous_fp = conv._system_prompt_fingerprint
+        try:
+            from agent.context import build_system_prompt
+            model_max, context_mode = self._budget_window_and_mode(conv)
+            new_prompt = build_system_prompt(
+                conv.agent_name,
+                conv.project_path,
+                self._prompt_tool_names(conv),
+                review_mode="off",
+                agent_role=conv.agent_role or "",
+                model_max_tokens=model_max,
+                context_mode=context_mode,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to rebuild system prompt for %s; keeping previous prompt",
+                session_key,
+            )
+            conv.system_prompt = previous_prompt
+            conv._system_prompt_fingerprint = previous_fp
+            return
+        conv.system_prompt = new_prompt
+        conv._system_prompt_fingerprint = fingerprint
+        conv._token_estimate_cache = None
 
     def get_conversation(self, session_key: str) -> Any | None:  # Conversation | None
         """Get a conversation by session key."""
@@ -1591,6 +1676,12 @@ class AgentRuntime:
                 ))
                 return
 
+            # Once per user turn, before the first model call. The tool loop
+            # below does not call this again, so the prompt stays stable for
+            # a provider prompt cache. An empty prompt was just filled by
+            # _ensure_system_prompt; a matching fingerprint skips a second build.
+            self._rebuild_system_prompt_if_inputs_changed(session_key)
+
             # BUG #21 (redesigned): Fire a dedicated turn-start signal BEFORE
             # any LLM call or tool processing. This guarantees the handler
             # starts the streaming bubble + emits the drawer lifecycle-start
@@ -1732,7 +1823,9 @@ class AgentRuntime:
                     # HTTP 400 rejections (which corrupt conversation state because
                     # the assistant message is already added by the time the error
                     # surfaces). Response reserve accounts for output tokens.
-                    messages = self._messages_for_model(session_key, conv, model_max)
+                    messages = self._messages_for_model(
+                        session_key, conv, model_max, tools,
+                    )
 
                     # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
                     # §2.2 Edit G): transition RUNNING → STREAMING (non-terminal)
@@ -3330,6 +3423,74 @@ class AgentRuntime:
                 total += len(raw)
         return total // 4
 
+    def _wire_text(self, messages: list[dict]) -> str:
+        """The exact text _wire_char_tokens measures, as one string.
+
+        Split out of _wire_char_tokens so the tiktoken path encodes the
+        same bytes the chars//4 path counts. Keep the two in step: a
+        divergence here is exactly the BUG #6 skew.
+        """
+        chunks: list[str] = []
+        for entry in messages:
+            content = entry.get("content") or ""
+            if isinstance(content, str):
+                chunks.append(content)
+            for tc in entry.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                raw = fn.get("arguments") or ""
+                if not isinstance(raw, str):
+                    raw = json.dumps(raw)
+                chunks.append(raw)
+        return "".join(chunks)
+
+    def _compile_token_count(
+        self, conv, messages: list[dict], tools: list | None,
+    ) -> int:
+        """Tokens for one compiled call: wire text + schemas, ONE estimator.
+
+        Debugger audit BUG #5 and BUG #6 (SPEC-24 compiled branch).
+
+        BUG #6 — the two halves used different estimators. The base was
+        always chars//4 (_wire_char_tokens) while _schema_tokens went
+        through tiktoken when installed, so the same JSON was charged at
+        two different rates (measured 2,023 vs 1,019 tokens on one schema
+        blob — a 2x over-count) and the total drifted toward a false
+        over-budget error. The estimator is resolved ONCE here and applied
+        to base and addons together.
+
+        BUG #5 — the task card was never counted on this branch.
+        to_api_messages() prefixes the card onto the last user message
+        and get_token_estimate() counts it, so the plain branch was
+        correct; _compiled_messages() builds its own wire list and does
+        not, so a 2,000-char card rode the wire uncounted.
+
+        The card is counted HERE as an addon rather than folded into
+        _compiled_messages() for one reason: _compiled_messages() is
+        what actually goes on the wire, and it does not carry the card.
+        Counting it here keeps that function honest about what it emits,
+        and the wire stays byte-identical to today's compiled wire.
+        (The repo map needs no addon — _compiled_messages() already
+        embeds it in fact_lines, so the wire text already contains it and
+        the base count covers it. Adding a map addon here would be the
+        double-count requirement (4) warns about.)
+        """
+        from models.conversation import _tiktoken_encoding_for
+        schema_json = json.dumps(tools) if tools else ""
+        card = getattr(conv, "task_card", "") or ""
+        encoding = _tiktoken_encoding_for(getattr(conv, "model", "") or "")
+        if encoding is None:
+            return (
+                self._wire_char_tokens(messages)
+                + len(card) // 4
+                + len(schema_json) // 4
+            )
+        wire = self._wire_text(messages)
+        return (
+            conv._count_text(encoding, wire)
+            + conv._count_text(encoding, card)
+            + conv._count_text(encoding, schema_json)
+        )
+
     def _over_budget_error(self, used: int, model_max: int) -> RuntimeError:
         usage_pct = int((used / model_max) * 100) if model_max > 0 else 0
         return RuntimeError(
@@ -3338,22 +3499,68 @@ class AgentRuntime:
             f"Use /clear to reset or /compact to summarize the conversation."
         )
 
-    def _messages_for_model(self, session_key: str, conv, model_max: int) -> list[dict]:
+    def _addon_tokens(self, conv, text: str) -> int:
+        """Token count for wire text that is not already in the estimate.
+
+        Uses the conversation's tiktoken path when that path is available,
+        and chars // 4 otherwise. Same split as get_token_estimate.
+        """
+        if not text:
+            return 0
+        from models.conversation import _tiktoken_encoding_for
+        encoding = _tiktoken_encoding_for(getattr(conv, "model", "") or "")
+        if encoding is None:
+            return len(text) // 4
+        return conv._count_text(encoding, text)
+
+    def _schema_tokens(self, conv, tools: list | None) -> int:
+        """Tokens for the tool-schema JSON sent beside the messages.
+
+        The schemas are not part of conv.system_prompt and must stay a
+        separate API field. None means the caller is not sending tools.
+        """
+        if not tools:
+            return 0
+        return self._addon_tokens(conv, json.dumps(tools))
+
+    def _messages_for_model(
+        self,
+        session_key: str,
+        conv,
+        model_max: int,
+        tools: list | None = None,
+    ) -> list[dict]:
         """Wire list for the next model call.
 
         After an enforced write, this is the compiled packet plus messages
         appended after that write. Otherwise it is to_api_messages().
+
+        Plain branch: get_token_estimate() already counts the task card,
+        so the map and the tool schemas are added on top of it and the card
+        is not counted again.
+
+        Compiled branch: the wire list is built by _compiled_messages(),
+        which carries the repo map inside fact_lines but no task card, so
+        the count comes from _compile_token_count() — the card added once,
+        the map covered by the wire, one estimator for all of it.
         """
         effective = model_max - self._RESPONSE_RESERVE_TOKENS
         block = self._repo_map_block_for(session_key, conv)
         packet = self._compile.get(session_key)
         if packet is None:
-            post = conv.get_token_estimate()
+            schema_tokens = self._schema_tokens(conv, tools)
+            map_text = ""
+            if block:
+                map_text = REPO_MAP_HEADER + "\n\n" + block + "\n\n"
+            post = conv.get_token_estimate() + self._addon_tokens(conv, map_text) + schema_tokens
             if post >= effective:
                 raise self._over_budget_error(post, model_max)
             return self._prefix_repo_map(conv.to_api_messages(), block)
         messages = self._compiled_messages(conv, packet, block)
-        compiled = self._wire_char_tokens(messages)
+        # The repo map rides inside the packet's fact_lines, so the wire
+        # count already covers it; the card and the schema JSON are the
+        # two addons, both at the same estimator rate as the wire.
+        compiled = self._compile_token_count(conv, messages, tools)
         if compiled >= effective:
             raise self._over_budget_error(compiled, model_max)
         return messages
@@ -3579,10 +3786,11 @@ class AgentRuntime:
         return ""
 
     def _note_task(self, session_key: str, line: str) -> None:
-        """Append one progress line to the session task card (max 2000 chars).
+        """Append one progress line to the session task card (max 500 chars).
 
         The card is a scratch list for this conversation, not project memory.
-        An empty line is a no-op. A missing conversation is a no-op.
+        An empty line is a no-op. A missing conversation is a no-op. The cut
+        keeps the tail, on a newline boundary, so the newest lines stay.
         """
         if not isinstance(line, str):
             return
@@ -3596,8 +3804,8 @@ class AgentRuntime:
         if not isinstance(card, str):
             card = ""
         card = f"{card}\n{line}" if card else line
-        if len(card) > 2000:
-            tail = card[-2000:]
+        if len(card) > 500:
+            tail = card[-500:]
             nl = tail.find("\n")
             if nl != -1:
                 tail = tail[nl + 1:]
@@ -3690,7 +3898,7 @@ class AgentRuntime:
                     return output
                 return (
                     f"[unchanged \u2014 read_file {path} offset={offset or 0} "
-                    f"limit={limit}; same mtime and size as the earlier read this turn]"
+                    f"limit={limit}]"
                 )
             bucket[key] = fp
         return output
@@ -3817,12 +4025,14 @@ class AgentRuntime:
         # _ensure_system_prompt(), so all three produce equivalent prompts.
         model_max_for_budget, context_mode = self._budget_window_and_mode(conv)
 
+        failed = False
         try:
             from agent.context import build_system_prompt
             new_prompt = build_system_prompt(
                 conv.agent_name,
                 project_path,
-                conv.allowed_tools or [],
+                self._prompt_tool_names(conv),
+                review_mode="off",
                 agent_role=agent_role or conv.agent_role or "",
                 model_max_tokens=model_max_for_budget,
                 context_mode=context_mode,
@@ -3831,14 +4041,19 @@ class AgentRuntime:
             # build_system_prompt is non-critical — fall back to whatever
             # was persisted, with a logged warning. The agent still works
             # (just with a potentially stale prompt) instead of crashing.
+            # The previous fingerprint stays with the previous string.
             logger.exception(
                 "Failed to rebuild system prompt for %s; keeping persisted prompt",
                 session_key,
             )
             new_prompt = conv.system_prompt
+            failed = True
 
         conv.project_path = project_path
         conv.system_prompt = new_prompt
+        if not failed:
+            conv._system_prompt_fingerprint = self._system_prompt_fingerprint(conv)
+            conv._token_estimate_cache = None
         logger.info(
             "Reconciled conversation context for %s: project_path=%r",
             session_key, project_path,

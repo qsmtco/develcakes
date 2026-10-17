@@ -224,9 +224,51 @@ def _read_crabcakes_docs(project_path: str, max_size: int = 50 * 1024) -> str:
 
 _PROJECT_PROMPTS_CONTEXT_CAP = 20 * 1024  # 20KB per prompt
 _PROJECT_PROMPTS_MAX_FILES = 30
+# Hybrid and JIT append names only. The section is the header plus stems,
+# cut to the alphabetically first names when it would pass this cap.
+_PROJECT_PROMPT_NAME_SECTION_CAP = 2000
+_PROMPT_NAME_MORE = (
+    "[\u2026 {n} more prompts; open .crabcakes/prompts/ with read_file]"
+)
 
 
-def _load_project_prompts_context(project_path: str) -> str:
+def _eligible_project_prompt_files(project_path: str) -> list[str]:
+    """Sorted ``.crabcakes/prompts/*.md`` names that pass the size cap.
+
+    ``listdir`` and ``stat`` only. Oversized files are skipped and do not
+    consume one of the 30 slots. The files are not opened.
+    """
+    prompts_dir = os.path.join(project_path, ".crabcakes", "prompts")
+    if not os.path.isdir(prompts_dir):
+        return []
+    try:
+        names = os.listdir(prompts_dir)
+    except OSError:
+        return []
+    kept: list[str] = []
+    for fname in names:
+        if not fname.endswith(".md"):
+            continue
+        full = os.path.join(prompts_dir, fname)
+        if not os.path.isfile(full):
+            continue
+        try:
+            size = os.path.getsize(full)
+        except OSError as e:
+            logging.getLogger(__name__).debug(
+                "Skipping prompt %s: %s", fname, e
+            )
+            continue
+        if size <= _PROJECT_PROMPTS_CONTEXT_CAP:
+            kept.append(fname)
+    kept.sort()
+    return kept
+
+
+def _load_project_prompts_context(
+    project_path: str,
+    max_chars: int | None = None,
+) -> str:
     """
     Read .crabcakes/prompts/*.md into the agent's file context.
 
@@ -237,47 +279,88 @@ def _load_project_prompts_context(project_path: str) -> str:
     default_agents/) are NOT included here — those are loaded by other code
     paths and including them would double the context size.
 
+    ``max_chars`` (CONTEXT-EFFICIENCY-INSTRUCTIONS §7) is the file-context
+    budget still available to prompt bodies. A file is only opened when the
+    remaining budget can hold it, and the walk stops as soon as the running
+    total reaches the budget. Without it this still read 30 files (124KB on
+    this repo) and let the caller discard all but the head. ``None`` means
+    no budget, which is the historical behavior.
+
     Returns empty string if the directory does not exist.
     """
     prompts_dir = os.path.join(project_path, ".crabcakes", "prompts")
     if not os.path.isdir(prompts_dir):
         return ""
     sections: list[str] = []
-    try:
-        files = sorted(
-            f for f in os.listdir(prompts_dir)
-            if f.endswith(".md") and os.path.isfile(os.path.join(prompts_dir, f))
-        )
-    except OSError:
-        return ""
     # Size filter FIRST, then count cap — oversized files are skipped without
     # burning one of the 30 slots (Phase 7 audit BUG #5, supervisor override
-    # of the doc-only recommendation).
-    kept: list[str] = []
-    for fname in files:
-        try:
-            if os.path.getsize(
-                os.path.join(prompts_dir, fname)
-            ) <= _PROJECT_PROMPTS_CONTEXT_CAP:
-                kept.append(fname)
-        except OSError as e:
-            # Deleted/unreadable between listdir and stat (TOCTOU) — skip,
-            # but log so the silent-drop window is at least visible.
-            logging.getLogger(__name__).debug(
-                "Skipping prompt %s: %s", fname, e
-            )
-            continue
+    # of the doc-only recommendation). The list is listdir + stat; this
+    # function is the one that opens bodies, and only on the preload path.
+    kept = _eligible_project_prompt_files(project_path)
+    # Budgeted read: a prompt file is only opened when the budget still has
+    # room for it, and the walk stops the moment the budget is spent. This
+    # is what stops preload from reading 124KB and keeping the wrong half.
+    remaining = max_chars
     for fname in kept[:_PROJECT_PROMPTS_MAX_FILES]:
+        if remaining is not None and remaining <= 0:
+            break
         fpath = os.path.join(prompts_dir, fname)
         try:
-            if os.path.getsize(fpath) > _PROJECT_PROMPTS_CONTEXT_CAP:
+            size = os.path.getsize(fpath)
+            if size > _PROJECT_PROMPTS_CONTEXT_CAP:
+                continue
+            if remaining is not None and size > remaining:
+                # Not enough room for this file — skip it and keep walking.
+                # The walk is sorted by NAME, not size, so a smaller file
+                # later in the alphabet can still fit the remaining budget;
+                # breaking here dropped every later file too (on this repo a
+                # 7,651-byte README.md sorted first and zero prompt sections
+                # survived). The budget-exhausted case above is the only one
+                # that stops the walk.
                 continue
             with open(fpath, encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except OSError:
             continue
         sections.append(f"## .crabcakes/prompts/{fname[:-3]}\n\n{content}\n")
+        if remaining is not None:
+            # Account for the section header and separators, not just the
+            # body, or the running total under-counts by ~30 chars a file.
+            remaining -= len(sections[-1]) + 1
     return "\n".join(sections)
+
+
+def _project_prompt_name_section(project_path: str) -> str:
+    """Stems of eligible project prompts. No file bodies.
+
+    Missing ``prompts/`` directory, or no file under the size cap, yields
+    an empty string and no header. The section keeps the alphabetically
+    first names, at most 30, and at most 2,000 characters.
+    """
+    stems = [name[:-3] for name in _eligible_project_prompt_files(project_path)]
+    if not stems:
+        return ""
+    header = "## Project prompts"
+    limit = min(len(stems), _PROJECT_PROMPTS_MAX_FILES)
+    while True:
+        omitted = len(stems) - limit
+        lines = [header, *stems[:limit]]
+        if omitted:
+            lines.append(_PROMPT_NAME_MORE.format(n=omitted))
+        text = "\n".join(lines)
+        if len(text) <= _PROJECT_PROMPT_NAME_SECTION_CAP or limit == 0:
+            return text
+        limit -= 1
+
+
+def _append_project_prompt_names(base: str, project_path: str) -> str:
+    """Append the prompt-name section. Preload does not call this."""
+    section = _project_prompt_name_section(project_path)
+    if not section:
+        return base
+    if not base:
+        return section
+    return f"{base}\n\n{section}"
 
 
 # Directories excluded from file context by default.
@@ -394,7 +477,9 @@ def build_file_context(
     - With query: include files matching the query (by name)
     - Without query: directory tree + key files (README, ARCHITECTURE, etc.)
     - Respects .gitignore
-    - Total context capped at ~max_chars
+    - Total context capped at ~max_chars. On overflow the drop order is
+      prompt bodies first, then the tree/key files, project docs last
+      (§4.4a always includes project docs)
 
     Args:
         project_path: Absolute path to the project root.
@@ -415,51 +500,67 @@ def build_file_context(
         if cached and cached[0] >= mtime:
             return cached[1]
 
-    patterns = _load_gitignore_patterns(project_path)
-    parts: list[str] = []
-
-    # §4.4a quick win: always include .crabcakes/ project docs first
-    crab_docs = _read_crabcakes_docs(project_path)
-    if crab_docs:
-        parts.append(f"## Project docs\n\n{crab_docs}\n\n")
-
-    # Include per-project prompts library (SPEC-PROJECT-PROMPTS-DIRECTORY
-    # §2.9) — project prompt library after the core docs: methodology first,
-    # then reference material, then the tree.
-    prompts_ctx = _load_project_prompts_context(project_path)
-    if prompts_ctx:
-        parts.append(f"## Project prompts\n\n{prompts_ctx}\n\n")
-
+    # §7: the assembly cap reserves the tail. Prompt bodies sit at the front
+    # and are what a tail cut drops first. Docs stay ahead of the tree
+    # (§4.4a). The tree and key files are last, so both this cut and the
+    # later end-preserving smart truncator keep them.
     if query:
-        # Query mode: find files matching the query string
+        patterns = _load_gitignore_patterns(project_path)
         matches = _find_matching_files(project_path, query, patterns)
         if not matches:
             return f"(No files match query: {query})"
-        parts.append("## Matching files\n")
+        match_sections = ["## Matching files\n"]
         for rel_path in matches:
             content = _read_file_safe(os.path.join(project_path, rel_path))
             if content is None:
                 continue
-            parts.append(f"## {rel_path}\n\n{content}\n")
+            match_sections.append(f"## {rel_path}\n\n{content}\n")
+        tail = "".join(match_sections)
     else:
-        # No query: directory tree + key files
-        tree = _build_directory_tree(project_path)
-        parts.append(f"## Project tree\n\n{tree}\n\n")
+        tree_section = f"## Project tree\n\n{_build_directory_tree(project_path)}\n\n"
         key_files = _read_key_files(project_path)
-        if key_files:
-            parts.append(f"## Key files\n\n{key_files}\n")
+        key_section = f"## Key files\n\n{key_files}\n" if key_files else ""
+        tail = tree_section + key_section
 
-    full = "".join(parts)
+    crab_docs = _read_crabcakes_docs(project_path)
+    docs_section = f"## Project docs\n\n{crab_docs}\n\n" if crab_docs else ""
 
-    # Truncate if needed — preserve header if possible
+    # Prompt files are opened only when the leftover budget can hold them.
+    # The wrapper around the loader's sections is reserved here so a file
+    # that fits the loader budget still fits after the heading is added.
+    _PROMPT_WRAP = len("## Project prompts\n\n\n\n")
+    prompt_budget = max_chars - len(tail) - len(docs_section) - _PROMPT_WRAP
+    prompts_ctx = _load_project_prompts_context(
+        project_path, max_chars=max(0, prompt_budget),
+    )
+
+    # Docs stay ahead of prompts (the prompts-directory tests require that
+    # order). Prompts stay ahead of the tree, so a tail cut drops prompt
+    # bodies before it touches the tree or the key files. If the prompt
+    # block still does not fit, it is omitted entirely before that cut.
+    prompt_block = f"## Project prompts\n\n{prompts_ctx}\n\n" if prompts_ctx else ""
+    if prompt_block and len(docs_section) + len(prompt_block) + len(tail) > max_chars:
+        prompt_block = ""
+    full = docs_section + prompt_block + tail
+
     if len(full) <= max_chars:
         if not query:
             cache_key = f"{project_path}::{max_chars}"
             _FILE_CONTEXT_CACHE[cache_key] = (_project_root_mtime(project_path), full)
         return full
 
-    # Truncate, keeping as much as possible from the end (most recent context)
-    truncated = full[:max_chars] + f"\n\n[... file context truncated to {max_chars} chars ...]"
+    # Keep the tail. A head slice would drop the tree the smart truncator
+    # also keeps from the end.
+    #
+    # The marker is part of the budget, not an addition to it. Slicing to
+    # max_chars and appending after returned max_chars + len(marker) — 47-49
+    # chars over at every budget, since the marker length itself scales with
+    # the digits of max_chars. Slice to what is left after reserving it.
+    marker = f"\n\n[... file context truncated to {max_chars} chars ...]"
+    keep = max(0, max_chars - len(marker))
+    # When max_chars cannot even hold the marker, emit the marker alone
+    # rather than a slice of content plus an over-budget marker.
+    truncated = (full[-keep:] if keep else "") + marker
     if not query:
         cache_key = f"{project_path}::{max_chars}"
         _FILE_CONTEXT_CACHE[cache_key] = (_project_root_mtime(project_path), truncated)
@@ -491,7 +592,10 @@ def resolve_context_mode(
             Case-insensitive; whitespace is stripped. "auto" is resolved by
             this function.
         model_max_tokens: Model context window from ProviderConfig.
-            If None, 0, or negative, defaults to 128_000 for heuristics.
+            None, 0, or negative is an unknown window and resolves to
+            "hybrid". Those values are not passed through the 128_000
+            default. A known window from 1 through 128_000 resolves to
+            "jit". A window larger than 128_000 resolves to "hybrid".
 
     Returns:
         One of "preload", "hybrid", "jit".
@@ -502,14 +606,13 @@ def resolve_context_mode(
 
     if explicit_mode in ("preload", "jit", "hybrid"):
         return explicit_mode
-    # explicit_mode is "auto" — resolve by model context window size
-    if model_max_tokens is not None and model_max_tokens <= 0:
-        # Negative/zero window → unknown, use balanced default
+    # "auto". An unknown window stays hybrid. Do not substitute 128_000
+    # first: that default would then classify as JIT.
+    if model_max_tokens is None or model_max_tokens <= 0:
         return "hybrid"
-    window = model_max_tokens or 128_000
-    if window <= 32_000:
-        return "jit"       # small window — every token counts
-    return "hybrid"        # 128K and larger — index plus core-file stubs
+    if model_max_tokens <= 128_000:
+        return "jit"
+    return "hybrid"
 
 
 def build_file_index(
@@ -715,9 +818,11 @@ def build_file_context_with_core_files(
     Build a file context block with core files preserved at the end.
 
     Mode behavior:
-    - "preload" (default): existing behavior — full file context + core files
-    - "jit": replace base context with file index; do NOT include core files
-    - "hybrid": one stub line per existing core file + file index (no file bodies)
+    - "preload" (default): existing behavior — full file context + core files.
+      Prompt bodies are inlined here, under the file-context budget.
+    - "jit": file index, then the names of .crabcakes/prompts/*.md. No bodies.
+    - "hybrid": one stub line per existing core file, the file index, then
+      the same prompt-name list. No prompt bodies.
 
     All other behavior (gitignore, .crabcakes/ docs, CB-5 core file
     preservation) is unchanged.
@@ -757,8 +862,8 @@ def build_file_context_with_core_files(
     # jit or hybrid
     file_index = build_file_index(project_path)
     if context_mode == "jit":
-        # JIT: index only, no core files
-        return file_index
+        # JIT: index, then prompt names. No core files, no prompt bodies.
+        return _append_project_prompt_names(file_index, project_path)
 
     # hybrid: one stub line per existing core file, then the index.
     # File bodies are not inlined; the model calls read_file for a window.
@@ -776,8 +881,10 @@ def build_file_context_with_core_files(
             f"[{size} bytes \u2014 use read_file(\"{core_file}\") to read a window]\n"
         )
     if not core_sections:
-        return file_index
-    return "\n".join(core_sections) + "\n\n" + file_index
+        base = file_index
+    else:
+        base = "\n".join(core_sections) + "\n\n" + file_index
+    return _append_project_prompt_names(base, project_path)
 
 
 def _find_matching_files(

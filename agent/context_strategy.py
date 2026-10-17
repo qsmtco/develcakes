@@ -370,7 +370,7 @@ class DefaultContextStrategy:
         skipping the protect_turns most recent TOOL_RESULT messages. For
         each unprotected TOOL_RESULT, replaces content with a short stub:
 
-          "[compacted — {tool_name} output, {N} chars removed]"
+          "[compacted — {tool_name} {N}]"
 
         Stops when get_token_estimate() <= target_tokens.
         Idempotent: detects already-stubbed messages by their
@@ -453,7 +453,7 @@ class DefaultContextStrategy:
                         if parent is not None:
                             break  # Found the parent; stop searching.
             original_len = len(msg.content)
-            stub = f"[compacted \u2014 {tool_name} output, {original_len} chars removed]"
+            stub = self._compacted_stub(tool_name, original_len)
             msg.content = stub
             # The tool message is the copy the meter counts. Drop the
             # duplicate string kept on the parent call.
@@ -472,6 +472,15 @@ class DefaultContextStrategy:
         # Cache is invalidated inside the loop after each stub.
         tokens_after = conv.get_token_estimate()
         return tokens_before - tokens_after
+
+    @staticmethod
+    def _compacted_stub(tool_name: str, n_chars: int) -> str:
+        """The one line both compaction sites write.
+
+        The ``[compacted —`` prefix is matched with ``startswith`` and must
+        not change. The tail is the tool name and the removed length.
+        """
+        return f"[compacted \u2014 {tool_name} {n_chars}]"
 
     def panic_prune(
         self,
@@ -500,7 +509,7 @@ class DefaultContextStrategy:
             if path and path in protected:
                 continue
             n_chars = len(content)
-            stub = f"[compacted \u2014 {tool_name} output, {n_chars} chars removed]"
+            stub = self._compacted_stub(tool_name, n_chars)
             msg.content = stub
             if parent is not None:
                 for tc in parent.tool_calls:

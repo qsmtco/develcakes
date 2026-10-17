@@ -12,6 +12,7 @@ import tempfile
 import pytest
 
 from agent.context import (
+    _load_project_prompts_context,
     build_file_context,
     build_system_prompt,
 )
@@ -208,6 +209,101 @@ class TestBuildFileContextTruncation:
             ctx = build_file_context(proj, max_chars=500)
             assert "truncated" in ctx
 
+    def test_truncation_marker_counts_inside_the_budget(self):
+        """Debugger audit BUG #4: the marker is budget, not an addition to it.
+
+        The tail cut sliced to exactly ``max_chars`` and then appended the
+        marker, so the return was ``max_chars + len(marker)`` — 47-49 chars
+        over at every budget, because the marker's own length scales with
+        the digits of ``max_chars``. Reserve the marker first, then slice to
+        whatever budget is left.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "README.md"), "w") as f:
+                f.write("# Project\n" + "A" * 8000)
+            max_chars = 5000
+            ctx = build_file_context(proj, max_chars=max_chars)
+            assert "truncated" in ctx, "fixture must overflow the budget"
+            assert len(ctx) <= max_chars, (
+                f"returned {len(ctx)} chars for a {max_chars} budget "
+                f"(over by {len(ctx) - max_chars})"
+            )
+
+    def test_tight_budget_keeps_tree_and_drops_prompt_body(self):
+        """§7: the tail cut keeps the tree. Prompt bodies are dropped first."""
+        with tempfile.TemporaryDirectory() as proj:
+            prompts = os.path.join(proj, ".crabcakes", "prompts")
+            os.makedirs(prompts)
+            with open(os.path.join(prompts, "huge.md"), "w") as f:
+                f.write("PROMPT-BODY-UNIQUE " + ("P" * 8000))
+            with open(os.path.join(proj, "kept_source.py"), "w") as f:
+                f.write("x = 1\n")
+            ctx = build_file_context(proj, max_chars=2000)
+            assert "kept_source.py" in ctx
+            assert "PROMPT-BODY-UNIQUE" not in ctx
+
+    def test_docs_beat_prompts_when_budget_cannot_hold_all_three(self):
+        """§4.4a + §7: prompts are the sacrificial layer, never the docs.
+
+        Phase 7 audit BUG #2/#3: the prompt budget was derived without the
+        docs, so a tight budget pushed the assembly over ``max_chars`` and
+        the tail cut deleted the '## Project docs' heading — the one group
+        §4.4a says is always included — while the very prompt bodies §7
+        says get dropped first survived. With the docs reserved up front
+        the overflow is absorbed by prompt bodies instead, so the heading
+        and the tree both survive and nothing is tail-cut.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            crab = os.path.join(proj, ".crabcakes")
+            prompts = os.path.join(crab, "prompts")
+            os.makedirs(prompts)
+            # .crabcakes/context.md is in _read_crabcakes_docs' DOC_NAMES, so
+            # this is what puts a '## Project docs' section in the output.
+            with open(os.path.join(crab, "context.md"), "w") as f:
+                f.write("# Context\n" + "D" * 2_000)
+            # Sorted by name; 030_big is the one that cannot fit the budget.
+            for name, marker, char, size in (
+                ("010_small.md", "PROMPT-010-MARKER", "S", 4_000),
+                ("020_mid.md", "PROMPT-020-MARKER", "M", 6_000),
+                ("030_big.md", "PROMPT-030-MARKER", "B", 9_000),
+            ):
+                with open(os.path.join(prompts, name), "w") as f:
+                    f.write(marker + "\n" + char * size)
+            # A README puts a real '## Key files' section in the tail.
+            with open(os.path.join(proj, "README.md"), "w") as f:
+                f.write("# Fixture\n" + "R" * 1_500)
+            with open(os.path.join(proj, "main.py"), "w") as f:
+                f.write("x = 1\n")
+
+            # --- tight budget: docs + tree fit, the prompt set does not ---
+            ctx = build_file_context(proj, max_chars=20_000)
+
+            assert "## Project docs" in ctx, "docs dropped under a tight budget"
+            assert "## .crabcakes/context.md" in ctx
+            assert "## Project tree" in ctx
+            assert "main.py" in ctx
+            # Sacrificial layer gave way: a prompt body is gone (here the
+            # all-or-nothing block would also satisfy "or absent").
+            assert "PROMPT-030-MARKER" not in ctx
+            # The giveaway that this was a budgeted drop, not a tail cut:
+            # a tail cut would have eaten the docs heading and appended the
+            # truncation marker instead.
+            assert "truncated" not in ctx
+            assert ctx.find("## Project docs") < ctx.find("## Project tree")
+
+            # --- comfortable budget: all three groups, docs still first ---
+            ctx = build_file_context(proj, max_chars=120_000)
+
+            assert "## Project docs" in ctx
+            assert "## Project prompts" in ctx
+            assert "## Project tree" in ctx
+            for marker in ("PROMPT-010-MARKER", "PROMPT-020-MARKER",
+                           "PROMPT-030-MARKER"):
+                assert marker in ctx, f"{marker} lost at a comfortable budget"
+            docs_pos = ctx.find("## Project docs")
+            assert 0 <= docs_pos < ctx.find("## Project tree")
+            assert ctx.find("## Project prompts") < ctx.find("## Project tree")
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  build_file_context — key files
@@ -339,3 +435,36 @@ class TestBuildSystemPromptBudget:
             (Path(proj) / "file.txt").write_text("z" * 5_000)
             prompt = build_system_prompt("Coder", proj, [], agent_role="coder")
             assert "file.txt" in prompt
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  _load_project_prompts_context — budgeted walk
+# ═══════════════════════════════════════════════════════════════════
+
+class TestLoadProjectPromptsContextBudget:
+    def test_oversized_file_sorting_first_does_not_kill_the_walk(self):
+        """A file too big for the remaining budget is SKIPPED, not a stop.
+
+        Phase 7 audit BUG #1: the walk is sorted by filename, not by size,
+        so an oversized file sorting first used to break the loop and drop
+        every file behind it. All three small files must still load.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            prompts = os.path.join(proj, ".crabcakes", "prompts")
+            os.makedirs(prompts)
+            # Sorts first, strictly BIGGER than the 2,000-char budget (equal
+            # would still fit and eat the whole budget), yet well under the
+            # 20KB per-file cap so it survives the size pre-filter and only
+            # the budgeted walk can reject it.
+            with open(os.path.join(prompts, "010_big.md"), "w") as f:
+                f.write("B" * 3_000)
+            for name, body in (("020_small_a.md", "a"), ("030_small_b.md", "b"),
+                               ("040_small_c.md", "c")):
+                with open(os.path.join(prompts, name), "w") as f:
+                    f.write(body * 10)
+
+            out = _load_project_prompts_context(proj, max_chars=2_000)
+
+            for name in ("020_small_a", "030_small_b", "040_small_c"):
+                assert f"## .crabcakes/prompts/{name}" in out, f"{name} dropped"
+            assert "## .crabcakes/prompts/010_big" not in out

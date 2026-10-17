@@ -229,6 +229,7 @@ class Conversation:
     system_prompt: str = ""
     # Per-session scratch list (files touched this conversation). Spliced
     # onto the last user message at serialization time. Not project memory.
+    # Capped at 500 characters by AgentRuntime._note_task; the tail is kept.
     task_card: str = ""
     messages: list[Message] = field(default_factory=list)
     model: str = ""                      # e.g. "openai/gpt-4o"
@@ -250,6 +251,9 @@ class Conversation:
     # SPEC-21 SP0: per-string token counts. Survives _token_estimate_cache
     # wipes so a stub/pop recount is lookups plus the new strings only.
     _token_count_memo: dict = field(default_factory=dict, repr=False, compare=False)
+    # Inputs that produced system_prompt. Compared once per user turn.
+    # Not persisted; a loaded conversation rebuilds the prompt.
+    _system_prompt_fingerprint: tuple | None = field(default=None, repr=False, compare=False)
 
     # ── Message helpers ───────────────────────────────────────────────────────
 

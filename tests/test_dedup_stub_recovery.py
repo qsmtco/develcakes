@@ -35,8 +35,7 @@ def _read(rt, sk, conv, call_id: str, args: dict, iteration: int = 1):
 
 def _notice(path: str, offset, limit) -> str:
     return (
-        f"[unchanged \u2014 read_file {path} offset={offset or 0} "
-        f"limit={limit}; same mtime and size as the earlier read this turn]"
+        f"[unchanged \u2014 read_file {path} offset={offset or 0} limit={limit}]"
     )
 
 

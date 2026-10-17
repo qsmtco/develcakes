@@ -811,11 +811,88 @@ def _run_grep(
     return result.returncode, result.stdout, result.stderr
 
 
-def _search_files(pattern: str, project_path: str, path: str | None = None, file_type: str | None = None) -> ToolResult:
-    """Search file contents using grep/ripgrep."""
+def _norm_search_rel(path: str) -> str:
+    """Project-relative path with a leading ``./`` stripped."""
+    rel = path.replace("\\", "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return rel
+
+
+def _search_root_rel(search_root: str, project_path: str) -> str:
+    """``search_root`` relative to the project, or ``""`` at the project root."""
+    root_rel = os.path.relpath(search_root, os.path.realpath(project_path))
+    root_rel = _norm_search_rel(root_rel)
+    if root_rel == ".":
+        return ""
+    return root_rel
+
+
+def _under_search_root(rel_path: str, root_rel: str) -> bool:
+    if not root_rel:
+        return True
+    return rel_path == root_rel or rel_path.startswith(root_rel + "/")
+
+
+def _matches_file_type(rel_path: str, file_type: str | None) -> bool:
+    if not file_type:
+        return True
+    ext = file_type.lower().lstrip(".")
+    return rel_path.lower().endswith("." + ext)
+
+
+def _project_rel_from_grep(grep_path: str, root_rel: str) -> str:
+    rel = _norm_search_rel(grep_path)
+    if not root_rel or rel == root_rel or rel.startswith(root_rel + "/"):
+        return rel
+    return f"{root_rel}/{rel}"
+
+
+def _search_files(
+    pattern: str,
+    project_path: str,
+    path: str | None = None,
+    file_type: str | None = None,
+    max_results: int = 20,
+    preview_lines: int = 5,
+) -> ToolResult:
+    """Name-or-content search. One grep, grouped by file.
+
+    Content matches come from ``_run_grep``. Filename matches come from
+    ``_find_matching_files`` (a name fragment). Each hit is path, size from
+    ``stat``, and at most 5 preview lines taken from the grep hit. The hit
+    file is not opened to count lines. ``file_search`` calls this function.
+    Sandbox, timeout, and ``file_type`` stay on this path.
+    """
+    if not isinstance(pattern, str) or not pattern.strip():
+        return ToolResult(success=False, error="empty query")
+    if not isinstance(max_results, int) or isinstance(max_results, bool) or max_results <= 0:
+        max_results = 20
+    if not isinstance(preview_lines, int) or isinstance(preview_lines, bool) or preview_lines <= 0:
+        preview_lines = 5
+    preview_lines = min(preview_lines, 5)
+
     search_root = _resolve_project_path(path or ".", project_path)
     if search_root is None:
-        return ToolResult(success=False, error=f"Path escapes project sandbox: {path or '.'}")
+        return ToolResult(
+            success=False,
+            error=f"Path escapes project sandbox: {path or '.'}",
+        )
+
+    from agent.context import _find_matching_files, _load_gitignore_patterns
+
+    root_rel = _search_root_rel(search_root, project_path)
+    patterns = _load_gitignore_patterns(project_path)
+    name_matches = [
+        _norm_search_rel(rel)
+        for rel in _find_matching_files(
+            project_path, pattern, patterns, max_files=max_results,
+        )
+    ]
+    name_matches = [
+        rel for rel in name_matches
+        if _under_search_root(rel, root_rel) and _matches_file_type(rel, file_type)
+    ]
 
     try:
         returncode, stdout, stderr = _run_grep(pattern, search_root, file_type)
@@ -826,14 +903,63 @@ def _search_files(pattern: str, project_path: str, path: str | None = None, file
     except OSError as e:
         return ToolResult(success=False, error=f"Search failed: {e}")
 
-    if returncode == 1:
-        return ToolResult(success=True, output="(no matches)")
-    elif returncode != 0:
-        return ToolResult(success=False, error=f"grep exited with {returncode}: {stderr[:200]}")
+    if returncode not in (0, 1):
+        return ToolResult(
+            success=False,
+            error=f"grep exited with {returncode}: {stderr[:200]}",
+        )
 
-    output = stdout
+    grep_hits: dict[str, list[tuple[int, str]]] = {}
+    if returncode == 0 and stdout:
+        for line in stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            fpath, lineno_s, content = parts
+            try:
+                lineno = int(lineno_s)
+            except ValueError:
+                continue
+            rel = _project_rel_from_grep(fpath, root_rel)
+            grep_hits.setdefault(rel, []).append((lineno, content))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for rel in list(name_matches) + list(grep_hits):
+        if rel in seen:
+            continue
+        seen.add(rel)
+        ordered.append(rel)
+    ordered = sorted(ordered)[:max_results]
+    if not ordered:
+        return ToolResult(success=True, output="(no matches)")
+
+    project_real = os.path.realpath(project_path)
+    lines: list[str] = []
+    for rel in ordered:
+        full_path = os.path.join(project_real, *rel.split("/"))
+        try:
+            size = os.stat(full_path).st_size
+        except OSError:
+            size_str = "?KB"
+        else:
+            if size < 1024 * 1024:
+                size_str = f"{size // 1024}KB"
+            else:
+                size_str = f"{size // (1024 * 1024)}MB"
+        lines.append(f"{rel} ({size_str})")
+        hits = grep_hits.get(rel)
+        if hits:
+            for lineno, content in hits[:preview_lines]:
+                lines.append(f"  Line {lineno}: {content.strip()}")
+        else:
+            lines.append("  [name match only — use read_file for content]")
+
+    lines.append("")
+    lines.append('[Use read_file("path") for the file body.]')
+    output = "\n".join(lines)
     if len(output) > MAX_EXEC_OUTPUT:
-        output = output[:MAX_EXEC_OUTPUT] + f"\n[... truncated ...]"
+        output = output[:MAX_EXEC_OUTPUT] + "\n[... truncated ...]"
     return ToolResult(success=True, output=output)
 
 
@@ -844,82 +970,15 @@ def _file_search(
     max_results: int = 20,
     preview_lines: int = 5,
 ) -> ToolResult:
-    """Find files by name OR content pattern. Returns grouped, previewed results.
-
-    Combines:
-    - Filename matching via agent.context._find_matching_files
-    - Content matching via _run_grep (shared with _search_files)
-    """
-    if not query or not query.strip():
-        return ToolResult(success=False, error="empty query")
-
-    search_root = _resolve_project_path(".", project_path)
-    if search_root is None:
-        return ToolResult(success=False, error=f"Path escapes project sandbox: {project_path}")
-
-    # Filename matching via _find_matching_files
-    from agent.context import _find_matching_files, _load_gitignore_patterns
-    patterns = _load_gitignore_patterns(project_path)
-    name_matches = _find_matching_files(
-        project_path, query, patterns, max_files=max_results
+    """Old name for ``_search_files``. One code path, no second grep."""
+    return _search_files(
+        query,
+        project_path,
+        path=None,
+        file_type=file_type,
+        max_results=max_results or 20,
+        preview_lines=preview_lines,
     )
-
-    # Content matching via _run_grep
-    grep_hits: dict[str, list[tuple[int, str]]] = {}
-    try:
-        returncode, stdout, stderr = _run_grep(query, search_root, file_type)
-        if returncode == 0 and stdout:
-            for line in stdout.splitlines():
-                # Parse grep output: file:line:content
-                parts = line.split(":", 2)
-                if len(parts) >= 3:
-                    fpath, lineno, content = parts[0], int(parts[1]), parts[2]
-                    # Normalize grep paths: strip leading "./" so they match
-                    # the format from _find_matching_files (relative, no prefix)
-                    if fpath.startswith("./"):
-                        fpath = fpath[2:]
-                    if fpath not in grep_hits:
-                        grep_hits[fpath] = []
-                    grep_hits[fpath].append((lineno, content))
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass  # Non-fatal — name matches still usable
-
-    # Merge results: files from both name + content matches
-    all_files = set(name_matches)
-    all_files.update(grep_hits.keys())
-    all_files = sorted(all_files)[:max_results]
-
-    if not all_files:
-        return ToolResult(success=True, output="(no matches)")
-
-    # Build output
-    lines: list[str] = []
-    for fpath in all_files:
-        full_path = os.path.join(search_root, fpath)
-        try:
-            size = os.path.getsize(full_path)
-            size_str = f"{size // 1024}KB" if size < 1024 * 1024 else f"{size // (1024 * 1024)}MB"
-        except OSError:
-            size_str = "?KB"
-
-        # Path + size only. Counting lines meant reading every hit file to
-        # EOF; the preview lines already come from grep, and bound_tool_output
-        # cuts the whole result to 16KB regardless (CONTEXT-EFFICIENCY §2).
-        lines.append(f"{fpath} ({size_str})")
-
-        if fpath in grep_hits:
-            for lineno, content in grep_hits[fpath][:preview_lines]:
-                lines.append(f"  Line {lineno}: {content.strip()}")
-        else:
-            lines.append("  [name match only — use read_file for content]")
-
-    lines.append("")
-    lines.append('[Use read_file("path") to read full contents. Use list_files(".") to browse directory tree.]')
-
-    output = "\n".join(lines)
-    if len(output) > MAX_EXEC_OUTPUT:
-        output = output[:MAX_EXEC_OUTPUT] + f"\n[... truncated ...]"
-    return ToolResult(success=True, output=output)
 
 
 def _get_brave_api_key() -> str | None:
@@ -1223,8 +1282,9 @@ def _register_tools() -> None:
         ToolDefinition(
             name="search_files",
             description=(
-                "Grep project files; returns matching file:line. "
-                "Times out after 10s."
+                "Find files by name or content. One group per file: path, "
+                "size, and up to 5 preview lines. Times out after 10s. "
+                "Use read_file for the body."
             ),
             parameters={
                 "type": "object",
@@ -1262,7 +1322,9 @@ def _register_tools() -> None:
             requires_approval=False,
         ),
         lambda query, project_path, file_type=None, max_results=None, **kwargs:  # type: ignore
-            _file_search(query, project_path, file_type, max_results or 20),
+            _search_files(
+                query, project_path, file_type=file_type, max_results=max_results or 20,
+            ),
     )
 
     # web_search
@@ -1401,6 +1463,11 @@ def get_all_tools() -> list[ToolDefinition]:
     return [defn for defn, _ in _TOOLS.values()]
 
 
+# file_search stays registered so execute_tool can run calls already stored
+# in old transcripts. The model sees search_files only.
+_API_SCHEMA_HIDDEN = frozenset({"file_search"})
+
+
 def get_tool_definitions_for_api(allowed_tools: list[str] | None = None) -> list[dict]:
     """
     Return tool definitions in OpenAI function-calling format.
@@ -1416,6 +1483,7 @@ def get_tool_definitions_for_api(allowed_tools: list[str] | None = None) -> list
         tools_to_include = [t for t in all_tools if t.name in allowed_set]
     else:
         tools_to_include = all_tools
+    tools_to_include = [t for t in tools_to_include if t.name not in _API_SCHEMA_HIDDEN]
 
     result = []
     for defn in tools_to_include:

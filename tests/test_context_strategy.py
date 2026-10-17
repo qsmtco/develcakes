@@ -367,9 +367,8 @@ class TestPruneToolOutputs:
         # And the content was actually stubbed (cb6 invariant wouldn't be
         # useful if no stubbing happened).
         assert "[compacted \u2014" in tool_result_msg.content
-        assert tool_result_msg.content == (
-            "[compacted \u2014 exec_command output, 5000 chars removed]"
-        )
+        assert tool_result_msg.content == "[compacted \u2014 exec_command 5000]"
+        assert "chars removed" not in tool_result_msg.content
 
     def test_token_cache_reflects_post_prune_state(self):
         """After prune_tool_outputs returns, the token cache must reflect

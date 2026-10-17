@@ -1,6 +1,7 @@
 """SPEC-24 Stage A: compiled wire list after an enforced write."""
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from agent.enforcement import EnforcementCheck
@@ -99,6 +100,51 @@ def test_write_file_hunk_is_a_byte_count_not_the_content():
     hunk = rt._compile[sk]["hunk"]
     assert hunk == "write_file replaced a.py (100 bytes)"
     assert content not in hunk
+
+
+def test_plain_budget_counts_repo_map_and_tool_schemas(monkeypatch):
+    """§8: the check includes the repo map and the tool-schema JSON.
+
+    The transcript estimate alone is under the ceiling. Either addon by
+    itself pushes the same call over, and the error is the existing one.
+    """
+    monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
+    rt = AgentRuntime(_make_cfg())
+    conv = Conversation(
+        agent_name="Coder", system_prompt="S" * 40, model="", project_path="/tmp/proj",
+    )
+    conv.add_user_message("goal")
+    sk = "special:addons"
+    rt._conversations[sk] = conv
+    estimate = conv.get_token_estimate()
+    reserve = rt._RESPONSE_RESERVE_TOKENS
+
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "D" * 4000}}]
+    schema_tokens = len(json.dumps(tools)) // 4
+    model_max = estimate + reserve + max(1, schema_tokens // 2)
+    with patch("agent.repo_map.build_repo_map", return_value=""):
+        rt._messages_for_model(sk, conv, model_max)
+        try:
+            rt._messages_for_model(sk, conv, model_max, tools)
+            raised = False
+        except RuntimeError as exc:
+            raised = True
+            assert "after compaction" in str(exc)
+        assert raised
+
+    rt.drop_repo_map(sk)
+    block = "M" * 4000
+    map_tokens = len(REPO_MAP_HEADER + "\n\n" + block + "\n\n") // 4
+    model_max = estimate + reserve + max(1, map_tokens // 2)
+    with patch("agent.repo_map.build_repo_map", return_value=block):
+        rt._messages_for_model(sk, conv, model_max + map_tokens)
+        try:
+            rt._messages_for_model(sk, conv, model_max)
+            raised = False
+        except RuntimeError as exc:
+            raised = True
+            assert "after compaction" in str(exc)
+        assert raised
 
 
 def test_compiled_call_skips_transcript_budget_when_packet_fits(monkeypatch):
@@ -237,3 +283,70 @@ def test_clear_drops_compile_and_the_next_send_uses_the_transcript():
     blob = "\n".join(m.get("content") or "" for m in wired)
     assert "READBODY-UNIQUE" in blob
     assert "## Write" not in blob
+
+
+def test_compiled_budget_counts_the_task_card_once_with_one_estimator(monkeypatch):
+    """Debugger BUG #5 + #6 on the compiled branch, pinned together.
+
+    BUG #5: _compiled_messages() emits no task card, so the card has to be
+    charged as an addon — exactly once, never on top of a card the wire
+    already carries. BUG #6: base and addons must share one estimator.
+
+    The counting paths are instrumented rather than the token numbers, so
+    the assertions survive any change to the token constants: the card must
+    be measured through one estimator, the same one that measures the wire,
+    and the schema JSON must be charged on that same estimator.
+    """
+    # A fake encoding that counts words, so "one estimator" is observable as
+    # "one family of calls" instead of an opaque integer.
+    class _WordEncoding:
+        name = "word-encoding"
+
+        @staticmethod
+        def encode_ordinary(text: str) -> list[int]:
+            return text.split()
+
+    monkeypatch.setattr(
+        "models.conversation._tiktoken_encoding_for", lambda model: _WordEncoding()
+    )
+
+    rt = AgentRuntime(_make_cfg())
+    conv = Conversation(
+        agent_name="Coder", system_prompt="SYS", model="", project_path="/tmp/proj",
+    )
+    conv.task_card = "CARD " * 200
+    conv.add_user_message("goal")
+    sk = "special:cardbudget"
+    rt._conversations[sk] = conv
+    rt._maybe_compile(
+        sk, conv, "edit_file",
+        {"path": "a.py", "old_text": "a", "new_text": "b"},
+        ToolResult(success=True, enforcement_checks=[_check()]),
+    )
+    conv.add_tool_result("w", "OK")
+    rt._compile[sk]["after"] = len(conv.messages)
+
+    counted: list[tuple[str, int]] = []
+    original = conv._count_text
+
+    def _recording(encoding, text: str) -> int:
+        counted.append((text, len(text)))
+        return original(encoding, text)
+
+    monkeypatch.setattr(conv, "_count_text", _recording)
+
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "D" * 2000}}]
+    schema_json = json.dumps(tools)
+    with patch("agent.repo_map.build_repo_map", return_value=""):
+        rt._messages_for_model(sk, conv, 128_000, tools)
+
+    texts = [text for text, _ in counted]
+    card_hits = [t for t in texts if t == conv.task_card]
+    # BUG #5: the card is counted, and counted exactly once.
+    assert len(card_hits) == 1
+    # BUG #6: no add-on re-enters the chars//4 estimator while tiktoken is
+    # available — every measured string went through conv._count_text.
+    assert any(t == schema_json for t in texts)
+    assert schema_json in texts
+    # The wire itself is measured as one string, not per-message chars//4.
+    assert any(len(t) > len(conv.task_card) for t in texts)
