@@ -147,7 +147,32 @@ def serialize_messages(messages: list[Message], *, index_base: int = 0) -> list[
     Empty assistant messages with no tool calls become a placeholder so
     strict providers do not reject the call. ``index_base`` keeps the
     warning index aligned with the list the caller is building.
+
+    Tool-call adjacency (SPEC D1): strict providers (MiniMax 2013
+    "tool call result does not follow tool call", Anthropic tool_result
+    ordering) require every ``tool`` row to directly follow the assistant
+    row that carries its ``tool_call_id``. A result that was stored after
+    an interleaved message — a user nudge sent mid-loop, a compaction
+    stub, a masked block — is pulled forward to sit immediately after its
+    assistant; the interleaved message is emitted after the tool-result
+    run. A tool result with no matching assistant call (the call was
+    compacted or masked away) is emitted as a user row so the content
+    survives without a dangling tool row.
     """
+    # ── Pass 1: index the tool results and the calls that claim them ──────
+    # Results are collected before anything is emitted so an assistant can
+    # pull forward the results that were stored after an interleaved
+    # message. ``claimed_ids`` is the set of call ids that some assistant
+    # in this list carries — a result whose id is NOT in it has no owner.
+    pending: dict[str | None, list[Message]] = {}
+    claimed_ids: set[str | None] = set()
+    for msg in messages:
+        if msg.role == MessageRole.TOOL_RESULT:
+            pending.setdefault(msg.tool_call_id, []).append(msg)
+        elif msg.role == MessageRole.ASSISTANT:
+            for tc in msg.tool_calls:
+                claimed_ids.add(tc.call_id)
+
     result: list[dict] = []
     for msg in messages:
         if msg.role == MessageRole.USER:
@@ -189,12 +214,29 @@ def serialize_messages(messages: list[Message], *, index_base: int = 0) -> list[
                         for tc in msg.tool_calls
                     ]
             result.append(entry)
+            # Call order, then storage order within one call id. Pop removes
+            # the list so a later assistant with the same id does not emit
+            # the row again, and so the walk below can skip it.
+            for tc in msg.tool_calls:
+                for tool_msg in pending.pop(tc.call_id, []):
+                    result.append({
+                        "role": "tool",
+                        "tool_call_id": tool_msg.tool_call_id,
+                        "content": tool_msg.content,
+                    })
 
         elif msg.role == MessageRole.TOOL_RESULT:
+            if msg.tool_call_id in claimed_ids:
+                continue
+            _logger.warning(
+                "to_api_messages: tool result call_id=%r has no matching "
+                "assistant tool call at idx=%d — emitting as user row",
+                msg.tool_call_id,
+                len(result) + index_base,
+            )
             result.append({
-                "role": "tool",
-                "tool_call_id": msg.tool_call_id,
-                "content": msg.content,
+                "role": "user",
+                "content": f"[tool result {msg.tool_call_id}] — {msg.content}",
             })
     return result
 

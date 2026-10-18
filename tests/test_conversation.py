@@ -11,6 +11,7 @@ from models.conversation import (
     ToolCall,
     MessageRole,
     ToolCallStatus,
+    serialize_messages,
 )
 
 
@@ -197,9 +198,11 @@ class TestConversationToApiMessages:
 
     def test_tool_result_format(self):
         c = Conversation(agent_name="Coder")
+        tc = ToolCall(call_id="call_abc", tool_name="read_file", arguments={"path": "a.py"})
+        c.add_assistant_message("", [tc])
         c.add_tool_result("call_abc", "file contents")
         msgs = c.to_api_messages()
-        assert msgs[0] == {
+        assert msgs[1] == {
             "role": "tool",
             "tool_call_id": "call_abc",
             "content": "file contents",
@@ -220,6 +223,52 @@ class TestConversationToApiMessages:
         assert msgs[2]["tool_calls"][0]["function"]["name"] == "write_file"
         assert msgs[3]["role"] == "tool"
         assert msgs[4]["role"] == "assistant"
+
+    def test_tool_result_follows_its_call_when_storage_interleaves(self, caplog):
+        """D1: a nudge stored between a call and its result must not stay there.
+
+        The unmatched-result half is the sad path: no dangling tool row.
+        """
+        import logging
+
+        call = ToolCall(call_id="X", tool_name="read_file", arguments={})
+        stored = [
+            Message(role=MessageRole.ASSISTANT, content="", tool_calls=[call]),
+            Message(role=MessageRole.USER, content="nudge"),
+            Message(role=MessageRole.TOOL_RESULT, content="r", tool_call_id="X"),
+        ]
+        assert serialize_messages(stored) == [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "X",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "X", "content": "r"},
+            {"role": "user", "content": "nudge"},
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="models.conversation"):
+            orphan = serialize_messages([
+                Message(
+                    role=MessageRole.TOOL_RESULT,
+                    content="payload",
+                    tool_call_id="missing",
+                ),
+            ])
+        assert orphan == [
+            {"role": "user", "content": "[tool result missing] — payload"},
+        ]
+        assert all(row["role"] != "tool" for row in orphan)
+        assert any(
+            rec.levelno == logging.WARNING
+            and "call_id='missing'" in rec.message
+            and "idx=0" in rec.message
+            for rec in caplog.records
+        )
 
     def test_empty_assistant_message_substitutes_placeholder(self):
         """Empty assistant message (no content, no tool_calls) is replaced with placeholder at the wire boundary.
