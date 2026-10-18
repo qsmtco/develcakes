@@ -191,6 +191,10 @@ class ChatHandler:
         session_key = self._mc.get_current_session_key()
         if session_key is None:
             return
+        # Canvas tabs display a document. They are not a conversation, so a
+        # send must not leave this buffer or route the text anywhere.
+        if isinstance(session_key, str) and session_key.startswith("canvas:"):
+            return
 
         buf = self._mc.user_input.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True).strip()

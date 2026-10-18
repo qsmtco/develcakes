@@ -65,24 +65,28 @@ class TestExtractToolCalls:
         assert calls[0][0].startswith("call_")
         assert calls[1][0].startswith("call_")
 
-    def test_extract_tool_calls_malformed_json_args_skipped(self):
-        """Malformed JSON string arguments → tool call skipped (not raised).
+    def test_extract_tool_calls_malformed_json_args_kept(self):
+        """Malformed JSON is kept as an error marker, not dropped or raised.
 
-        Regression: deepseek streaming can drop a connection mid-tool-call
-        without sending [DONE], producing truncated JSON arguments. The
-        extractor must skip the malformed call rather than raise and kill
-        the agent turn. See docs/specs/SPEC-TRUNCATED-STREAMING-TOOL-ARGS.md.
+        A skipped call used to vanish. The turn then looked successful and
+        the model issued the same call again.
         """
+        from agent.llm.extractors import is_truncated_arguments
         response = {
             "choices": [{"message": {"tool_calls": [
                 {"id": "c1", "function": {"name": "x", "arguments": "not-json"}},
             ]}}],
         }
         calls = extract_tool_calls(response, response_format="openai")
-        assert calls == []
+        assert len(calls) == 1
+        assert calls[0][0] == "c1"
+        assert calls[0][1] == "x"
+        assert is_truncated_arguments(calls[0][2])
+        assert calls[0][2]["__truncated_arguments__"] == "not-json"
 
     def test_extract_tool_calls_mixed_valid_and_malformed_args(self):
-        """One valid + one malformed tool call → only the valid call returned."""
+        """One valid + one malformed tool call → both returned."""
+        from agent.llm.extractors import is_truncated_arguments
         response = {
             "choices": [{"message": {"tool_calls": [
                 {"id": "good", "function": {"name": "read_file",
@@ -92,10 +96,12 @@ class TestExtractToolCalls:
             ]}}],
         }
         calls = extract_tool_calls(response, response_format="openai")
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert calls[0][0] == "good"
         assert calls[0][1] == "read_file"
         assert calls[0][2] == {"path": "ok.py"}
+        assert calls[1][0] == "bad"
+        assert is_truncated_arguments(calls[1][2])
 
     def test_extract_tool_calls_empty_string_arguments_defaults_to_empty_dict(self):
         """BUG #1: empty-but-present arguments string defaults to {} (not dropped).

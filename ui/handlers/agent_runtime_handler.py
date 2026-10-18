@@ -829,6 +829,23 @@ class AgentRuntimeHandler(
     # ── AgentRuntime lifecycle ────────────────────────────────────────────────
 
 
+    def runtime_for(self, session_key: str):
+        """Return the AgentRuntime that owns ``session_key``, or None.
+
+        Public wrapper so window callbacks do not reach into ``_get_runtime``.
+        Creates the runtime lazily, matching ``clear_conversation``.
+        """
+        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+            return None
+        agent_def = self._agents.get(session_key)
+        if agent_def is None:
+            return None
+        try:
+            return self._get_runtime(agent_def.display_name, agent_def=agent_def)
+        except Exception:
+            logger.exception("runtime_for: failed for %s", session_key)
+            return None
+
     def _get_runtime(self, name: str, agent_def=None) -> Any:
         """
         Get or create the AgentRuntime for a named agent.

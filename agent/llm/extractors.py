@@ -15,6 +15,44 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
+# Arguments that arrived cut off. The runtime reports this and does not
+# run the tool. The key is not sent back to the model.
+TRUNCATED_ARGUMENTS = "__truncated_arguments__"
+
+
+def parse_tool_arguments(args_raw: object) -> dict:
+    """Return a dict the tool loop can run, or a one-key truncation marker."""
+    if isinstance(args_raw, dict):
+        return args_raw
+    if not isinstance(args_raw, str) or not args_raw:
+        if args_raw in (None, ""):
+            return {}
+        logger.warning(
+            "[extract] tool arguments are incomplete and will be returned as an error: %.200r",
+            args_raw,
+        )
+        return {TRUNCATED_ARGUMENTS: str(args_raw)}
+    try:
+        parsed = json.loads(args_raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    logger.warning(
+        "[extract] tool arguments are incomplete and will be returned as an error: %.200r",
+        args_raw,
+    )
+    return {TRUNCATED_ARGUMENTS: args_raw}
+
+
+def is_truncated_arguments(args: object) -> bool:
+    """True when parse_tool_arguments kept a call that must not be executed."""
+    return (
+        isinstance(args, dict)
+        and TRUNCATED_ARGUMENTS in args
+        and len(args) == 1
+    )
+
 
 def extract_tool_calls(
     response: dict, response_format: str = "openai"
@@ -48,23 +86,10 @@ def extract_tool_calls(
                 # test for the synthetic-id contract.
                 call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
                 name = func.get("name", "")
-                args_raw = func.get("arguments") or "{}"
-                if isinstance(args_raw, str):
-                    try:
-                        args = json.loads(args_raw)
-                    except json.JSONDecodeError:
-                        # Defensive: malformed/truncated tool-call arguments
-                        # (e.g. a streaming provider dropped the connection
-                        # mid-arguments without sending [DONE]). Skip this
-                        # tool call rather than crashing the agent turn.
-                        logger.warning(
-                            "[extract] skipping tool call with malformed "
-                            "JSON arguments: tool=%s args_raw=%.200r",
-                            name, args_raw,
-                        )
-                        continue
-                else:
-                    args = args_raw or {}
+                # Missing arguments are an empty object. A present non-object
+                # is a cut-off stream and must not be dropped.
+                present = func.get("arguments")
+                args = parse_tool_arguments("{}" if present in (None, "") else present)
                 calls.append((call_id, name, args))
 
     elif response_format == "anthropic":

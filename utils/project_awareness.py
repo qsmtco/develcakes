@@ -1189,15 +1189,22 @@ def awareness_content_fingerprint(project_path: str) -> str:
             facts = facts_file.read()
     except OSError:
         facts = b""
+    index = b""
+    index_path = os.path.join(project_path, CRABCAKES_DIR_NAME, "memory", "INDEX.md")
+    try:
+        with open(index_path, "rb") as index_file:
+            index = index_file.read()
+    except OSError:
+        index = b""
     return hashlib.sha1(
-        ctx.encode("utf-8", errors="replace") + b"\0" + facts
+        ctx.encode("utf-8", errors="replace") + b"\0" + facts + b"\0" + index
     ).hexdigest()
 
 
 def build_awareness_dict(project_path: str) -> dict[str, str]:
     """Return awareness data as a dict of template variables.
 
-    Keys: PROJECT_NAME, TEAM_ROSTER, CURRENT_STATE, PROJECT_MEMORY, CURRENT_TASK, WORKFLOW_STATUS.
+    Keys: PROJECT_NAME, TEAM_ROSTER, CURRENT_STATE, PROJECT_MEMORY, MEMORY_INDEX, CURRENT_TASK, WORKFLOW_STATUS.
     Parallel to build_awareness_block() but returns structured data
     instead of formatted text.
     """
@@ -1278,6 +1285,14 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         parts["PROJECT_MEMORY"] = _untrusted_fence(blob, "facts.json")
     else:
         parts["PROJECT_MEMORY"] = ""
+
+    # Long-term memory index only. Topic bodies stay on disk.
+    try:
+        from utils.project_memory import load_index
+        parts["MEMORY_INDEX"] = load_index(project_path)
+    except Exception:
+        _logger.exception("build_awareness_dict: memory index failed")
+        parts["MEMORY_INDEX"] = ""
 
     # Current task — extracted from the latest context.md heading.
     # Injected as TRUSTED data (not in the untrusted fence) because it is

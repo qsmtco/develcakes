@@ -17,6 +17,12 @@ tools:
   - search_files
   - file_search  # execute permit for replayed transcript calls; hidden from API schema (_API_SCHEMA_HIDDEN)
   - provider_events
+  - diary
+  - project_memory
+  - jev_ask
+  - canvas
+  - talk
+  - agent_context
 auto_open: false
 auto_add_to_projects: false  # deliberately manual — user clicks + in the Agents tab
 self_improvement:

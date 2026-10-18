@@ -16,6 +16,11 @@ tools:
   - write_file
   - web_search
   - web_fetch
+  - diary
+  - project_memory
+  - jev_ask
+  - canvas
+  - talk
 self_improvement:
   bug_journal: true
   project_rules: true

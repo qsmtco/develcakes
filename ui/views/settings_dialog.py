@@ -606,6 +606,10 @@ class SettingsDialog:
         self._stt_page = self._build_stt_page()
         self._stack.add_titled(self._stt_page, "stt", "STT Model")
 
+        # ── Speech page (talk tool) ──────────────────────────────────
+        self._speech_page = self._build_speech_page()
+        self._stack.add_titled(self._speech_page, "speech", "Speech")
+
         content.append(self._stack)
         self._window.set_child(content)
 
@@ -980,6 +984,128 @@ class SettingsDialog:
         )
         self._refresh_stt_section()
         return page
+
+    def _build_speech_page(self) -> Gtk.Box:
+        """Speech endpoint, model, and token for the talk tool.
+
+        The form stays hidden until the user clicks Add/Edit Speech.
+        A blank token on a later save keeps the stored token.
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "The talk tool sends text to this endpoint. The token stays on "
+            "this machine. The choice applies on the next talk — no app "
+            "restart needed."
+        )
+        page.append(intro)
+
+        self._speech_add_btn = Gtk.Button(label="+ Add Speech")
+        self._speech_add_btn.add_css_class("suggested-action")
+        self._speech_add_btn.set_hexpand(True)
+        self._speech_add_btn.connect("clicked", self._on_speech_add_clicked)
+        page.append(self._speech_add_btn)
+
+        self._speech_form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._speech_endpoint_entry = Gtk.Entry()
+        self._speech_endpoint_entry.set_hexpand(True)
+        self._speech_endpoint_entry.set_placeholder_text("https://host/api/v1/audio/speech")
+        self._speech_model_entry = Gtk.Entry()
+        self._speech_model_entry.set_hexpand(True)
+        self._speech_model_entry.set_placeholder_text("provider/model-id")
+        self._speech_token_entry = Gtk.Entry()
+        self._speech_token_entry.set_hexpand(True)
+        self._speech_token_entry.set_visibility(False)
+        self._speech_token_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self._speech_token_entry.set_placeholder_text("Bearer token")
+        reveal = Gtk.Button(label="Show")
+        reveal.connect("clicked", self._on_speech_reveal_clicked)
+        token_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        token_box.append(self._speech_token_entry)
+        token_box.append(reveal)
+        self._speech_form.append(self._labeled_row("Endpoint", self._speech_endpoint_entry))
+        self._speech_form.append(self._labeled_row("Model", self._speech_model_entry))
+        self._speech_form.append(self._labeled_row("Token", token_box))
+        self._speech_save_btn = Gtk.Button(label="Save")
+        self._speech_save_btn.add_css_class("suggested-action")
+        self._speech_save_btn.connect("clicked", self._on_speech_save_clicked)
+        self._speech_form.append(self._speech_save_btn)
+        self._speech_form.set_visible(False)
+        page.append(self._speech_form)
+
+        self._speech_status_label = Gtk.Label(label="")
+        self._speech_status_label.set_xalign(0.0)
+        self._speech_status_label.set_wrap(True)
+        page.append(self._speech_status_label)
+        self._speech_has_token = False
+        self._refresh_speech_section()
+        return page
+
+    def _refresh_speech_section(self) -> None:
+        from utils.speech_config import load_speech_config
+        cfg, error = load_speech_config()
+        inert = error is not None
+        self._speech_add_btn.set_sensitive(not inert)
+        self._speech_endpoint_entry.set_sensitive(not inert)
+        self._speech_model_entry.set_sensitive(not inert)
+        self._speech_token_entry.set_sensitive(not inert)
+        self._speech_save_btn.set_sensitive(not inert)
+        if inert:
+            self._speech_status_label.set_text(f"⚠ Speech settings unusable: {error}")
+            self._speech_status_label.remove_css_class("settings-status-ok")
+            self._speech_status_label.add_css_class("settings-status-fail")
+            return
+        self._speech_status_label.remove_css_class("settings-status-fail")
+        self._speech_has_token = bool(cfg and cfg.get("token"))
+        if cfg:
+            self._speech_add_btn.set_label("Edit Speech")
+            self._speech_endpoint_entry.set_text(cfg.get("endpoint", ""))
+            self._speech_model_entry.set_text(cfg.get("model", ""))
+            self._speech_token_entry.set_text("")
+            self._speech_token_entry.set_placeholder_text("leave blank to keep the saved token")
+        else:
+            self._speech_add_btn.set_label("+ Add Speech")
+            self._speech_token_entry.set_placeholder_text("Bearer token")
+
+    def _on_speech_add_clicked(self, _btn) -> None:
+        self._speech_form.set_visible(True)
+
+    def _on_speech_reveal_clicked(self, btn) -> None:
+        current = self._speech_token_entry.get_visibility()
+        self._speech_token_entry.set_visibility(not current)
+        btn.set_label("Hide" if not current else "Show")
+
+    def _on_speech_save_clicked(self, _btn) -> None:
+        from utils.speech_config import save_speech_config
+        try:
+            save_speech_config(
+                self._speech_endpoint_entry.get_text(),
+                self._speech_model_entry.get_text(),
+                self._speech_token_entry.get_text(),
+            )
+        except ValueError as e:
+            self._speech_status_label.set_text(f"❌ {e}")
+            self._speech_status_label.remove_css_class("settings-status-ok")
+            self._speech_status_label.add_css_class("settings-status-fail")
+            return
+        except OSError as e:
+            self._speech_status_label.set_text(f"❌ write failed: {e}")
+            self._speech_status_label.remove_css_class("settings-status-ok")
+            self._speech_status_label.add_css_class("settings-status-fail")
+            return
+        self._speech_status_label.remove_css_class("settings-status-fail")
+        self._speech_status_label.add_css_class("settings-status-ok")
+        self._speech_status_label.set_text("✓ Saved. Applies on the next talk.")
+        self._speech_token_entry.set_text("")
+        self._refresh_speech_section()
 
     def _refresh_stt_section(self) -> None:
         """Sync dropdown/entry with stt.yaml; render inert on degraded store.

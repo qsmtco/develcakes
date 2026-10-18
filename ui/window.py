@@ -765,6 +765,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def _update_agent_display(sk: str):
             """Update context meter avatar/name and the status-bar agent label."""
+            if isinstance(sk, str) and sk.startswith("canvas:"):
+                return
             agent_name, agent_color = _resolve_agent_info(sk)
             if agent_name:
                 self._main_content.update_agent_context_display(agent_name, agent_color or "#6366f1")
@@ -788,6 +790,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._project_handler.set_compact_chat_callback(
             lambda sk, result: self._show_compact_bubble(sk, result)
         )
+        self._wire_group_tool_callbacks()
 
         # ── Agent Command Handler (Phase 6.2) ─────────────────────────────────────
         # Scans agent responses for backtick commands, routes to target agents,
@@ -1031,6 +1034,145 @@ class MainWindow(Gtk.ApplicationWindow):
             on_revert=on_revert,
         )
         self._main_content.show_diff_viewer(viewer)
+
+    def _wire_group_tool_callbacks(self) -> None:
+        """Install agent_context, canvas, and talk callbacks.
+
+        agent_context runs on the caller's tool-loop thread. It must use
+        cancel_peer (not cancel) so the global _cancel_requested flag stays
+        down. Canvas hops to the GTK thread and waits. Talk does not touch GTK.
+        """
+        import threading
+        import time
+
+        from agent.special_agents import get_special_agent
+        from agent.tools import (
+            ToolResult,
+            cancel_all_processes,
+            set_agent_context_callback,
+            set_canvas_callback,
+            set_talk_callback,
+        )
+
+        def _peer_label(session_key: str) -> str:
+            agent = get_special_agent(session_key)
+            if agent is not None and getattr(agent, "display_name", ""):
+                return agent.display_name
+            return session_key.split(":", 1)[-1]
+
+        def _agent_context(_caller, peer, action, focus):
+            rt = self._agent_runtime_handler.runtime_for(peer)
+            if rt is None:
+                return ToolResult(success=False, error="could not clear" if action == "clear" else "could not compact")
+            was_active = rt.is_loop_active(peer)
+            # An idle peer must not be added to _cancelled: that set is only
+            # cleared when a running loop notices it, so a leftover mark
+            # would cancel the peer's next turn.
+            if was_active:
+                rt.cancel_peer(peer)
+            killed, _unkillable = cancel_all_processes(peer)
+            idle = not rt.is_loop_active(peer)
+            if not idle:
+                for _ in range(50):
+                    time.sleep(0.1)
+                    if not rt.is_loop_active(peer):
+                        idle = True
+                        break
+            if not idle:
+                return ToolResult(success=False, error="peer loop still active")
+            label = _peer_label(peer)
+            state = "Stopped an active loop." if was_active else "Agent was idle."
+            killed_bit = f" killed={killed}." if killed else ""
+            if action == "clear":
+                ok = self._agent_runtime_handler.clear_conversation(peer)
+                if not ok:
+                    return ToolResult(success=False, error="could not clear")
+
+                def _ui_clear():
+                    try:
+                        self._clear_chat_box(peer)
+                    except Exception:
+                        logger.exception("agent_context clear UI failed for %s", peer)
+                    return False
+
+                GLib.idle_add(_ui_clear)
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"cleared {label}. {state}{killed_bit} "
+                        "The next delegation is the whole brief."
+                    ),
+                )
+            result = self._agent_runtime_handler.compact_conversation(peer, focus or "")
+            if not isinstance(result, dict):
+                return ToolResult(success=False, error="could not compact")
+
+            def _ui_compact(payload=result):
+                try:
+                    self._show_compact_bubble(peer, payload)
+                except Exception:
+                    logger.exception("agent_context compact UI failed for %s", peer)
+                return False
+
+            GLib.idle_add(_ui_compact)
+            removed = int(result.get("messages_removed", 0))
+            freed = int(result.get("tokens_freed", 0))
+            return ToolResult(
+                success=True,
+                output=(
+                    f"compacted {label}. {state}{killed_bit} "
+                    f"Removed {removed} messages, freed ~{freed} tokens."
+                ),
+            )
+
+        def _canvas(_session_key, slug, html):
+            done = threading.Event()
+            box: dict = {}
+
+            def _ui():
+                try:
+                    key = f"canvas:{slug}"
+                    self._main_content.create_chat_tab(key, slug)
+                    surface = self._chat_render_handler.surface_for_mount(key)
+                    if surface is None:
+                        box["error"] = "canvas surface did not mount"
+                        return False
+                    surface.clear()
+                    live = getattr(surface, "is_live_enabled", None)
+                    if not callable(live) or not live():
+                        from render.sanitize import sanitize_agent_html
+                        surface.append_message(
+                            "agent", sanitize_agent_html(html), agent_name=slug,
+                        )
+                        box["degraded"] = True
+                    else:
+                        live_id = surface.append_live(html, agent_name=slug)
+                        if live_id is None:
+                            box["error"] = "canvas surface is destroyed"
+                        else:
+                            box["live_id"] = live_id
+                except Exception as exc:  # noqa: BLE001 — surface the failure as a tool error
+                    box["error"] = f"{type(exc).__name__}: {exc}"
+                finally:
+                    done.set()
+                return False
+
+            GLib.idle_add(_ui)
+            if not done.wait(2.0):
+                return ToolResult(success=False, error="canvas UI did not open")
+            if box.get("error"):
+                return ToolResult(success=False, error=str(box["error"]))
+            if box.get("degraded"):
+                return ToolResult(success=True, output=f"opened canvas {slug} (scripts off)")
+            return ToolResult(success=True, output=f"opened canvas {slug}")
+
+        def _talk(text):
+            from utils.speech import speak
+            return speak(text)
+
+        set_agent_context_callback(_agent_context)
+        set_canvas_callback(_canvas)
+        set_talk_callback(_talk)
 
     def _clear_chat_box(self, session_key: str) -> None:
         """Empty the chat surface for a session. /clear UI side effect.

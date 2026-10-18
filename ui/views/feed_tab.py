@@ -2,23 +2,28 @@
 # Feed tab container - pure view for the Projects notebook's "Feed" sub-tab.
 # No business logic, no state mutations.
 #
+# HTML-only (feed GTK-removal plan, chunk E1): the card list is a WebKit
+# document (ui/views/feed_surface.py). The GTK card list is gone; a feed
+# without WebKit is a hard error at wiring time, not a silent fallback.
+#
 # Public API:
 #   class FeedTab(Gtk.Box):
-#       get_card_container() -> Gtk.Box
-#       append_card(card_widget: Gtk.Widget, card_id: str | None) -> None
-#       remove_card(card_id: str) -> None
-#       schedule_smart_scroll_to_bottom() -> None
+#       attach_html_surface(on_action) -> FeedSurface
+#       upsert_card(card) / prepend_html_card(card) / remove_card_html(card_id)
+#       set_html_cards(cards) / set_html_load_more(remaining)
 #       show_empty_state() -> None
+#       remove_card(card_id) -> None          # compat no-op (E2/E3 re-route callers)
+#       schedule_smart_scroll_to_bottom() -> None
 #       get_vadjustment() -> Gtk.Adjustment | None
 #       is_near_bottom(slack: int = 80) -> bool
-#       is_above_viewport(widget) -> bool
 
 import logging
+from collections.abc import Callable
 
 import gi
+
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
-from typing import Callable
 
 from utils.gtk_containers import is_in_container
 
@@ -27,28 +32,22 @@ logger = logging.getLogger(__name__)
 
 class FeedTab(Gtk.Box):
     """
-    Feed card list for the Projects notebook's "Feed" sub-tab.
+    Feed document host for the Projects notebook's "Feed" sub-tab.
 
     Layout:
       Gtk.Box (vertical)
-        └── Gtk.ScrolledWindow
-              └── Gtk.Box (vertical, card_container)
-
-    CSS classes:
-      .feed-scroll  - the scrolled window
-      .feed-card-list - the vertical box holding cards
+        ├── Gtk.ScrolledWindow (.feed-scroll)
+        │     └── WebKit webview (set by attach_html_surface)
+        └── bottom toolbar (auto-accept / batch accept)
     """
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.set_vexpand(True)
 
-        self._card_container: Gtk.Box | None = None
         self._feed_scroll: Gtk.ScrolledWindow | None = None
         self._html_surface = None
         self._html_load_more: Gtk.Box | None = None
-        self._cards_by_id: dict[str, Gtk.Widget] = {}  # card_id → widget
-        self._empty_widget: Gtk.Widget | None = None
         # Phase 5 — Auto-accept toggle callback (set by FeedHandler via set_auto_accept_callback).
         # Stores the caller's function; invoked from _on_auto_accept_toggled when the user clicks
         # the toggle button. None means no callback is wired yet (toggling still updates the
@@ -88,7 +87,12 @@ class FeedTab(Gtk.Box):
         self._was_near_bottom: bool = True
         self._saved_value: float = 0.0
 
-        # ── Build scrolled card list ────────────────────────────────────
+        # ── Build the scroll host ───────────────────────────────────────
+        # The scroll's child is the WebKit document set by
+        # attach_html_surface() (set_child swaps the child; it does not add a
+        # second scroller). There is no GTK card-list fallback: a feed
+        # without WebKit is a hard error at wiring time (PM directive — SPEC
+        # fallback deleted entirely).
         scroll = Gtk.ScrolledWindow()
         scroll.add_css_class("feed-scroll")
         scroll.set_vexpand(True)
@@ -97,14 +101,6 @@ class FeedTab(Gtk.Box):
         scroll.set_valign(Gtk.Align.FILL)
         self._feed_scroll = scroll
 
-        card_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        card_container.add_css_class("feed-card-list")
-        card_container.set_spacing(8)
-        card_container.set_valign(Gtk.Align.START)
-        card_container.set_vexpand(True)
-        self._card_container = card_container
-
-        scroll.set_child(card_container)
         self.append(scroll)
 
         # ── Persistent bottom toolbar (Phase 5 — auto-accept + batch accept) ──────
@@ -328,7 +324,7 @@ class FeedTab(Gtk.Box):
         self._clear_widget_state_recursive(widget)
         if self._card_container is not None and is_in_container(widget, self._card_container):
             self._card_container.remove(widget)
-        del self._cards_by_id[card_id]      
+        del self._cards_by_id[card_id]
 
     def prepend_card(self, card_widget: Gtk.Widget, card_id: str | None = None) -> None:
         """

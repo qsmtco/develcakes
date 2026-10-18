@@ -63,6 +63,7 @@ def _parse_agent_file(filepath: str) -> dict | None:
     # Try YAML first
     if filepath.endswith((".yaml", ".yml")):
         try:
+            import yaml
             from utils.yaml_load import safe_load_yaml
             with open(filepath, encoding="utf-8") as f:
                 data = safe_load_yaml(f)
@@ -89,6 +90,14 @@ def _parse_agent_file(filepath: str) -> dict | None:
                 "pyyaml not installed — cannot parse %s. Install with: pip install pyyaml",
                 filepath,
             )
+            return None
+        except OSError as e:
+            logger.warning("Failed to read agent file %s: %s", filepath, e)
+            return None
+        except yaml.YAMLError as e:
+            # A hand-edited or half-migrated agent file must not take down
+            # startup. load_agent_defs skips anything this returns as None.
+            logger.warning("Failed to parse agent file %s: %s", filepath, e)
             return None
 
     # JSON files
@@ -156,6 +165,121 @@ def _seed_defaults() -> None:
                     logger.info("Seeded default agent definition: %s", fname)
                 except OSError as e:
                     logger.warning("Failed to seed default agent %s: %s", fname, e)
+
+    for tool in ("diary", "project_memory", "jev_ask", "canvas", "talk"):
+        for agent_name in ("Coder", "Debugger", "Supervisor"):
+            ensure_builtin_tool(agent_name, tool)
+    ensure_builtin_tool("Supervisor", "agent_context")
+
+
+_BUILTIN_AGENT_FILES = {
+    "Coder": "coder.yaml",
+    "Debugger": "debugger.yaml",
+    "Supervisor": "supervisor.yaml",
+}
+
+
+def ensure_builtin_tool(name: str, tool: str) -> None:
+    """Append ``tool`` to a built-in agent file when that agent lacks it.
+
+    Only coder.yaml, debugger.yaml, and supervisor.yaml in the config agents
+    dir are considered, and only when their ``name`` field is Coder, Debugger,
+    or Supervisor. Other files in that directory are left alone. A parse
+    failure logs a warning and does not write.
+    """
+    fname = _BUILTIN_AGENT_FILES.get(name)
+    if fname is None or not isinstance(tool, str) or not tool.strip():
+        return
+    tool = tool.strip()
+    path = os.path.join(_get_agents_dir(), fname)
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as exc:
+        logger.warning("ensure_builtin_tool: cannot read %s: %s", path, exc)
+        return
+    try:
+        from utils.yaml_load import safe_load_yaml
+        data = safe_load_yaml(text)
+    except Exception as exc:  # noqa: BLE001 — malformed agent file stays untouched
+        logger.warning("ensure_builtin_tool: %s did not parse: %s", path, exc)
+        return
+    if not isinstance(data, dict) or data.get("name") != name:
+        return
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        logger.warning("ensure_builtin_tool: %s tools is not a list", path)
+        return
+    if tool in tools:
+        return
+    updated = _insert_tool_line(text, tool)
+    if updated is None:
+        data["tools"] = list(tools) + [tool]
+        try:
+            import yaml
+            updated = yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ensure_builtin_tool: cannot dump %s: %s", path, exc)
+            return
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+        os.rename(tmp_path, path)
+    except OSError as exc:
+        logger.warning("ensure_builtin_tool: write failed for %s: %s", path, exc)
+        if os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+    logger.info("ensure_builtin_tool: added %s to %s", tool, fname)
+
+
+def _insert_tool_line(text: str, tool: str) -> str | None:
+    """Append ``tool`` to a flat block-style tools list, matching its indent.
+
+    User files use both ``  - name`` and ``- name``. Inserting a two-space
+    item in front of a zero-indent list is invalid YAML (the next ``-`` is
+    no longer a key). Returns None for inline lists and for items that carry
+    nested bodies; the caller then rewrites via yaml.dump.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "tools:" or stripped.startswith("tools:"):
+            if stripped != "tools:":
+                return None  # inline list — caller falls back to a dump
+            start = i
+            break
+    if start is None:
+        return None
+    item_indent: str | None = None
+    insert_at = start + 1
+    for j in range(start + 1, len(lines)):
+        body = lines[j]
+        if body.strip() == "" or body.lstrip().startswith("#"):
+            continue
+        content = body.lstrip(" \t")
+        indent = body[: len(body) - len(content)]
+        if content.startswith("- "):
+            if item_indent is None:
+                item_indent = indent
+            elif indent != item_indent:
+                return None
+            insert_at = j + 1
+            continue
+        # Indented non-item line: a nested body under a list entry.
+        if indent:
+            return None
+        break
+    prefix = "  " if item_indent is None else item_indent
+    lines.insert(insert_at, f"{prefix}- {tool}\n")
+    return "".join(lines)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

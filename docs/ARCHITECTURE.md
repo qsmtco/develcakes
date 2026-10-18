@@ -240,6 +240,7 @@ develcakes/
     ├── mcp_client.py            # MCP client library — asyncio-to-threading bridge, stdio transport, connection pooling, tool discovery/call
     ├── mcp_config.py            # MCP server configuration loader — YAML/JSON deserialization with schema validation
     ├── project_awareness.py     # Project awareness system — manages .develcakes/ directory per project (team, workflow, context; seed_project_prompts)
+    ├── project_memory.py        # Long-term memory under .crabcakes/memory — index only is prompted (SPEC-GROUP-AGENT-TOOLS)
     ├── project_trust.py         # HIGH-5: per-project trust gate for .develcakes/ rule/bug ingestion
     ├── prompt_loader.py         # System prompt template loader — loads/fills/composes prompts/system/*.md
     ├── prompt_paths.py          # Per-project prompts dir resolvers (get_project_prompts_dir read-side, ensure_project_prompts_dir write-side)
@@ -250,6 +251,8 @@ develcakes/
     ├── quoting.py               # _parse_quoted_payload() — quoted-payload parsing with escape handling (A2A_QUOTED_PAYLOAD_SPEC)
     ├── review_log.py            # Review log persistence — append/retrieve review entries per project
     ├── spellcheck.py            # Spell check engine — Enchant-based misspelling detection and suggestion
+    ├── speech.py                # talk tool — POST text to the saved speech endpoint and play mp3
+    ├── speech_config.py         # speech.yaml — endpoint, model, token, mode 0o600
     ├── stt.py                   # STTEngine — OpenRouter cloud STT (model from stt_config, SPEC-37); arecord 16kHz mono capture + STT_PHRASES keyword biasing
     ├── stt_config.py            # STT model setting store — stt.yaml, env STT_MODEL override, per-model bias gating (SPEC-37)
     ├── syntax_highlight.py      # highlight() — Pygments → Pango markup (Tokyo Night color scheme)
@@ -2056,6 +2059,8 @@ all registered tools are permitted — preserves back-compat.
 The API-schema filter in `get_tool_definitions_for_api(allowed_tools)`
 remains as a *prompt-level* optimization. It is no longer the sole
 authorization mechanism.
+
+**Group tools (SPEC-GROUP-AGENT-TOOLS).** `diary`, `project_memory`, `jev_ask`, `canvas`, and `talk` are registered beside the file tools. Handlers live in `agent/group_tools.py`. `agent_context`, and `project_memory` actions `promote` and `supersede`, succeed only when `SpecialAgentDef.role == "supervisor"`. `ui/window.py` installs the three callbacks. `AgentRuntime.cancel_peer` marks one session in `_cancelled` and does not set `_cancel_requested`. A canvas tab's session key is `canvas:<slug>`: `create_chat_tab` skips `render_welcome`, and `ChatHandler.on_send` returns before it reads the input buffer. `talk` reads `<config_dir>/speech.yaml`. `{{MEMORY_INDEX}}` is filled from `.crabcakes/memory/INDEX.md` by `prompts/system/agent-tools.md`.
 
 ### 3.21o `agent/config.py` — LLM Provider Config (Phase 1.1)
 
@@ -4641,6 +4646,7 @@ develcakes/
     ├── mcp_client.py             # ~541 lines — MCP asyncio-threading bridge
     ├── mcp_config.py             # ~295 lines — MCP server config loader
     ├── project_awareness.py      # ~641 lines — project awareness system
+    ├── project_memory.py         # .crabcakes/memory store — INDEX.md is the only prompted file
     ├── project_trust.py          # ~203 lines — HIGH-5 per-project trust gate
     ├── prompt_loader.py          # ~489 lines — system prompt template loader
     ├── prompts.py                # ~25 lines — load_prompts()
@@ -4650,6 +4656,8 @@ develcakes/
     ├── quoting.py                # ~78 lines — quoted-payload parsing
     ├── review_log.py             # ~146 lines — review log persistence
     ├── spellcheck.py             # ~100 lines — spell check engine (Enchant)
+    ├── speech.py                 # talk tool playback — no GTK
+    ├── speech_config.py          # speech.yaml credential store (mode 0o600)
     ├── stt.py                    # ~286 lines — STTEngine (OpenRouter cloud STT; GTK carve-out: lazy GLib import)
     ├── stt_config.py             # STT model setting store — stt.yaml + env override (SPEC-37; pure Python)
     ├── syntax_highlight.py       # ~164 lines — Pygments → Pango (Tokyo Night)

@@ -328,6 +328,14 @@ class ChatRenderHandler:
                 return surface
         return None
 
+    def surface_for_mount(self, session_key: str):
+        """Mount (or return) the surface for ``session_key``.
+
+        Canvas tabs call this from the GTK thread. Unlike ``surface_for_key``,
+        a miss creates the surface.
+        """
+        return self._surface_for(session_key)
+
     def surface_for_key(self, session_key: str):
         """SPEC-07 SP1: READ-ONLY surface lookup by DISPLAY key (or None).
 

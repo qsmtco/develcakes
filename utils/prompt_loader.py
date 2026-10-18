@@ -206,6 +206,11 @@ def compose_system_prompt(
     if cc_ctx:
         parts.append(cc_ctx)
 
+    # 1d. Group tools (every agent — role-neutral). Missing file is skipped.
+    agent_tools = load_prompt_template("agent-tools")
+    if agent_tools:
+        parts.append(agent_tools)
+
     # 2. Project awareness (when project active)
     if project_path:
         pa = load_prompt_template("project-awareness")
@@ -319,6 +324,7 @@ def compose_system_prompt(
         "TEAM_ROSTER": awareness.get("TEAM_ROSTER", ""),
         "CURRENT_STATE": awareness.get("CURRENT_STATE", ""),
         "PROJECT_MEMORY": awareness.get("PROJECT_MEMORY", ""),
+        "MEMORY_INDEX": awareness.get("MEMORY_INDEX", ""),
         "CURRENT_TASK": awareness.get("CURRENT_TASK", ""),
         "WORKFLOW_STATUS": awareness.get("WORKFLOW_STATUS", ""),
         "REVIEW_MODE": review_mode,

@@ -644,7 +644,11 @@ class MainContent(Gtk.Box):
         pop_box = getattr(handler, "pop_tombstones_for_box", None) if handler is not None else None
         if callable(pop_box):
             pop_box(session_key)
-        if handler is not None and hasattr(handler, "render_welcome"):
+        if (
+            handler is not None
+            and hasattr(handler, "render_welcome")
+            and not (isinstance(session_key, str) and session_key.startswith("canvas:"))
+        ):
             handler.render_welcome(session_key)
         return page_idx
 
@@ -678,6 +682,8 @@ class MainContent(Gtk.Box):
     def _extract_session_display_name(session_key: str) -> str:
         """Parse a session key like 'agent:qaster:telegram:direct:7478874934'
         and return a human-readable channel name like 'Telegram'."""
+        if isinstance(session_key, str) and session_key.startswith("canvas:"):
+            return "Canvas"
         parts = session_key.split(":")
         if len(parts) >= 3:
             channel = parts[2].lower()

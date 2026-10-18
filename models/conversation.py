@@ -200,7 +200,13 @@ def serialize_messages(messages: list[Message], *, index_base: int = 0) -> list[
                     "content": "[assistant returned no content — placeholder]",
                 }
             else:
-                entry = {"role": "assistant", "content": msg.content}
+                content = msg.content
+                # Old transcripts stored this phrase beside real tool calls.
+                # Sending it back teaches the model to reply with only that
+                # phrase and no tool call.
+                if msg.tool_calls and isinstance(content, str) and content.strip() == "[calling tools]":
+                    content = ""
+                entry = {"role": "assistant", "content": content}
                 if msg.tool_calls:
                     entry["tool_calls"] = [
                         {

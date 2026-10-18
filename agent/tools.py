@@ -87,6 +87,35 @@ def set_approval_callback(cb: Callable[[str, str, dict], bool] | None) -> None:
     _approval_callback = cb
 
 
+def set_agent_context_callback(cb) -> None:
+    """Install the supervisor peer clear/compact callback.
+
+    Trigger: the ``agent_context`` tool handler, after the role check.
+    Signature ``(caller_session_key, peer_session_key, action, focus) -> ToolResult``.
+    """
+    from agent.group_tools import set_agent_context_callback as _set
+    _set(cb)
+
+
+def set_canvas_callback(cb) -> None:
+    """Install the canvas tab callback.
+
+    Trigger: the ``canvas`` tool handler, after the slug and size checks.
+    Signature ``(session_key, slug, html) -> ToolResult``.
+    """
+    from agent.group_tools import set_canvas_callback as _set
+    _set(cb)
+
+
+def set_talk_callback(cb) -> None:
+    """Install the talk callback.
+
+    Trigger: the ``talk`` tool handler. Signature ``(text,) -> ToolResult``.
+    """
+    from agent.group_tools import set_talk_callback as _set
+    _set(cb)
+
+
 def _get_approval(session_key: str, tool_name: str, arguments: dict, *, approval_callback=None) -> bool:
     """Return True if exec_command is approved, False otherwise.
 
@@ -1397,6 +1426,153 @@ def _register_tools() -> None:
             requires_approval=False,
         ),
         lambda session_key=None, limit=20, **kwargs: _provider_events(session_key, limit),  # type: ignore
+    )
+
+    from agent import group_tools as _group
+
+    _TOOLS["agent_context"] = (
+        ToolDefinition(
+            name="agent_context",
+            description=(
+                "Supervisor only. clear or compact a peer agent's working "
+                "context. clear means the next brief is the whole task."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Peer display name or role"},
+                    "action": {"type": "string", "enum": ["clear", "compact"]},
+                    "focus": {"type": "string", "description": "What compact should keep"},
+                },
+                "required": ["agent", "action"],
+            },
+            requires_approval=False,
+        ),
+        lambda agent, action, focus="", **kwargs: _group.agent_context(  # type: ignore
+            agent, action, focus, **kwargs
+        ),
+    )
+
+    _TOOLS["diary"] = (
+        ToolDefinition(
+            name="diary",
+            description=(
+                "Append or search the project diary (.crabcakes/context.md). "
+                "remember needs a ## heading. recall searches entries."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["remember", "recall"]},
+                    "heading": {"type": "string", "description": "Must start with ## "},
+                    "body": {"type": "string"},
+                    "query": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+            requires_approval=False,
+        ),
+        lambda action, heading="", body="", query="", **kwargs: _group.diary(  # type: ignore
+            action, heading, body, query, **kwargs
+        ),
+    )
+
+    _TOOLS["project_memory"] = (
+        ToolDefinition(
+            name="project_memory",
+            description=(
+                "Long-term project memory. log and search are open. "
+                "promote and supersede are supervisor-only. "
+                "For supersede, name is the old slug and body is the replacement slug."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["log", "search", "read", "promote", "supersede"],
+                    },
+                    "name": {"type": "string"},
+                    "body": {"type": "string"},
+                    "query": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["shared", "private"]},
+                },
+                "required": ["action"],
+            },
+            requires_approval=False,
+        ),
+        lambda action, name="", body="", query="", scope="shared", **kwargs: (  # type: ignore
+            _group.project_memory(action, name, body, query, scope, **kwargs)
+        ),
+    )
+
+    _TOOLS["jev_ask"] = (
+        ToolDefinition(
+            name="jev_ask",
+            description=(
+                "Ask the decision model one closed question. "
+                "2–5 options. decisive false or no decision means do not treat it as a verdict."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "description": "The situation, max 1000 chars"},
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "meaning": {"type": "string"},
+                            },
+                            "required": ["name", "meaning"],
+                        },
+                    },
+                },
+                "required": ["state", "options"],
+            },
+            requires_approval=False,
+        ),
+        lambda state, options=None, **kwargs: _group.jev_ask(state, options, **kwargs),  # type: ignore
+    )
+
+    _TOOLS["canvas"] = (
+        ToolDefinition(
+            name="canvas",
+            description=(
+                "Open or focus a notebook tab and run an HTML, CSS, and "
+                "JavaScript document there. The html is not returned."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "html": {"type": "string"},
+                },
+                "required": ["name", "html"],
+            },
+            requires_approval=False,
+        ),
+        lambda name, html, **kwargs: _group.canvas(name, html, **kwargs),  # type: ignore
+    )
+
+    _TOOLS["talk"] = (
+        ToolDefinition(
+            name="talk",
+            description=(
+                "Speak one line through the speech endpoint saved in Settings. "
+                "Fails when speech is not configured."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+            requires_approval=False,
+        ),
+        lambda text, **kwargs: _group.talk(text, **kwargs),  # type: ignore
     )
 
 

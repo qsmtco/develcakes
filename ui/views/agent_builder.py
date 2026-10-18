@@ -517,6 +517,10 @@ class AgentBuilderDialog:
             ("Write", {"write_file", "edit_file"}),
             ("Execute", {"exec_command"}),
             ("Web", {"web_search", "web_fetch"}),
+            ("Group", {
+                "agent_context", "diary", "project_memory",
+                "jev_ask", "canvas", "talk",
+            }),
         ]
 
         tools = self._handler.get_tool_options()

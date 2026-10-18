@@ -35,7 +35,9 @@ def _read(rt, sk, conv, call_id: str, args: dict, iteration: int = 1):
 
 def _notice(path: str, offset, limit) -> str:
     return (
-        f"[unchanged \u2014 read_file {path} offset={offset or 0} limit={limit}]"
+        f"[unchanged \u2014 read_file {path} offset={offset or 0} limit={limit}; "
+        "the body is already in this conversation. "
+        "Do not read it again and do not print it with a shell command.]"
     )
 
 

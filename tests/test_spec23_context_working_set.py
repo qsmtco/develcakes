@@ -33,7 +33,9 @@ def test_second_identical_read_is_unchanged_notice(tmp_path):
     bodies = _tool_bodies(conv)
     assert bodies[0] == "hello world\n"
     assert bodies[1] == (
-        "[unchanged \u2014 read_file a.txt offset=0 limit=None]"
+        "[unchanged \u2014 read_file a.txt offset=0 limit=None; "
+        "the body is already in this conversation. "
+        "Do not read it again and do not print it with a shell command.]"
     )
     for msg in conv.messages:
         for tc in msg.tool_calls:

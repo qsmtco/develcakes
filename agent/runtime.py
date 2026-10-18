@@ -350,9 +350,8 @@ from agent.llm.extractors import extract_tool_calls, extract_text_content, extra
 def _is_empty_content(text) -> bool:
     """True if text_content is empty or whitespace-only.
 
-    Used at write-side call sites to decide whether to substitute a placeholder
-    before persisting. Matches the BUG #1 guard semantics so all empty-content
-    paths produce consistent behavior.
+    Used to decide that a reply has no text. "[calling tools]" counts as
+    empty: it was a stored placeholder, and models copy it back with no tool call.
 
     Covers:
     - None / missing
@@ -363,13 +362,14 @@ def _is_empty_content(text) -> bool:
       (U+200B zero-width space, U+FEFF BOM, U+200C/200D ZWNJ/ZWJ)
     - empty list / dict (treated as falsy)
 
-    Does NOT cover valid OpenAI responses with `content=None` and tool_calls
-    present — that's the tool-call path which has its own guard at site 2391.
+    Does NOT cover a real OpenAI response with content=None and tool_calls
+    present. That message is stored with empty content; the words
+    "[calling tools]" are not written into history.
     """
     if not text:
         return True
     if isinstance(text, str):
-        if text.strip() == "":
+        if text.strip() == "" or text.strip() == "[calling tools]":
             return True
         # Zero-width / format chars: str.strip() doesn't remove these but some
         # strict providers treat them as effectively empty. Strip and re-check.
@@ -379,32 +379,33 @@ def _is_empty_content(text) -> bool:
     return False
 
 
-# ── Streaming argument validation ────────────────────────────────────────────
+def _assemble_streamed_tool_calls(tool_calls_partial: dict) -> list[dict]:
+    """Keep every named streamed tool call, including cut-off arguments.
 
-def _validate_streamed_arguments(
-    args_str: str, tool_name: str, session_key: str
-) -> bool:
-    """Validate that accumulated streaming arguments form complete JSON.
-
-    Returns True if the arguments are valid JSON (or empty — empty is
-    allowed, some providers send arguments as a separate frame that may
-    not have arrived). Returns False if the arguments are malformed
-    (truncated stream), in which case the caller should skip the tool call.
-
-    Logs a warning on failure so truncated streams are observable.
+    Dropping a call made the turn look successful. Parsing happens later,
+    in extract_tool_calls, which turns bad JSON into an error result.
     """
-    if not args_str:
-        return True  # empty is valid — no arguments fragment arrived yet
-    try:
-        json.loads(args_str)
-        return True
-    except (json.JSONDecodeError, TypeError):
-        logger.warning(
-            "[stream] sk=%s skipping tool=%s with incomplete JSON arguments "
-            "(stream truncated): %.200r",
-            session_key, tool_name, args_str,
-        )
-        return False
+    if not isinstance(tool_calls_partial, dict):
+        return []
+    calls: list[dict] = []
+    for idx in sorted(tool_calls_partial.keys()):
+        tc = tool_calls_partial[idx]
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = tc.get("arguments")
+        if not isinstance(arguments, str):
+            arguments = "" if arguments is None else str(arguments)
+        call_id = tc.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = f"call_{idx}"
+        calls.append({
+            "id": call_id,
+            "function": {"name": name, "arguments": arguments},
+        })
+    return calls
 
 
 # ── AgentRuntime ──────────────────────────────────────────────────────────────
@@ -1368,6 +1369,29 @@ class AgentRuntime:
             _turn_token=active_tk,
         )
 
+    def cancel_peer(self, session_key: str) -> None:
+        """Ask one other session's loop to stop. Does not set _cancel_requested.
+
+        The global flag is consumed by whichever _run_loop reaches the
+        immediate-cancel check first, including the caller. A tool running
+        inside the supervisor's loop must not arm it. The target loop notices
+        via ``_cancelled`` at its next iteration and emits CANCEL_MESSAGE
+        itself. Pending approvals for this session are flushed the same way
+        ``cancel`` flushes them (``result`` + event + pop).
+        """
+        if not isinstance(session_key, str) or not session_key:
+            return
+        with self._lock:
+            self._cancelled.add(session_key)
+            self._cancelled_epochs.add(session_key)
+            for sk in list(self._pending_approvals):
+                if sk.startswith(session_key):
+                    ev = self._pending_approvals[sk]["event"]
+                    self._pending_approvals[sk]["result"] = None
+                    ev.set()
+                    self._pending_approvals.pop(sk, None)
+            logger.info("cancel_peer: marked %s (global cancel flag left alone)", session_key)
+
     def stop_all(self) -> dict[str, str]:
         """Cancel every in-flight turn + kill every registered process. sk -> outcome.
 
@@ -1957,6 +1981,11 @@ class AgentRuntime:
                                     provider_name = metadata.get("provider_name")
                                     if provider_name:
                                         error_text += f" (underlying provider: {provider_name})"
+                            elif isinstance(text_content, str) and text_content.strip() == "[calling tools]":
+                                error_text = (
+                                    "The model wrote [calling tools] and did not call a tool. "
+                                    "The turn stopped instead of being saved as a finished answer."
+                                )
                             else:
                                 error_text = "Agent returned no content. This may indicate a configuration error or an issue with the LLM provider."
 
@@ -2212,30 +2241,36 @@ class AgentRuntime:
             for call_id, tool_name, args in tool_calls_raw
         ]
 
-        # BUG #3 sweep: tool-call response with empty/whitespace text_content.
-        # OpenAI spec allows content=null with tool_calls, but strict providers
-        # (Cohere, Anthropic strict mode) require non-empty content even when
-        # tool_calls are present. If a model returns tool_calls with empty
-        # content (e.g. provider bug, malformed streaming response), substitute
-        # a meaningful placeholder so the next LLM call doesn't 400.
-        # The read-side filter at models/conversation.py:262 already handles
-        # the no-content-no-tool_calls case; this fills the gap for the
-        # tool_calls-present-but-content-empty case.
+        # Do not store "[calling tools]". Models copy that phrase back
+        # as a finished reply with no tool call.
         if _is_empty_content(text_content):
-            logger.warning(
-                "[tool-loop] sk=%s tool-call response has empty content "
-                "(tool_calls=%d) — substituting placeholder for strict-provider safety",
-                session_key, len(tool_call_objects),
-            )
-            text_content = "[calling tools]"
+            text_content = ""
 
         conv.add_assistant_message(text_content, tool_call_objects)
 
         # Import once per loop iteration (avoid repeated import overhead)
         import agent.tools as agent_tools_module
 
+        from agent.llm.extractors import TRUNCATED_ARGUMENTS, is_truncated_arguments
+
         for call_id, tool_name, args in tool_calls_raw:
             tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
+
+            # Incomplete streamed arguments are not a command. Tell the model
+            # and do not run the tool, approve it, or hide the call.
+            if is_truncated_arguments(args):
+                fragment = args.get(TRUNCATED_ARGUMENTS, "")
+                fragment = fragment if isinstance(fragment, str) else str(fragment)
+                text = (
+                    f"{tool_name} was not run because its arguments were cut off. "
+                    f"Call {tool_name} again. Fragment: {fragment[:200]!r}"
+                )
+                tc.arguments = {}
+                tc.mark_failed(text)
+                tc.result = None
+                conv.add_tool_result(call_id, text)
+                self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
+                continue
 
             # Approval gating for exec_command — fires BEFORE tool_call_start
             # so the approval card appears first. Non-approval tools skip this.
@@ -3214,22 +3249,9 @@ class AgentRuntime:
                     )
 
             elif ev.type == "done":
-                # Build final tool_calls list from accumulated partials.
-                # STREAM-ID-PRES: use the provider-assigned id captured during
-                # SSE assembly; fall back to synthetic only if absent.
-                tool_calls = []
-                for idx in sorted(tool_calls_partial.keys()):
-                    tc = tool_calls_partial[idx]
-                    if tc["name"] and _validate_streamed_arguments(
-                        tc["arguments"], tc["name"], session_key
-                    ):
-                        tool_calls.append({
-                            "id": tc["id"] or f"call_{idx}",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": tc["arguments"]
-                            }
-                        })
+                # STREAM-ID-PRES: the helper keeps the provider id captured
+                # during SSE assembly and falls back to a synthetic id.
+                tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
                 logger.debug("[stream] sk=%s done: text_len=%d tool_calls=%d usage_captured=%s error_captured=%s",
                              session_key, len(full_content), len(tool_calls),
                              bool(captured_usage), bool(captured_error))
@@ -3262,19 +3284,7 @@ class AgentRuntime:
 
         # Fallback — stream ended without explicit done event (e.g. provider doesn't send [DONE])
         # STREAM-ID-PRES: same id-preservation logic as the done-event path.
-        tool_calls = []
-        for idx in sorted(tool_calls_partial.keys()):
-            tc = tool_calls_partial[idx]
-            if tc["name"] and _validate_streamed_arguments(
-                tc["arguments"], tc["name"], session_key
-            ):
-                tool_calls.append({
-                    "id": tc["id"] or f"call_{idx}",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": tc["arguments"]
-                    }
-                })
+        tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
         logger.debug("[stream-fallback] sk=%s text_len=%d tool_calls=%d error_captured=%s (no done event)",
                      session_key, len(full_content), len(tool_calls), bool(captured_error))
         result = {"choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}], "usage": captured_usage}
@@ -3911,7 +3921,8 @@ class AgentRuntime:
                     return output
                 return (
                     f"[unchanged \u2014 read_file {path} offset={offset or 0} "
-                    f"limit={limit}]"
+                    f"limit={limit}; the body is already in this conversation. "
+                    f"Do not read it again and do not print it with a shell command.]"
                 )
             bucket[key] = fp
         return output

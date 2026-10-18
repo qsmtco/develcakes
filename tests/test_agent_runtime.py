@@ -630,9 +630,9 @@ class TestToolLoop:
             {role: assistant, content: '', tool_calls: [...]}
         which strict providers reject with HTTP 400.
 
-        After the fix, `_is_empty_content(text_content)` catches this case
-        and substitutes "[calling tools]" before persisting, so the next
-        LLM call sees a non-empty assistant message.
+        Empty content with tool calls is stored as empty. The old
+        "[calling tools]" placeholder was sent back as the assistant's
+        own words, and the model copied it with no tool call.
         """
         import logging
         rt = AgentRuntime(_make_cfg())
@@ -669,35 +669,17 @@ class TestToolLoop:
         asst_msgs = [m for m in conv.messages if m.role.value == "assistant"]
         assert asst_msgs, f"Expected assistant message; got: {conv.messages}"
 
-        # The FIRST assistant message is the tool-call response with the
-        # substituted placeholder (not empty content).
-        placeholder_msg = asst_msgs[0]
-        assert placeholder_msg.content, (
-            f"Expected non-empty content (placeholder substituted); got empty. "
-            f"messages: {[(m.role.value, m.content) for m in conv.messages]}"
+        tool_msg = asst_msgs[0]
+        assert tool_msg.content == "", (
+            f"Empty tool-call text must stay empty; got {tool_msg.content!r}"
         )
-        assert placeholder_msg.content == "[calling tools]", (
-            f"Expected '[calling tools]' placeholder; got: {placeholder_msg.content!r}"
+        assert "[calling tools]" not in tool_msg.content
+        assert tool_msg.tool_calls, (
+            f"Expected tool_calls preserved; got: {tool_msg.tool_calls}"
         )
-
-        # And the tool_calls are intact (semantics preserved)
-        assert placeholder_msg.tool_calls, (
-            f"Expected tool_calls preserved on the substituted message; got: "
-            f"{placeholder_msg.tool_calls}"
-        )
-
-        # The WARNING was emitted so provider issues are detectable
-        warning_records = [
-            r for r in caplog.records
-            if r.levelno == logging.WARNING and r.name == "agent.runtime"
-        ]
-        assert any(
-            "tool-call response has empty content" in r.getMessage()
-            for r in warning_records
-        ), (
-            f"Expected WARNING about empty content in tool-call response; got: "
-            f"{[(r.name, r.getMessage()) for r in warning_records]}"
-        )
+        wire = conv.to_api_messages()
+        assistant_wire = next(m for m in wire if m.get("role") == "assistant" and m.get("tool_calls"))
+        assert assistant_wire["content"] == ""
         rt.stop()
 
 
@@ -4611,38 +4593,28 @@ class TestLocalAgentDrawerEmissions:
 
 
 class TestStreamedArgumentsValidation:
-    """Tests for _validate_streamed_arguments and _call_llm_streaming
-    truncation handling. See docs/specs/SPEC-TRUNCATED-STREAMING-TOOL-ARGS.md."""
+    """Cut-off tool arguments are kept. See SPEC-TRUNCATED-STREAMING-TOOL-ARGS.md."""
 
-    # ── Unit tests for _validate_streamed_arguments ──────────────────────────
+    def test_assemble_keeps_incomplete_arguments(self):
+        from agent.runtime import _assemble_streamed_tool_calls
+        calls = _assemble_streamed_tool_calls({
+            0: {"name": "read_file", "arguments": '{"path": "ok.py"}', "id": "a"},
+            1: {"name": "exec_command", "arguments": '{"command": "git sta', "id": ""},
+        })
+        assert [c["function"]["name"] for c in calls] == ["read_file", "exec_command"]
+        assert calls[1]["function"]["arguments"] == '{"command": "git sta'
+        assert calls[1]["id"] == "call_1"
 
-    def test_validate_good_json(self):
-        from agent.runtime import _validate_streamed_arguments
-        assert _validate_streamed_arguments('{"path": "x.py"}', "read_file", "sk1") is True
-
-    def test_validate_empty_string(self):
-        from agent.runtime import _validate_streamed_arguments
-        assert _validate_streamed_arguments("", "read_file", "sk1") is True
-
-    def test_validate_malformed_json(self):
-        from agent.runtime import _validate_streamed_arguments
-        assert _validate_streamed_arguments('{"command": "git sta', "exec_command", "sk1") is False
-
-    def test_validate_non_string_input_returns_false(self):
-        """BUG #2: non-string input (int) does not crash; returns False.
-
-        json.loads raises TypeError on non-string input. The helper's except
-        clause covers both JSONDecodeError and TypeError so a future caller
-        passing a non-string does not crash the agent turn.
-        """
-        from agent.runtime import _validate_streamed_arguments
-        # int input — previously crashed with TypeError
-        assert _validate_streamed_arguments(42, "f", "sk") is False
+    def test_calling_tools_phrase_counts_as_empty(self):
+        from agent.runtime import _is_empty_content
+        assert _is_empty_content("[calling tools]") is True
+        assert _is_empty_content("[calling tools]\n") is True
+        assert _is_empty_content("Done.\n[calling tools]") is False
 
     # ── Integration: done-event path skips malformed tool call ───────────────
 
-    def test_done_path_skips_malformed_tool_call(self, tmp_path):
-        """_call_llm_streaming done-event path: malformed args → call skipped."""
+    def test_done_path_keeps_malformed_tool_call(self, tmp_path):
+        """Done-event path: truncated arguments are kept and reported, not dropped."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
@@ -4682,15 +4654,15 @@ class TestStreamedArgumentsValidation:
         tool_msgs = [m for m in conv.messages if m.role == "assistant" and m.tool_calls]
         assert len(tool_msgs) >= 1, "Expected at least one assistant message with tool calls"
         tcs = tool_msgs[0].tool_calls
-        assert len(tcs) == 1, (
-            f"Expected 1 tool call (malformed exec_command skipped), got {len(tcs)}"
-        )
-        assert tcs[0].tool_name == "read_file"
+        assert [tc.tool_name for tc in tcs] == ["read_file", "exec_command"]
         assert tcs[0].arguments == {"path": "ok.py"}
+        assert tcs[1].arguments == {}
+        results = [m.content for m in conv.messages if m.role.value == "tool"]
+        assert any("was not run" in r and "exec_command" in r for r in results)
         rt.stop()
 
-    def test_done_path_skips_all_malformed(self, tmp_path):
-        """_call_llm_streaming done-event path: all malformed → empty tool_calls."""
+    def test_done_path_keeps_all_malformed(self, tmp_path):
+        """A stream of only truncated arguments still records the call."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
@@ -4713,17 +4685,18 @@ class TestStreamedArgumentsValidation:
 
         conv = rt.get_conversation(sk)
         assert conv is not None
-        last_msg = conv.messages[-1]
-        tcs = last_msg.tool_calls
-        assert len(tcs) == 0, (
-            f"Expected 0 tool calls (malformed skipped), got {len(tcs)}"
-        )
+        tool_msgs = [m for m in conv.messages if m.role == "assistant" and m.tool_calls]
+        assert tool_msgs, "truncated call must be stored"
+        assert tool_msgs[0].tool_calls[0].tool_name == "exec_command"
+        assert tool_msgs[0].tool_calls[0].arguments == {}
+        results = [m.content for m in conv.messages if m.role.value == "tool"]
+        assert any("was not run" in r for r in results)
         rt.stop()
 
-    # ── Integration: fallback path (no done event) skips malformed tool call ─
+    # ── Integration: fallback path (no done event) keeps malformed tool call ─
 
-    def test_fallback_path_skips_malformed_tool_call(self, tmp_path):
-        """_call_llm_streaming fallback (no done): malformed args → skipped."""
+    def test_fallback_path_keeps_malformed_tool_call(self, tmp_path):
+        """Fallback path: truncated arguments are kept and reported, not dropped."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
@@ -4760,15 +4733,15 @@ class TestStreamedArgumentsValidation:
         tool_msgs = [m for m in conv.messages if m.role == "assistant" and m.tool_calls]
         assert len(tool_msgs) >= 1, "Expected at least one assistant message with tool calls"
         tcs = tool_msgs[0].tool_calls
-        assert len(tcs) == 1, (
-            f"Expected 1 valid tool call via fallback, got {len(tcs)}"
-        )
-        assert tcs[0].tool_name == "read_file"
+        assert [tc.tool_name for tc in tcs] == ["read_file", "exec_command"]
         assert tcs[0].arguments == {"path": "ok.py"}
+        assert tcs[1].arguments == {}
+        results = [m.content for m in conv.messages if m.role.value == "tool"]
+        assert any("was not run" in r and "exec_command" in r for r in results)
         rt.stop()
 
-    def test_fallback_path_skips_all_malformed(self, tmp_path):
-        """_call_llm_streaming fallback (no done): all malformed → empty."""
+    def test_fallback_path_keeps_all_malformed(self, tmp_path):
+        """_call_llm_streaming fallback (no done): truncated call is kept."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
@@ -4790,11 +4763,12 @@ class TestStreamedArgumentsValidation:
 
         conv = rt.get_conversation(sk)
         assert conv is not None
-        last_msg = conv.messages[-1]
-        tcs = last_msg.tool_calls
-        assert len(tcs) == 0, (
-            f"Expected 0 tool calls (all malformed), got {len(tcs)}"
-        )
+        tool_msgs = [m for m in conv.messages if m.role == "assistant" and m.tool_calls]
+        assert tool_msgs, "truncated call must be stored"
+        assert tool_msgs[0].tool_calls[0].tool_name == "exec_command"
+        assert tool_msgs[0].tool_calls[0].arguments == {}
+        results = [m.content for m in conv.messages if m.role.value == "tool"]
+        assert any("was not run" in r for r in results)
         rt.stop()
 
 

@@ -17,6 +17,11 @@ tools:
   - web_search
   - web_fetch
   - provider_events
+  - diary
+  - project_memory
+  - jev_ask
+  - canvas
+  - talk
 self_improvement:
   bug_journal: true
   project_rules: true

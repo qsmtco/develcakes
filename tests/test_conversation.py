@@ -320,6 +320,15 @@ class TestConversationToApiMessages:
         assert msgs[0]["tool_calls"][0]["id"] == "call_abc"
         assert "[placeholder]" not in msgs[0]["content"]
 
+    def test_legacy_calling_tools_phrase_is_not_sent_back(self):
+        """A stored '[calling tools]' reply must not be taught to the model."""
+        c = Conversation(agent_name="Coder")
+        tc = ToolCall(call_id="call_abc", tool_name="read_file", arguments={"path": "a.py"})
+        c.add_assistant_message("[calling tools]", [tc])
+        msgs = c.to_api_messages()
+        assert msgs[0]["content"] == ""
+        assert msgs[0]["tool_calls"][0]["function"]["name"] == "read_file"
+
     def test_assistant_message_with_only_content_does_not_substitute(self):
         """Non-empty content + no tool_calls is the normal text-only path; placeholder must NOT fire."""
         c = Conversation(agent_name="Coder")
