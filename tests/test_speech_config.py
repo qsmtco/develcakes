@@ -23,7 +23,68 @@ def test_round_trip(tmp_path, monkeypatch):
         "endpoint": "https://speech.example/v1",
         "model": "voice-1",
         "token": "sekret",
+        "voice": "",
+        "format": "mp3",
     }
+
+
+def test_voice_absent_normalizes_to_empty(tmp_path, monkeypatch):
+    target = _path(tmp_path, monkeypatch)
+    target.write_text(
+        "endpoint: https://speech.example/v1\n"
+        "model: voice-1\n"
+        "token: sekret\n"
+        "voice: '  '\n"
+        "format: pcm\n",
+        encoding="utf-8",
+    )
+    cfg, error = load_speech_config()
+    assert error is None
+    assert cfg["voice"] == ""
+    assert cfg["format"] == "pcm"
+
+
+def test_voice_present_is_stripped(tmp_path, monkeypatch):
+    target = _path(tmp_path, monkeypatch)
+    target.write_text(
+        "endpoint: https://speech.example/v1\n"
+        "model: voice-1\n"
+        "token: sekret\n"
+        "voice: ' alto '\n",
+        encoding="utf-8",
+    )
+    cfg, error = load_speech_config()
+    assert error is None
+    assert cfg["voice"] == "alto"
+    assert cfg["format"] == "mp3"
+
+
+def test_non_string_voice_is_a_store_error(tmp_path, monkeypatch):
+    target = _path(tmp_path, monkeypatch)
+    target.write_text(
+        "endpoint: https://speech.example/v1\n"
+        "model: voice-1\n"
+        "token: sekret\n"
+        "voice: 7\n",
+        encoding="utf-8",
+    )
+    cfg, error = load_speech_config()
+    assert cfg is None
+    assert "voice" in error
+
+
+def test_invalid_format_is_a_store_error(tmp_path, monkeypatch):
+    target = _path(tmp_path, monkeypatch)
+    target.write_text(
+        "endpoint: https://speech.example/v1\n"
+        "model: voice-1\n"
+        "token: sekret\n"
+        "format: wav\n",
+        encoding="utf-8",
+    )
+    cfg, error = load_speech_config()
+    assert cfg is None
+    assert "format" in error
 
 
 def test_blank_token_on_first_save_raises(tmp_path, monkeypatch):
