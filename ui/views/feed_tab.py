@@ -45,6 +45,8 @@ class FeedTab(Gtk.Box):
 
         self._card_container: Gtk.Box | None = None
         self._feed_scroll: Gtk.ScrolledWindow | None = None
+        self._html_surface = None
+        self._html_load_more: Gtk.Box | None = None
         self._cards_by_id: dict[str, Gtk.Widget] = {}  # card_id → widget
         self._empty_widget: Gtk.Widget | None = None
         # Phase 5 — Auto-accept toggle callback (set by FeedHandler via set_auto_accept_callback).
@@ -199,6 +201,9 @@ class FeedTab(Gtk.Box):
     def show_empty_state(self) -> None:
         """Clear all cards and show the empty state widget."""
         from ui.views.feed_card import build_empty_feed_widget
+        if self._html_surface is not None:
+            self._html_surface.set_cards([])
+            self.set_html_load_more(0)
         if self._card_container is None:
             return
 
@@ -213,6 +218,78 @@ class FeedTab(Gtk.Box):
         empty = build_empty_feed_widget()
         self._card_container.append(empty)
         self._empty_widget = empty
+
+    def attach_html_surface(self, on_action):
+        """Swap the card list for a WebKit document. None keeps the GTK list.
+
+        Idempotent. Called from FeedHandler.set_feed_tab. Does not load a
+        page; the first card or empty-state call does.
+        """
+        if self._html_surface is not None:
+            return self._html_surface
+        if self._feed_scroll is None:
+            return None
+        from ui.views.feed_surface import create_feed_surface
+
+        surface = create_feed_surface(
+            on_action,
+            is_near_bottom=self.is_near_bottom,
+            on_load_finished=self.schedule_smart_scroll_to_bottom,
+        )
+        if surface is None:
+            return None
+        self._html_surface = surface
+        self._feed_scroll.set_child(surface.webview)
+        surface.set_cards([])
+        return surface
+
+    def upsert_card(self, card) -> None:
+        if self._html_surface is not None:
+            self._html_surface.upsert(card)
+
+    def prepend_html_card(self, card) -> None:
+        if self._html_surface is not None:
+            self._html_surface.upsert(card, prepend=True)
+
+    def remove_card_html(self, card_id: str) -> None:
+        if self._html_surface is not None:
+            self._html_surface.remove(card_id)
+
+    def set_html_cards(self, cards: list) -> None:
+        if self._html_surface is not None:
+            self._html_surface.set_cards(cards)
+
+    def set_html_load_more(self, remaining: int) -> None:
+        """GTK control above the document. Hidden when there is nothing older."""
+        if remaining <= 0:
+            if self._html_load_more is not None:
+                self._html_load_more.set_visible(False)
+            return
+        if self._html_load_more is None:
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            bar.add_css_class("feed-card-load-more")
+            label = Gtk.Label()
+            label.set_hexpand(True)
+            label.set_halign(Gtk.Align.START)
+            button = Gtk.Button(label="Load More")
+            button.add_css_class("feed-btn-load-more")
+            button.connect("clicked", lambda *_a: self._on_html_load_more())
+            bar.append(label)
+            bar.append(button)
+            self._html_load_more = bar
+            self._html_load_more_label = label
+            self.prepend(bar)
+        noun = "card" if remaining == 1 else "cards"
+        self._html_load_more_label.set_text(f"📂 {remaining} older {noun}")
+        self._html_load_more.set_visible(True)
+
+    def set_html_load_more_callback(self, callback) -> None:
+        self._html_load_more_callback = callback
+
+    def _on_html_load_more(self) -> None:
+        callback = getattr(self, "_html_load_more_callback", None)
+        if callback is not None:
+            callback()
 
     def append_card(self, card_widget: Gtk.Widget, card_id: str | None = None) -> None:
         """

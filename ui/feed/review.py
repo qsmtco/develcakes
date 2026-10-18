@@ -18,6 +18,10 @@ class FeedReviewMixin:
         if card_widget is not None and hasattr(card_widget, '_context_panel'):
             panel = card_widget._context_panel
             panel.set_visible(not panel.get_visible())
+            return
+        surface = getattr(self, "_feed_surface", None)
+        if surface is not None:
+            surface.toggle_context(card_id)
 
     def handle_accept(self, card_id: str) -> None:
         """

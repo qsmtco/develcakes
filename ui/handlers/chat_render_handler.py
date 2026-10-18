@@ -6,8 +6,9 @@
 # SPEC-06 SP4 (R2A): the Pango bubble pipeline is RETIRED for the transcript
 # role. render_async/render_sync/streaming now route through
 # render/html.render_message (SPEC-13: a whole-message ```html fence → the
-# agent-author policy sanitize_agent_html; anything else → markdown → HTML →
-# sanitize — the sanitizer is ALWAYS in the path) into a display-keyed
+# agent-author policy sanitize_agent_html; SPEC-CHAT-MIXED-HTML: role
+# "Agent" also promotes each ```html fence inside prose; anything else →
+# markdown → HTML → sanitize — the sanitizer is ALWAYS in the path) into a display-keyed
 # ChatSurface (ui/views/chat_surface.py) — the
 # cache key is `mount_key or session_key`, so every agent rendering into one
 # project tab shares ONE surface. Per
@@ -115,20 +116,26 @@ def _surface_role(role: str) -> str:
     return {"You": "user", "Agent": "agent"}.get(role, "system")
 
 
-def _compose_text(text: str) -> tuple[str | None, str]:
+def _compose_text(text: str, *, role: str = "") -> tuple[str | None, str]:
     """SPEC-19 SP2 §2.2/§2.3: compose one message into (live_payload, html).
 
     - A whole-message ```live fence → (payload, sanitize_agent_html(payload)).
       The static fragment is the T2 degrade the surface uses when the live tier
       is OFF (kill-switch) or unavailable — never an error, never raw.
-    - Anything else → (None, render_message(text)) — the unchanged pipeline.
+      A live fence that is not the whole message is not live.
+    - Role "Agent" → render_message(..., promote_html_segments=True), so each
+      closed ```html fence renders and the prose around it stays markdown.
+    - Any other role (including "") → render_message with the flag off.
+      A whole-message ```html fence still renders; a mixed one stays a code block.
 
     Pure (no GTK): safe to run on the compose thread.
     """
     payload = live_fence(text)
     if payload is not None:
         return payload, sanitize_agent_html(payload)
-    return None, render_message(text)
+    return None, render_message(
+        text, promote_html_segments=(role == "Agent"),
+    )
 
 
 def _append_composed(surface, role: str, live_payload: str | None, html_fragment: str,
@@ -154,6 +161,9 @@ class ChatRenderHandler:
       text → render/html.render_message()   (SPEC-13: a whole-message
                                               ```html fence → the agent-author
                                               policy sanitize_agent_html;
+                                              SPEC-CHAT-MIXED-HTML: role
+                                              "Agent" also promotes each
+                                              ```html fence in prose;
                                               anything else → markdown → HTML
                                               → nh3 sanitize — fail-closed,
                                               ALWAYS in the path)
@@ -518,7 +528,8 @@ class ChatRenderHandler:
     def _append_to_surface(self, role: str, text: str, session_key: str | None, agent_name=None,
                            mount_key: str | None = None, agent_color: str | None = None):
         """Compose (render_message: whole-message ```html fence → the
-        agent-author policy; otherwise markdown → sanitized HTML) and append
+        agent-author policy; role "Agent" also promotes each ```html fence
+        in prose; otherwise markdown → sanitized HTML) and append
         to the session surface. Sanitize is ALWAYS in the path here — SP6's
         guard pins this call site. Raw-HTML fallback only if composition
         itself raises, and even that goes through html.escape (never raw).
@@ -527,7 +538,7 @@ class ChatRenderHandler:
         its surface in the project tab's box (see _surface_for)."""
         live_payload: str | None = None
         try:
-            live_payload, html_fragment = _compose_text(text)
+            live_payload, html_fragment = _compose_text(text, role=role)
         except Exception:
             _logger.exception("render_message failed — appending escaped raw text")
             html_fragment = _html.escape(text) + "<!-- fallback: escaped raw -->"
@@ -671,8 +682,9 @@ class ChatRenderHandler:
             try:
                 # Heavy pure-Python work — no GTK calls. sanitize runs here.
                 # SPEC-19 SP2: a ```live fence composes to (payload, T2-static
-                # fragment); anything else → (None, render_message(text)).
-                live_payload, html_fragment = _compose_text(text)
+                # fragment). Role "Agent" promotes ```html fences inside
+                # prose; any other role keeps the whole-message-only rule.
+                live_payload, html_fragment = _compose_text(text, role=role)
 
                 def _append_on_main():
                     try:

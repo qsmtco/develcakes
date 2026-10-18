@@ -134,15 +134,16 @@ class FeedLoadMixin:
             # thread's eviction pass behind them (its locked gate reads
             # len(_card_widgets) under the same lock).
             widgets = {}
-            for card in recent:
-                widget = build_feed_card(
-                    card,
-                    on_review=self._make_review_cb(card.card_id),
-                    on_accept=self._make_accept_cb(card.card_id),
-                    on_reject=self._make_reject_cb(card.card_id),
-                    on_copy=self._make_copy_cb(card),
-                )
-                widgets[card.card_id] = widget
+            if not self._html_feed:
+                for card in recent:
+                    widget = build_feed_card(
+                        card,
+                        on_review=self._make_review_cb(card.card_id),
+                        on_accept=self._make_accept_cb(card.card_id),
+                        on_reject=self._make_reject_cb(card.card_id),
+                        on_copy=self._make_copy_cb(card),
+                    )
+                    widgets[card.card_id] = widget
 
             with self._lock:
                 # Index ALL cards (including backlog) so _project_cards is complete.
@@ -171,9 +172,10 @@ class FeedLoadMixin:
 
                 # Store the widgets built above — the MAP WRITE stays inside the
                 # lock (spec "One rule for _card_widgets"); only the expensive
-                # construction left it.
-                for card in recent:
-                    self._card_widgets[card.card_id] = widgets[card.card_id]
+                # construction left it. HTML mode builds no widgets.
+                if not self._html_feed:
+                    for card in recent:
+                        self._card_widgets[card.card_id] = widgets[card.card_id]
 
             # Build "Load More" widget if the MERGED backlog is non-empty
             load_more_widget = None
@@ -199,20 +201,26 @@ class FeedLoadMixin:
                 # `if` because the switch-to-a-project-with-no-backlog case
                 # builds no new sentinel and would leak the old one.
                 self._feed_tab.remove_card("__load_more__")   # drop any stale sentinel
-                if load_more_widget is not None:
-                    self._feed_tab.prepend_card(load_more_widget, card_id="__load_more__")
+                if self._html_feed:
+                    self._feed_tab.set_html_cards(recent)
+                    if hasattr(self._feed_tab, "set_html_load_more"):
+                        self._feed_tab.set_html_load_more(merged_backlog_count)
+                    self._load_more_widget = None
                 else:
-                    self._load_more_widget = None             # no sentinel for this project
+                    if load_more_widget is not None:
+                        self._feed_tab.prepend_card(load_more_widget, card_id="__load_more__")
+                    else:
+                        self._load_more_widget = None             # no sentinel for this project
 
-                # Append recent cards (chronological: oldest first, newest last)
-                for card in recent:
-                    widget = widgets.get(card.card_id)
-                    if widget:
-                        # Same-project reopen: append_card only overwrites the
-                        # map entry, leaving the previous widget parented and
-                        # unreachable by every map/removal path (round-7 BUG #2).
-                        self._feed_tab.remove_card(card.card_id)
-                        self._feed_tab.append_card(widget, card.card_id)
+                    # Append recent cards (chronological: oldest first, newest last)
+                    for card in recent:
+                        widget = widgets.get(card.card_id)
+                        if widget:
+                            # Same-project reopen: append_card only overwrites the
+                            # map entry, leaving the previous widget parented and
+                            # unreachable by every map/removal path (round-7 BUG #2).
+                            self._feed_tab.remove_card(card.card_id)
+                            self._feed_tab.append_card(widget, card.card_id)
 
                 # Bound the live widget window once this batch is parented.
                 self._evict_surplus_card_widgets()
@@ -297,6 +305,26 @@ class FeedLoadMixin:
             page = self._backlog[:self.PAGE_SIZE]
             self._backlog = self._backlog[self.PAGE_SIZE:]
             remaining = len(self._backlog)
+
+        if self._html_feed:
+            ids_just_loaded = set()
+
+            def _render_html():
+                if self._feed_tab is None:
+                    return
+                # page is newest-first. Prepend the oldest of the page first
+                # so the whole page lands above the cards already on screen.
+                for card in reversed(page):
+                    data = self._cards.get(card.card_id, card)
+                    self._feed_tab.prepend_html_card(data)
+                    if data.card_id:
+                        ids_just_loaded.add(data.card_id)
+                if hasattr(self._feed_tab, "set_html_load_more"):
+                    self._feed_tab.set_html_load_more(remaining)
+                self._evict_surplus_card_widgets(exclude=frozenset(ids_just_loaded))
+
+            self._GLib.idle_add(_render_html)
+            return
 
         # Build widgets for this page (construction OUTSIDE the lock)
         widgets = []
@@ -414,6 +442,9 @@ class FeedLoadMixin:
         Threading: dict mutation under self._lock (class contract at :83);
         FeedTab calls are main-thread only and are never made while holding it.
         """
+        if self._html_feed:
+            self._evict_surplus_html_rows(exclude)
+            return
         if self._feed_tab is None:
             return
         # SP2 (SPEC-03): the cap is CONFIG — resolved per pass (R3 call-time
@@ -490,6 +521,55 @@ class FeedLoadMixin:
                 self._feed_tab.schedule_scroll_to_bottom()      # keep the bottom pinned
             elif vadj is not None and removed_height:
                 vadj.set_value(max(0.0, vadj.get_value() - removed_height))
+
+    def _evict_surplus_html_rows(self, exclude: frozenset[str] = frozenset()) -> None:
+        """Drop the oldest document rows past the live window.
+
+        Same caps as the GTK pass (MAX_LIVE_CARD_WIDGETS, KEEP_NEWEST_CARDS).
+        Nothing is dropped when the reader is not near the bottom — there is
+        no per-card allocation to test. Dropped cards stay in `_cards` and
+        are pushed onto `_backlog` so Load More can put them back.
+        """
+        tab = self._feed_tab
+        surface = self._feed_surface
+        if tab is None or surface is None:
+            return
+        try:
+            near = tab.is_near_bottom()
+        except (AttributeError, TypeError):
+            _mod()._logger.exception("html eviction: near-bottom check failed")
+            return
+        if not near:
+            return
+        cap = self._effective_live_window()
+        visible = surface.card_ids()
+        if len(visible) <= cap:
+            return
+        with self._lock:
+            newest = sorted(
+                (cid for cid in visible if cid in self._cards),
+                key=lambda cid: self._cards[cid].seq_num or 0,
+                reverse=True,
+            )
+            protected = set(newest[: _mod().KEEP_NEWEST_CARDS])
+            oldest_first = sorted(
+                (cid for cid in visible if cid in self._cards and cid not in exclude),
+                key=lambda cid: self._cards[cid].seq_num or 0,
+            )
+        backlog_count = 0
+        for cid in oldest_first:
+            if len(surface.card_ids()) <= cap:
+                break
+            if cid in protected:
+                continue
+            with self._lock:
+                data = self._cards.get(cid)
+                if data is not None:
+                    self._backlog.insert(0, data)
+                backlog_count = len(self._backlog)
+            surface.remove(cid)
+        if backlog_count and hasattr(tab, "set_html_load_more"):
+            tab.set_html_load_more(backlog_count)
 
     def _card_container_spacing(self) -> int:
         """Gtk.Box spacing between cards, for scroll compensation. 0 if unknown."""

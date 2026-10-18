@@ -90,6 +90,8 @@ class FeedHandler(
     ):
         self._GLib = GLib
         self._feed_tab = None         # set via set_feed_tab() after FeedTab is created
+        self._html_feed = False       # True only after a WebKit feed document exists
+        self._feed_surface = None
         self._on_send_to_agent = on_send_to_agent
         self._on_card_added = on_card_added
         self._on_approve_exec = on_approve_exec  # Phase E
@@ -191,9 +193,13 @@ class FeedHandler(
         self._on_auto_accept_level_changed: Callable[[str], None] | None = None
 
     def set_card_added_callback(self, callback) -> None:
-        """Late-bind the card-added observer (SPEC-15 SP3b — the Telegram
-        bridge filters pending approvals from this seam). Overrides the ctor
-        arg when called; None clears."""
+        """Late-bind the card-added observer. Overrides the ctor arg when
+        called; None clears.
+
+        SPEC-15c: the Telegram bridge is no longer a consumer. The seam
+        stays for tests and any future observer. Production window does
+        not register one.
+        """
         self._on_card_added = callback
 
     def set_feed_tab(self, feed_tab) -> None:
@@ -204,6 +210,15 @@ class FeedHandler(
         Once set, FeedHandler can add/remove cards from the FeedTab.
         """
         self._feed_tab = feed_tab
+        self._html_feed = False
+        self._feed_surface = None
+        if self._feed_tab is not None and hasattr(self._feed_tab, "attach_html_surface"):
+            surface = self._feed_tab.attach_html_surface(self.on_feed_action)
+            if surface is not None:
+                self._html_feed = True
+                self._feed_surface = surface
+                if hasattr(self._feed_tab, "set_html_load_more_callback"):
+                    self._feed_tab.set_html_load_more_callback(self._load_more)
         # Phase 5: wire batch accept callback
         if self._feed_tab is not None:
             self._feed_tab.set_batch_accept_callback(
@@ -395,6 +410,50 @@ class FeedHandler(
                 self._project_cards[proj] = []
             self._project_cards[proj].insert(0, card_id)  # newest first
 
+        # Get project path from card metadata (set by on_project_opened load path),
+        # or fall back to _project_paths if the card came from the parser (metadata empty).
+        project_path = (
+            (card_data.metadata or {}).get("project_path", "")
+            or self._project_paths.get(card_data.project_name, "")
+        )
+
+        def _persist():
+            if project_path and hasattr(card_data, 'to_dict') and not self._loading:
+                # Skip snapshot persistence if oversized
+                if card_data.metadata.get("_snapshot_oversized"):
+                    saved = card_data.conversation_snapshot
+                    card_data.conversation_snapshot = None
+                    feed_store.append_feed_card(project_path, card_data)
+                    card_data.conversation_snapshot = saved
+                else:
+                    feed_store.append_feed_card(project_path, card_data)
+
+        # HTML document: no per-card GTK widget. The tab upserts the card.
+        if self._html_feed and self._feed_tab is not None:
+            def _append_html():
+                if self._feed_tab is not None:
+                    self._feed_tab.upsert_card(card_data)
+                    self._schedule_smart_scroll()
+                    self._evict_surplus_card_widgets()
+                    if card_data.accepted is None and self._is_card_auto_acceptable(card_data):
+                        if (card_data.card_type == "agent_action"
+                                and (card_data.metadata or {}).get("needs_approval")):
+                            self._GLib.idle_add(
+                                lambda cid=card_data.card_id: self._auto_approve_exec_card(cid)
+                            )
+                        else:
+                            self._GLib.idle_add(
+                                lambda cid=card_data.card_id: self.handle_accept(cid)
+                            )
+                    if self._on_card_added:
+                        self._on_card_added(card_id)
+            self._update_batch_bar_for_active_project(card_data.project_name)
+            self._GLib.idle_add(_append_html)
+            if project_path and not self._loading and persist:
+                t = threading.Thread(target=_persist, daemon=True)
+                t.start()
+            return card_id
+
         # Build widget (pure Python, no shared state) — done outside lock
         # Phase E: approval cards use approve/deny callbacks instead of accept/reject
         if card_data.metadata.get("needs_approval"):
@@ -417,10 +476,6 @@ class FeedHandler(
 
         with self._lock:
             self._card_widgets[card_id] = widget
-
-        # Get project path from card metadata (set by on_project_opened load path),
-        # or fall back to _project_paths if the card came from the parser (metadata empty).
-        project_path = card_data.metadata.get("project_path", "") or self._project_paths.get(card_data.project_name, "")
 
         # Append to feed tab on main thread (newest at bottom), then persist
         def _append():
@@ -450,18 +505,6 @@ class FeedHandler(
 
         # Refresh batch accept bar (Phase 5)
         self._update_batch_bar_for_active_project(card_data.project_name)
-
-        def _persist():
-            if project_path and hasattr(card_data, 'to_dict') and not self._loading:
-                # Skip snapshot persistence if oversized
-                if card_data.metadata.get("_snapshot_oversized"):
-                    # Temporarily remove snapshot for persistence
-                    saved = card_data.conversation_snapshot
-                    card_data.conversation_snapshot = None
-                    feed_store.append_feed_card(project_path, card_data)
-                    card_data.conversation_snapshot = saved
-                else:
-                    feed_store.append_feed_card(project_path, card_data)
 
         self._GLib.idle_add(_append)
         # Persist in background to avoid blocking UI.
@@ -521,26 +564,28 @@ class FeedHandler(
 
                 card_ids.append(card_id)
 
-        # Phase 2: build widgets outside the lock (pure Python, no shared state)
+        # Phase 2: build widgets outside the lock (pure Python, no shared state).
+        # HTML mode stores no widgets — the document upserts the card data.
         for card_data, card_id in zip(cards, card_ids):
-            if card_data.metadata.get("needs_approval"):
-                on_approve, on_deny = self._make_approve_exec_cb(card_id)
-                widget = build_feed_card(
-                    card_data,
-                    on_review=self._make_review_cb(card_id),
-                    on_accept=on_approve,
-                    on_reject=on_deny,
-                    on_copy=self._make_copy_cb(card_data),
-                )
-            else:
-                widget = build_feed_card(
-                    card_data,
-                    on_review=self._make_review_cb(card_id),
-                    on_accept=self._make_accept_cb(card_id),
-                    on_reject=self._make_reject_cb(card_id),
-                    on_copy=self._make_copy_cb(card_data),
-                )
-            widget_by_id[card_id] = widget
+            if not self._html_feed:
+                if card_data.metadata.get("needs_approval"):
+                    on_approve, on_deny = self._make_approve_exec_cb(card_id)
+                    widget = build_feed_card(
+                        card_data,
+                        on_review=self._make_review_cb(card_id),
+                        on_accept=on_approve,
+                        on_reject=on_deny,
+                        on_copy=self._make_copy_cb(card_data),
+                    )
+                else:
+                    widget = build_feed_card(
+                        card_data,
+                        on_review=self._make_review_cb(card_id),
+                        on_accept=self._make_accept_cb(card_id),
+                        on_reject=self._make_reject_cb(card_id),
+                        on_copy=self._make_copy_cb(card_data),
+                    )
+                widget_by_id[card_id] = widget
 
             # Cache project_path for the persistence phase
             project_path = (
@@ -561,10 +606,14 @@ class FeedHandler(
         def _append_all():
             if self._feed_tab is None:
                 return
-            for card_id in card_ids:
-                widget = widget_by_id.get(card_id)
-                if widget is not None:
-                    self._feed_tab.append_card(widget, card_id)
+            if self._html_feed:
+                for card_data in cards:
+                    self._feed_tab.upsert_card(card_data)
+            else:
+                for card_id in card_ids:
+                    widget = widget_by_id.get(card_id)
+                    if widget is not None:
+                        self._feed_tab.append_card(widget, card_id)
             # Single scroll decision for the whole batch
             self._schedule_smart_scroll()
             # MEMRATCHET §2.1: one eviction pass for the whole batch — the
@@ -681,6 +730,10 @@ class FeedHandler(
                 "lost on reload)",
                 card_data.project_name, card_id,
             )
+
+        if self._html_feed and self._feed_tab is not None:
+            self._GLib.idle_add(lambda c=card_data: self._feed_tab.upsert_card(c) if self._feed_tab else None)
+            return
 
         if old_widget is None:
             # Evicted (§2.1). Data was updated and persisted above; the widget is
@@ -1195,8 +1248,42 @@ class FeedHandler(
         )
         return self.add_card(card)
 
+    def on_feed_action(self, card_id: str, action: str) -> None:
+        """Click from the feed document. Unknown actions and ids are ignored."""
+        card = self._cards.get(card_id)
+        if card is None or not isinstance(action, str):
+            return
+        if action == "copy":
+            self.handle_copy(card.body or card.title)
+            return
+        if action == "review":
+            self.handle_review(card_id, None)
+            return
+        if action == "reveal":
+            if self._feed_surface is not None:
+                self._feed_surface.reveal(card_id)
+            return
+        if action == "accept":
+            if (card.metadata or {}).get("needs_approval"):
+                self.handle_approve_exec(card_id, True)
+            else:
+                self.handle_accept(card_id)
+            return
+        if action == "reject":
+            if (card.metadata or {}).get("needs_approval"):
+                self.handle_approve_exec(card_id, False)
+            else:
+                self.handle_reject(card_id)
+            return
+
     def _update_card_visual(self, card_id: str, accepted: bool) -> None:
         """Apply accepted/rejected CSS class + badge to card widget."""
+        card = self._cards.get(card_id)
+        if card is not None:
+            card.accepted = accepted
+        if self._html_feed and self._feed_tab is not None and card is not None:
+            self._feed_tab.upsert_card(card)
+            return
         widget = self._card_widgets.get(card_id)
         if widget is None:
             return

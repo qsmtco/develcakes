@@ -14,7 +14,7 @@ from gi.repository import Gtk, Pango
 from typing import Callable
 import os
 
-from models.feed_card import FeedCardData, CardType
+from models.feed_card import FeedCardData, CardType, format_feed_timestamp
 from models.conversation_snapshot import ConversationSnapshot
 from utils.escaping import escape_for_pango, xml_template
 from utils.config import get_project_root
@@ -77,24 +77,7 @@ def _make_feed_card_header(
 
 def _format_timestamp(ts) -> str:
     """Format a datetime as a human-readable relative string."""
-    from datetime import datetime, timezone
-    if ts is None:
-        return "just now"
-    now = datetime.now(timezone.utc)
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    delta = now - ts
-    total_seconds = delta.total_seconds()
-    if total_seconds < 60:
-        return "just now"
-    if total_seconds < 3600:
-        mins = int(total_seconds / 60)
-        return f"{mins}m ago"
-    if total_seconds < 86400:
-        hrs = int(total_seconds / 3600)
-        return f"{hrs}h ago"
-    days = int(total_seconds / 86400)
-    return f"{days}d ago"
+    return format_feed_timestamp(ts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

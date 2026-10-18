@@ -512,10 +512,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # action reuses the real halt path WITHOUT the GTK confirm dialog.
         self._bridge_handler.set_stop_all_handler(self._remote_stop_all)
         self._bridge_handler.set_status_provider(self._remote_status_summary)
-        # SPEC-15 SP3b: pending approval cards mirror to the phone (inline
-        # buttons). The bridge filters to its own allowlist internally.
-        self._feed_handler.set_card_added_callback(
-            self._bridge_handler.on_feed_card_added)
         self._emit_startup_check_card()
 
         # FeedTab created here (once) — inject into LeftPanel's Projects "Feed" sub-tab

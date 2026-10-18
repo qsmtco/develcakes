@@ -53,6 +53,27 @@ CardType = Literal[
 CardSource = Literal["agent", "system", "git", "crabwatch"]
 
 
+def format_feed_timestamp(ts) -> str:
+    """Relative age for a feed card footer.
+
+    None or under 60s → "just now"; under an hour → "Nm ago"; under a day
+    → "Nh ago"; otherwise "Nd ago". A naive datetime is treated as UTC.
+    """
+    if ts is None:
+        return "just now"
+    now = datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    total_seconds = (now - ts).total_seconds()
+    if total_seconds < 60:
+        return "just now"
+    if total_seconds < 3600:
+        return f"{int(total_seconds / 60)}m ago"
+    if total_seconds < 86400:
+        return f"{int(total_seconds / 3600)}h ago"
+    return f"{int(total_seconds / 86400)}d ago"
+
+
 def cap_stored_body(text: str, site: str = "") -> str:
     """Bound a card body for storage at `MAX_STORED_BODY` (SPEC-UIRESP2-T2 §1).
 
