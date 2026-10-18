@@ -185,6 +185,11 @@ message keeps today's behavior — `block_parser` yields it as a `code` block,
 `highlight_html` tokenizes it, it renders as a documentation code block. This is
 load-bearing: "how to write a div" must stay visible code.
 
+**Status (2026-10-17):** agent rows no longer use this rule. SPEC-CHAT-MIXED-HTML
+promotes every closed ` ```html ` fence on role `"Agent"` and leaves the prose
+on the markdown path. User and system rows still follow the rule above. To show
+HTML as source, use a fence whose language is not `html`.
+
 **Guard update:** `tests/test_html_guard_sites.py` pins that every chat call site
 composes through `render_document`. Repoint the pin to `render_message` (the
 handler will call `render_message`; `render_document` remains its markdown
@@ -358,7 +363,7 @@ prompt-convention fixes it).
 | SVG `<use href="#x">` | http(s)-gated like everything else |
 | 1 MB payload | `_cap_row_html` byte-budget unchanged (512 KB) |
 | Sanitizer panic | `except BaseException: ""` — fail-closed (same contract) |
-| Non-agent surfaces (feed cards, diff cards) | Pango path untouched — SPEC-13 is chat-surface only |
+| Non-agent surfaces (feed cards, diff cards) | Pango at the time of SPEC-13 (chat-surface only). The feed document is SPEC-FEED-HTML-SURFACE |
 
 ---
 
