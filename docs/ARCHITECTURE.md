@@ -357,12 +357,14 @@ handler node. The phone is a **thin client for the Supervisor only**:
 - Allowlist: `/status` (compact project summary), `/stop` (typed two-step confirmation
   → the SAME stop-all path the toolbar uses), `/help`; any other `/command` gets one
   refusal listing the allowlist. Plain text still forwards.
-- Exec approvals: pending-approval cards mirror to the phone with inline ✅/❌ buttons;
-  a tap → `ARH.approve_exec` → the card is re-read and the message edited to the actual
-  state ("Already resolved in the app." for a desk-first race).
+- Exec approvals stay in the app feed. New approval cards are not sent to the phone
+  (SPEC-15c). A tap on an approval message already in the chat still calls
+  `ARH.approve_exec`, re-reads the card, and edits that message to the actual state.
 - Outbound mirror (SP3b): Supervisor turn replies forward to the phone (4096-char
   paragraph split); a whole-message ```html card is flattened to its visible TEXT
-  (Telegram is a text surface).
+  (Telegram is a text surface). A card with surrounding prose is flattened the
+  same way — each ```html fence becomes its visible text and the prose is kept
+  (SPEC-CHAT-MIXED-HTML).
 - Trust boundary: one paired chat_id; NO shell, NO file access. Foreign chat ⇒ one
   polite refusal, never processed.
 
@@ -1137,6 +1139,13 @@ Dispatches to the appropriate event card factory in `chat_bubble.py`. Thread-saf
 1. `escape_for_pango(text)` — protect existing Pango markup tags
 2. `format_markdown(text)` — convert markdown → Pango inline markup
 3. `build_role_bubble(role, text)` — create styled GTK bubble widget
+
+**HTML transcript (SPEC-13, SPEC-CHAT-MIXED-HTML):** `_compose_text` is the
+composer. A whole-message ```html fence renders for every role. Agent rows
+also promote every closed ```html fence, and the prose around those fences
+stays markdown. User and system rows promote only a whole-message fence.
+A ```live fence is whole-message only. The Supervisor phone mirror flattens
+those same html fences to text and keeps the surrounding prose.
 
 ### 3.14e `ui/views/chat_bubble.py` — Bubble Widget Factories (Phase 2–5)
 
@@ -2913,7 +2922,7 @@ set_progress_opacity(opacity)      # Set bar opacity 0.0..1.0 (for subtle idle p
 
 ### 3.22a `ui/views/feed_card.py` — Project Feed Card Widgets (Phase 5)
 
-**Responsibility:** GTK widget factories for individual feed cards in the project tab. Pure view — no business logic.
+**Responsibility:** GTK widget factories for individual feed cards in the project tab. Pure view — no business logic. This is the `NO_WEBKIT` fallback. When WebKit is available the feed document is `render/feed_html.py` plus `ui/views/feed_surface.py`; bodies stay escaped text.
 
 **Owns:** Card widget layout and CSS class application. State comes from `FeedCardData` dicts passed at construction.
 
@@ -2981,6 +2990,9 @@ update_card_badge(card_widget: Gtk.Widget, accepted: bool | None) -> None
 
 def css_class_for_type(card_type: str) -> str:
     """Map card_type to CSS class name for feed card styling."""
+
+def format_feed_timestamp(ts) -> str:
+    """Relative footer age: just now / Nm ago / Nh ago / Nd ago. Naive datetimes are UTC."""
 ```
 
 ---
@@ -2988,7 +3000,9 @@ def css_class_for_type(card_type: str) -> str:
 
 ### 3.22c `ui/handlers/feed_handler.py` — Project Feed Handler (Phase 5)
 
-**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and `ChatRenderHandler` (crabcard extraction). Delegates rendering to `feed_card.py`, persistence to `feed_store.py`, git ops to `git_ops.py`.
+**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and `ChatRenderHandler` (crabcard extraction). Delegates rendering to `feed_card.py` (GTK fallback) or the WebKit document, persistence to `feed_store.py`, git ops to `git_ops.py`.
+
+`on_feed_action(card_id, action)` is the document click entry. In HTML mode `_card_widgets` stays empty. The 120 / 40 cap (`MAX_LIVE_CARD_WIDGETS` / `KEEP_NEWEST_CARDS`) applies to document rows when the reader is near the bottom, and is unchanged for GTK widgets otherwise.
 
 **Owns:** `_cards` (dict: card_id → FeedCardData), `_card_widgets` (dict: card_id → Gtk.Widget), `_project_cards` (dict: project_name → [card_ids]), `_project_paths` (dict: project_name → abs_path), `_recent_git_paths` (dict: file_path → monotonic timestamp for echo suppression), `_lock` (threading.Lock), plus the background-persistence state: `_persist_queue` (dict: (project_path, card_id) → coalesced updates), `_persist_deferred` (dict: same key → (payload, tries)), `_persist_compactions` (list: (project_path, tries)), `_persist_queue_lock`, `_persist_wakeup` (threading.Event), `_persist_writer` (threading.Thread | None), `_persist_stop` (bool).
 
@@ -3998,7 +4012,7 @@ User removes a provider in Settings while the Agent Builder is open (with that p
 
 ### 4.14 Feed Persistence — Background Writer, Journal, Compaction (SPEC-UI-RESPONSIVENESS-2)
 
-The feed write path is asynchronous: no feed disk I/O ever runs on the GTK main thread.
+The feed write path is asynchronous: no feed disk I/O ever runs on the GTK main thread. Accept and reject clicks from the feed document enter through `FeedHandler.on_feed_action` and then the existing accept/reject handlers.
 
 ```
 Tool result (runtime thread)

@@ -180,7 +180,7 @@ class TestLifecycle:
         rt.stop()
         assert not rt.is_running()
 
-    def test_create_get(self):
+    def test_create_get(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -197,7 +197,7 @@ class TestLifecycle:
         )
         rt = AgentRuntime(cfg)
         rt.start()
-        sk = rt.create_conversation("Coder", _uniq(), "/tmp")
+        sk = rt.create_conversation("Coder", _uniq(), str(tmp_path))
         conv = rt.get_conversation(sk)
         assert conv is not None
         assert conv.agent_name == "Coder"
@@ -252,11 +252,11 @@ def _make_cfg():
 
 
 class TestToolLoop:
-    def test_user_plus_assistant_in_conversation(self):
+    def test_user_plus_assistant_in_conversation(self, tmp_path):
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # mock(session_key, messages, tools) — NO self
         with unittest.mock.patch.object(rt, "_call_llm", lambda sk, msgs, tools, **kwargs: _resp("Hello, human.")):
@@ -268,11 +268,11 @@ class TestToolLoop:
         assert "assistant" in roles
         rt.stop()
 
-    def test_user_message_in_llm_context(self):
+    def test_user_message_in_llm_context(self, tmp_path):
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         received = []
         def mock(sk, msgs, tools, **kwargs):
@@ -289,11 +289,11 @@ class TestToolLoop:
         ), f"User message not in {received[0]}"
         rt.stop()
 
-    def test_text_response_callback(self):
+    def test_text_response_callback(self, tmp_path):
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         complete = []
         rt._on_response_complete = lambda sk2, t: complete.append(t)
@@ -304,7 +304,7 @@ class TestToolLoop:
         assert complete == ["The result is 42."], f"Got: {complete}"
         rt.stop()
 
-    def test_empty_text_content_with_choices_placeholder_saved_and_no_crash(self, caplog):
+    def test_empty_text_content_with_choices_placeholder_saved_and_no_crash(self, caplog, tmp_path):
         """Regression: nemotron-3-ultra returns finish_reason='stop' with empty content after tool execution.
 
         Before the runtime.py:2272 guard fix, choices-present-but-empty-content was
@@ -318,7 +318,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -373,7 +373,7 @@ class TestToolLoop:
         )
         rt.stop()
 
-    def test_empty_text_content_no_choices_placeholder_saved_and_no_crash(self):
+    def test_empty_text_content_no_choices_placeholder_saved_and_no_crash(self, tmp_path):
         """Regression: response with NO choices key still triggers the guard.
 
         This is the case the original guard at agent/runtime.py:2272 already covered
@@ -383,7 +383,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -402,7 +402,7 @@ class TestToolLoop:
         )
         rt.stop()
 
-    def test_text_response_with_only_whitespace_does_not_falsely_trigger_guard(self):
+    def test_text_response_with_only_whitespace_does_not_falsely_trigger_guard(self, tmp_path):
         """Whitespace-only 'content' (e.g. '\\n\\n') is valid; guard must not fire.
 
         The guard is `if not text_content or (isinstance(text_content, str) and
@@ -415,7 +415,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -444,7 +444,7 @@ class TestToolLoop:
         )
         rt.stop()
 
-    def test_empty_text_content_on_error_handler_throws_loop_still_exits(self, caplog):
+    def test_empty_text_content_on_error_handler_throws_loop_still_exits(self, caplog, tmp_path):
         """BUG #2 regression: user-registered _on_error callback throws.
 
         Before the fix, if _on_error raised, the exception propagated out of
@@ -463,7 +463,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # _on_error raises — e.g. UI dispatcher broken
         def _broken_error_handler(sk2, msg):
@@ -517,11 +517,11 @@ class TestToolLoop:
         )
         rt.stop()
 
-    def test_tool_call_appends_result(self):
+    def test_tool_call_appends_result(self, tmp_path):
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         results = []
         rt._on_tool_call_result = lambda sk2, n, r, success=True: results.append((n, r))
@@ -537,7 +537,7 @@ class TestToolLoop:
         assert results[0][0] == "list_files"
         rt.stop()
 
-    def test_tool_loop_two_iterations(self):
+    def test_tool_loop_two_iterations(self, tmp_path):
         """
         Verify: user → tool_result → assistant = 3 messages.
         The runtime updates the user message with tool_calls (rather than
@@ -547,7 +547,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         call_num = [0]
         def mock_caller(sk, msgs, tools, **kwargs):
@@ -582,7 +582,7 @@ class TestToolLoop:
         assert assistant_msg.tool_calls[0].tool_name == "read_file"
         rt.stop()
 
-    def test_max_iterations_enforced(self):
+    def test_max_iterations_enforced(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -600,7 +600,7 @@ class TestToolLoop:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         call_count = [0]
         def mock_caller(sk, msgs, tools, **kwargs):
@@ -620,7 +620,7 @@ class TestToolLoop:
         assert call_count[0] <= 2, f"Expected <= 2 calls, got {call_count[0]}"
         rt.stop()
 
-    def test_tool_call_response_with_empty_content_substitutes_placeholder(self, caplog):
+    def test_tool_call_response_with_empty_content_substitutes_placeholder(self, caplog, tmp_path):
         """BUG #3 sweep: tool-call response with empty/whitespace content.
 
         OpenAI spec allows `content=null` with `tool_calls=[]` present, but
@@ -638,7 +638,7 @@ class TestToolLoop:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Tool-call response with empty content (some providers do this on streaming completion)
         tc_response = {
@@ -764,7 +764,7 @@ class TestIsEmptyContent:
 class TestComputeModelMax:
     """Helper that resolves the model's context window from the provider config."""
 
-    def test_returns_provider_max_tokens(self):
+    def test_returns_provider_max_tokens(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -785,13 +785,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "openrouter/some-model"
         assert rt._compute_model_max(conv) == 200_000
         rt.stop()
 
-    def test_falls_back_to_128k_when_provider_unknown(self):
+    def test_falls_back_to_128k_when_provider_unknown(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -809,13 +809,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "unknown/model"  # provider not in config
         assert rt._compute_model_max(conv) == 128_000
         rt.stop()
 
-    def test_falls_back_to_128k_when_max_tokens_is_zero(self):
+    def test_falls_back_to_128k_when_max_tokens_is_zero(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -836,13 +836,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "openrouter/some-model"
         assert rt._compute_model_max(conv) == 128_000
         rt.stop()
 
-    def test_falls_back_to_128k_when_max_tokens_is_none(self):
+    def test_falls_back_to_128k_when_max_tokens_is_none(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -863,13 +863,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "openrouter/some-model"
         assert rt._compute_model_max(conv) == 128_000
         rt.stop()
 
-    def test_extracts_provider_name_from_slash_model(self):
+    def test_extracts_provider_name_from_slash_model(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -890,7 +890,7 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "openrouter/claude-3-opus"  # extracts "openrouter", not default_provider
         assert rt._compute_model_max(conv) == 200_000
@@ -901,7 +901,7 @@ class TestComputeModelMax:
     # Before the fix, MiniMax-M3 (1M context) and Claude (200K) both defaulted
     # to 128K — wasting 87% / 36% of the model's context window.
 
-    def test_minimax_zero_max_tokens_falls_back_to_caller_default(self):
+    def test_minimax_zero_max_tokens_falls_back_to_caller_default(self, tmp_path):
         """When provider.max_tokens=0 and caller='minimax', returns 1_048_576
         (NOT 128K). This is the headline BUG #3 fix."""
         from agent.config import AgentConfig, LLMProviderConfig
@@ -925,7 +925,7 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "minimax/MiniMax-M3"
         assert rt._compute_model_max(conv) == 1_048_576, (
@@ -934,7 +934,7 @@ class TestComputeModelMax:
         )
         rt.stop()
 
-    def test_anthropic_zero_max_tokens_falls_back_to_caller_default(self):
+    def test_anthropic_zero_max_tokens_falls_back_to_caller_default(self, tmp_path):
         """When provider.max_tokens=0 and caller='anthropic', returns 200_000."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -957,13 +957,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "anthropic/claude-sonnet-4-20250514"
         assert rt._compute_model_max(conv) == 200_000
         rt.stop()
 
-    def test_unknown_caller_falls_back_to_global_128k(self):
+    def test_unknown_caller_falls_back_to_global_128k(self, tmp_path):
         """When caller is empty/unknown, fall back to 128K global default."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -986,13 +986,13 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "openai/gpt-4o"
         assert rt._compute_model_max(conv) == 128_000
         rt.stop()
 
-    def test_max_tokens_set_wins_over_caller_default(self):
+    def test_max_tokens_set_wins_over_caller_default(self, tmp_path):
         """When provider.max_tokens > 0, caller default is ignored."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -1015,7 +1015,7 @@ class TestComputeModelMax:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.model = "minimax/MiniMax-M3"
         assert rt._compute_model_max(conv) == 64_000
@@ -1029,7 +1029,7 @@ class TestComputeModelMax:
 class TestRunLoopTrimsContext:
     """§4.15 + BUG #1 fix: _run_loop trims the conversation to model_max per iteration."""
 
-    def test_long_conversation_is_trimmed(self):
+    def test_long_conversation_is_trimmed(self, tmp_path):
         """A 20-exchange conversation that exceeds model_max gets trimmed before the LLM call."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -1052,7 +1052,7 @@ class TestRunLoopTrimsContext:
         rt._RESPONSE_RESERVE_TOKENS = 0  # disable reserve for trim test
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.system_prompt = "Test"  # minimize for predictable trim behavior
 
@@ -1086,7 +1086,7 @@ class TestRunLoopTrimsContext:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestCostLimit:
-    def test_cost_limit_stops(self):
+    def test_cost_limit_stops(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -1105,7 +1105,7 @@ class TestCostLimit:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -1123,7 +1123,7 @@ class TestCostLimit:
         assert "cost" in errors[0].lower(), f"Got: {errors[0]}"
         rt.stop()
 
-    def test_step_limit_stops(self):
+    def test_step_limit_stops(self, tmp_path):
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
             providers={
@@ -1142,7 +1142,7 @@ class TestCostLimit:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -1160,11 +1160,11 @@ class TestCostLimit:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestApproval:
-    def test_exec_without_callback_denied(self):
+    def test_exec_without_callback_denied(self, tmp_path):
         rt = AgentRuntime(_make_cfg())  # no approval callback
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         results = []
         rt._on_tool_call_result = lambda sk2, n, r, success=True: results.append((n, r))
@@ -1184,7 +1184,7 @@ class TestApproval:
         assert "approval" in exec_results[0][1].lower() or "denied" in exec_results[0][1].lower(), f"Got: {exec_results[0][1]}"
         rt.stop()
 
-    def test_exec_with_approval_allow(self):
+    def test_exec_with_approval_allow(self, tmp_path):
         approved = [False]
         rt = AgentRuntime(
             _make_cfg(),
@@ -1196,7 +1196,7 @@ class TestApproval:
         )
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         responses = [
             _resp(tool_calls=[{
@@ -1211,7 +1211,7 @@ class TestApproval:
         assert approved[0], "Approval callback should have fired"
         rt.stop()
 
-    def test_exec_with_approval_deny(self):
+    def test_exec_with_approval_deny(self, tmp_path):
         # SP5c-3: resolve via approve_exec (see allow test) — the pre-SP4
         # sync-return contract fell through to the 60s timeout→deny fallback.
         rt = AgentRuntime(
@@ -1220,7 +1220,7 @@ class TestApproval:
         )
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         results = []
         rt._on_tool_call_result = lambda sk2, n, r, success=True: results.append((n, r))
@@ -1444,11 +1444,11 @@ class TestStreaming:
     which iterates the SSE generator and fires callbacks per event.
     """
 
-    def test_text_delta_fires_incrementally(self):
+    def test_text_delta_fires_incrementally(self, tmp_path):
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         deltas = []
         rt._on_text_delta = lambda sk, d: deltas.append(d)
@@ -1481,11 +1481,11 @@ class TestStreaming:
         assert deltas[2] == "!"
         rt.stop()
 
-    def test_response_complete_fires_after_stream(self):
+    def test_response_complete_fires_after_stream(self, tmp_path):
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         complete = []
         rt._on_response_complete = lambda sk, t: complete.append(t)
@@ -1503,11 +1503,11 @@ class TestStreaming:
         assert complete[0] == "Hello world!"
         rt.stop()
 
-    def test_tool_call_start_fires_when_complete(self):
+    def test_tool_call_start_fires_when_complete(self, tmp_path):
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         tool_starts = []
         rt._on_tool_call_start = lambda sk, name, args: tool_starts.append((name, args))
@@ -1533,12 +1533,12 @@ class TestStreaming:
         assert tool_starts[0][1] == {"path": "."}, f"Got: {tool_starts[0][1]}"
         rt.stop()
 
-    def test_streaming_accumulates_text_in_response(self):
+    def test_streaming_accumulates_text_in_response(self, tmp_path):
         """Verify that the final assistant message contains the full accumulated text."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from unittest.mock import MagicMock
         mock_provider = MagicMock()
@@ -1554,7 +1554,7 @@ class TestStreaming:
         assert assistant_msgs[-1].content == "Hello world!"
         rt.stop()
 
-    def test_tool_call_delta_without_index_defaults_to_zero(self):
+    def test_tool_call_delta_without_index_defaults_to_zero(self, tmp_path):
         """PHASE-11.5 regression: streamer yields tool_call_delta without 'index' key
         should default to idx=0, not crash with KeyError. Anthropic's streaming
         format omits 'index' for single-tool responses.
@@ -1562,7 +1562,7 @@ class TestStreaming:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -1582,7 +1582,7 @@ class TestStreaming:
         assert len(assistant_msgs) >= 1, f"Expected assistant message, got: {[m.role.value for m in conv.messages]}"
         rt.stop()
 
-    def test_streaming_preserves_provider_tool_call_id(self):
+    def test_streaming_preserves_provider_tool_call_id(self, tmp_path):
         """STREAM-ID-PRES: provider-assigned tool_call id flows from raw SSE
         bytes through the streamer, the accumulator, and the final response dict.
 
@@ -1659,7 +1659,7 @@ class TestStreaming:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         with unittest.mock.patch(
             "agent.llm.openai_provider.urlopen_with_ssl_retry",
@@ -1695,7 +1695,7 @@ class TestStreaming:
         )
         assert tool_name == "read_file"
 
-    def test_anthropic_content_block_start_preserves_tool_use_id(self):
+    def test_anthropic_content_block_start_preserves_tool_use_id(self, tmp_path):
         """STREAM-ID-PRES (BUG #4): AnthropicProvider().stream must forward the
         tool_use.id from the content_block_start event through to the SSE event
         stream, so the accumulator captures the provider-assigned id before
@@ -1764,7 +1764,7 @@ class TestStreaming:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         with unittest.mock.patch(
             "agent.llm.anthropic_provider.urlopen_with_ssl_retry",
@@ -1966,7 +1966,7 @@ class TestStreamingSignature:
 class TestStreamingUsageCapture:
     """Phase CB-3 (BUG #3 fix): streaming responses now capture SSE usage chunks."""
 
-    def test_streaming_captures_openai_usage_chunk(self):
+    def test_streaming_captures_openai_usage_chunk(self, tmp_path):
         """An OpenAI-compatible stream that emits a usage chunk in the final frame
         must surface the usage in the response dict (not {})."""
         from agent.runtime import SSEEvent
@@ -1983,7 +1983,7 @@ class TestStreamingUsageCapture:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         usage_calls = []
         rt._on_token_usage = lambda sk, tokens, cost: usage_calls.append((tokens, cost))
@@ -2000,12 +2000,12 @@ class TestStreamingUsageCapture:
         total_tokens = usage_calls[0][0]
         assert total_tokens > 0, f"Expected non-zero tokens, got: {total_tokens}. Usage calls: {usage_calls}"
 
-    def test_streaming_without_usage_chunk_returns_empty_usage(self):
+    def test_streaming_without_usage_chunk_returns_empty_usage(self, tmp_path):
         """Streams that don't emit a usage chunk still return a valid response with usage={}."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, delta: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from unittest.mock import MagicMock
         mock_provider = MagicMock()
@@ -2021,7 +2021,7 @@ class TestStreamingUsageCapture:
         assert len(assistant_msgs) >= 1
         assert assistant_msgs[-1].content == "Hello world!"
 
-    def test_streaming_captures_anthropic_usage_in_message_delta(self):
+    def test_streaming_captures_anthropic_usage_in_message_delta(self, tmp_path):
         """Anthropic streams emit usage in message_delta events; the fix must capture these too."""
         from agent.runtime import SSEEvent
         from unittest.mock import MagicMock
@@ -2037,7 +2037,7 @@ class TestStreamingUsageCapture:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = mock_anthropic_stream_with_usage()
@@ -2105,14 +2105,14 @@ class TestStuckDetection:
             setattr(cfg, k, v)
         return cfg
 
-    def test_stuck_repeated_same_tool_and_args(self):
+    def test_stuck_repeated_same_tool_and_args(self, tmp_path):
         """3+ calls of same tool+args → stuck detection fires."""
         from agent.runtime import AgentRuntime
         rt = AgentRuntime(self._cfg())
         rt.start()
 
         sk = "test_stuck_repeated_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         tool = "read_file"
         args = {"path": "src/main.py"}
@@ -2131,14 +2131,14 @@ class TestStuckDetection:
         rt._cleanup_tool_history(sk)
         rt.stop()
 
-    def test_stuck_write_loop_no_exec(self):
+    def test_stuck_write_loop_no_exec(self, tmp_path):
         """8+ write operations with no exec_command → stuck detection fires."""
         from agent.runtime import AgentRuntime
         rt = AgentRuntime(self._cfg())
         rt.start()
 
         sk = "test_stuck_write_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Do 7 writes → no stuck yet
         for i in range(7):
@@ -2154,7 +2154,7 @@ class TestStuckDetection:
         rt._cleanup_tool_history(sk)
         rt.stop()
 
-    def test_not_stuck_with_exec_between_writes(self):
+    def test_not_stuck_with_exec_between_writes(self, tmp_path):
         """Interleaving exec_command with writes prevents the write-loop stuck detection.
 
         The write-loop check fires at 8+ writes with no exec in the last 8.
@@ -2165,7 +2165,7 @@ class TestStuckDetection:
         rt.start()
 
         sk = "test_stuck_varied_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Alternate write/exec for 10 iterations — use different args each time
         # so 'same tool+args' check never triggers, and exec breaks write-loop count
@@ -2180,14 +2180,14 @@ class TestStuckDetection:
         rt._cleanup_tool_history(sk)
         rt.stop()
 
-    def test_not_stuck_different_args(self):
+    def test_not_stuck_different_args(self, tmp_path):
         """Same tool called with different args → not stuck."""
         from agent.runtime import AgentRuntime
         rt = AgentRuntime(self._cfg())
         rt.start()
 
         sk = "test_stuck_diff_args_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Same tool, different args, 5 times → no stuck
         for i in range(5):
@@ -2197,14 +2197,14 @@ class TestStuckDetection:
         rt._cleanup_tool_history(sk)
         rt.stop()
 
-    def test_tool_history_cleans_up_on_cancel(self):
+    def test_tool_history_cleans_up_on_cancel(self, tmp_path):
         """Cancelling a conversation removes its tool history."""
         from agent.runtime import AgentRuntime
         rt = AgentRuntime(self._cfg())
         rt.start()
 
         sk = "test_cleanup_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Add some history
         rt._check_stuck(sk, "read_file", {"path": "a.py"}, iteration=1)
@@ -2221,14 +2221,14 @@ class TestStuckDetection:
 
         rt.stop()
 
-    def test_history_pruned_at_20_entries(self):
+    def test_history_pruned_at_20_entries(self, tmp_path):
         """History is kept to last 20 entries."""
         from agent.runtime import AgentRuntime
         rt = AgentRuntime(self._cfg())
         rt.start()
 
         sk = "test_prune_" + str(uuid.uuid4().hex[:8])
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Add 25 entries
         for i in range(25):
@@ -2250,7 +2250,7 @@ class TestStuckDetection:
 class TestStuckMessageTransient:
     """Phase CB-3 (BUG #4 fix): stuck messages are transient prefixes, not stored."""
 
-    def test_stuck_message_not_stored_in_conv_messages(self):
+    def test_stuck_message_not_stored_in_conv_messages(self, tmp_path):
         """Stuck-detection text is NOT stored in conv.messages when stuck fires.
 
         Drives _run_loop 3 times with the same tool call to trigger stuck
@@ -2260,7 +2260,7 @@ class TestStuckMessageTransient:
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.tools import ToolResult
 
@@ -2443,12 +2443,12 @@ class TestEmptyChoicesResponse:
     """When the LLM returns a response with no choices and empty content,
     _run_loop must dispatch _on_error instead of _on_response_complete."""
 
-    def test_empty_choices_response_dispatches_on_error(self):
+    def test_empty_choices_response_dispatches_on_error(self, tmp_path):
         """Response with no choices key and empty content → _on_error fires."""
         rt = AgentRuntime(_make_cfg())
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
@@ -3621,7 +3621,7 @@ class TestAllowedToolsFallback:
 class TestPreCallBudgetGuard:
     """Tests for the pre-call RuntimeError guard in _run_loop."""
 
-    def test_guard_fires_when_post_trim_exceeds_budget(self):
+    def test_guard_fires_when_post_trim_exceeds_budget(self, tmp_path):
         """Guard raises RuntimeError when conversation exceeds model_max minus response reserve."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -3643,7 +3643,7 @@ class TestPreCallBudgetGuard:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.system_prompt = "Test"
         conv.add_user_message("hello")
@@ -3654,7 +3654,7 @@ class TestPreCallBudgetGuard:
         assert errors, "guard should have fired"
         assert "exceeds model context window" in errors[0]
 
-    def test_guard_message_includes_usage_percent_and_hint(self):
+    def test_guard_message_includes_usage_percent_and_hint(self, tmp_path):
         """Error message must include usage percent and remediation hint."""
         from agent.config import AgentConfig, LLMProviderConfig
         cfg = AgentConfig(
@@ -3676,7 +3676,7 @@ class TestPreCallBudgetGuard:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         conv = rt.get_conversation(sk)
         conv.system_prompt = "Test"
         conv.add_user_message("hello")
@@ -4641,12 +4641,12 @@ class TestStreamedArgumentsValidation:
 
     # ── Integration: done-event path skips malformed tool call ───────────────
 
-    def test_done_path_skips_malformed_tool_call(self):
+    def test_done_path_skips_malformed_tool_call(self, tmp_path):
         """_call_llm_streaming done-event path: malformed args → call skipped."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4689,12 +4689,12 @@ class TestStreamedArgumentsValidation:
         assert tcs[0].arguments == {"path": "ok.py"}
         rt.stop()
 
-    def test_done_path_skips_all_malformed(self):
+    def test_done_path_skips_all_malformed(self, tmp_path):
         """_call_llm_streaming done-event path: all malformed → empty tool_calls."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4722,12 +4722,12 @@ class TestStreamedArgumentsValidation:
 
     # ── Integration: fallback path (no done event) skips malformed tool call ─
 
-    def test_fallback_path_skips_malformed_tool_call(self):
+    def test_fallback_path_skips_malformed_tool_call(self, tmp_path):
         """_call_llm_streaming fallback (no done): malformed args → skipped."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4767,12 +4767,12 @@ class TestStreamedArgumentsValidation:
         assert tcs[0].arguments == {"path": "ok.py"}
         rt.stop()
 
-    def test_fallback_path_skips_all_malformed(self):
+    def test_fallback_path_skips_all_malformed(self, tmp_path):
         """_call_llm_streaming fallback (no done): all malformed → empty."""
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4808,7 +4808,7 @@ class TestStreamErrorIntegration:
     inclusion, content_filter synthetic error, and code=0 formatting.
     """
 
-    def test_call_llm_streaming_attaches_stream_error(self):
+    def test_call_llm_streaming_attaches_stream_error(self, tmp_path):
         """_call_llm_streaming sets _stream_error on result when error event received.
         Verifies via on_error callback that the provider error message is surfaced
         (not the generic "no content" placeholder)."""
@@ -4823,7 +4823,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -4847,7 +4847,7 @@ class TestStreamErrorIntegration:
         )
         rt.stop()
 
-    def test_stream_error_surfaces_code_0_message(self):
+    def test_stream_error_surfaces_code_0_message(self, tmp_path):
         """_stream_error with code=0 does not show '(code=0)' in on_error message."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4860,7 +4860,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -4881,7 +4881,7 @@ class TestStreamErrorIntegration:
         assert "non-fatal" in error_messages[0]
         rt.stop()
 
-    def test_stream_error_surfaces_metadata_provider_name(self):
+    def test_stream_error_surfaces_metadata_provider_name(self, tmp_path):
         """_stream_error with metadata.provider_name includes it in the on_error message."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -4894,7 +4894,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -4918,7 +4918,7 @@ class TestStreamErrorIntegration:
         )
         rt.stop()
 
-    def test_stream_error_fallback_path(self):
+    def test_stream_error_fallback_path(self, tmp_path):
         """_stream_error attached via fallback path (no done event).
         Phase 2b (BUG #5 fix): the turn terminates FAILED via
         _terminate_turn; on_error IS called with the 503, and the partial
@@ -4938,7 +4938,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         # No done event — stream ends after text + error event (fallback path)
@@ -4976,7 +4976,7 @@ class TestStreamErrorIntegration:
         assert "Partial text" not in last.content
         rt.stop()
 
-    def test_stream_error_fallback_empty_content(self):
+    def test_stream_error_fallback_empty_content(self, tmp_path):
         """_stream_error via fallback path with empty content: on_error is called.
         Only the error event, no text content, no done event."""
         from agent.llm.streaming import SSEEvent
@@ -4990,7 +4990,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         # No done event, no text content — only error event (fallback path, empty content)
@@ -5009,7 +5009,7 @@ class TestStreamErrorIntegration:
         assert "503" in error_messages[0]
         rt.stop()
 
-    def test_stream_error_content_filter_surfaces_filtered_message(self):
+    def test_stream_error_content_filter_surfaces_filtered_message(self, tmp_path):
         """content_filter finish_reason surfaces 'Content was filtered' to on_error callback."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -5022,7 +5022,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -5042,7 +5042,7 @@ class TestStreamErrorIntegration:
         )
         rt.stop()
 
-    def test_stream_error_missing_on_error_callback(self):
+    def test_stream_error_missing_on_error_callback(self, tmp_path):
         """_on_error not set: _run_loop does not crash when error event is received."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -5051,7 +5051,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -5068,7 +5068,7 @@ class TestStreamErrorIntegration:
         assert conv is not None
         rt.stop()
 
-    def test_stream_error_captures_late_error_after_done(self):
+    def test_stream_error_captures_late_error_after_done(self, tmp_path):
         """Late error after done is captured and written back to _stream_error."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -5080,7 +5080,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None, on_error=on_error)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Simulate: text_delta -> done -> late error event
         mock_provider = MagicMock()
@@ -5103,7 +5103,7 @@ class TestStreamErrorIntegration:
         )
         rt.stop()
 
-    def test_stream_error_captures_late_usage_after_done(self):
+    def test_stream_error_captures_late_usage_after_done(self, tmp_path):
         """Late usage after done is captured and written back to result.usage."""
         from agent.llm.streaming import SSEEvent
         from unittest.mock import MagicMock
@@ -5111,7 +5111,7 @@ class TestStreamErrorIntegration:
         rt = AgentRuntime(_make_cfg(), on_text_delta=lambda sk, d: None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([
@@ -5438,13 +5438,13 @@ class TestTurnStateMachine:
 
     # ── Group 3: _run_loop state transitions (4 tests) ──────────────
 
-    def test_run_loop_starts_in_running_state(self):
+    def test_run_loop_starts_in_running_state(self, tmp_path):
         """At the top of _run_loop, state is RUNNING; after success, state is COMPLETED."""
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         with unittest.mock.patch.object(
             rt, "_call_llm",
             lambda sk, msgs, tools, **kwargs: _resp("Hello, human."),
@@ -5453,13 +5453,13 @@ class TestTurnStateMachine:
         assert rt.get_turn_state(sk) == TurnStatus.COMPLETED
         rt.stop()
 
-    def test_run_loop_transitions_to_streaming_before_first_llm_call(self):
+    def test_run_loop_transitions_to_streaming_before_first_llm_call(self, tmp_path):
         """STREAMING is recorded before the first _call_llm returns; final state is COMPLETED."""
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         states_seen = []
 
         def tracking_call(*args, **kwargs):
@@ -5475,13 +5475,13 @@ class TestTurnStateMachine:
         assert rt.get_turn_state(sk) == TurnStatus.COMPLETED
         rt.stop()
 
-    def test_run_loop_terminates_with_failed_on_max_iterations(self):
+    def test_run_loop_terminates_with_failed_on_max_iterations(self, tmp_path):
         """When max_tool_iterations is reached with no text response, terminal is FAILED."""
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         # Always return a tool call (never text) — loop will exhaust max_iterations.
         tool_resp = _resp(tool_calls=[{
             "id": "call_1",
@@ -5503,7 +5503,7 @@ class TestTurnStateMachine:
         assert result.metadata.get("reason") == "max_iterations"
         rt.stop()
 
-    def test_run_loop_terminates_with_cancelled_on_cancel_signal(self):
+    def test_run_loop_terminates_with_cancelled_on_cancel_signal(self, tmp_path):
         """When _cancel_requested is set, the next loop iteration's cancel check fires CANCELLED.
 
         The trigger returns a tool call (not text) so the loop iterates again,
@@ -5514,7 +5514,7 @@ class TestTurnStateMachine:
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         call_count = [0]
 
         def trigger_cancel(*args, **kwargs):
@@ -5567,14 +5567,14 @@ class TestTurnStateMachine:
         assert result.metadata.get("reason") == "no_conversation"
         rt.stop()
 
-    def test_run_loop_terminates_with_failed_on_prompt_build_failure(self):
+    def test_run_loop_terminates_with_failed_on_prompt_build_failure(self, tmp_path):
         """BUG #2: _run_loop where _ensure_system_prompt raises must route through
         _terminate_turn(FAILED, prompt_build_failed)."""
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         errors = []
         rt._on_error = lambda sk2, msg: errors.append(msg)
         with unittest.mock.patch.object(
@@ -5593,7 +5593,7 @@ class TestTurnStateMachine:
 
     # ── Group 3b: BUG #5 mid-stream error (1 test) ──────────────────
 
-    def test_run_loop_terminates_with_failed_on_stream_error_with_content(self):
+    def test_run_loop_terminates_with_failed_on_stream_error_with_content(self, tmp_path):
         """BUG #5: a response with non-empty text_content AND _stream_error must
         terminate the turn with FAILED. The previous fall-through to
         on_response_complete must NOT happen."""
@@ -5601,7 +5601,7 @@ class TestTurnStateMachine:
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         response = {
             "choices": [{"message": {
                 "content": "partial response that was streamed",
@@ -5628,7 +5628,7 @@ class TestTurnStateMachine:
 
     # ── Group 3c: BUG #6 limit handling (2 tests) ───────────────────
 
-    def test_run_loop_terminates_with_failed_on_cost_limit(self):
+    def test_run_loop_terminates_with_failed_on_cost_limit(self, tmp_path):
         """BUG #6: When conv.total_cost > cost_limit, terminate FAILED with reason='cost_limit'."""
         from agent.runtime import TurnStatus
         cfg = _make_cfg()
@@ -5636,7 +5636,7 @@ class TestTurnStateMachine:
         rt = AgentRuntime(cfg, GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         with unittest.mock.patch.object(
             rt, "_call_llm",
             lambda sk, msgs, tools, **kwargs: _resp("Hi."),
@@ -5652,7 +5652,7 @@ class TestTurnStateMachine:
         )
         rt.stop()
 
-    def test_run_loop_terminates_with_failed_on_step_limit(self):
+    def test_run_loop_terminates_with_failed_on_step_limit(self, tmp_path):
         """BUG #6: When conv.step_count > step_limit, terminate FAILED with reason='step_limit'."""
         from agent.runtime import TurnStatus
         cfg = _make_cfg()
@@ -5660,7 +5660,7 @@ class TestTurnStateMachine:
         rt = AgentRuntime(cfg, GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         with unittest.mock.patch.object(
             rt, "_call_llm",
             lambda sk, msgs, tools, **kwargs: _resp("Hi."),
@@ -5724,7 +5724,7 @@ class TestTurnStateMachine:
 
     # ── Group 6: send_message token rotation (1 test) ───────────────
 
-    def test_send_message_rotates_turn_token(self):
+    def test_send_message_rotates_turn_token(self, tmp_path):
         """BUG #4: two consecutive _run_loop calls with different turn_tokens
         must produce different _turn_tokens[sk] values so a new turn's state
         is not confused with a prior turn's terminal result.
@@ -5738,7 +5738,7 @@ class TestTurnStateMachine:
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
         first_tk = object()
         second_tk = object()
         assert first_tk is not second_tk, "test setup: tokens must differ"
@@ -6848,7 +6848,7 @@ class TestSpec10AgentCheckpoints:
 class TestProviderFailureCarrier:
     """The stream/empty-content failure rides in metadata; error stays a str."""
 
-    def test_stream_error_path_error_is_str_and_metadata_carries_failure(self):
+    def test_stream_error_path_error_is_str_and_metadata_carries_failure(self, tmp_path):
         """RED-first: pre-fix, `error` was a ClassifiedProviderError object."""
         from agent.llm.failure_classifier import ProviderFailure
         from agent.llm.streaming import SSEEvent
@@ -6859,7 +6859,7 @@ class TestProviderFailureCarrier:
                           on_error=lambda sk, msg: captured.append((sk, msg)))
         rt.start()
         sk = _uniq()
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         mock_provider = MagicMock()
         mock_provider.stream.return_value = iter([

@@ -462,7 +462,7 @@ class TestIntegration:
         # Message landed in pending, keyed by session
         assert pending_messages["special:coder"] == [stuck_msg]
 
-    def test_run_loop_invokes_tool_chain(self):
+    def test_run_loop_invokes_tool_chain(self, tmp_path):
         """Regression guard: _run_loop must call self._tool_chain.run(...).
 
         Without this test, a silent revert of Edit 4 (replacing the chain
@@ -494,7 +494,7 @@ class TestIntegration:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = f"test-{uuid.uuid4().hex[:8]}"
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         # Mock _call_llm to return a write_file tool call, then "Done."
         responses = [

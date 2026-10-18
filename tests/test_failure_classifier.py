@@ -590,7 +590,7 @@ class TestRuntimeRecordOnce:
         assert failure is not None
         assert failure.failure_class.value == "unknown"
 
-    def test_provider_network_error_without_marker_is_recorded(self, tmp_config_dir):
+    def test_provider_network_error_without_marker_is_recorded(self, tmp_config_dir, tmp_path):
         """REGRESSION GUARD (SPEC-22 audit, BUG #1): a provider call raising a
         network/HTTP error carries NO `_crabcakes_context` marker — the narrow
         handlers only catch (IndexError, KeyError, TypeError, ValueError).
@@ -619,7 +619,7 @@ class TestRuntimeRecordOnce:
         rt = AgentRuntime(cfg)
         rt.start()
         sk = "special:coder"
-        rt.create_conversation("Coder", sk, "/tmp")
+        rt.create_conversation("Coder", sk, str(tmp_path))
 
         class _Provider:
             def call(self, **kwargs):

@@ -439,13 +439,13 @@ class TestDoErrorFeedCard:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _seed_conversation(rt, sk, pre_history):
+def _seed_conversation(rt, sk, pre_history, project_path: str):
     """Create the conversation; returns it. Pre-history stays BELOW the
     message the turn itself appends — _run_loop appends the user message
     at the end, so pre-history + [user] is the shape at _call_llm time.
     The turn-added empty assistants are appended by the patched _call_llm
     (production adds them mid-turn, after _call_llm returns at :1486)."""
-    rt.create_conversation("Coder", sk, "/tmp")
+    rt.create_conversation("Coder", sk, project_path)
     conv = rt._conversations[sk]
     conv.messages.extend(pre_history)
     return conv
@@ -475,7 +475,7 @@ def _empty_assistant():
 
 
 class TestEmptyMessageRollback:
-    def test_rollback_removes_trailing_empty_assistant(self):
+    def test_rollback_removes_trailing_empty_assistant(self, tmp_path):
         errors = []
 
         def _collect(
@@ -488,7 +488,7 @@ class TestEmptyMessageRollback:
 
         rt = _make_runtime(on_error=_collect)
         sk = _uniq()
-        conv = _seed_conversation(rt, sk, [_user("prior answer")])
+        conv = _seed_conversation(rt, sk, [_user("prior answer")], str(tmp_path))
 
         with unittest.mock.patch.object(
             rt,
@@ -508,10 +508,10 @@ class TestEmptyMessageRollback:
         assert len(errors) == 1
         rt.stop()
 
-    def test_rollback_keeps_partial_content(self):
+    def test_rollback_keeps_partial_content(self, tmp_path):
         rt = _make_runtime()
         sk = _uniq()
-        conv = _seed_conversation(rt, sk, [_user("q")])
+        conv = _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
         partial = Message(role=MessageRole.ASSISTANT, content="partial text")
 
         with unittest.mock.patch.object(
@@ -527,12 +527,12 @@ class TestEmptyMessageRollback:
         assert conv.messages[-1].content == "partial text"
         rt.stop()
 
-    def test_rollback_keeps_tool_call_messages(self):
+    def test_rollback_keeps_tool_call_messages(self, tmp_path):
         from models.conversation import ToolCall
 
         rt = _make_runtime()
         sk = _uniq()
-        conv = _seed_conversation(rt, sk, [_user("q")])
+        conv = _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
         tool_caller = Message(
             role=MessageRole.ASSISTANT,
             content="",
@@ -552,7 +552,7 @@ class TestEmptyMessageRollback:
         assert conv.messages[-1].tool_calls[0].call_id == "c1"
         rt.stop()
 
-    def test_rollback_shields_legacy_empty_below_turn_user_message(self):
+    def test_rollback_shields_legacy_empty_below_turn_user_message(self, tmp_path):
         """Fix round, audit #5 (comment truth), Debugger probe A: the strip
         is origin-agnostic, but a LEGACY trailing empty sitting BELOW the
         turn's own user message is unreachable — the user message shields
@@ -561,7 +561,7 @@ class TestEmptyMessageRollback:
         rt = _make_runtime()
         sk = _uniq()
         # Legacy corrupt trailing empty from some earlier bad write.
-        conv = _seed_conversation(rt, sk, [_user("q"), _empty_assistant()])
+        conv = _seed_conversation(rt, sk, [_user("q"), _empty_assistant()], str(tmp_path))
 
         with unittest.mock.patch.object(
             rt,
@@ -577,7 +577,7 @@ class TestEmptyMessageRollback:
         assert conv.messages[1].content == ""  # legacy empty survives — shielded
         rt.stop()
 
-    def test_rollback_deletes_unshielded_legacy_empty_when_user_message_add_fails(self):
+    def test_rollback_deletes_unshielded_legacy_empty_when_user_message_add_fails(self, tmp_path):
         """A pre-existing trailing empty exposed at the tail IS deleted when
         the turn fails before its user message lands — the strip is
         origin-agnostic. Modeled by add_user_message raising.
@@ -589,7 +589,7 @@ class TestEmptyMessageRollback:
         the mid-loop exception path (where the rollback DOES run)."""
         rt = _make_runtime()
         sk = _uniq()
-        conv = _seed_conversation(rt, sk, [_user("q"), _empty_assistant()])
+        conv = _seed_conversation(rt, sk, [_user("q"), _empty_assistant()], str(tmp_path))
 
         def _user_msg_boom(session_key, text):
             raise RuntimeError("user message write failed")
@@ -611,10 +611,10 @@ class TestEmptyMessageRollback:
         assert conv.messages[0].content == "q"
         rt.stop()
 
-    def test_rollback_caps_at_five(self):
+    def test_rollback_caps_at_five(self, tmp_path):
         rt = _make_runtime()
         sk = _uniq()
-        conv = _seed_conversation(rt, sk, [_user("q")])
+        conv = _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
         empties = [_empty_assistant() for _ in range(6)]
 
         with unittest.mock.patch.object(
@@ -696,11 +696,11 @@ class TestMidLoopCancelDispatchConstants:
 
         return _collect
 
-    def test_cancel_requested_site_dispatches_cancel_message(self):
+    def test_cancel_requested_site_dispatches_cancel_message(self, tmp_path):
         errors = []
         rt = _make_runtime(on_error=self._collector(errors))
         sk = _uniq()
-        _seed_conversation(rt, sk, [_user("q")])
+        _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
 
         call_llm = unittest.mock.MagicMock(return_value={})
         rt._cancel_requested = True  # pre-seed: first loop check fires
@@ -718,11 +718,11 @@ class TestMidLoopCancelDispatchConstants:
         call_llm.assert_not_called()
         rt.stop()
 
-    def test_cancelled_set_site_dispatches_cancel_message(self):
+    def test_cancelled_set_site_dispatches_cancel_message(self, tmp_path):
         errors = []
         rt = _make_runtime(on_error=self._collector(errors))
         sk = _uniq()
-        _seed_conversation(rt, sk, [_user("q")])
+        _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
 
         call_llm = unittest.mock.MagicMock(return_value={})
         rt._cancelled.add(sk)  # pre-seed: per-session cancel check fires
@@ -744,7 +744,7 @@ class TestMidLoopCancelDispatchConstants:
 
 
 class TestFailedTurnPersistence:
-    def test_failed_turn_persists_no_empty_assistant(self):
+    def test_failed_turn_persists_no_empty_assistant(self, tmp_path):
         """The original failure mode, end to end: a turn that dies mid-loop
         must not leave trailing empty assistant messages in the persisted
         conversation JSON (the placeholder-masking poison on reload).
@@ -756,7 +756,7 @@ class TestFailedTurnPersistence:
         rather than assuming HOME or XDG precedence."""
         rt = _make_runtime()
         sk = _uniq()
-        _seed_conversation(rt, sk, [_user("q")])
+        _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
 
         with unittest.mock.patch.object(
             rt,

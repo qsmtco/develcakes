@@ -8,7 +8,8 @@ markdown. This prompt is the rules of that surface, learned the hard way.
 
 ## 1. The two card tiers
 
-Make the **ENTIRE message** one fenced block. The fence tag selects the tier.
+An `html` fence renders wherever it sits, including with prose around it.
+A `live` fence is still the entire message. The fence tag selects the tier.
 
 ### Static card — `html`
 
@@ -42,16 +43,19 @@ Make the **ENTIRE message** one fenced block. The fence tag selects the tier.
 
 ## 2. Fence discipline — the rule that breaks cards most often
 
-**The fence must be the whole message. Nothing before it. Nothing after it.**
-
-Not a preamble, not a sign-off, not a single trailing line of prose. One line of
-text after the closing fence makes the **entire message fall back to markdown**,
-and your card renders as a raw code block — the user sees your HTML source.
+An `html` fence renders wherever it sits. Prose before it and after it is
+normal markdown. Commentary does not have to be a second message.
 
 ```
-WRONG:  "Here's the report:" + fence + "Hope that helps!"
-RIGHT: fence only — commentary goes INSIDE the card, or in a separate message
+OK: "Here's the report:" + ```html fence + "Hope that helps!"
 ```
+
+A `live` fence is still the **entire message**. Nothing before it, nothing
+after it. One line of prose and the live section is not live — it falls back
+to a code block.
+
+To show HTML as source, do not use an `html` fence. Fence it as `` ``` ``,
+`` ```text ``, or `` ```xml ``. An `html` fence always renders.
 
 **Never print three consecutive backticks inside a card body.** That run *is* the
 delimiter: the card ends early and the remainder spills out as raw source. To show

@@ -2,7 +2,8 @@
 # Tests for ui/handlers/chat_render_handler.py — SPEC-06 SP4 surface repoint.
 #
 # SP4: append/stream paths route text → render_message (SPEC-13: whole-message
-# ```html fence → agent-author policy; otherwise markdown → HTML → nh3
+# ```html fence → agent-author policy; SPEC-CHAT-MIXED-HTML: role "Agent"
+# also promotes each ```html fence in prose; otherwise markdown → HTML → nh3
 # sanitize, ALWAYS in path) → per-session ChatSurface. Ruling R1: the
 # surface owns the widget tree — render_sync returns None and
 # on_bubble_ready fires with None (callers' `if bubble is not None` guards
@@ -126,7 +127,7 @@ class TestSurfaceAppendContract:
         HANDLER's binding (from-import copied the name at import time —
         patching render.html would miss the call site)."""
 
-        def boom(text):
+        def boom(text, **_kwargs):
             raise RuntimeError("composition failed")
 
         monkeypatch.setattr(crh_module, "render_message", boom)
@@ -134,6 +135,80 @@ class TestSurfaceAppendContract:
         html_arg = self.spy.appended[0]["html"]
         assert "&lt;b&gt;raw &amp; dangerous&lt;/b&gt;" in html_arg
         assert "<b>" not in html_arg
+
+    def test_agent_mixed_html_renders_card_and_prose(self):
+        """SPEC-CHAT-MIXED-HTML: sync path (role on _append_to_surface)."""
+        text = 'Here:\n```html\n<div style="color:red">hi</div>\n```\nDone.'
+        self.handler.render_sync("Agent", text, "sk")
+        html_arg = self.spy.appended[0]["html"]
+        assert "<div" in html_arg
+        assert 'style="color:red"' in html_arg
+        assert "Here" in html_arg and "Done" in html_arg
+        assert "&lt;div" not in html_arg
+
+    def test_you_and_system_mixed_html_stay_source(self):
+        text = 'Here:\n```html\n<div style="color:red">hi</div>\n```\nDone.'
+        self.handler.render_sync("You", text, "sk")
+        self.handler.render_sync("System", text, "sk")
+        for row in self.spy.appended:
+            assert "&lt;" in row["html"]
+            assert "<div" not in row["html"]
+
+    def test_you_whole_message_html_still_renders(self):
+        self.handler.render_sync("You", '```html\n<div style="color:red">hi</div>\n```', "sk")
+        html_arg = self.spy.appended[0]["html"]
+        assert "<div" in html_arg and "&lt;div" not in html_arg
+
+    def test_async_agent_mixed_html_renders(self):
+        """The off-thread compose site must pass role too."""
+        text = 'Here:\n```html\n<div style="color:red">hi</div>\n```\nDone.'
+        self.handler.render_async("Agent", text, "sk", on_bubble_ready=lambda _b: None)
+        html_arg = self.spy.appended[0]["html"]
+        assert "<div" in html_arg and "&lt;div" not in html_arg
+        assert "Here" in html_arg and "Done" in html_arg
+
+    def test_end_streaming_agent_promotes_mixed_html(self):
+        """Production finalizes through end_streaming → _append_to_surface."""
+        self.handler.start_streaming("sk", role="Agent")
+        assert self.handler.set_streaming_text(
+            "sk", 'Here:\n```html\n<div>hi</div>\n```\nDone.'
+        )
+        self.handler.end_streaming("sk")
+        html_arg = self.spy.appended[0]["html"]
+        assert "<div>hi</div>" in html_arg
+        assert "Here" in html_arg and "Done" in html_arg
+        assert "&lt;div" not in html_arg
+
+    def test_missing_role_does_not_promote_segments(self):
+        from ui.handlers.chat_render_handler import _compose_text
+        text = 'Here:\n```html\n<div>hi</div>\n```'
+        _live, html_arg = _compose_text(text)
+        assert _live is None
+        assert "&lt;" in html_arg
+        assert "<div" not in html_arg
+
+    def test_mixed_live_fence_does_not_append_live(self):
+        """A live-enabled surface must not treat prose + ```live as a live section."""
+        spy = SpySurface()
+        spy.live_calls = []
+
+        def is_live_enabled():
+            return True
+
+        def append_live(payload_html, agent_name=None, agent_color=None):
+            spy.live_calls.append(payload_html)
+
+        spy.is_live_enabled = is_live_enabled
+        spy.append_live = append_live
+        self.handler._surfaces["sk"] = spy
+        whole = "```live\n<div id=\"only\">x</div>\n```"
+        mixed = "See\n```live\n<div id=\"nope\">x</div>\n```\n"
+        self.handler.render_sync("Agent", whole, "sk")
+        assert spy.live_calls == ["<div id=\"only\">x</div>"]
+        self.handler.render_sync("Agent", mixed, "sk")
+        assert spy.live_calls == ["<div id=\"only\">x</div>"]
+        assert len(spy.appended) == 1
+        assert "See" in spy.appended[0]["html"]
 
 
 # ── Per-session surfaces ──────────────────────────────────────────────────
@@ -335,9 +410,9 @@ class TestReentrancyGuard:
         gate = threading.Event()
         real_compose = crh_module.render_message  # capture BEFORE patching
 
-        def gated_compose(text):
+        def gated_compose(text, **kwargs):
             gate.wait(timeout=5)  # first render parks here — in-flight
-            return real_compose(text)
+            return real_compose(text, **kwargs)
 
         monkeypatch.setattr(crh_module, "render_message", gated_compose)
         handler = ChatRenderHandler()  # REAL shared pool

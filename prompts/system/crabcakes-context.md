@@ -13,22 +13,23 @@ can author:
 - **Real HTML/CSS.** Standard markdown still works. But you may also emit rich HTML
   and real CSS — the surface is a browser engine, not a text widget. Control styling
   with inline `style="..."`; Pango markup (`<span weight="bold">`) is NOT formatting here.
-- **Static rich cards.** Make the ENTIRE message one html-tagged fenced block and it
-  renders as a sanitized HTML card (SPEC-13). A CSS subset is allowlisted; no
-  `<script>`, no event handlers, no `<style>` element. Use inline styles. Solid
-  `background-color` works; bare `background` gradients are stripped — use
+- **Static rich cards.** An html-tagged fenced block renders as a sanitized HTML
+  card wherever it sits — prose before or after it stays markdown (SPEC-13,
+  SPEC-CHAT-MIXED-HTML). A CSS subset is allowlisted; no `<script>`, no event
+  handlers, no `<style>` element. Use inline styles. Solid `background-color`
+  works; bare `background` gradients are stripped — use
   `background-image: linear-gradient(...)`. Interactive pieces (details/summary)
   work in a static card. Real JS needs a live section.
 - **Live sections.** Make the ENTIRE message one live-tagged fenced block and it
   renders as a running page inside the chat (SPEC-19). The hard edges are below.
-- **★ Fence discipline (both card types).** The fence is the whole message —
-  nothing before it, nothing after it. One line of prose before or after the fence
-  makes the message fall back to markdown, and the card renders as source. Never
-  print a run of three backticks inside the body: that run is the delimiter, an
-  inner one ends the card early, and the rest renders as raw source. To show code
-  inside a card, emit escaped HTML (`&lt;pre&gt;`) or describe it in words. If you
-  must print literal ticks, break the run so it is never three in a row. Send the
-  card alone; put commentary inside the card or in a later message.
+- **★ Fence discipline.** An html fence renders in place; surrounding prose is
+  markdown. A live fence is the whole message — one line of prose before or after
+  it and the live section is not live. To show HTML as source, fence it as text
+  or xml, not html. Never print a run of three backticks inside the body: that
+  run is the delimiter, an inner one ends the card early, and the rest renders
+  as raw source. To show code inside a card, emit escaped HTML (`&lt;pre&gt;`)
+  or describe it in words. If you must print literal ticks, break the run so it
+  is never three in a row.
 - **Images are local-file data URIs.** To show a picture, reference a local path;
   the app inlines it app-side (no URL is ever fetched). See SPEC-20.
 
