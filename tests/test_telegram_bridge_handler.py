@@ -320,6 +320,24 @@ def _connected(**kw):
     return h, t, a
 
 
+def test_feed_card_is_not_sent_to_phone():
+    """SPEC-15c: a pending exec-approval card must not reach the phone."""
+    h, t, _a = _connected()
+    card = type("C", (), {
+        "card_id": "card-1",
+        "body": "$ ls",
+        "metadata": {
+            "needs_approval": True,
+            "status": "pending_approval",
+        },
+    })()
+    h.on_feed_card_added(card)
+    h.on_feed_card_added("card-1")  # add_card passes the id string
+    h.on_feed_card_added(None)
+    assert t["t"].sent == []
+    assert h._approval_msgs == {}
+
+
 def test_supervisor_reply_forwards_to_phone():
     h, t, _a = _connected()
     h.on_supervisor_reply("special:supervisor", "done — 3 files changed")
@@ -380,6 +398,28 @@ def test_plain_text_reply_passes_through_unchanged():
     h, t, _a = _connected()
     h.on_supervisor_reply("special:supervisor", "just **markdown**, no fence")
     assert t["t"].sent[-1]["text"] == "just **markdown**, no fence"
+
+
+def test_mixed_html_reply_flattens_fence_keeps_prose():
+    """SPEC-CHAT-MIXED-HTML: prose around an html fence is text, not source."""
+    h, t, _a = _connected()
+    reply = "  Here:\n```html\n<div><b>Build OK</b></div>\n```\nDone."
+    h.on_supervisor_reply("special:supervisor", reply)
+    sent = t["t"].sent[-1]["text"]
+    assert sent.startswith("  Here:")
+    assert "Build OK" in sent
+    assert "Done." in sent
+    assert "<div" not in sent and "<b" not in sent and ">" not in sent
+
+
+def test_mixed_html_reply_crlf_and_angle_prose():
+    h, t, _a = _connected()
+    reply = "5 < 6\r\n```html\r\n<div>ok</div>\r\n```\r\n"
+    h.on_supervisor_reply("special:supervisor", reply)
+    sent = t["t"].sent[-1]["text"]
+    assert "5 < 6" in sent
+    assert "ok" in sent
+    assert "<div" not in sent
 
 
 # ── SP4: remote command allowlist ────────────────────────────────────────

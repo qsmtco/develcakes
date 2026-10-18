@@ -297,6 +297,13 @@ class TestAgentResponseComposition:
         ), "ARH response slot must be composed via _on_agent_response (SPEC-15 SP3b)"
         assert "def _on_agent_response(" in src
 
+    def test_build_does_not_mirror_feed_cards_to_phone(self):
+        import pathlib
+
+        src = pathlib.Path("ui/window.py").read_text()
+        assert "on_feed_card_added" not in src
+        assert "set_card_added_callback" not in src
+
 
 # ── SP4: remote stop-all + status injection ──────────────────────────────
 

@@ -9,13 +9,15 @@
 # state/routing action onto the GTK main thread via the injected `dispatch`
 # seam (production passes GLib.idle_add; tests pass an inline runner).
 #
-# Scope: inbound phone → Supervisor routing (SP2) + exec approvals via inline
-# callback buttons (SP3a) + app→phone reply mirror (SP3b) + remote command
+# Scope: inbound phone → Supervisor routing (SP2) + inbound taps on approval
+# messages already in the chat still resolve (SP3a inbound); new feed cards
+# are not mirrored (SPEC-15c) + app→phone reply mirror (SP3b) + remote command
 # allowlist / typed stop-all confirmation (SP4).
 # Foreign chat ⇒ one polite refusal, never processed.
 #
-# Trust boundary (binding): one paired chat_id; the phone gets conversation +
-# approvals + the /status // /stop commands — NO shell, NO file access.
+# Trust boundary (binding): one paired chat_id; the phone gets Supervisor
+# conversation plus the /status /stop /help allowlist. It does not receive
+# new approval cards. NO shell, NO file access.
 
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
 
+from render.html import split_html_fences
 from transport.telegram import TelegramAuthError, TelegramTransport, redact_log_preview
 
 _logger = logging.getLogger(__name__)
@@ -689,54 +692,17 @@ class TelegramBridgeHandler:
                                 redact_log_preview(str(e)))
         self._approval_msgs.pop(card_id, None)
 
-    def on_feed_card_added(self, card_id_or_data: Any) -> None:
-        """SP3a: surface a PENDING exec-approval card on the phone (SP3b wires
-        this from the window's ``on_card_added`` seam).
+    def on_feed_card_added(self, *_card_id_or_data: Any) -> None:
+        """SPEC-15c: feed cards are not sent to the phone.
 
-        Allowlist: ONLY cards with ``needs_approval is True`` AND
-        ``status == "pending_approval"`` — never needs_review, never plain
-        messages. Skips silently when disconnected/unpaired.
+        The old feed callback passed a card id or a card object. Those
+        arguments are accepted and ignored, so a stale caller does not
+        raise. Supervisor turn text goes out through ``on_supervisor_reply``.
+        Approval cards stay in the app feed. A tap on an approval message
+        that was sent before this change still resolves in
+        ``_handle_callback_query``.
         """
-        card = card_id_or_data
-        fh = self._feed_handler
-        if isinstance(card_id_or_data, str) and fh is not None:
-            getter = getattr(fh, "get_card", None)
-            if callable(getter):
-                try:
-                    card = getter(card_id_or_data)
-                except Exception as e:  # noqa: BLE001
-                    _logger.warning("on_feed_card_added lookup failed: %s",
-                                    redact_log_preview(str(e)))
-                    return
-        if card is None or not isinstance(getattr(card, "metadata", None), dict):
-            return
-        meta = card.metadata
-        if meta.get("needs_approval") is not True:
-            return
-        if meta.get("status") != "pending_approval":
-            return
-        if self._transport is None or self._chat_id is None:
-            return  # disconnected/unpaired — skip silently
-        card_id = getattr(card, "card_id", None) or ""
-        command = str(card.body or "")
-        markup = {"inline_keyboard": [[
-            {"text": "✅ Approve", "callback_data": f"approve:{card_id}"},
-            {"text": "❌ Deny", "callback_data": f"deny:{card_id}"},
-        ]]}
-        try:
-            sent = self._transport.send_message(
-                f"⚠️ Approval requested — {command}", reply_markup=markup)
-            msg_id = sent.get("result", {}).get("message_id") if isinstance(sent, dict) else None
-        except Exception as e:  # noqa: BLE001 — a failed mirror must not kill the bridge
-            _logger.warning("approval mirror send failed: %s",
-                            redact_log_preview(str(e)))
-            return
-        if msg_id is not None:
-            # FIFO cap 50.
-            self._approval_msgs[card_id] = msg_id
-            self._approval_order.append(card_id)
-            while len(self._approval_order) > 50:
-                self._approval_msgs.pop(self._approval_order.pop(0), None)
+        return None
 
     def _clear_approval_msgs(self) -> None:
         self._approval_msgs.clear()
@@ -789,8 +755,10 @@ class TelegramBridgeHandler:
         """SP3b: flatten a Supervisor reply for a TEXT surface.
 
         The whole-message ```html fence (SPEC-13) is flattened to its visible
-        text — the card's content, never markup. Any other message passes
-        through unchanged. R2/R3 (audit): uses a LINEAR stdlib HTMLParser
+        text — the card's content, never markup. A message with prose around
+        one or more ```html fences (SPEC-CHAT-MIXED-HTML) flattens each fence
+        and keeps the surrounding prose. Anything else passes through
+        unchanged. R2/R3 (audit): uses a LINEAR stdlib HTMLParser
         (`_html_fragment_to_text`), so decoded `<`/`>` in TEXT is preserved
         and angle-bracket-dense input cannot freeze the main thread. Fail-safe:
         if anything raises, the original text is returned.
@@ -799,9 +767,18 @@ class TelegramBridgeHandler:
             return text if isinstance(text, str) else ""
         try:
             m = _WHOLE_MESSAGE_HTML_FENCE_RE.match(text.strip())
-            if not m:
+            if m:
+                return _html_fragment_to_text(m.group(1))
+            parts = split_html_fences(text)
+            if not parts:
                 return text
-            return _html_fragment_to_text(m.group(1))
+            chunks: list[str] = []
+            for kind, chunk in parts:
+                if kind == "html":
+                    chunks.append(_html_fragment_to_text(chunk))
+                else:
+                    chunks.append(chunk)
+            return "".join(chunks)
         except Exception as e:  # noqa: BLE001 — never lose a reply to a strip bug
             _logger.warning("html-card flatten failed: %s", redact_log_preview(str(e)))
             return text
