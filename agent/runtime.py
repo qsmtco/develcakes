@@ -379,6 +379,27 @@ def _is_empty_content(text) -> bool:
     return False
 
 
+_REPRINT_COMMANDS = frozenset({"cat", "sed", "head", "tail", "nl", "less", "bat"})
+
+
+def _reprint_target(command: str, paths: set[str]) -> str | None:
+    """Return a known path if one command chunk only displays that file."""
+    if not paths:
+        return None
+    chunks = command.replace("&&", "\n").replace("||", "\n").replace(";", "\n")
+    ordered = sorted(paths, key=len, reverse=True)
+    for chunk in chunks.split("\n"):
+        tokens = chunk.strip().split()
+        if not tokens:
+            continue
+        if os.path.basename(tokens[0]) not in _REPRINT_COMMANDS:
+            continue
+        for path in ordered:
+            if path and path in chunk:
+                return path
+    return None
+
+
 def _assemble_streamed_tool_calls(tool_calls_partial: dict) -> list[dict]:
     """Keep every named streamed tool call, including cut-off arguments.
 
@@ -616,6 +637,9 @@ class AgentRuntime:
         # body for that key is still in the transcript. A mask, compact
         # stub, or missing body returns the file body again (SPEC-32).
         self._read_fingerprints: dict[str, dict[tuple, tuple]] = {}
+        # How many times a fingerprint key has already been answered with the
+        # unchanged notice. The next read is refused. Cleared with the fingerprints.
+        self._reread_notices: dict[str, dict[tuple, int]] = {}
         # Conversation-scoped, unlike _read_fingerprints (cleared every turn).
         # Cleared only by drop_read_cache.
         self._read_counts: dict[str, dict[str, int]] = {}
@@ -1738,6 +1762,7 @@ class AgentRuntime:
                 # a completed turn.
                 with self._tool_history_lock:
                     self._read_fingerprints.pop(session_key, None)
+                    self._reread_notices.pop(session_key, None)
                 # Step 1: add user message
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
@@ -2256,8 +2281,19 @@ class AgentRuntime:
         for call_id, tool_name, args in tool_calls_raw:
             tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
 
-            # Incomplete streamed arguments are not a command. Tell the model
-            # and do not run the tool, approve it, or hide the call.
+            # A shell dump of a file already read this turn is how the
+            # read-loop avoids the unchanged notice.
+            if tool_name == "exec_command":
+                blocked = self._block_file_reprint(session_key, args)
+                if blocked:
+                    tc.mark_failed(blocked)
+                    tc.result = None
+                    conv.add_tool_result(call_id, blocked)
+                    self._dispatch(
+                        self._on_tool_call_result, session_key, tool_name, blocked, False,
+                    )
+                    continue
+
             if is_truncated_arguments(args):
                 fragment = args.get(TRUNCATED_ARGUMENTS, "")
                 fragment = fragment if isinstance(fragment, str) else str(fragment)
@@ -2381,6 +2417,10 @@ class AgentRuntime:
                 tool_result_text = self._dedup_read_output(
                     session_key, conv, args, tool_result_text,
                 )
+                if tool_result_text.startswith("REFUSED:"):
+                    result = dataclasses.replace(
+                        result, success=False, error=tool_result_text, output="",
+                    )
             if result.success:
                 self._note_tool_path(session_key, conv, tool_name, args)
             tc.result = None
@@ -3662,6 +3702,7 @@ class AgentRuntime:
         """
         with self._tool_history_lock:
             self._read_fingerprints.pop(session_key, None)
+            self._reread_notices.pop(session_key, None)
             self._read_counts.pop(session_key, None)
             self._hot_pins.pop(session_key, None)
             self._edited_paths.pop(session_key, None)
@@ -3919,6 +3960,13 @@ class AgentRuntime:
                     # Re-sending once is cheaper than an exec_command loop.
                     bucket[key] = fp
                     return output
+                seen = self._reread_notices.setdefault(session_key, {})
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] > 1:
+                    return (
+                        f"REFUSED: {path} is already in this conversation. "
+                        f"Do not read it again. Edit it or run its test."
+                    )
                 return (
                     f"[unchanged \u2014 read_file {path} offset={offset or 0} "
                     f"limit={limit}; the body is already in this conversation. "
@@ -3927,11 +3975,28 @@ class AgentRuntime:
             bucket[key] = fp
         return output
 
+    def _block_file_reprint(self, session_key: str, args: dict) -> str | None:
+        """Refuse cat/sed/head of a file this turn already read. None to allow."""
+        command = args.get("command") if isinstance(args, dict) else None
+        if not isinstance(command, str) or not command.strip():
+            return None
+        with self._tool_history_lock:
+            keys = list(self._read_fingerprints.get(session_key, {}))
+        paths = {key[0] for key in keys if isinstance(key, tuple) and key and isinstance(key[0], str)}
+        hit = _reprint_target(command, paths)
+        if hit is None:
+            return None
+        return (
+            f"REFUSED: {hit} is already in this conversation. "
+            f"Do not print it with the shell. Edit it or run its test."
+        )
+
     def _cleanup_tool_history(self, session_key: str) -> None:
         """Remove tool history and pending stuck messages for a session when conversation ends."""
         with self._tool_history_lock:
             self._tool_history.pop(session_key, None)
             self._read_fingerprints.pop(session_key, None)
+            self._reread_notices.pop(session_key, None)
         # Phase CB-3: also clean up pending stuck messages
         self._pending_stuck_messages.pop(session_key, None)
 

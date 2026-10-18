@@ -22,6 +22,38 @@ def _tool_bodies(conv):
     return [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
 
 
+def test_third_identical_read_is_refused(tmp_path):
+    target = tmp_path / "a.txt"
+    target.write_text("hello world\n")
+    rt, sk, conv = _runtime(str(tmp_path))
+    for n in (1, 2, 3):
+        assert rt._execute_tool_batch(
+            sk, None, conv, "reading", [("c%d" % n, "read_file", {"path": "a.txt"})], n,
+        ) is False
+    bodies = _tool_bodies(conv)
+    assert bodies[0] == "hello world\n"
+    assert bodies[1].startswith("[unchanged")
+    assert bodies[2].startswith("REFUSED:")
+    assert "hello world" not in bodies[2]
+
+
+def test_shell_reprint_of_a_read_file_is_refused(tmp_path):
+    target = tmp_path / "a.txt"
+    target.write_text("hello world\n")
+    rt, sk, conv = _runtime(str(tmp_path))
+    assert rt._execute_tool_batch(
+        sk, None, conv, "reading", [("c1", "read_file", {"path": "a.txt"})], 1,
+    ) is False
+    assert rt._execute_tool_batch(
+        sk, None, conv, "reading",
+        [("c2", "exec_command", {"command": "sed -n '1,5p' a.txt"})],
+        2,
+    ) is False
+    bodies = _tool_bodies(conv)
+    assert bodies[1].startswith("REFUSED:")
+    assert "hello world" not in bodies[1]
+
+
 def test_second_identical_read_is_unchanged_notice(tmp_path):
     target = tmp_path / "a.txt"
     target.write_text("hello world\n")
