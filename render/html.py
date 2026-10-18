@@ -382,12 +382,15 @@ def render_document(text: str) -> str:
 # trust boundary moves without disappearing:
 #
 #   WHOLE-MESSAGE ```html fence  → sanitize_agent_html(payload)  (author policy)
-#   ANYTHING ELSE                → render_document(text)         (markdown, escape-first)
+#   promote_html_segments=True   → each closed ```html fence is author HTML;
+#                                  slices between fences stay render_document
+#   otherwise                    → render_document(text)         (markdown, escape-first)
 #
-# A mixed prose+```html message therefore KEEPS the markdown path (the fence
-# stays a documentation code block) — load-bearing: "how to write a div" must
-# stay visible source. Untrusted text (tool results, fetched content, USER
-# rows) never enters render_message as an author payload; only agent turns do.
+# The flag defaults off. ChatRenderHandler turns it on for role "Agent" only,
+# so a user or system row that mixes prose with an html fence still shows the
+# fence as a documentation code block. ```live is not segment-promoted
+# (live_fence is whole-message only and runs before render_message). To show
+# HTML as source, fence it as something other than html.
 
 # Whole-message fence: ^```html (optional trailing spaces) \r?\n payload
 # \r?\n? ```$  — re.DOTALL lets the payload span lines; the payload group is
@@ -451,14 +454,75 @@ def live_fence(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def render_message(text: str) -> str:
-    """THE chat entry point (SPEC-13). ONE rule set:
+# Closed ```html fence anywhere in the message (SPEC-CHAT-MIXED-HTML).
+# Not anchored: prose may sit before and after. CRLF is normalized by
+# split_html_fences before the scan; the whole-message regex above is a
+# separate fast path and is not this pattern. Non-greedy, so the first
+# closing fence ends the payload (an inner ``` still splits the card).
+_HTML_FENCE_RE = re.compile(
+    r"```html[ \t]*\n(.*?)\n?```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def split_html_fences(text: str) -> list[tuple[str, str]] | None:
+    """Ordered ("text", raw_slice) / ("html", payload) parts.
+
+    None when `text` is not a str, is empty, or contains no closed
+    ```html fence. CRLF and bare CR are normalized to LF before the scan.
+    Slices are the raw characters between fences, not re-emitted markdown.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(_HTML_FENCE_RE.finditer(normalized))
+    if not matches:
+        return None
+    parts: list[tuple[str, str]] = []
+    cursor = 0
+    for match in matches:
+        if match.start() > cursor:
+            parts.append(("text", normalized[cursor:match.start()]))
+        parts.append(("html", match.group(1)))
+        cursor = match.end()
+    if cursor < len(normalized):
+        parts.append(("text", normalized[cursor:]))
+    return parts
+
+
+def _render_html_segments(text: str) -> str:
+    """Splice author-HTML fences into markdown slices.
+
+    Author fragments are sanitized on their own. They are not passed back
+    through render_document — that policy strips div and style.
+    """
+    parts = split_html_fences(text)
+    if parts is None:
+        return render_document(text)
+    from render.sanitize import sanitize_agent_html
+
+    out: list[str] = []
+    for kind, chunk in parts:
+        if kind == "html":
+            out.append(sanitize_agent_html(chunk))
+        elif chunk.strip():
+            out.append(render_document(chunk))
+    return "".join(out)
+
+
+def render_message(text: str, *, promote_html_segments: bool = False) -> str:
+    """THE chat entry point (SPEC-13, SPEC-CHAT-MIXED-HTML).
+
       1. whole-message ```html fence → sanitize_agent_html(payload)
-      2. otherwise → render_document(text)   (markdown, unchanged)
-    Fail-closed end-to-end: non-str input → "" (never reaches the markdown
-    branch, where extract_blocks would raise); sanitize_agent_html returns ""
-    on internal error; render_document already fails closed. An empty payload
-    renders as an empty message body (acceptable: an author's empty card).
+         (every caller; the flag is not consulted)
+      2. promote_html_segments True → each closed ```html fence is author
+         HTML; the slices between fences are render_document
+      3. otherwise → render_document(text)
+
+    Fail-closed: non-str → "" (never reaches extract_blocks). A sanitizer
+    panic on one promoted fence contributes "" for that fence and does not
+    drop the other slices. An empty whole-message payload renders as an
+    empty message body.
     """
     if not isinstance(text, str):
         # Public-entry fail-closed guard (BUG#2): a non-str must not reach
@@ -470,4 +534,6 @@ def render_message(text: str) -> str:
         from render.sanitize import sanitize_agent_html
 
         return sanitize_agent_html(payload)
-    return render_document(text)
+    if not promote_html_segments:
+        return render_document(text)
+    return _render_html_segments(text)

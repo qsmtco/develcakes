@@ -12,6 +12,7 @@ from render.html import (
     markdown_to_html,
     render_document,
     render_message,
+    split_html_fences,
 )
 from render.syntax_html import highlight_html
 
@@ -420,6 +421,125 @@ class TestRenderMessage:
         monkeypatch.setattr(nh3, "clean", boom)
         out = render_message("```html\n<div>raw</div>\n```")
         assert out == ""
+
+
+class TestPromoteHtmlSegments:
+    """SPEC-CHAT-MIXED-HTML: Agent opt-in splices each ```html fence.
+
+    The default (flag false) stays the SPEC-13 documentation code block.
+    """
+
+    _MIXED = "Here:\n```html\n<div style=\"color:red\">hi</div>\n```\nDone."
+
+    def test_flag_off_mixed_stays_code_block(self):
+        out = render_message(self._MIXED)
+        assert out == render_document(self._MIXED)
+        assert "&lt;" in out
+        assert "<div" not in out
+
+    def test_flag_on_renders_card_and_prose(self):
+        out = render_message(self._MIXED, promote_html_segments=True)
+        assert "<div" in out
+        assert 'style="color:red"' in out
+        assert "Here" in out and "Done" in out
+        assert "&lt;div" not in out
+
+    def test_flag_on_uppercase_lang_renders(self):
+        text = "Here:\n```HTML\n<div>hi</div>\n```\nDone."
+        out = render_message(text, promote_html_segments=True)
+        assert "<div>hi</div>" in out
+        assert "Here" in out and "Done" in out
+        assert "&lt;div" not in out
+
+    def test_flag_on_crlf_mixed_renders(self):
+        text = "Here:\r\n```html\r\n<div style=\"color:red\">hi</div>\r\n```\r\nDone."
+        out = render_message(text, promote_html_segments=True)
+        assert "<div" in out and 'style="color:red"' in out
+        assert "&lt;div" not in out
+        assert "Here" in out and "Done" in out
+
+    def test_flag_on_plain_and_python_byte_identical(self):
+        for text in ("hello **world**", "```python\nx = 1\n```", "just plain"):
+            assert render_message(text, promote_html_segments=True) == render_document(text)
+
+    def test_non_html_fence_stays_source_when_promoted(self):
+        for text in ("```text\n<div>x</div>\n```", "```\n<div>x</div>\n```", "```xml\n<div>x</div>\n```"):
+            out = render_message(text, promote_html_segments=True)
+            assert out == render_document(text)
+            assert "<div>x</div>" not in out
+            assert "&lt;" in out
+
+    def test_unclosed_fence_stays_markdown_when_promoted(self):
+        text = "```html\n<div>x</div>"
+        assert render_message(text, promote_html_segments=True) == render_document(text)
+
+    def test_script_stripped_prose_kept(self):
+        text = "Note\n```html\n<script>alert(1)</script><div>safe</div>\n```\nEnd"
+        out = render_message(text, promote_html_segments=True)
+        assert "<script" not in out.lower()
+        assert "alert" not in out.lower()
+        assert "<div>safe</div>" in out
+        assert "Note" in out and "End" in out
+
+    def test_two_fences_keep_order(self):
+        text = "A\n```html\n<div>1</div>\n```\nB\n```html\n<section>2</section>\n```\nC"
+        out = render_message(text, promote_html_segments=True)
+        assert out.index("<div>1</div>") < out.index("B") < out.index("<section>2</section>")
+        assert "A" in out and "C" in out
+        assert "&lt;div" not in out
+
+    def test_empty_fence_between_prose_drops_only_the_fence(self):
+        out = render_message("Before\n```html\n```\nAfter", promote_html_segments=True)
+        assert "Before" in out and "After" in out
+        assert "<div" not in out
+
+    def test_whole_message_ignores_flag(self):
+        text = "```html\n<div>x</div>\n```"
+        assert render_message(text, promote_html_segments=True) == "<div>x</div>"
+        assert render_message(text, promote_html_segments=False) == "<div>x</div>"
+
+    def test_non_str_and_splitter_sad_paths(self):
+        assert render_message(123, promote_html_segments=True) == ""  # type: ignore[arg-type]
+        assert render_message(None) == ""  # type: ignore[arg-type]
+        assert split_html_fences(None) is None  # type: ignore[arg-type]
+        assert split_html_fences("") is None
+        assert split_html_fences("no fence") is None
+        assert split_html_fences(123) is None  # type: ignore[arg-type]
+
+    def test_unfenced_div_stays_escaped_when_promoted(self):
+        text = "a <div>x</div> b"
+        out = render_message(text, promote_html_segments=True)
+        assert out == render_document(text)
+        assert "<div" not in out
+        assert "&lt;div" in out
+
+    def test_sanitizer_panic_drops_fence_keeps_prose(self, monkeypatch):
+        import nh3
+
+        real = nh3.clean
+
+        def boom(html, *args, **kwargs):
+            if "PANIC" in html:
+                raise RuntimeError("simulated ammonia panic")
+            return real(html, *args, **kwargs)
+
+        monkeypatch.setattr(nh3, "clean", boom)
+        out = render_message(
+            "Keep\n```html\n<div>PANIC</div>\n```\nme",
+            promote_html_segments=True,
+        )
+        assert "Keep" in out and "me" in out
+        assert "PANIC" not in out
+        assert "<div" not in out
+
+    def test_image_fence_beside_html_fence(self, tmp_path):
+        path = tmp_path / "chart.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        text = f"chart\n\n```image\n{path}\n```\n\n```html\n<div>card</div>\n```"
+        out = render_message(text, promote_html_segments=True)
+        assert '<img src="data:image/png;base64,' in out
+        assert "<div>card</div>" in out
+        assert "&lt;div" not in out
 
 
 class TestLocalImageFence:
