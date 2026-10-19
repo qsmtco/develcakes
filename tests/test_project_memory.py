@@ -212,3 +212,158 @@ def test_log_twice_does_not_duplicate_index_line(tmp_path):
     text = "".join(p.read_text(encoding="utf-8") for p in log_dir.glob("*.md"))
     assert "the auth bug lives in login()" in text
     assert "second note" in text
+
+
+def _private_topic(tmp_path, role, slug):
+    """Private topics live at memory/agents/<role>/<slug>.md."""
+    return tmp_path / ".crabcakes" / "memory" / "agents" / role / f"{slug}.md"
+
+
+def _meta_of(path):
+    """Frontmatter of a topic file, parsed without private helpers."""
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n"), text
+    end = text.find("\n---\n", 4)
+    meta = {}
+    for line in text[4:end].splitlines():
+        key, value = line.split(":", 1)
+        meta[key.strip()] = value.strip()
+    return meta
+
+
+def _private_search(tmp_path, query):
+    """Private search as the supervisor (the role that owns these topics)."""
+    return execute_tool(
+        "project_memory",
+        {"action": "search", "query": query, "scope": "private"},
+        str(tmp_path),
+        session_key="special:supervisor",
+    )
+
+
+def _private_log(name, body="the auth bug lives in login()"):
+    # dispatch takes role_slug from the CALLER, so a private topic written by
+    # the supervisor lives under agents/supervisor/.
+    return {"action": "log", "body": body, "name": name, "scope": "private"}
+
+
+def test_supersede_private_marks_private_file_not_shared(tmp_path, monkeypatch):
+    _as_supervisor(monkeypatch)
+    assert execute_tool(
+        "project_memory", _private_log("auth bug"), str(tmp_path),
+        session_key="special:supervisor",
+    ).success
+    assert execute_tool(
+        "project_memory", _private_log("auth-new", "use argon2"), str(tmp_path),
+        session_key="special:supervisor",
+    ).success
+    old = _private_topic(tmp_path, "supervisor", "auth-bug")
+    new_ = _private_topic(tmp_path, "supervisor", "auth-new")
+    assert old.is_file() and new_.is_file()
+
+    result = execute_tool(
+        "project_memory",
+        {"action": "supersede", "name": "auth bug", "body": "auth-new", "scope": "private"},
+        str(tmp_path),
+        session_key="special:supervisor",
+    )
+    assert result.success is True, result.error
+    assert result.output == "superseded auth-bug with auth-new"
+    # the private file at agents/<role>/ is the one retired
+    meta = _meta_of(old)
+    assert meta["status"] == "superseded"
+    assert meta["superseded_by"] == "auth-new"
+    assert _meta_of(new_)["status"] == "live"
+    # the private topic is no longer a topic hit in private search
+    found = _private_search(tmp_path, "login()")
+    assert found.success is True, found.error
+    assert "auth-bug:" not in found.output
+
+
+def test_supersede_private_does_not_touch_shared_index(tmp_path, monkeypatch):
+    # a shared topic with the same slug must not be collateral damage
+    assert _promote(tmp_path, monkeypatch, "auth bug", body="shared copy").success
+    root = tmp_path / ".crabcakes" / "memory"
+    index_path = root / "INDEX.md"
+    shared = root / "auth-bug.md"
+    index_before = index_path.read_text(encoding="utf-8")
+    shared_before = shared.read_text(encoding="utf-8")
+    assert "- auth-bug " in index_before
+
+    _as_supervisor(monkeypatch)
+    assert execute_tool(
+        "project_memory", _private_log("auth bug", "private copy"), str(tmp_path),
+        session_key="special:supervisor",
+    ).success
+    assert execute_tool(
+        "project_memory", _private_log("auth-new"), str(tmp_path),
+        session_key="special:supervisor",
+    ).success
+    result = execute_tool(
+        "project_memory",
+        {"action": "supersede", "name": "auth bug", "body": "auth-new", "scope": "private"},
+        str(tmp_path),
+        session_key="special:supervisor",
+    )
+    assert result.success is True, result.error
+    # private original retired...
+    assert _meta_of(_private_topic(tmp_path, "supervisor", "auth-bug"))["status"] == "superseded"
+    # ...while the shared topic and INDEX.md are byte-identical
+    assert index_path.read_text(encoding="utf-8") == index_before
+    assert shared.read_text(encoding="utf-8") == shared_before
+    assert _meta_of(shared)["status"] == "live"
+
+
+def test_promote_private_moves_body_and_marks_original(tmp_path, monkeypatch):
+    _as_supervisor(monkeypatch)
+    private_body = "curated private finding: argon2 params live in auth.py"
+    assert execute_tool(
+        "project_memory", _private_log("argon2", private_body), str(tmp_path),
+        session_key="special:supervisor",
+    ).success
+    private = _private_topic(tmp_path, "supervisor", "argon2")
+    assert private.is_file()
+    assert load_index(str(tmp_path)) == ""  # private topics have no index line
+
+    promoted = execute_tool(
+        "project_memory",
+        {"action": "promote", "name": "argon2", "body": "ignored stub", "scope": "private"},
+        str(tmp_path),
+        session_key="special:supervisor",
+    )
+    assert promoted.success is True, promoted.error
+    shared = tmp_path / ".crabcakes" / "memory" / "argon2.md"
+    shared_text = shared.read_text(encoding="utf-8")
+    # the curated private body is what became shared, not the promote body
+    assert private_body in shared_text
+    assert "ignored stub" not in shared_text
+    assert _meta_of(shared)["status"] == "live"
+    assert "- argon2 — " in load_index(str(tmp_path))
+    # exactly one live copy: the private original is retired in place
+    meta = _meta_of(private)
+    assert meta["status"] == "superseded"
+    assert meta["superseded_by"] == "argon2"
+    assert "argon2:" not in _private_search(tmp_path, "argon2").output
+    assert "argon2:" in _search(tmp_path, "argon2", scope="shared").output
+
+
+def test_promote_shared_unchanged_behavior(tmp_path, monkeypatch):
+    _as_supervisor(monkeypatch)
+    result = execute_tool(
+        "project_memory",
+        {"action": "promote", "name": "gateway", "body": "routed through the bridge"},
+        str(tmp_path),
+        session_key="special:supervisor",
+    )
+    assert result.success is True, result.error
+    assert result.output == "promoted gateway"
+    shared = tmp_path / ".crabcakes" / "memory" / "gateway.md"
+    meta = _meta_of(shared)
+    assert meta["status"] == "live"
+    assert meta["superseded_by"] == ""
+    assert meta["origin"] == "promote"
+    assert "routed through the bridge" in shared.read_text(encoding="utf-8")
+    assert "- gateway — routed through the bridge" in load_index(str(tmp_path))
+    # a shared promote creates no private tree and no extra INDEX lines
+    assert not (tmp_path / ".crabcakes" / "memory" / "agents").exists()
+    assert len([ln for ln in load_index(str(tmp_path)).splitlines() if ln.strip()]) == 1

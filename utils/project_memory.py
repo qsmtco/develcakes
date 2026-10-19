@@ -92,9 +92,9 @@ def dispatch(
         if action == "read":
             return _read(project_path, role_slug, name, scope)
         if action == "promote":
-            return _promote(project_path, name, body)
+            return _promote(project_path, role_slug, scope, name, body)
         if action == "supersede":
-            return _supersede(project_path, name, body)
+            return _supersede(project_path, role_slug, scope, name, body)
         return TR(success=False, error=f"unknown memory action {action!r}")
 
 
@@ -413,10 +413,32 @@ def _index_has(lines: list[str], slug: str) -> int | None:
     return None
 
 
-def _promote(project_path: str, name: str, body: str) -> ToolResult:
+def _promote(
+    project_path: str, role_slug: str, scope: str, name: str, body: str
+) -> ToolResult:
+    """Make a topic shared.
+
+    A private topic is opened with ``scope="private"`` and promote IS the
+    make-shared action: the private body becomes the shared topic, its INDEX
+    line is added, and the private original is marked superseded_by=<slug> so
+    exactly one live copy remains.
+    """
     slug = slugify(name)
     if not slug:
         return ToolResult(success=False, error="memory name is empty")
+    source: str | None = None
+    if scope == "private":
+        source = _topic_path(project_path, slug, role_slug, scope)
+        if source is None:
+            return ToolResult(success=False, error="memory path escapes the project")
+        try:
+            with open(source, "r", encoding="utf-8") as f:
+                text = f.read()
+        except FileNotFoundError:
+            return ToolResult(success=False, error=f"no memory named {slug}")
+        except OSError as exc:
+            return ToolResult(success=False, error=f"memory write failed: {exc}")
+        _meta, body = _frontmatter(text)  # the private original is the curated body
     if not isinstance(body, str) or not body.strip():
         return ToolResult(success=False, error="promote body is empty")
     root = memory_root(project_path)
@@ -451,22 +473,32 @@ def _promote(project_path: str, name: str, body: str) -> ToolResult:
         else:
             lines[existing] = line
         _write_index(index_path, lines)
+        if source is not None:
+            # The shared copy is now the only live one: retire the private original.
+            with open(source, "w", encoding="utf-8") as f:
+                f.write(_render("superseded", slug, body))
     except OSError as exc:
         _logger.warning("project_memory promote failed: %s", exc)
         return ToolResult(success=False, error=f"memory write failed: {exc}")
     return ToolResult(success=True, output=f"promoted {slug}")
 
 
-def _supersede(project_path: str, name: str, replacement: str) -> ToolResult:
+def _supersede(
+    project_path: str, role_slug: str, scope: str, name: str, replacement: str
+) -> ToolResult:
+    """Retire a topic in place, in the scope it actually lives in.
+
+    A private topic lives at ``agents/<role>/<slug>.md`` and has no INDEX line,
+    so a private supersede must not read or write the shared INDEX.md.
+    """
     slug = slugify(name)
     repl = slugify(replacement)
     if not slug or not repl:
         return ToolResult(success=False, error="memory name is empty")
     root = memory_root(project_path)
-    old = _safe_join(root, f"{slug}.md")
-    new = _safe_join(root, f"{repl}.md")
-    index_path = _safe_join(root, "INDEX.md")
-    if old is None or new is None or index_path is None:
+    old = _topic_path(project_path, slug, role_slug, scope)
+    new = _topic_path(project_path, repl, role_slug, scope)
+    if old is None or new is None:
         return ToolResult(success=False, error="memory path escapes the project")
     if not os.path.isfile(old) or not os.path.isfile(new):
         return ToolResult(success=False, error=f"no memory named {slug}")
@@ -476,11 +508,15 @@ def _supersede(project_path: str, name: str, replacement: str) -> ToolResult:
         _meta, body = _frontmatter(text)
         with open(old, "w", encoding="utf-8") as f:
             f.write(_render("superseded", repl, body))
-        lines = _read_index_lines(index_path)
-        idx = _index_has(lines, slug)
-        if idx is not None:
-            del lines[idx]
-            _write_index(index_path, lines)
+        if scope != "private":
+            index_path = _safe_join(root, "INDEX.md")
+            if index_path is None:
+                return ToolResult(success=False, error="memory path escapes the project")
+            lines = _read_index_lines(index_path)
+            idx = _index_has(lines, slug)
+            if idx is not None:
+                del lines[idx]
+                _write_index(index_path, lines)
     except OSError as exc:
         _logger.warning("project_memory supersede failed: %s", exc)
         return ToolResult(success=False, error=f"memory write failed: {exc}")
