@@ -189,6 +189,20 @@ All tools are defined in `agent/tools.py`. The `agent/` package is the only code
 
 All file operations are sandboxed to the project directory. Paths are resolved with `os.path.realpath()` and verified to stay within `project_path`. Any attempt to escape the sandbox (e.g. `../../etc/passwd`) is rejected.
 
+### Group Tools: `diary` vs `project_memory` (do not confuse them)
+
+Both persist notes, but they reach agents differently:
+
+| | `diary` | `project_memory` |
+|---|---|---|
+| File | `.crabcakes/context.md` | `.crabcakes/memory/` (topic files + `INDEX.md`) |
+| System prompt | **Yes** — read as the context block, capped at 8,000 chars (`utils/project_awareness.py` `CONTEXT_READ_CAP`), injected into every agent's awareness | **Bodies: never.** Only the `MEMORY_INDEX` (slug + one-line hook, ≤80 lines, fenced untrusted) rides the prompt via `{{MEMORY_INDEX}}` in `prompts/system/agent-tools.md` |
+| Fetch model | always visible | on demand — the agent must call `read`/`search` |
+| Capacity | 50-entry FIFO, 50KB write cap — it evicts | disk-backed; grows indefinitely |
+| Use for | session/phase state, handoffs, PM directives — things every agent should *always* see | durable decisions, gotchas, patterns worth surviving many sessions |
+
+Rule of thumb: if it should change agent behavior *this session*, diary; if it's institutional knowledge, project_memory. Because the index is the only broadcast channel into prompts, anything written there must be treated as untrusted data (see the project-memory audit: private-scope isolation + `_untrusted_fence`).
+
 ### exec_command Approval Flow
 
 1. Agent calls `exec_command` with a shell command
