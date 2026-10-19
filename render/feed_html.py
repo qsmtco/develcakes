@@ -23,21 +23,51 @@ REVEAL_TITLE_DEFAULT = "Show the full text"
 
 FEED_CSS = """
 body { margin: 0; background: #1a1b26; color: #c0caf5;
-       font: 13px/1.4 sans-serif; }
-#feed { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
-.feed-card { border: 1px solid #3b4261; border-radius: 6px; padding: 8px; }
+       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#feed { display: flex; flex-direction: column; gap: 8px; padding: 12px;
+        max-width: 760px; margin: 0 auto; }
+
+/* Card elevation. The 3px left border is the per-type accent below. */
+.feed-card { background: #1f2335; border: 1px solid #3b4261;
+             border-left: 3px solid #3b4261; border-radius: 8px;
+             padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+             overflow-wrap: anywhere; }
+
+/* Type accent palette (git=blue, diff=teal, agent=purple,
+   system=gray, audit=amber). Unlisted types keep the neutral gray. */
+.feed-card-git { border-left-color: #7aa2f7; }
+.feed-card-diff { border-left-color: #2ac3de; }
+.feed-card-agent { border-left-color: #bb9af7; }
+.feed-card-system { border-left-color: #565f89; }
+.feed-card-audit { border-left-color: #e0af68; }
+.feed-card-file-new { border-left-color: #9ece6a; }
+.feed-card-file-del { border-left-color: #f7768e; }
+
 .feed-card-header, .feed-card-footer, .feed-card-actions {
   display: flex; gap: 8px; align-items: center; }
+.feed-card-header { justify-content: space-between; }
+.feed-card-footer { justify-content: space-between; color: #9b9bab;
+                    font-size: 12px; }
+.feed-card-title { font-weight: 600; flex: 1 1 auto; }
+.feed-card-seq { color: #9b9bab; }
+
 .feed-card-body { margin: 6px 0; }
-.feed-body-mono, .feed-diff { white-space: pre-wrap; font-family: monospace; }
+.feed-body-mono, .feed-diff { white-space: pre-wrap;
+                              font-family: ui-monospace, monospace;
+                              background: #16161e; padding: 8px;
+                              border-radius: 6px; }
+.feed-body-path { margin: 0 0 6px 0; }
 .feed-diff-add { color: #6a9955; }
 .feed-diff-del { color: #f44747; }
 .feed-task-id { color: #9b9bab; }
 .feed-accepted-badge { color: #9ece6a; }
 .feed-rejected-badge { color: #f7768e; }
-.feed-empty { text-align: center; padding: 24px; }
+.feed-context-panel { margin-top: 8px; border-top: 1px solid #3b4261;
+                      padding-top: 8px; }
+.feed-empty { text-align: center; padding: 24px; color: #9b9bab; }
 button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
-         border-radius: 6px; padding: 4px 10px; }
+         border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { background: #3b4261; border-color: #565f89; color: #c0caf5; }
 """
 
 # Static. Not formatted with card data.

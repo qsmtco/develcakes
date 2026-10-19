@@ -128,6 +128,30 @@ class TestRenderFeedCard:
         assert "hello" in out
         assert "feed-card-actions" not in out
 
+    def test_container_and_card_class_attributes_are_pinned(self):
+        # CSS-pass guard: styles only, so the emitted class attributes and
+        # element order must not move. Pins the DOM contract chunk 2 relies on.
+        out = render_feed_card(_card(card_type="git_commit", body="x"))
+        assert out.startswith('<article class="feed-card feed-card-git" ')
+        assert 'data-card-id="card-1"' in out
+        assert 'class="feed-card-header"' in out
+        assert 'class="feed-card-title"' in out
+        assert 'class="feed-card-footer"' in out
+        assert 'class="feed-card-body feed-body-mono"' in out
+        doc = render_feed_document([out])
+        assert '<div id="feed">' in doc
+        assert 'class="feed-empty"' in render_feed_document([])
+        # Accent classes come from FeedCardData.css_class_for_type, unchanged.
+        for card_type, css_class in (
+            ("diff", "feed-card-diff"),
+            ("agent_action", "feed-card-agent"),
+            ("system", "feed-card-system"),
+            ("audit_report", "feed-card-audit"),
+        ):
+            assert f"feed-card {css_class}" in render_feed_card(
+                _card(card_type=card_type, body="b")
+            )
+
     def test_two_fragments_keep_order(self):
         doc = render_feed_document([
             render_feed_card(_card(card_id="old", title="Old")),
