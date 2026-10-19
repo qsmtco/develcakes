@@ -3932,6 +3932,65 @@ class AgentRuntime:
                 pass
         return False
 
+    def _last_transcript_body_index(
+        self, conv: Any, tool: str, key: tuple,
+    ) -> int | None:
+        """SPEC-40: index of the newest live body for this (tool, key), else None.
+
+        Mirror of ``_body_live_in_transcript`` (:3898) that returns the index
+        instead of a bool. The guard compares that index against the compile
+        packet's ``after``: a body below the cut is off the wire, so the model
+        cannot see it even though the transcript still holds it.
+
+        Newest to oldest. Skips [unchanged \u2014 notices and any other tool.
+        The first remaining result for the key decides: a [masked \u2014 or
+        [compacted \u2014 stub yields None (no live body). Nothing left, or
+        any exception, yields None — identical swallow semantics to
+        ``_body_live_in_transcript``; this walk runs after
+        ``_key_body_in_transcript`` already said live, so an exception here
+        must not escape the tool batch.
+        """
+        try:
+            from models.conversation import MessageRole
+            strategy = self._context_strategy
+            for i in range(len(conv.messages) - 1, -1, -1):
+                msg = conv.messages[i]
+                if getattr(msg, "role", None) != MessageRole.TOOL_RESULT:
+                    continue
+                content = msg.content or ""
+                if content.startswith("[unchanged \u2014"):
+                    continue
+                name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
+                if name != tool:
+                    continue
+                rlimit = strategy._tool_result_limit(conv, i)
+                if (rpath, roffset, rlimit) != key:
+                    continue
+                if (
+                    content.startswith("[masked \u2014")
+                    or content.startswith("[compacted \u2014")
+                ):
+                    return None
+                return i
+        except Exception:
+            try:
+                logger.debug("body index walk failed for %s", key, exc_info=True)
+            except Exception:
+                pass
+        return None
+
+    def _wire_cutoff(self, session_key: str, conv: Any) -> int | None:
+        """SPEC-40: the compile packet's ``after``, or None when uncompiled.
+
+        Pure dict read — no lock. ``self._compile`` is replaced whole and
+        never mutated in place.
+        """
+        packet = self._compile.get(session_key)
+        if not packet:
+            return None
+        after = packet.get("after")
+        return after if isinstance(after, int) and not isinstance(after, bool) else None
+
     def _dedup_read_output(self, session_key: str, conv, args: dict, output: str) -> str:
         """Return the unchanged notice when this turn already read the same bytes.
 
@@ -3970,6 +4029,16 @@ class AgentRuntime:
                     # Re-sending once is cheaper than an exec_command loop.
                     bucket[key] = fp
                     return output
+                cutoff = self._wire_cutoff(session_key, conv)
+                if cutoff is not None:
+                    idx = self._last_transcript_body_index(
+                        conv, "read_file", (path, offset or 0, limit))
+                    if idx is None or idx < cutoff:
+                        # Only live body is off the wire (compile packet replaced it).
+                        # Serve fresh; reset this key's notice counter.
+                        seen = self._reread_notices.setdefault(session_key, {})
+                        seen.pop((path, offset or 0, limit), None)
+                        return output
                 seen = self._reread_notices.setdefault(session_key, {})
                 seen[key] = seen.get(key, 0) + 1
                 if seen[key] > 1:
