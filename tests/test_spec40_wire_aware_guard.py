@@ -145,3 +145,92 @@ def test_on_wire_notice_ladder_is_unchanged(tmp_path):
     assert second.startswith("[unchanged")
     assert third.startswith("REFUSED:")
     assert _BODY not in third
+
+
+# --- (d) _block_file_reprint path-set construction -----------------------
+
+
+def _pin_and_cut(rt: AgentRuntime, conv: Conversation, after: int) -> int:
+    """Pin a.py's fingerprint via the miss path, then compile a cut above it."""
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY) == _BODY
+    body_idx = rt._last_transcript_body_index(conv, "read_file", ("a.py", 0, None))
+    assert body_idx is not None
+    rt._compile[_SK] = {
+        "after": after, "goal": "g", "path": "a.py", "hunk": "", "checks": [],
+    }
+    return body_idx
+
+
+def test_off_wire_only_path_sed_is_allowed(tmp_path):
+    """Every body for a.py is below the cut => the shell dump is not refused."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    body_idx = _plant_read(conv, "r1", _BODY)
+    _pin_and_cut(rt, conv, body_idx + 1)
+
+    blocked = rt._block_file_reprint(_SK, conv, {"command": "sed -n 1,5p a.py"})
+
+    assert blocked is None
+
+
+def test_on_wire_path_sed_is_still_refused(tmp_path):
+    """A live body at or above the cut keeps the refusal."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    body_idx = _plant_read(conv, "r1", _BODY)
+    _pin_and_cut(rt, conv, body_idx)
+
+    blocked = rt._block_file_reprint(_SK, conv, {"command": "sed -n 1,5p a.py"})
+
+    assert blocked is not None
+    assert blocked.startswith("REFUSED:")
+    assert "a.py" in blocked
+
+
+def test_path_is_refused_when_any_fingerprint_key_is_on_wire(tmp_path):
+    """Path-set rule: SOME key on the wire is enough to refuse the path."""
+    _write_read_file(tmp_path, _BODY + "line four\n")
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    win = _BODY + "line four\n"
+    old_idx = _plant_read(conv, "r1", win, offset=0, limit=None)
+    new_idx = _plant_read(conv, "r2", win, offset=0, limit=10)
+    assert new_idx > old_idx
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py", "limit": 10}, win) == win
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, win) == win
+    # Cut sits between the two keys: (a.py, 0, None) is off-wire,
+    # (a.py, 0, 10) is on-wire. The path must still be refused.
+    rt._compile[_SK] = {
+        "after": old_idx + 1, "goal": "g", "path": "a.py", "hunk": "", "checks": [],
+    }
+
+    blocked = rt._block_file_reprint(_SK, conv, {"command": "sed -n 1,5p a.py"})
+
+    assert blocked is not None
+    assert blocked.startswith("REFUSED:")
+
+
+def test_allowed_off_wire_path_stays_allowed_until_a_new_read_lands(tmp_path):
+    """Documented relaxation: shell output is not a read_file body, so the
+    allowance persists until a fresh read_file of that path lands on-wire."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    body_idx = _plant_read(conv, "r1", _BODY)
+    _pin_and_cut(rt, conv, body_idx + 1)
+    cmd = {"command": "cat a.py"}
+
+    assert rt._block_file_reprint(_SK, conv, cmd) is None
+    # Second attempt in the same turn: still allowed (no re-arming).
+    assert rt._block_file_reprint(_SK, conv, cmd) is None
+
+    # A new read_file of a.py lands at or above the cut: the guard is re-armed.
+    new_idx = _plant_read(conv, "r2", _BODY)
+    assert new_idx >= body_idx + 1
+
+    blocked = rt._block_file_reprint(_SK, conv, cmd)
+
+    assert blocked is not None
+    assert blocked.startswith("REFUSED:")

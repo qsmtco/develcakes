@@ -2285,7 +2285,7 @@ class AgentRuntime:
             # A shell dump of a file already read this turn is how the
             # read-loop avoids the unchanged notice.
             if tool_name == "exec_command":
-                blocked = self._block_file_reprint(session_key, args)
+                blocked = self._block_file_reprint(session_key, conv, args)
                 if blocked:
                     tc.mark_failed(blocked)
                     tc.result = None
@@ -4054,14 +4054,39 @@ class AgentRuntime:
             bucket[key] = fp
         return output
 
-    def _block_file_reprint(self, session_key: str, args: dict) -> str | None:
-        """Refuse cat/sed/head of a file this turn already read. None to allow."""
+    def _block_file_reprint(
+        self, session_key: str, conv: Any, args: dict,
+    ) -> str | None:
+        """Refuse cat/sed/head of a file this turn already read. None to allow.
+
+        SPEC-40: a path is refused only when SOME fingerprint key of that path
+        still has a live read_file body at or after the compile packet's cut.
+        A path whose only bodies are off the wire is no longer refused — the
+        model cannot see those bodies, so a shell dump is not a way around a
+        guard it would otherwise obey.
+
+        Documented relaxation (accepted by design): once a sed/cat of an
+        off-wire-only path is allowed, it stays allowed until a NEW read_file
+        of that path lands at or after the cutoff. The shell result is not a
+        read_file body and does not re-arm the refusal. The read-side guard in
+        ``_dedup_read_output`` remains the strict one.
+        """
         command = args.get("command") if isinstance(args, dict) else None
         if not isinstance(command, str) or not command.strip():
             return None
         with self._tool_history_lock:
             keys = list(self._read_fingerprints.get(session_key, {}))
-        paths = {key[0] for key in keys if isinstance(key, tuple) and key and isinstance(key[0], str)}
+        cutoff = self._wire_cutoff(session_key, conv)
+        paths: set[str] = set()
+        for key in keys:
+            if not (isinstance(key, tuple) and key and isinstance(key[0], str)):
+                continue
+            if cutoff is not None:
+                idx = self._last_transcript_body_index(conv, "read_file", key)
+                if idx is None or idx < cutoff:
+                    # Every body for this key is off the wire: do not refuse.
+                    continue
+            paths.add(key[0])
         hit = _reprint_target(command, paths)
         if hit is None:
             return None
