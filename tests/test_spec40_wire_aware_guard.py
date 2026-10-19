@@ -1,6 +1,8 @@
 """SPEC-40 Part A: wire-aware read guard (compile-packet cutoff)."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from agent.runtime import AgentRuntime
 from models.conversation import Conversation, MessageRole, ToolCall
 from tests.test_agent_runtime import _make_cfg
@@ -234,3 +236,251 @@ def test_allowed_off_wire_path_stays_allowed_until_a_new_read_lands(tmp_path):
 
     assert blocked is not None
     assert blocked.startswith("REFUSED:")
+
+
+def test_spiral_double_gets_the_body_on_every_post_write_reread(tmp_path):
+    """Regression for the 150-iteration spiral: the first post-write re-read
+    (and every later one) serves the BODY, never `[unchanged` / REFUSED."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    body_idx = _plant_read(conv, "r1", _BODY)
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY) == _BODY
+    rt._compile[_SK] = {
+        "after": body_idx + 1, "goal": "g", "path": "a.py", "hunk": "", "checks": [],
+    }
+
+    for _ in range(3):
+        served = rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY)
+        assert served == _BODY
+
+
+# --- Part B: hot-window carry (§2.2) -------------------------------------
+
+_BIG = "h" * 600  # above the 512-char probe floor, below the 16KiB cap
+_HOT_HEADER = "## Hot files"
+
+
+def _enforcement_ok():
+    from agent.enforcement import EnforcementCheck
+    return EnforcementCheck(
+        tier="syntax", tool="edit_file", file="a.py", passed=True,
+        detail="ok", output="", duration_ms=1,
+    )
+
+
+def _compile_packet(rt: AgentRuntime, conv: Conversation, path: str = "b.py") -> dict:
+    from agent.tools import ToolResult
+    result = ToolResult(
+        success=True, output="OK", enforcement_checks=[_enforcement_ok()],
+    )
+    rt._maybe_compile(
+        _SK, conv, "edit_file",
+        {"path": path, "old_text": "a", "new_text": "b"}, result,
+    )
+    conv.add_tool_result("w1", "OK")
+    rt._compile[_SK]["after"] = len(conv.messages)
+    return rt._compile[_SK]
+
+
+def _hot_keys(rt: AgentRuntime) -> list[tuple]:
+    return list(rt._hot_windows.get(_SK, {}).keys())
+
+
+def _hot_body(rt: AgentRuntime, path: str = "a.py") -> str | None:
+    for key, win in rt._hot_windows.get(_SK, {}).items():
+        if key[0] == path:
+            return win["body"]
+    return None
+
+
+def test_capture_stores_the_window_and_caps_the_body(tmp_path):
+    rt = _runtime()
+    rt._capture_hot_window(_SK, "a.py", 4, 200, "x" * (20 * 1024))
+
+    win = rt._hot_windows[_SK][("a.py", 4, 200)]
+    assert win["path"] == "a.py"
+    assert win["offset"] == 4
+    assert win["limit"] == 200
+    assert len(win["body"]) == 16 * 1024
+
+
+def test_capture_skips_a_probe_below_the_floor(tmp_path):
+    rt = _runtime()
+    rt._capture_hot_window(_SK, "a.py", 0, None, "p" * 180)
+    assert _hot_keys(rt) == []
+
+
+def test_reread_moves_the_key_to_the_end(tmp_path):
+    """pop-then-set: the next new file evicts the OLDEST, never the re-read."""
+    rt = _runtime()
+    rt._capture_hot_window(_SK, "a.py", 0, None, "a.py-" + "b" * 600)
+    rt._capture_hot_window(_SK, "b.py", 0, None, "b.py-" + "b" * 600)
+    rt._capture_hot_window(_SK, "c.py", 0, None, "c.py-" + "b" * 600)
+    # a.py is already gone (oldest of three). Re-read b.py to move it behind c.py.
+    rt._capture_hot_window(_SK, "b.py", 0, None, "b.py-again-" + "b" * 600)
+
+    assert _hot_keys(rt) == [("c.py", 0, None), ("b.py", 0, None)]
+    assert _hot_body(rt, "b.py").startswith("b.py-again-")
+
+
+def test_miss_path_captures_the_served_window(tmp_path):
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BIG) == _BIG
+    assert _hot_body(rt) == _BIG
+
+
+def test_spec32_recovery_path_captures_the_served_window(tmp_path):
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    idx = _plant_read(conv, "r1", _BIG)
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BIG) == _BIG
+    rt._hot_windows.pop(_SK)
+    conv.messages[idx].content = "[masked \u2014 read_file a.py (600 chars removed)]"
+
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BIG) == _BIG
+    assert _hot_body(rt) == _BIG
+
+
+def test_off_wire_serve_path_captures_the_served_window(tmp_path):
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    idx = _plant_read(conv, "r1", _BIG)
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BIG) == _BIG
+    rt._hot_windows.pop(_SK)
+    rt._compile[_SK] = {
+        "after": idx + 1, "goal": "g", "path": "a.py", "hunk": "", "checks": [],
+    }
+
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BIG) == _BIG
+    assert _hot_body(rt) == _BIG
+
+
+def test_a_write_evicts_its_own_hot_window(tmp_path):
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", 0, None, "a.py-" + "b" * 600)
+    rt._capture_hot_window(_SK, "b.py", 0, None, "b.py-" + "b" * 600)
+
+    rt._note_tool_path(_SK, conv, "edit_file", {"path": "a.py"})
+
+    assert _hot_keys(rt) == [("b.py", 0, None)]
+
+
+def test_packet_snapshot_is_a_point_in_time_copy(tmp_path):
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", 0, None, _BIG)
+
+    packet = _compile_packet(rt, conv)
+
+    assert isinstance(packet["hot"], tuple)
+    assert len(packet["hot"]) == 1
+    assert packet["hot"][0]["body"] == _BIG
+    assert packet["hot"][0]["limit"] is None
+
+    # A later serve must not rewrite what the packet replays.
+    rt._capture_hot_window(_SK, "a.py", 0, None, "re-read-" + "z" * 600)
+    assert packet["hot"][0]["body"] == _BIG
+
+
+def test_packet_carries_at_most_two_windows(tmp_path):
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    for path in ("a.py", "b.py", "c.py"):
+        rt._capture_hot_window(_SK, path, 0, None, path + "-" + "b" * 600)
+
+    packet = _compile_packet(rt, conv, path="d.py")
+
+    assert [w["path"] for w in packet["hot"]] == ["b.py", "c.py"]
+
+
+def test_compiled_message_replays_the_hot_section(tmp_path):
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", 8, 40, _BIG)
+    packet = _compile_packet(rt, conv)
+
+    user = next(
+        m for m in rt._compiled_messages(conv, packet, "") if m["role"] == "user"
+    )["content"]
+    assert _HOT_HEADER in user
+    assert "### a.py offset=8 limit=40" in user
+    assert _BIG in user
+    # Replay sits after the write record it belongs to.
+    assert user.index("## Checks") < user.index(_HOT_HEADER)
+
+    cold = next(
+        m for m in rt._compiled_messages(conv, packet, "", hot=False)
+        if m["role"] == "user"
+    )["content"]
+    assert _HOT_HEADER not in cold
+    assert _BIG not in cold
+
+
+def test_packet_without_hot_adds_no_section(tmp_path):
+    """No `hot` key (older packets, no reads) => the compiled wire is unchanged."""
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    packet = _compile_packet(rt, conv)
+    packet.pop("hot")
+
+    user = next(
+        m for m in rt._compiled_messages(conv, packet, "") if m["role"] == "user"
+    )["content"]
+    assert _HOT_HEADER not in user
+
+
+def test_hot_section_raises_the_wire_count(tmp_path, monkeypatch):
+    monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", 0, None, _BIG)
+    packet = _compile_packet(rt, conv)
+
+    with_hot = rt._compile_token_count(
+        conv, rt._compiled_messages(conv, packet, ""), None)
+    without = rt._compile_token_count(
+        conv, rt._compiled_messages(conv, packet, "", hot=False), None)
+
+    assert with_hot > without
+
+
+def test_over_budget_drops_hot_before_raising(tmp_path, monkeypatch):
+    monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._conversations[_SK] = conv
+    rt._capture_hot_window(_SK, "a.py", 0, None, _BIG)
+    packet = _compile_packet(rt, conv)
+    without = rt._compile_token_count(
+        conv, rt._compiled_messages(conv, packet, "", hot=False), None)
+
+    with patch("agent.repo_map.build_repo_map", return_value=""):
+        wired = rt._messages_for_model(
+            _SK, conv, without + rt._RESPONSE_RESERVE_TOKENS + 1)
+
+    user = next(m for m in wired if m["role"] == "user")["content"]
+    assert _HOT_HEADER not in user
+    assert "## Write" in user
+
+
+def test_over_budget_without_hot_still_raises(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._conversations[_SK] = conv
+    _compile_packet(rt, conv)
+
+    with (
+        patch("agent.repo_map.build_repo_map", return_value=""),
+        pytest.raises(RuntimeError, match="after compaction"),
+    ):
+        rt._messages_for_model(_SK, conv, 200)

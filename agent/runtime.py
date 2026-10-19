@@ -382,6 +382,13 @@ def _is_empty_content(text) -> bool:
 
 _REPRINT_COMMANDS = frozenset({"cat", "sed", "head", "tail", "nl", "less", "bat"})
 
+# SPEC-40 §2.2a: a probe read must not evict a real window from a hot slot.
+_HOT_WINDOW_MIN_CHARS = 512
+# SPEC-40 §2.2a: per-window body cap (the replay is continuity, not the file).
+_HOT_WINDOW_MAX_CHARS = 16 * 1024
+# SPEC-40 §2.2a: slots per session. The two most recently SERVED windows.
+_HOT_WINDOW_SLOTS = 2
+
 
 def _reprint_target(command: str, paths: set[str]) -> str | None:
     """Return a known path if one command chunk only displays that file."""
@@ -641,6 +648,12 @@ class AgentRuntime:
         # How many times a fingerprint key has already been answered with the
         # unchanged notice. The next read is refused. Cleared with the fingerprints.
         self._reread_notices: dict[str, dict[tuple, int]] = {}
+        # SPEC-40 §2.2a: session_key → {(path, offset, limit): window dict}
+        # holding the verbatim bodies of the last _HOT_WINDOW_SLOTS served
+        # read windows, in serve order. Captured at serve time so the compiled
+        # packet can replay them inside the wire cut. Cleared wherever
+        # _read_fingerprints is cleared.
+        self._hot_windows: dict[str, dict[tuple, dict]] = {}
         # Conversation-scoped, unlike _read_fingerprints (cleared every turn).
         # Cleared only by drop_read_cache.
         self._read_counts: dict[str, dict[str, int]] = {}
@@ -1764,6 +1777,10 @@ class AgentRuntime:
                 with self._tool_history_lock:
                     self._read_fingerprints.pop(session_key, None)
                     self._reread_notices.pop(session_key, None)
+                    # SPEC-40 §2.2a: hot windows live and die with the
+                    # fingerprints — a new turn must not carry the old
+                    # turn's served bodies.
+                    self._hot_windows.pop(session_key, None)
                 # Step 1: add user message
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
@@ -3458,7 +3475,9 @@ class AgentRuntime:
                 break
         return messages
 
-    def _compiled_messages(self, conv, packet: dict, map_block: str = "") -> list[dict]:
+    def _compiled_messages(
+        self, conv, packet: dict, map_block: str = "", hot: bool = True,
+    ) -> list[dict]:
         from models.conversation import serialize_messages
         tail = conv.messages[packet["after"]:]
         fact_lines = ""
@@ -3475,6 +3494,23 @@ class AgentRuntime:
             + "\n\n## Checks\n"
             + self._format_checks(packet["checks"])
         )
+        # SPEC-40 §2.2c: replay the bodies the model was reading when it
+        # wrote. They ride inside the compiled user message, so the wire
+        # count already covers them (_compile_token_count measures the
+        # wire list). `hot=False` is the over-budget escape hatch.
+        if hot and packet.get("hot"):
+            parts = []
+            for w in packet["hot"]:
+                parts.append(
+                    f"### {w['path']} offset={w['offset']} "
+                    f"limit={w['limit']} "
+                    f"(as read before the write above; re-read if unsure)"
+                    f"\n\n```\n{w['body']}\n```"
+                )
+            body += (
+                "\n\n## Hot files (recently read, kept for continuity)\n\n"
+                + "\n\n".join(parts)
+            )
         messages: list[dict] = []
         if conv.system_prompt:
             messages.append({"role": "system", "content": conv.system_prompt})
@@ -3634,6 +3670,13 @@ class AgentRuntime:
         # count already covers it; the card and the schema JSON are the
         # two addons, both at the same estimator rate as the wire.
         compiled = self._compile_token_count(conv, messages, tools)
+        # SPEC-40 §2.2d: the hot-window replay is continuity, not the write
+        # record — it is the first thing to drop when the wire does not fit.
+        # Hot text lives inside the compiled user message, so the recount
+        # below sees its absence without any extra bookkeeping.
+        if compiled >= effective and packet.get("hot"):
+            messages = self._compiled_messages(conv, packet, block, hot=False)
+            compiled = self._compile_token_count(conv, messages, tools)
         if compiled >= effective:
             raise self._over_budget_error(compiled, model_max)
         return messages
@@ -3686,12 +3729,27 @@ class AgentRuntime:
                 "detail": detail,
                 "output": output[:2000],
             })
+        # SPEC-40 §2.2b: snapshot the session's hot windows into the packet.
+        # No selection heuristic — the captured bodies ARE the ones the model
+        # was using when it wrote. A tuple so the packet is a point-in-time
+        # copy: later serves must not mutate what this packet replays.
+        with self._tool_history_lock:
+            hot = tuple(
+                {
+                    "path": w["path"],
+                    "offset": w["offset"],
+                    "limit": w["limit"],
+                    "body": w["body"],
+                }
+                for w in self._hot_windows.get(session_key, {}).values()
+            )
         self._compile[session_key] = {
             "goal": goal,
             "path": path,
             "hunk": hunk,
             "checks": stored,
             "after": len(conv.messages),
+            "hot": hot,
         }
         try:
             from utils.project_awareness import record_enforcement_fact
@@ -3715,6 +3773,7 @@ class AgentRuntime:
             self._reread_notices.pop(session_key, None)
             self._read_counts.pop(session_key, None)
             self._hot_pins.pop(session_key, None)
+            self._hot_windows.pop(session_key, None)
             self._edited_paths.pop(session_key, None)
 
     def _note_tool_path(self, session_key: str, conv, tool_name: str, args) -> None:
@@ -3737,6 +3796,13 @@ class AgentRuntime:
         if tool_name in ("edit_file", "write_file"):
             with self._tool_history_lock:
                 self._edited_paths.setdefault(session_key, set()).add(path)
+                # SPEC-40 §2.2a: a write evicts its own hot window. The hunk
+                # is the authority for a written file; replaying the pre-write
+                # served body beside the new hunk would show stale bytes.
+                wins = self._hot_windows.get(session_key)
+                if wins:
+                    for stale in [k for k in wins if k[0] == path]:
+                        wins.pop(stale, None)
             return
         if tool_name != "read_file":
             return
@@ -3991,6 +4057,36 @@ class AgentRuntime:
         after = packet.get("after")
         return after if isinstance(after, int) and not isinstance(after, bool) else None
 
+    def _capture_hot_window(
+        self,
+        session_key: str,
+        path: str,
+        offset: int | None,
+        limit: int | None,
+        output: str,
+    ) -> None:
+        """Store one served read window as a hot-carry candidate.
+
+        Callers hold ``_tool_history_lock``. Pop-then-set so a re-read MOVES
+        the key to the end: plain assignment keeps the stale insertion order,
+        so the next new file would evict the window just re-read. Bodies below
+        ``_HOT_WINDOW_MIN_CHARS`` are not stored — a tiny probe read must not
+        occupy a slot a real window could use.
+        """
+        if not isinstance(output, str) or len(output) < _HOT_WINDOW_MIN_CHARS:
+            return
+        key = (path, offset or 0, limit)
+        wins = self._hot_windows.setdefault(session_key, {})
+        wins.pop(key, None)
+        wins[key] = {
+            "path": path,
+            "offset": offset or 0,
+            "limit": limit,
+            "body": output[:_HOT_WINDOW_MAX_CHARS],
+        }
+        while len(wins) > _HOT_WINDOW_SLOTS:
+            wins.pop(next(iter(wins)))
+
     def _dedup_read_output(self, session_key: str, conv, args: dict, output: str) -> str:
         """Return the unchanged notice when this turn already read the same bytes.
 
@@ -4028,6 +4124,8 @@ class AgentRuntime:
                     # the walk could not prove a live read_file body.
                     # Re-sending once is cheaper than an exec_command loop.
                     bucket[key] = fp
+                    self._capture_hot_window(
+                        session_key, path, offset, limit, output)
                     return output
                 cutoff = self._wire_cutoff(session_key, conv)
                 if cutoff is not None:
@@ -4038,6 +4136,11 @@ class AgentRuntime:
                         # Serve fresh; reset this key's notice counter.
                         seen = self._reread_notices.setdefault(session_key, {})
                         seen.pop((path, offset or 0, limit), None)
+                        # Serving a real body: carry it into the next packet.
+                        # This path does NOT re-pin bucket[key] — the
+                        # fingerprint already matched, so `fp` is unchanged.
+                        self._capture_hot_window(
+                            session_key, path, offset, limit, output)
                         return output
                 seen = self._reread_notices.setdefault(session_key, {})
                 seen[key] = seen.get(key, 0) + 1
@@ -4052,6 +4155,10 @@ class AgentRuntime:
                     f"Do not read it again and do not print it with a shell command.]"
                 )
             bucket[key] = fp
+            # Fingerprint-miss tail: the bytes are new to this turn, so they
+            # are the freshest continuity candidate for the next packet.
+            self._capture_hot_window(
+                session_key, path, offset, limit, output)
         return output
 
     def _block_file_reprint(
@@ -4101,6 +4208,7 @@ class AgentRuntime:
             self._tool_history.pop(session_key, None)
             self._read_fingerprints.pop(session_key, None)
             self._reread_notices.pop(session_key, None)
+            self._hot_windows.pop(session_key, None)
         # Phase CB-3: also clean up pending stuck messages
         self._pending_stuck_messages.pop(session_key, None)
 
