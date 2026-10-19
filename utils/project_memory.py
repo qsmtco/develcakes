@@ -86,7 +86,7 @@ def dispatch(
 
     with _LOCK:
         if action == "log":
-            return _log(project_path, role_slug, body, scope)
+            return _log(project_path, role_slug, body, scope, name)
         if action == "search":
             return _search(project_path, role_slug, query, scope)
         if action == "read":
@@ -115,7 +115,10 @@ def _safe_join(root: str, *parts: str) -> str | None:
     return path
 
 
-def _log(project_path: str, role_slug: str, body: str, scope: str) -> ToolResult:
+def _log(
+    project_path: str, role_slug: str, body: str, scope: str, name: str = ""
+) -> ToolResult:
+    """Append to the dated log, and — when named — register a readable topic."""
     if not isinstance(body, str) or not body.strip():
         return ToolResult(success=False, error="log body is empty")
     root = memory_root(project_path)
@@ -134,7 +137,75 @@ def _log(project_path: str, role_slug: str, body: str, scope: str) -> ToolResult
     except OSError as exc:
         _logger.warning("project_memory log failed: %s", exc)
         return ToolResult(success=False, error=f"memory write failed: {exc}")
-    return ToolResult(success=True, output=f"logged {rel}")
+    output = f"logged {rel}"
+    slug = slugify(name)
+    if slug:
+        note = _index_logged(project_path, slug, role_slug, scope, body)
+        if note:
+            output = f"{output}\n{note}"
+    return ToolResult(success=True, output=output)
+
+
+def _index_logged(
+    project_path: str, slug: str, role_slug: str, scope: str, body: str
+) -> str:
+    """Give a logged memory a topic file and an INDEX.md line.
+
+    Never raises and never rolls the log write back. Returns '' on success,
+    or a one-line warning for the ToolResult output.
+    """
+    root = memory_root(project_path)
+    topic = _topic_path(project_path, slug, role_slug, scope)
+    if topic is None:
+        _logger.warning("project_memory log: topic path escapes the project")
+        return "index warning: path escapes the project — not indexed"
+    if scope == "private":
+        # Private topics live under agents/<role>/ and are reachable through
+        # private search/read only. A shared INDEX.md line would leak them to
+        # every other agent, so the shared index is never even opened here.
+        try:
+            _write_topic(topic, body, origin="log")
+        except OSError as exc:
+            _logger.warning("project_memory log topic failed: %s", exc)
+            return f"index warning: topic write failed ({exc}) — read will not find it"
+        return "(private — not in the shared index)"
+    index_path = _safe_join(root, "INDEX.md")
+    if index_path is None:
+        _logger.warning("project_memory log: index path escapes the project")
+        return "index warning: path escapes the project — not indexed"
+    try:
+        if not os.path.isfile(topic):
+            _write_topic(topic, body, origin="log")
+    except OSError as exc:
+        _logger.warning("project_memory log topic failed: %s", exc)
+        return (
+            f"index warning: topic write failed ({exc}) — read will not find it"
+            " — index line not written either"
+        )
+    lines = _read_index_lines(index_path)
+    if _index_has(lines, slug) is not None:
+        return ""  # already indexed — never clobber an existing line
+    if len(lines) >= _INDEX_CAP:
+        _logger.warning(
+            "project_memory log: index at cap (%d), %s not indexed", _INDEX_CAP, slug
+        )
+        return (
+            f"index at cap ({_INDEX_CAP}): not in the shared index — other agents "
+            "will not see it; search and read still work"
+        )
+    line = f"- {slug} — {_hook(body.strip())}"
+    if len(line) > _LINE_CAP:
+        line = line[:_LINE_CAP]
+    try:
+        lines.append(line)
+        _write_index(index_path, lines)
+    except OSError as exc:
+        _logger.warning("project_memory log index failed: %s", exc)
+        return (
+            f"index warning: index write failed ({exc}) — not in the shared index; "
+            "search and read still work"
+        )
+    return ""
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -152,14 +223,58 @@ def _frontmatter(text: str) -> tuple[dict[str, str], str]:
     return meta, text[end + 5:]
 
 
-def _render(status: str, superseded_by: str, body: str) -> str:
+def _render(status: str, superseded_by: str, body: str, origin: str = "log") -> str:
+    """Topic text with frontmatter. ``origin`` says whether the INDEX line came
+    from a log (evictable at cap) or a promote (not evictable)."""
     return (
         "---\n"
         f"status: {status}\n"
         f"superseded_by: {superseded_by}\n"
+        f"origin: {origin}\n"
         "---\n"
         f"{body.strip()}\n"
     )
+
+
+def _write_topic(path: str, body: str, *, origin: str) -> None:
+    """Write a new topic file with its origin recorded in the frontmatter."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_render("live", "", body, origin=origin))
+
+
+def _topic_origin(root: str, slug: str) -> str:
+    """Origin of an indexed topic; files without the field default to promote."""
+    path = _safe_join(root, f"{slug}.md")
+    if path is None:
+        return "promote"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return "promote"
+    meta, _body = _frontmatter(text)
+    origin = meta.get("origin", "").strip()
+    return origin if origin in ("log", "promote") else "promote"
+
+
+def _slug_of_line(line: str) -> str:
+    """Slug from an INDEX line (`- slug — hook`, or a legacy bare `- slug`)."""
+    if not line.startswith("- "):
+        return ""
+    rest = line[2:]
+    cut = rest.find(" — ")
+    return (rest if cut < 0 else rest[:cut]).strip()
+
+
+def _evict_oldest_log_line(root: str, lines: list[str]) -> bool:
+    """Drop the oldest INDEX line whose topic is log-origin. False if none."""
+    for i, line in enumerate(lines):
+        slug = _slug_of_line(line)
+        if slug and _topic_origin(root, slug) == "log":
+            del lines[i]
+            return True
+    return False
 
 
 def _topic_path(project_path: str, slug: str, role_slug: str, scope: str) -> str | None:
@@ -275,12 +390,19 @@ def _read_index_lines(path: str) -> list[str]:
 
 
 def _write_index(path: str, lines: list[str]) -> None:
+    """Rewrite INDEX.md atomically (tmp + os.replace).
+
+    A crash or short write mid-way leaves the previous index intact instead of
+    truncating every agent's memory map to a partial file.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     text = "\n".join(lines[:_INDEX_CAP])
     if text:
         text += "\n"
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
+    os.replace(tmp, path)
 
 
 def _index_has(lines: list[str], slug: str) -> int | None:
@@ -304,7 +426,14 @@ def _promote(project_path: str, name: str, body: str) -> ToolResult:
         return ToolResult(success=False, error="memory path escapes the project")
     lines = _read_index_lines(index_path)
     existing = _index_has(lines, slug)
-    if existing is None and len(lines) >= _INDEX_CAP:
+    # At cap a promote evicts the oldest log-origin line; it refuses only when
+    # every one of the 80 lines is promote-origin (or its topic is unreadable),
+    # so a supervisor-curated entry is never dropped.
+    if (
+        existing is None
+        and len(lines) >= _INDEX_CAP
+        and not _evict_oldest_log_line(root, lines)
+    ):
         return ToolResult(
             success=False,
             error="memory index is full (80). Supersede one first.",
@@ -316,7 +445,7 @@ def _promote(project_path: str, name: str, body: str) -> ToolResult:
     try:
         os.makedirs(root, exist_ok=True)
         with open(topic, "w", encoding="utf-8") as f:
-            f.write(_render("live", "", body))
+            f.write(_render("live", "", body, origin="promote"))
         if existing is None:
             lines.append(line)
         else:

@@ -117,3 +117,98 @@ def test_coder_cannot_promote(tmp_path, monkeypatch):
     assert result.error == "promote is supervisor-only"
     assert not (tmp_path / ".crabcakes" / "memory" / "auth.md").exists()
     assert isinstance(result, ToolResult)
+
+
+def _log(tmp_path, name="", body="the auth bug lives in login()", scope="shared"):
+    return execute_tool(
+        "project_memory",
+        {"action": "log", "body": body, "name": name, "scope": scope},
+        str(tmp_path),
+        session_key="special:coder",
+    )
+
+
+def _search(tmp_path, query, scope="shared"):
+    return execute_tool(
+        "project_memory",
+        {"action": "search", "query": query, "scope": scope},
+        str(tmp_path),
+        session_key="special:coder",
+    )
+
+
+def _as_role(monkeypatch, role):
+    agent = SimpleNamespace(
+        role=role, conv_id_prefix=f"special:{role}", display_name=role.title(),
+    )
+    monkeypatch.setattr(
+        "agent.special_agents.get_special_agent",
+        lambda key: agent if key == f"special:{role}" else None,
+    )
+
+
+def test_log_named_round_trips_through_read(tmp_path):
+    logged = _log(tmp_path, name="auth bug")
+    assert logged.success is True
+    read = execute_tool(
+        "project_memory",
+        {"action": "read", "name": "auth bug"},
+        str(tmp_path),
+        session_key="special:coder",
+    )
+    assert read.success is True, read.error
+    assert "the auth bug lives in login()" in read.output
+
+
+def test_log_named_round_trips_through_search(tmp_path):
+    assert _log(tmp_path, name="auth bug").success
+    found = execute_tool(
+        "project_memory",
+        {"action": "search", "query": "login()"},
+        str(tmp_path),
+        session_key="special:coder",
+    )
+    assert found.success is True
+    assert "No memories match." not in found.output
+    assert "auth-bug:" in found.output or "auth-bug" in found.output
+
+
+def test_log_named_writes_index_line(tmp_path):
+    assert _log(tmp_path, name="auth bug").success
+    index = load_index(str(tmp_path))
+    assert "- auth-bug — the auth bug lives in login()" in index
+
+
+def test_log_unnamed_does_not_touch_index(tmp_path):
+    assert _log(tmp_path).success
+    assert load_index(str(tmp_path)) == ""
+    assert not (tmp_path / ".crabcakes" / "memory" / "INDEX.md").exists()
+
+
+def test_log_at_cap_warns_but_still_writes(tmp_path, monkeypatch):
+    _as_supervisor(monkeypatch)
+    for i in range(80):
+        assert _promote(tmp_path, monkeypatch, f"topic-{i}", body=f"hook {i}").success
+    logged = _log(tmp_path, name="overflow topic", body="overflow body")
+    assert logged.success is True
+    assert "index at cap (80)" in logged.output
+    assert "other agents will not see it" in logged.output
+    assert "overflow topic" not in load_index(str(tmp_path))
+    topic = tmp_path / ".crabcakes" / "memory" / "overflow-topic.md"
+    assert topic.is_file()
+    assert "overflow body" in topic.read_text(encoding="utf-8")
+
+
+def test_log_twice_does_not_duplicate_index_line(tmp_path):
+    assert _log(tmp_path, name="auth bug").success
+    assert _log(tmp_path, name="auth bug", body="second note").success
+    lines = [
+        ln
+        for ln in load_index(str(tmp_path)).splitlines()
+        if ln.startswith("- auth-bug ")
+    ]
+    assert len(lines) == 1
+    log_dir = tmp_path / ".crabcakes" / "memory" / "log"
+    text = "".join(p.read_text(encoding="utf-8") for p in log_dir.glob("*.md"))
+    assert "the auth bug lives in login()" in text
+    assert "second note" in text

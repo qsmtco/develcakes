@@ -1289,7 +1289,12 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
     # Long-term memory index only. Topic bodies stay on disk.
     try:
         from utils.project_memory import load_index
-        parts["MEMORY_INDEX"] = load_index(project_path)
+        index_blob = load_index(project_path)
+        # INDEX.md is written by agents (log/promote bodies and slugs), so it
+        # is untrusted project data exactly like facts.json.
+        parts["MEMORY_INDEX"] = (
+            _untrusted_fence(index_blob, "memory/INDEX.md") if index_blob else ""
+        )
     except Exception:
         _logger.exception("build_awareness_dict: memory index failed")
         parts["MEMORY_INDEX"] = ""
