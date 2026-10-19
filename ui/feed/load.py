@@ -177,9 +177,10 @@ class FeedLoadMixin:
                     for card in recent:
                         self._card_widgets[card.card_id] = widgets[card.card_id]
 
-            # Build "Load More" widget if the MERGED backlog is non-empty
+            # GTK sentinel only. The HTML bar is set_html_load_more, and
+            # building this widget on that path is unused (then nulled).
             load_more_widget = None
-            if merged_backlog_count > 0:
+            if merged_backlog_count > 0 and not self._html_feed:
                 load_more_widget = self._build_load_more_widget(merged_backlog_count)
                 self._load_more_widget = load_more_widget
 
@@ -194,19 +195,19 @@ class FeedLoadMixin:
                 if self._feed_tab is None:
                     return False
 
-                # Drop any stale sentinel FIRST and unconditionally (round-6
-                # BUG #3): on_project_opened only nulls the attribute, so the
-                # previous project's bar — or this project's own bar from an
-                # earlier open — stays parented otherwise. Hoisted out of the
-                # `if` because the switch-to-a-project-with-no-backlog case
-                # builds no new sentinel and would leak the old one.
-                self._feed_tab.remove_card("__load_more__")   # drop any stale sentinel
                 if self._html_feed:
+                    # The HTML bar is not a card. set_html_load_more hides it
+                    # when this project has no backlog, including a switch away
+                    # from a project that was showing one.
                     self._feed_tab.set_html_cards(recent)
                     if hasattr(self._feed_tab, "set_html_load_more"):
                         self._feed_tab.set_html_load_more(merged_backlog_count)
                     self._load_more_widget = None
                 else:
+                    # Drop any stale GTK sentinel first (round-6 BUG #3): a
+                    # project with no backlog builds no new bar, and the
+                    # previous project's bar would stay parented otherwise.
+                    self._feed_tab.remove_card("__load_more__")
                     if load_more_widget is not None:
                         self._feed_tab.prepend_card(load_more_widget, card_id="__load_more__")
                     else:

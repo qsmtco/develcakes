@@ -1454,7 +1454,7 @@ class AgentRuntimeHandler(
             agent_def = self._agents.get(session_key)
             if agent_def is None:
                 return
-            runtime = self._runtimes.get(agent_def.runtime_id)
+            runtime = self._runtimes.get(agent_def.display_name)
             if runtime is None:
                 return
             # IMPORTANT: lambda captures session_key/tool_name/args by

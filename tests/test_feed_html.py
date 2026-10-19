@@ -327,3 +327,54 @@ class TestFeedActions:
         handler._evict_surplus_html_rows()
         assert surface.removed == []
         assert surface.card_ids() == ids
+
+
+class TestHtmlProjectOpen:
+    def test_open_paints_cards_without_gtk_remove_card(self, monkeypatch):
+        """Project open on the HTML feed must not call FeedTab.remove_card.
+
+        The GTK load-more sentinel is gone. set_html_load_more owns that bar.
+        """
+        import ui.handlers.feed_handler as fh
+
+        class _SyncThreading:
+            class Thread:
+                def __init__(self, target=None, daemon=None):
+                    self._target = target
+
+                def start(self):
+                    self._target()
+
+        class _OpenTab:
+            def __init__(self):
+                self.cards = None
+                self.load_more = None
+
+            def set_html_cards(self, cards):
+                self.cards = [c.card_id for c in cards]
+
+            def set_html_load_more(self, remaining):
+                self.load_more = remaining
+
+            def schedule_smart_scroll_to_bottom(self):
+                return None
+
+            def is_near_bottom(self, slack=80):
+                return True
+
+        cards = [_card(card_id=f"c{i}", seq_num=i) for i in range(1, 17)]
+        store = type("Store", (), {})()
+        store.load_feed = lambda _path: list(cards)
+        store.load_feed_prefs = lambda _path: {}
+        store.FEED_WINDOW_DEFAULT = 2000
+        handler = _handler()
+        monkeypatch.setattr(fh, "threading", _SyncThreading)
+        monkeypatch.setattr(fh, "feed_store", store)
+
+        tab = _OpenTab()
+        handler._html_feed = True
+        handler._feed_tab = tab
+        handler.on_project_opened("proj", "/tmp/proj")
+
+        assert tab.cards == [f"c{i}" for i in range(2, 17)]
+        assert tab.load_more == 1

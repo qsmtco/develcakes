@@ -277,3 +277,39 @@ class TestNameCollision:
             "fallback_provider": "openrouter",
         })
         assert not any("collision" in e.lower() for e in errors)
+
+
+class TestSilentExecApprovalLookup:
+    def test_silent_mode_approves_by_display_name(self):
+        """Silent exec auto-accept looks up the runtime by display_name.
+
+        SpecialAgentDef has no runtime_id. The old lookup raised
+        AttributeError and the command timed out as a denial.
+        """
+        from unittest.mock import MagicMock
+        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+        handler = AgentRuntimeHandler(MagicMock(), MagicMock())
+        handler._agents["special:coder"] = SpecialAgentDef(
+            conv_id_prefix="special:coder",
+            display_name="Coder",
+            role="coder",
+            emoji="🛠️",
+            tools=["exec_command"],
+            can_write=True,
+        )
+        runtime = MagicMock()
+        handler._runtimes["Coder"] = runtime
+        handler._active_project = ("proj", "/tmp/proj")
+        handler._fh = MagicMock()
+        handler.set_check_exec_auto_accept_callback(lambda: "silent")
+
+        handler._do_approval_needed(
+            "special:coder", "exec_command", {"command": "pytest"},
+        )
+
+        runtime.approve_exec.assert_called_once_with(
+            "special:coder", "exec_command", {"command": "pytest"}, True,
+        )
+        handler._fh.add_card.assert_not_called()
+        assert handler._pending_approvals == {}

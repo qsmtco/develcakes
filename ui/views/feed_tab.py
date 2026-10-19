@@ -25,8 +25,6 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-from utils.gtk_containers import is_in_container
-
 logger = logging.getLogger(__name__)
 
 
@@ -194,30 +192,33 @@ class FeedTab(Gtk.Box):
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def get_card_container(self) -> Gtk.Box:
-        """Return the vertical box that holds feed cards."""
-        return self._card_container
-
     def show_empty_state(self) -> None:
-        """Clear all cards and show the empty state widget."""
-        from ui.views.feed_card import build_empty_feed_widget
-        if self._html_surface is not None:
-            self._html_surface.set_cards([])
-            self.set_html_load_more(0)
-        if self._card_container is None:
-            return
+        """Clear the document, or show the NO_WEBKIT notice.
 
-        # Remove all card widgets, clearing CSS state first (Bug B fix)
-        for card_id in list(self._cards_by_id.keys()):
-            widget = self._cards_by_id[card_id]
-            self._clear_widget_state_recursive(widget)
-            if is_in_container(widget, self._card_container):
-                self._card_container.remove(widget)
-        self._cards_by_id.clear()
-        # Show the empty state widget
-        empty = build_empty_feed_widget()
-        self._card_container.append(empty)
-        self._empty_widget = empty
+        There is no widget-list empty state any more: the feed is a WebKit
+        document or it is nothing (NO_WEBKIT ruling).
+        """
+        if self._html_surface is None:
+            self._show_no_webkit()
+            return
+        self._html_surface.set_cards([])
+        self.set_html_load_more(0)
+
+    def _show_no_webkit(self) -> None:
+        """Single GTK label standing in for a feed that cannot exist.
+
+        The feed requires WebKit exactly like the chat surface does. When
+        `create_feed_surface` returns None there is no card list to fall back
+        to, so the tab says so and stops.
+        """
+        if self._feed_scroll is None:
+            return
+        label = Gtk.Label(label="Feed requires WebKit (unset NO_WEBKIT)")
+        label.add_css_class("feed-no-webkit")
+        label.set_wrap(True)
+        label.set_halign(Gtk.Align.CENTER)
+        label.set_valign(Gtk.Align.CENTER)
+        self._feed_scroll.set_child(label)
 
     def attach_html_surface(self, on_action):
         """Swap the card list for a WebKit document. None keeps the GTK list.
@@ -297,111 +298,6 @@ class FeedTab(Gtk.Box):
         callback = getattr(self, "_html_load_more_callback", None)
         if callback is not None:
             callback()
-
-    def append_card(self, card_widget: Gtk.Widget, card_id: str | None = None) -> None:
-        """
-        Append a card widget to the bottom of the feed (chronological, newest last).
-        If card_id is provided, the card can be removed via remove_card().
-        Removes the empty state widget if present.
-        """
-        if self._card_container is None:
-            return
-        # Remove empty state widget if present
-        if self._empty_widget is not None and is_in_container(self._empty_widget, self._card_container):
-            self._card_container.remove(self._empty_widget)
-            self._empty_widget = None
-        # Append to bottom (newest card at bottom - social-media order)
-        self._card_container.append(card_widget)
-        if card_id is not None:
-            self._cards_by_id[card_id] = card_widget
-
-    def remove_card(self, card_id: str) -> None:
-        """Remove a card widget by card_id.
-
-        Clears CSS state flags (PRELIGHT/ACTIVE/SELECTED) on the card and
-        all its children BEFORE unparenting. This prevents GTK4's
-        'Broken accounting of active state for widget' warning that fires
-        when a widget is removed while the cursor is over it or while a
-        child button is in :active state (e.g. user mid-click on Accept).
-        """
-        if card_id not in self._cards_by_id:
-            return
-        widget = self._cards_by_id[card_id]
-        # Clear CSS state on the card and all descendant widgets.
-        # The 'Broken accounting' warning is about GtkStyleContext state
-        # (PRELIGHT/ACTIVE/SELECTED), not focus. unset_state_flags is the
-        # documented GTK4 API and is safe to call on widgets that never
-        # had the flags set.
-        self._clear_widget_state_recursive(widget)
-        if self._card_container is not None and is_in_container(widget, self._card_container):
-            self._card_container.remove(widget)
-        del self._cards_by_id[card_id]
-
-    def prepend_card(self, card_widget: Gtk.Widget, card_id: str | None = None) -> None:
-        """
-        Prepend a card widget at the top of the feed (above all other cards).
-
-        Used by lazy-load to insert older cards above the existing feed.
-        If card_id is provided, the card can be removed via remove_card().
-        """
-        if self._card_container is None:
-            return
-        # Remove empty state widget if present
-        if self._empty_widget is not None and is_in_container(self._empty_widget, self._card_container):
-            self._card_container.remove(self._empty_widget)
-            self._empty_widget = None
-        # insert_child_after(child, None) prepends in GTK4
-        self._card_container.insert_child_after(card_widget, None)
-        if card_id is not None:
-            self._cards_by_id[card_id] = card_widget
-
-    def replace_card(self, card_id: str, new_widget: Gtk.Widget) -> None:
-        """
-        Replace an existing card widget with a new one at the same position.
-
-        Used by FeedHandler.update_card() when a tool call card is updated
-        with results - the widget is rebuilt and swapped in-place.
-        """
-        if card_id not in self._cards_by_id:
-            return
-        old_widget = self._cards_by_id[card_id]
-        if self._card_container is None:
-            return
-        if not is_in_container(old_widget, self._card_container):
-            return
-
-        # Find the position of old_widget, then insert new_widget at the same spot
-        children = list(self._card_container)
-        try:
-            idx = children.index(old_widget)
-        except ValueError:
-            return
-
-        # Remove old widget - now children[0..idx-1] are what come before new_widget
-        self._card_container.remove(old_widget)
-
-        # predecessor is children[idx-1] if idx > 0, else None (insert at start)
-        predecessor = children[idx - 1] if idx > 0 else None
-        self._card_container.insert_child_after(new_widget, predecessor)
-        self._cards_by_id[card_id] = new_widget
-
-    def _clear_widget_state_recursive(self, widget: Gtk.Widget) -> None:
-        """
-        Recursively clear PRELIGHT/ACTIVE/SELECTED state flags on a widget
-        and all its children. Called before removing widgets from the
-        container to prevent GTK4's 'Broken accounting of active state'
-        warning.
-        """
-        try:
-            widget.unset_state_flags(
-                Gtk.StateFlags.PRELIGHT | Gtk.StateFlags.ACTIVE | Gtk.StateFlags.SELECTED
-            )
-        except Exception:
-            pass  # unset_state_flags is safe but we guard anyway
-        child = widget.get_first_child()
-        while child is not None:
-            self._clear_widget_state_recursive(child)
-            child = child.get_next_sibling()
 
     _BOTTOM_THRESHOLD = 80.0
     _SETTLE_STABLE_FRAMES = 2
