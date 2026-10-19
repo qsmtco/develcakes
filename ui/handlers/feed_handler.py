@@ -582,8 +582,18 @@ class FeedHandler(
             widget = self._card_widgets.pop(card_id, None)
 
         def _remove():
-            if self._feed_tab is not None:
-                self._feed_tab.remove_card(card_id)
+            tab = self._feed_tab
+            if tab is None:
+                return
+            # SPEC-41 §2(c): the ROW must disappear from the document, so call
+            # the surface API. Legacy tab doubles without it fall back to
+            # remove_card, which forwards to remove_card_html on the real
+            # FeedTab (never a silent no-op either way).
+            remover = getattr(tab, "remove_card_html", None)
+            if remover is not None:
+                remover(card_id)
+            else:
+                tab.remove_card(card_id)
 
         self._GLib.idle_add(_remove)
 
@@ -757,9 +767,14 @@ class FeedHandler(
                 self._cards.pop(cid, None)
             self._project_cards.pop(project_name, None)
             self._project_seq.pop(project_name, None)
+        tab = self._feed_tab
+        if tab is None:
+            return
+        # SPEC-41 §2(c): explicit document-row removal (remove_card forwards
+        # here anyway; naming the surface API states the intent).
+        remover = getattr(tab, "remove_card_html", None) or tab.remove_card
         for cid in card_ids:
-            if self._feed_tab:
-                self._feed_tab.remove_card(cid)
+            remover(cid)
 
     # ─────────────────────────────────────────────────────────────────
     # Project lifecycle hooks

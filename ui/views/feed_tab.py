@@ -263,6 +263,33 @@ class FeedTab(Gtk.Box):
         if self._html_surface is not None:
             self._html_surface.remove(card_id)
 
+    # ── Compatibility API (WU 10 purge survivors, SPEC-41 §2 Phase 1(a)) ──
+    # The GTK card list was removed in WU 10. These five methods keep the
+    # pre-purge signatures so callers that still speak the old API do not
+    # raise AttributeError. Only `remove_card` does work: it forwards to the
+    # document row so a project switch/close actually clears the surface.
+
+    def remove_card(self, card_id: str) -> None:
+        """Compat no-op: the feed is a document. Removes the row if attached.
+
+        The GTK card list was removed in WU 10; callers that still speak the
+        old API are re-pointed here so project switch/close cannot raise
+        AttributeError.
+        """
+        self.remove_card_html(card_id)
+
+    def append_card(self, widget, card_id: str) -> None:
+        """Compat no-op: widgets are not part of the document feed."""
+
+    def prepend_card(self, widget, card_id: str) -> None:
+        """Compat no-op: widgets are not part of the document feed."""
+
+    def replace_card(self, card_id: str, widget) -> None:
+        """Compat no-op: widgets are not part of the document feed."""
+
+    def get_card_container(self) -> Gtk.Box:
+        """Compat no-op: the document has no GTK container. Returns None."""
+
     def set_html_cards(self, cards: list) -> None:
         if self._html_surface is not None:
             self._html_surface.set_cards(cards)
@@ -542,27 +569,14 @@ class FeedTab(Gtk.Box):
         return (vadj.get_upper() - vadj.get_page_size() - vadj.get_value()) <= slack
 
     def is_above_viewport(self, widget) -> bool:
-        """True when `widget` lies entirely above the visible region.
+        """Always False: card eviction is a GTK-list concept (WU 10 purge).
 
-        FAIL-SAFE. A widget that has never been allocated reports
-        `compute_bounds -> (True, rect)` with a ZERO rect (verified on GTK 4.14
-        under Xvfb: an unrealized/unmapped Gtk.Label in a Gtk.Box inside a
-        Gtk.ScrolledWindow gives ok=True, origin.y=0.0, size.height=0.0). A naive
-        `origin.y + height <= value` test therefore returns True — "above the
-        viewport" — for every unmeasurable widget and would DESTROY cards that
-        are merely not laid out yet (e.g. while the Feed sub-tab is unmapped).
-        So a non-positive extent means "unknown", never "above".
+        The only caller was the GTK eviction branch, which is dead on the
+        HTML surface: the document owns its own rows and there is no GTK
+        container geometry to measure against. False is the fail-safe answer
+        — "not above the viewport" means "never evict".
         """
-        vadj = self.get_vadjustment()
-        if vadj is None or self._card_container is None:
-            return False
-        try:
-            ok, rect = widget.compute_bounds(self._card_container)
-        except (AttributeError, TypeError):
-            return False                  # mock widgets have no compute_bounds
-        if not ok or rect.size.height <= 0:
-            return False                  # geometry unavailable → never evict
-        return (rect.origin.y + rect.size.height) <= vadj.get_value()
+        return False
 
     def update_batch_bar(self, pending_count: int) -> None:
         """
@@ -866,52 +880,15 @@ class FeedTab(Gtk.Box):
         self._on_batch_accept_clicked = callback
 
     def hide_card_buttons(self, card_id: str, button_names: list[str]) -> None:
-        """Hide specific action buttons on a card widget. (Phase 5)
+        """Compat no-op: the document has no per-card widget to mutate.
 
-        Used by FeedHandler._auto_approve_exec_card() in Show mode to hide
-        the Approve/Deny buttons on cards that were auto-approved.
-
-        Bug #13 (Phase 7 follow-up): the original implementation looked up
-        `_<name>_button` attributes on the card widget, but `build_feed_card`
-        never stored those (it constructs local `btn_accept` / `btn_reject`
-        variables and appends them inline). The result was a silent no-op:
-        buttons stayed visible after auto-approve and the user could click
-        Approve/Deny again, triggering a double-action in ARTH.
-
-        Fix: map each button name to its CSS class and hide matching
-        buttons in the card widget subtree.
-
-        Args:
-            card_id: The card whose buttons should be hidden. If the card
-                is not currently in self._cards_by_id (e.g. user navigated
-                away from it), the method is a no-op.
-            button_names: List of button names to hide. Supported names:
-                "approve" | "deny" | "accept" | "reject" | "review".
-                Each is mapped to the CSS class set by `build_feed_card()`
-                on the corresponding button. Unknown names are skipped.
-
-        Idempotent: calling twice with the same args has the same effect as
-        calling once.
+        Used by FeedHandler._auto_approve_exec_card() in Show mode to stop a
+        double action. On the HTML surface the card re-renders through
+        `update_card` / `upsert_card`, which draws its own approved/rejected
+        state — there is no button widget to hide and no `_cards_by_id` map.
+        Kept so the legacy caller (and MockFeedTab) does not raise.
         """
-        card_widget = self._cards_by_id.get(card_id)
-        if card_widget is None:
-            return
-        # Map hide-card-buttons names to CSS classes used in build_feed_card().
-        # Source of truth: ui/views/feed_card.py:431,438,443.
-        name_to_css = {
-            "approve": "feed-btn-accept",
-            "deny": "feed-btn-reject",
-            "accept": "feed-btn-accept",
-            "reject": "feed-btn-reject",
-            "review": "feed-btn-review",
-        }
-        target_classes = {
-            name_to_css[n] for n in button_names if n in name_to_css
-        }
-        if not target_classes:
-            return
-        for btn in self._find_buttons_by_css(card_widget, target_classes):
-            btn.set_visible(False)
+        del card_id, button_names
 
     def _find_buttons_by_css(
         self, widget: Gtk.Widget, css_classes: set[str]
