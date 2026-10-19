@@ -4199,7 +4199,8 @@ class AgentRuntime:
             return None
         return (
             f"REFUSED: {hit} is already in this conversation. "
-            f"Do not print it with the shell. Edit it or run its test."
+            f"Do not print it with the shell. Read it at a different "
+            f"offset, or edit it."
         )
 
     def _cleanup_tool_history(self, session_key: str) -> None:
