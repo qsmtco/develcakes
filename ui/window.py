@@ -1501,10 +1501,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 bridge = getattr(self, "_bridge_handler", None)
                 if bridge is not None:
                     bridge.stop_bridge()
+            self._stop_all_dialog = None
             _dialog.close()
 
         dialog.connect("response", _on_response)
-        dialog.show()
+        # Keep a ref so the dialog stays up, and present() so it comes
+        # forward over the chat surface.
+        self._stop_all_dialog = dialog
+        dialog.present()
 
     def _confirm_batch_accept(self, project_name: str, n: int,
                               on_confirm) -> None:

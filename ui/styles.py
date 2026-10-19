@@ -1465,13 +1465,14 @@ button.project-bar-icon {
 }
 button.project-bar-stop {
     color: #ef4444;
+    margin-left: 8px;
 }
 button.project-bar-connect-pip {
-    min-height: 8px;
-    min-width: 8px;
+    min-width: 10px;
+    min-height: 10px;
     padding: 0;
-    margin: 0 2px;
-    border-radius: 8px;
+    margin: 0 0 0 2px;
+    border-radius: 50%;
     border: none;
     box-shadow: none;
     background: #6b6b7a;

@@ -299,15 +299,24 @@ class MainContent(Gtk.Box):
         self._transport_cluster = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         self._transport_cluster.add_css_class("project-bar-transport")
 
-        self._connect_btn = self._make_bar_icon("network-transmit-receive-symbolic")
+        self._connect_btn = self._make_bar_icon(
+            "network-transmit-receive-symbolic", 16
+        )
         self._connect_btn.connect("clicked", self._on_transport_connect_clicked)
 
         self._connect_pip = Gtk.Button()
         self._connect_pip.add_css_class("project-bar-connect-pip")
         self._connect_pip.add_css_class("project-bar-connect-off")
+        # FILL would stretch this to the 28px bar and turn the circle into an oval.
+        self._connect_pip.set_halign(Gtk.Align.CENTER)
+        self._connect_pip.set_valign(Gtk.Align.CENTER)
+        self._connect_pip.set_size_request(10, 10)
+        # Same as the Chat/Files buttons: grabbing focus from the chat
+        # surface cancels the click gesture before "clicked" fires.
+        self._connect_pip.set_focus_on_click(False)
         self._connect_pip.connect("clicked", self._on_transport_connect_clicked)
 
-        self._stop_all_btn = self._make_bar_icon("process-stop-symbolic")
+        self._stop_all_btn = self._make_bar_icon("process-stop-symbolic", 16)
         self._stop_all_btn.add_css_class("project-bar-stop")
         self._stop_all_btn.set_tooltip_text(_STOP_ALL_TIP)
         self._stop_all_btn.connect("clicked", self._on_transport_stop_clicked)
@@ -321,11 +330,16 @@ class MainContent(Gtk.Box):
         self._transport_cluster.append(self._stop_all_btn)
 
     @staticmethod
-    def _make_bar_icon(icon_name: str) -> Gtk.Button:
+    def _make_bar_icon(icon_name: str, pixel_size: int) -> Gtk.Button:
         button = Gtk.Button()
         button.add_css_class("project-bar-icon")
+        button.set_valign(Gtk.Align.CENTER)
+        button.set_focus_on_click(False)
         image = Gtk.Image.new_from_icon_name(icon_name)
-        image.set_pixel_size(12)
+        image.set_pixel_size(pixel_size)
+        # A targetable image is the pick target, and the button then treats
+        # the release as outside itself and drops the click.
+        image.set_can_target(False)
         button.set_child(image)
         return button
 
