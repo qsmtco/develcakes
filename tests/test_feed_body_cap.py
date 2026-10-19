@@ -139,120 +139,9 @@ def _card(body: str, **overrides) -> FeedCardData:
     return FeedCardData(**fields)
 
 
-def _walk(widget):
-    """Yield every widget in the tree (pre-order)."""
-    yield widget
-    child = widget.get_first_child()
-    while child is not None:
-        yield from _walk(child)
-        child = child.get_next_sibling()
-
-
-def _buttons(widget):
-    from gi.repository import Gtk
-    return [w for w in _walk(widget) if isinstance(w, Gtk.Button)]
-
-
-def _button_by_label(widget, label):
-    for btn in _buttons(widget):
-        if btn.get_label() == label:
-            return btn
-    return None
-
-
-def _body_box(card_widget):
-    """The body container box: the '_body_box' seam when present, else child 1."""
-    box = getattr(card_widget, "_body_box", None)
-    if box is not None:
-        return box
-    header = card_widget.get_first_child()
-    return header.get_next_sibling() if header is not None else None
-
-
-def _reveal_button(card_widget):
-    """The reveal control inside the body box, or None.
-
-    Action-row buttons live outside the body box, so any button carrying the
-    view's reveal CSS class found here is the reveal control.
-    """
-    box = _body_box(card_widget)
-    if box is None:
-        return None
-    for btn in _buttons(box):
-        if "feed-body-reveal" in btn.get_css_classes():
-            return btn
-    return None
-
-
 # ═══════════════════════════════════════════════════════════════════
 #  1. Render cap + exact hidden count + reveal retrieves the full text
 # ═══════════════════════════════════════════════════════════════════
-
-class TestRenderCapAndReveal:
-    """RED on current code: the whole 22,714-char body is handed to Pango."""
-
-    def test_oversized_render_is_capped_with_exact_hidden_count(self):
-        from ui.views.feed_card import RENDERED_BODY_LIMIT, build_feed_card
-
-        full = _long_body(22_714)
-        card = _card(full)
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-
-        label = widget._body_label
-        assert label is not None, "fixture precondition: body seam exposed"
-        shown = label.get_text()
-        assert len(shown) <= RENDERED_BODY_LIMIT, (
-            f"rendered body is {len(shown)} chars — must be <= {RENDERED_BODY_LIMIT}"
-        )
-        assert shown == full[:RENDERED_BODY_LIMIT], "the visible text must be the head"
-
-        hidden = len(full) - RENDERED_BODY_LIMIT
-        assert hidden == 20_714
-        reveal = _reveal_button(widget)
-        assert reveal is not None, "an oversized body must offer a reveal control"
-        assert reveal.get_label() == f"… {hidden} more characters", (
-            f"indicator must show the EXACT hidden count, got {reveal.get_label()!r}"
-        )
-
-        # the reveal action retrieves the FULL text in the same label
-        reveal.emit("clicked")
-        assert label.get_text() == full, "reveal must restore the complete body"
-
-    def test_small_body_has_no_reveal_control(self):
-        from ui.views.feed_card import RENDERED_BODY_LIMIT, build_feed_card
-
-        short = _long_body(RENDERED_BODY_LIMIT)
-        card = _card(short)
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        assert widget._body_label.get_text() == short
-        assert _reveal_button(widget) is None, (
-            "a body at exactly the limit must not grow a reveal control"
-        )
-
-    def test_reveal_is_sticky_for_the_same_text(self):
-        from ui.views.feed_card import build_feed_card
-
-        full = _long_body(9_000)
-        card = _card(full)
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        _reveal_button(widget).emit("clicked")
-        assert widget._body_label.get_text() == full
-
-        # an update carrying the SAME text must not collapse back to truncated
-        from ui.views.feed_card import update_card_in_place
-        assert update_card_in_place(widget, card) is True
-        assert widget._body_label.get_text() == full, (
-            "sticky reveal: the same text must stay revealed across updates"
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -281,131 +170,10 @@ class TestStorageUnaffectedByRender:
 #  3. Approval cards: reachable pre-decision, affordance untouched
 # ═══════════════════════════════════════════════════════════════════
 
-class TestApprovalCardReachability:
-    def test_approval_card_reveal_tooltip_and_reachability_pre_decision(self):
-        from ui.views.feed_card import build_feed_card
-
-        command = _long_body(22_714, marker="--data @secret.heredoc")
-        card = _card(
-            f"$ {command}",
-            title="⚠️ Coder requests approval to run command",
-            metadata={"tool_name": "exec_command",
-                      "needs_approval": True,
-                      "status": "pending_approval"},
-        )
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-
-        reveal = _reveal_button(widget)
-        assert reveal is not None
-        assert reveal.get_tooltip_text() == (
-            "Full command text — view before approving"
-        ), "pending-approval reveal must carry the review tooltip"
-
-        # full text is reachable BEFORE deciding
-        before = widget._body_label.get_text()
-        reveal.emit("clicked")
-        assert widget._body_label.get_text() == card.body
-        assert widget._body_label.get_text().endswith("--data @secret.heredoc")
-        assert len(before) <= 2000
-
-        # Edit D: the approve/deny affordance is untouched and still actionable
-        approve = _button_by_label(widget, "Approve")
-        deny = _button_by_label(widget, "Deny")
-        assert approve is not None and deny is not None
-        assert approve.get_sensitive() and deny.get_sensitive()
-
-        # the reveal control lives in the body box, NOT on top of the action row
-        body_box = _body_box(widget)
-        actions = None
-        for w in _walk(widget):
-            from gi.repository import Gtk
-            if isinstance(w, Gtk.Box) and "feed-card-actions" in w.get_css_classes():
-                actions = w
-                break
-        assert actions is not None, "approval cards must keep their action row"
-        assert reveal not in list(_walk(actions)), (
-            "the reveal control must not sit inside the action row"
-        )
-        assert reveal in list(_walk(body_box))
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  4. In-place update re-evaluates truncation
 # ═══════════════════════════════════════════════════════════════════
-
-class TestInPlaceUpdateReEvaluatesTruncation:
-    def test_in_place_update_resets_to_truncated_on_new_oversized_body(self):
-        from ui.views.feed_card import RENDERED_BODY_LIMIT, build_feed_card
-
-        first = _long_body(9_000)
-        card = _card(first)
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        _reveal_button(widget).emit("clicked")
-        assert widget._body_label.get_text() == first
-
-        # a NEW oversized body arrives (tool result) — truncate again, fresh count
-        second = _long_body(5_000, marker="END-OF-SECOND")
-        card.body = second
-        from ui.views.feed_card import update_card_in_place
-        assert update_card_in_place(widget, card) is True
-
-        assert widget._body_label.get_text() == second[:RENDERED_BODY_LIMIT]
-        reveal = _reveal_button(widget)
-        assert reveal is not None
-        assert reveal.get_label() == "… 3000 more characters", (
-            f"fresh hidden count expected, got {reveal.get_label()!r}"
-        )
-        reveal.emit("clicked")
-        assert widget._body_label.get_text() == second
-
-    def test_in_place_update_to_short_body_clears_expanded_state(self):
-        from ui.views.feed_card import build_feed_card, update_card_in_place
-
-        card = _card(_long_body(9_000))
-        widget = build_feed_card(
-            card, on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        _reveal_button(widget).emit("clicked")
-
-        card.body = "read_file → 12 lines"
-        assert update_card_in_place(widget, card) is True
-
-        assert widget._body_label.get_text() == "read_file → 12 lines"
-        reveal = _reveal_button(widget)
-        assert reveal is None or not reveal.get_visible(), (
-            "a short body must not keep a stale reveal control"
-        )
-        # …and no stale expanded state leaks back on the next update
-        card.body = _long_body(4_000)
-        assert update_card_in_place(widget, card) is True
-        assert widget._body_label.get_text() == _long_body(4_000)[:2000], (
-            "the reset must be real: the next oversized body starts truncated"
-        )
-
-    def test_spacer_body_oversized_update_falls_back_to_rebuild(self):
-        """An empty body renders a spacer label; hosting a 22k body in it would
-        skip the wrap config, so the update must rebuild instead (Edit B)."""
-        h, tab = _make_feed_handler()
-        card = _card("")
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-        assert getattr(widget, "_body_label", None) is not None
-
-        stored = h.get_card(card_id)
-        stored.body = _long_body(22_714)
-        h.update_card(card_id, stored)
-
-        new_widget = h._card_widgets[card_id]
-        assert new_widget is not widget, "the spacer case must fall back to rebuild"
-        assert [cid for cid, _w in tab.replaced] == [card_id]
-        assert len(new_widget._body_label.get_text()) == 2000
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -516,75 +284,61 @@ class TestCopyPreserved:
         assert copied == [full], "copy must carry the stored body, not the rendered text"
         assert len(copied[0]) == 22_714 and copied[0].endswith("FINAL-LINE")
 
-    def test_copy_from_built_widget_carries_full_body(self):
-        """The header copy button is built at render time — it must still hand
-        over the full stored body, not the 2k slice."""
-        from ui.views.feed_card import build_feed_card
-
-        copied = []
-        full = _long_body(22_714)
-        widget = build_feed_card(
-            _card(full), on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=copied.append,
-        )
-        copy_btn = None
-        for btn in _buttons(widget):
-            if btn.get_tooltip_text() == "Copy":
-                copy_btn = btn
-                break
-        assert copy_btn is not None
-        copy_btn.emit("clicked")
-        assert copied == [full]
-
 
 # ═══════════════════════════════════════════════════════════════════
 #  Sweep: every other body-bearing card type is capped too
+#
+#  Ported from the retired GTK widget suite (WU feed-surface chunk 3b). The
+#  cap now lives in the pure renderer (render/feed_html.py), so these assert
+#  on the rendered HTML instead of a Gtk.Label tree — same contract, no GTK.
 # ═══════════════════════════════════════════════════════════════════
 
-class TestAllBodyRenderersCapped:
-    @pytest.mark.parametrize("card_type", [
-        "diff", "git_commit", "agent_action", "system", "audit_report",
-        "unknown_type", "task",
-    ])
-    def test_text_and_task_renderers_are_capped(self, card_type):
-        from ui.views.feed_card import build_feed_card
 
-        widget = build_feed_card(
-            _card(_long_body(6_000), card_type=card_type),
-            on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        assert _reveal_button(widget) is not None, (
-            f"{card_type} body must be capped and offer a reveal control"
-        )
-        # every rendered label in the card is bounded by the render limit
-        from gi.repository import Gtk
-        for label in (w for w in _walk(widget) if isinstance(w, Gtk.Label)):
-            assert len(label.get_text()) <= 2000, (
-                f"{card_type}: a label rendered {len(label.get_text())} chars"
-            )
+def _render(card: FeedCardData) -> str:
+    from render.feed_html import render_feed_card
 
-    def test_file_event_body_is_capped(self):
-        from ui.views.feed_card import build_feed_card
+    return render_feed_card(card)
 
-        widget = build_feed_card(
-            _card(_long_body(6_000), card_type="file_modified",
-                  file_path="src/foo.py", author="system"),
-            on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        assert _reveal_button(widget) is not None
 
-    def test_git_commit_stdout_body_is_capped(self):
-        """feed_handler._add_git_card stores raw `result.stdout` — the other
-        unbounded producer found in the sweep."""
-        from ui.views.feed_card import build_feed_card
+@pytest.mark.parametrize("card_type", [
+    "diff", "git_commit", "agent_action", "system", "audit_report",
+    "unknown_type", "task", "file_modified",
+])
+def test_every_body_bearing_card_type_is_capped(card_type):
+    """Each body-bearing type truncates at FEED_RENDERED_BODY_LIMIT and offers
+    the reveal control, with the EXACT hidden count."""
+    from render.feed_html import FEED_RENDERED_BODY_LIMIT
 
-        widget = build_feed_card(
-            _card(_long_body(30_000), card_type="git_commit", author="PM"),
-            on_review=MagicMock(), on_accept=MagicMock(),
-            on_reject=MagicMock(), on_copy=MagicMock(),
-        )
-        reveal = _reveal_button(widget)
-        assert reveal is not None
-        assert reveal.get_label() == f"… {30_000 - 2000} more characters"
+    full = _long_body(6_000)
+    out = _render(_card(full, card_type=card_type, file_path="src/foo.py",
+                        author="system"))
+    hidden = len(full) - FEED_RENDERED_BODY_LIMIT
+
+    assert full[:FEED_RENDERED_BODY_LIMIT] in out, (
+        f"{card_type}: the visible body must be the head of the text"
+    )
+    assert full not in out, f"{card_type}: the full body must not be rendered"
+    assert f"… {hidden} more characters" in out, (
+        f"{card_type}: an oversized body must offer the reveal control"
+    )
+
+
+def test_git_commit_stdout_body_is_capped():
+    """`feed_handler._add_git_card` stores raw `result.stdout` — the unbounded
+    producer found by the original sweep."""
+    full = _long_body(30_000)
+    out = _render(_card(full, card_type="git_commit", author="PM"))
+    assert f"… {30_000 - 2000} more characters" in out
+    assert full not in out
+
+
+def test_reveal_round_trips_the_full_body_in_html():
+    """The reveal path re-renders the COMPLETE body (escaped), not the slice."""
+    from render.feed_html import render_feed_card
+
+    full = _long_body(9_000, marker="FINAL-LINE")
+    out = render_feed_card(_card(full), revealed=True)
+    assert "more characters" not in out
+    assert full.splitlines()[-1] in out
+    assert "FINAL-LINE" in out
+

@@ -280,6 +280,35 @@ class TestReadFile:
             assert r.success is False
             assert "limit must be an integer" in r.error
 
+    def test_read_line_opens_the_search_hit_and_ignores_offset(self):
+        """search_files says Line N. line=N must not be treated as a byte offset."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.py"), "w") as fh:
+                fh.write("alpha\nbeta\ngamma\n")
+            # offset 0 would be "alpha" if line were ignored.
+            r = execute_tool(
+                "read_file",
+                {"path": "t.py", "line": 2, "offset": 0, "limit": 5},
+                proj,
+            )
+            assert r.success is True
+            assert r.output.startswith("[line 2 of t.py]\n")
+            body = r.output.split("\n", 1)[1]
+            assert body.startswith("beta\n")
+            assert "alpha" not in body
+
+    def test_read_line_past_end_and_bad_line(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.py"), "w") as fh:
+                fh.write("only\n")
+            past = execute_tool("read_file", {"path": "t.py", "line": 9}, proj)
+            assert past.success is False
+            assert "past the end" in past.error
+            for bad in (0, True, "2"):
+                r = execute_tool("read_file", {"path": "t.py", "line": bad}, proj)
+                assert r.success is False
+                assert "line must be an integer >= 1" in r.error
+
     def test_read_binary_file_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
             binary = os.path.join(proj, "bin.dat")
@@ -534,6 +563,51 @@ class TestSearchFiles:
             )
             assert control.success is True
             assert "zpkg/big.py" in control.output
+
+    def test_search_file_path_returns_the_line(self):
+        """A file path used to be grep's cwd and raised ENOTDIR."""
+        with tempfile.TemporaryDirectory() as proj:
+            sub = os.path.join(proj, "tests")
+            os.makedirs(sub)
+            with open(os.path.join(sub, "test_feed_card.py"), "w") as fh:
+                fh.write("class Keep:\n    pass\nclass TestBodySeamIsTotal:\n    pass\n")
+            with open(os.path.join(sub, "test_other_card.py"), "w") as fh:
+                fh.write("class TestBodySeamIsTotal:\n    pass\n")
+            r = execute_tool(
+                "search_files",
+                {
+                    "pattern": "class TestBodySeamIsTotal",
+                    "path": "tests/test_feed_card.py",
+                },
+                proj,
+            )
+            assert r.success is True, r.error
+            assert "Not a directory" not in (r.error or "")
+            assert "tests/test_feed_card.py" in r.output
+            assert "Line 3:" in r.output
+            assert "test_other_card.py" not in r.output
+
+    def test_search_file_path_miss_and_type_and_missing(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("def foo():\n    pass\n")
+            miss = execute_tool(
+                "search_files", {"pattern": "NOTFOUND", "path": "a.py"}, proj,
+            )
+            assert miss.success is True
+            assert miss.output == "(no matches)"
+            typed = execute_tool(
+                "search_files",
+                {"pattern": "def foo", "path": "a.py", "file_type": "md"},
+                proj,
+            )
+            assert typed.success is True
+            assert typed.output == "(no matches)"
+            missing = execute_tool(
+                "search_files", {"pattern": "x", "path": "no/such.py"}, proj,
+            )
+            assert missing.success is False
+            assert "Not a file or directory" in missing.error
 
 
 class TestWebSearch:

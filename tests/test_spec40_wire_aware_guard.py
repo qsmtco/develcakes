@@ -484,3 +484,70 @@ def test_over_budget_without_hot_still_raises(tmp_path, monkeypatch):
         pytest.raises(RuntimeError, match="after compaction"),
     ):
         rt._messages_for_model(_SK, conv, 200)
+
+
+def _compile_write(rt: AgentRuntime, conv: Conversation) -> dict:
+    """Production order: the write's tool result is already in the transcript."""
+    from agent.tools import ToolResult
+    tc = ToolCall(
+        call_id="w1", tool_name="edit_file",
+        arguments={"path": "b.py", "old_text": "a", "new_text": "b"},
+    )
+    conv.add_assistant_message("editing", [tc])
+    conv.add_tool_result("w1", "OK")
+    result = ToolResult(
+        success=True, output="OK", enforcement_checks=[_enforcement_ok()],
+    )
+    rt._maybe_compile(
+        _SK, conv, "edit_file",
+        {"path": "b.py", "old_text": "a", "new_text": "b"}, result,
+    )
+    return rt._compile[_SK]
+
+
+def test_enforced_write_keeps_current_turn_reads_on_the_wire(tmp_path):
+    """The reads that led to the write stay visible. The previous turn does not."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    _plant_read(conv, "old", "OLD-BODY-PREVIOUS")
+    conv.add_user_message("sweep the tests")
+    new_idx = _plant_read(conv, "new", "CURRENT-TURN-READ-BODY")
+    packet = _compile_write(rt, conv)
+
+    wired = rt._compiled_messages(conv, packet, "")
+    blob = "\n".join(
+        (m.get("content") or "") for m in wired if isinstance(m.get("content"), str)
+    )
+    assert "CURRENT-TURN-READ-BODY" in blob
+    assert "OLD-BODY-PREVIOUS" not in blob
+    assert packet["wire_from"] <= new_idx
+    assert rt._wire_cutoff(_SK, conv) == packet["wire_from"]
+
+    # Newest body for this key is the current-turn read, which is on the wire.
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY) == _BODY
+    again = rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY)
+    assert again.startswith("[unchanged")
+    assert "CURRENT-TURN-READ-BODY" not in again
+
+
+def test_previous_turn_read_is_off_the_wire_after_a_write(tmp_path):
+    """A read from before this turn is not in the packet, so a re-read serves it."""
+    _write_read_file(tmp_path)
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    old = _plant_read(conv, "old", _BODY)
+    conv.add_user_message("next task")
+    packet = _compile_write(rt, conv)
+
+    assert packet["wire_from"] > old
+    wired = rt._compiled_messages(conv, packet, "")
+    blob = "\n".join(
+        (m.get("content") or "") for m in wired if isinstance(m.get("content"), str)
+    )
+    assert _BODY not in blob
+
+    assert rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY) == _BODY
+    served = rt._dedup_read_output(_SK, conv, {"path": "a.py"}, _BODY)
+    assert served == _BODY
+    assert not served.startswith("[unchanged")

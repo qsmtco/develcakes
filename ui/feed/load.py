@@ -3,7 +3,6 @@ from __future__ import annotations
 
 
 from models.feed_card import AutoAcceptPrefs
-from ui.views.feed_card import build_feed_card
 
 from ui.feed._facade import _mod
 
@@ -128,23 +127,8 @@ class FeedLoadMixin:
                 # just rescued (and the count is a shared-list read → same lock).
                 merged_backlog_count = len(self._backlog)
 
-            # Build widgets for recent cards only, OUTSIDE the lock (round-3
-            # BUG #8). The loader's lock region is the dict writes ONLY: up to
-            # PAGE_SIZE GTK widget constructions inside it would block the main
-            # thread's eviction pass behind them (its locked gate reads
-            # len(_card_widgets) under the same lock).
-            widgets = {}
-            if not self._html_feed:
-                for card in recent:
-                    widget = build_feed_card(
-                        card,
-                        on_review=self._make_review_cb(card.card_id),
-                        on_accept=self._make_accept_cb(card.card_id),
-                        on_reject=self._make_reject_cb(card.card_id),
-                        on_copy=self._make_copy_cb(card),
-                    )
-                    widgets[card.card_id] = widget
-
+            # The feed document renders `recent` below. There is no per-card
+            # GTK widget to build outside the lock.
             with self._lock:
                 # Index ALL cards (including backlog) so _project_cards is complete.
                 # Order by seq_num, newest-first — do NOT infer provenance from set
@@ -170,20 +154,6 @@ class FeedLoadMixin:
                     reverse=True,
                 )
 
-                # Store the widgets built above — the MAP WRITE stays inside the
-                # lock (spec "One rule for _card_widgets"); only the expensive
-                # construction left it. HTML mode builds no widgets.
-                if not self._html_feed:
-                    for card in recent:
-                        self._card_widgets[card.card_id] = widgets[card.card_id]
-
-            # GTK sentinel only. The HTML bar is set_html_load_more, and
-            # building this widget on that path is unused (then nulled).
-            load_more_widget = None
-            if merged_backlog_count > 0 and not self._html_feed:
-                load_more_widget = self._build_load_more_widget(merged_backlog_count)
-                self._load_more_widget = load_more_widget
-
             # Add cards + load-more on main thread.
             # Use schedule_scroll_to_bottom() to defer the scroll until
             # AFTER GTK updates the vadjustment upper (layout pass).
@@ -204,24 +174,11 @@ class FeedLoadMixin:
                         self._feed_tab.set_html_load_more(merged_backlog_count)
                     self._load_more_widget = None
                 else:
-                    # Drop any stale GTK sentinel first (round-6 BUG #3): a
-                    # project with no backlog builds no new bar, and the
-                    # previous project's bar would stay parented otherwise.
-                    self._feed_tab.remove_card("__load_more__")
-                    if load_more_widget is not None:
-                        self._feed_tab.prepend_card(load_more_widget, card_id="__load_more__")
-                    else:
-                        self._load_more_widget = None             # no sentinel for this project
-
-                    # Append recent cards (chronological: oldest first, newest last)
-                    for card in recent:
-                        widget = widgets.get(card.card_id)
-                        if widget:
-                            # Same-project reopen: append_card only overwrites the
-                            # map entry, leaving the previous widget parented and
-                            # unreachable by every map/removal path (round-7 BUG #2).
-                            self._feed_tab.remove_card(card.card_id)
-                            self._feed_tab.append_card(widget, card.card_id)
+                    _mod()._logger.warning(
+                        "on_project_opened: feed document unavailable; "
+                        "%d cards kept in memory only",
+                        len(recent),
+                    )
 
                 # Bound the live widget window once this batch is parented.
                 self._evict_surplus_card_widgets()
@@ -327,63 +284,14 @@ class FeedLoadMixin:
             self._GLib.idle_add(_render_html)
             return
 
-        # Build widgets for this page (construction OUTSIDE the lock)
-        widgets = []
-        for card in page:
-            # Render from the authoritative map, not the backlog entry: a card
-            # evicted then updated exists as a fresh instance in _cards while
-            # the backlog copy is stale (round-4 BUG #1). The map is written by
-            # update_card before its guards, so resolving through it is enough
-            # — the spec explicitly does NOT require rewriting _backlog.
-            data = self._cards.get(card.card_id, card)
-            widget = build_feed_card(
-                data,
-                on_review=self._make_review_cb(data.card_id),
-                on_accept=self._make_accept_cb(data.card_id),
-                on_reject=self._make_reject_cb(data.card_id),
-                on_copy=self._make_copy_cb(data),
-            )
-            widgets.append((data.card_id, widget))
-
-        # Map write under the lock (F8 — this was the one existing writer that
-        # violated the class contract at :83); only the construction left it.
+        # No GTK card list. Put the page back so a later document attach can
+        # still drain it.
         with self._lock:
-            for card_id, widget in widgets:
-                self._card_widgets[card_id] = widget
-
-        # Ids just built — the eviction exclusion set. Mandatory: this page is
-        # the OLDEST content in the feed, i.e. exactly the victim set, so
-        # without it every click would build PAGE_SIZE widgets, evict them and
-        # push them straight back — a permanent no-op (round-3 BUG #1).
-        ids_just_loaded = {card_id for card_id, _w in widgets}
-
-        def _render():
-            if self._feed_tab is None:
-                return
-
-            # Remove old load-more widget
-            if self._load_more_widget is not None:
-                self._feed_tab.remove_card("__load_more__")
-
-            # Prepend new cards (oldest of page first → they go above existing cards)
-            for card_id, widget in widgets:
-                self._feed_tab.prepend_card(widget, card_id)
-
-            # Re-add load-more if backlog still has cards
-            if remaining > 0:
-                self._load_more_widget = self._build_load_more_widget(remaining)
-                self._feed_tab.prepend_card(self._load_more_widget, card_id="__load_more__")
-            else:
-                self._load_more_widget = None
-
-            # FINAL statement — NOT after the page loop above. The sentinel
-            # rebuild above bakes the PRE-push `remaining`; eviction running
-            # mid-_render would rebuild the sentinel from the post-push backlog
-            # and this tail would then build a SECOND bar from the stale
-            # `remaining`, repointing _cards_by_id at it (round-6 BUG #4).
-            self._evict_surplus_card_widgets(exclude=frozenset(ids_just_loaded))
-
-        self._GLib.idle_add(_render)
+            self._backlog = page + self._backlog
+        _mod()._logger.warning(
+            "_load_more: feed document unavailable; restored %d cards to the backlog",
+            len(page),
+        )
 
     def _effective_live_window(self) -> int:
         """Resolve the eviction cap for THIS pass (SPEC-03 SP2 rulings).

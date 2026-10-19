@@ -1,6 +1,6 @@
 # ui/handlers/feed_handler.py
 # Feed state management + card lifecycle (Phase 2).
-# Delegates rendering to feed_card.py, git ops to git_ops.py.
+# The feed document is render/feed_html.py via FeedTab. Git ops stay in git_ops.py.
 from __future__ import annotations
 # All GTK via GLib.idle_add(). All git operations run in background threads.
 #
@@ -23,11 +23,9 @@ import uuid
 from datetime import datetime, timezone
 
 from models.feed_card import AutoAcceptPrefs, FeedCardData
-from ui.views.feed_card import build_feed_card, update_card_badge, update_card_in_place
 from utils import git_ops
 from utils import feed_store
 from utils import conversation_store
-from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
 
 from ui.feed.auto_accept import FeedAutoAcceptMixin
 from ui.feed.persist import FeedPersistMixin
@@ -365,7 +363,7 @@ class FeedHandler(
         1. Assign unique card_id (uuid4)
         2. Store in self._cards[card_id]
         3. Index under project_name
-        4. Build widget via build_feed_card()
+        4. Upsert into the feed document (no per-card GTK widget)
         5. Prepend to feed_tab
         6. Persist to feed.json via feed_store.append_feed_card()
         7. Return card_id
@@ -454,66 +452,18 @@ class FeedHandler(
                 t.start()
             return card_id
 
-        # Build widget (pure Python, no shared state) — done outside lock
-        # Phase E: approval cards use approve/deny callbacks instead of accept/reject
-        if card_data.metadata.get("needs_approval"):
-            on_approve, on_deny = self._make_approve_exec_cb(card_id)
-            widget = build_feed_card(
-                card_data,
-                on_review=self._make_review_cb(card_id),
-                on_accept=on_approve,
-                on_reject=on_deny,
-                on_copy=self._make_copy_cb(card_data),
-            )
-        else:
-            widget = build_feed_card(
-                card_data,
-                on_review=self._make_review_cb(card_id),
-                on_accept=self._make_accept_cb(card_id),
-                on_reject=self._make_reject_cb(card_id),
-                on_copy=self._make_copy_cb(card_data),
-            )
-
-        with self._lock:
-            self._card_widgets[card_id] = widget
-
-        # Append to feed tab on main thread (newest at bottom), then persist
-        def _append():
-            if self._feed_tab is not None:
-                self._feed_tab.append_card(widget, card_id)
-                self._schedule_smart_scroll()  # one funnel for all append paths
-                # MEMRATCHET §2.1: bound the live widget window. Only releases
-                # widgets for cards already scrolled above the viewport.
-                self._evict_surplus_card_widgets()
-                # Phase 5 + v2: auto-accept check (runs on main thread via idle_add)
-                # Must run AFTER append_card so the widget exists in the tree
-                # before handle_accept starts git ops. The lazy agent lock-in
-                # is now handled inside _agent_scope_matches().
-                if card_data.accepted is None and self._is_card_auto_acceptable(card_data):
-                    # Exec approval cards in Show mode: auto-approve (not git accept)
-                    # and hide the Approve/Deny buttons so the user can't double-act.
-                    # Silent mode never reaches here (bypassed in AgentRuntimeHandler).
-                    if (card_data.card_type == "agent_action"
-                            and card_data.metadata.get("needs_approval")):
-                        self._GLib.idle_add(
-                            lambda cid=card_data.card_id: self._auto_approve_exec_card(cid)
-                        )
-                    else:
-                        self._GLib.idle_add(lambda cid=card_data.card_id: self.handle_accept(cid))
-                if self._on_card_added:
-                    self._on_card_added(card_id)
-
-        # Refresh batch accept bar (Phase 5)
+        # No feed document yet (startup notices fire before set_feed_tab).
+        # The card is already stored. There is no GTK card widget to build.
+        _logger.debug(
+            "add_card: feed document not attached; card %s stored without a view",
+            card_id,
+        )
         self._update_batch_bar_for_active_project(card_data.project_name)
-
-        self._GLib.idle_add(_append)
-        # Persist in background to avoid blocking UI.
-        # Skip persistence when _loading=True (cards already on disk from load)
-        # or when the caller explicitly owns persistence (persist=False).
         if project_path and not self._loading and persist:
             t = threading.Thread(target=_persist, daemon=True)
             t.start()
-
+        if self._on_card_added:
+            self._on_card_added(card_id)
         return card_id
 
     def add_cards_batch(self, cards: list[FeedCardData]) -> list[str]:
@@ -539,7 +489,6 @@ class FeedHandler(
             return []
 
         card_ids: list[str] = []
-        widget_by_id: dict[str, Gtk.Widget] = {}
         persist_data: list[tuple[FeedCardData, str]] = []  # (card, project_path)
 
         # Phase 1: assign ids, sequence numbers, build widgets (cheap, pure)
@@ -564,29 +513,9 @@ class FeedHandler(
 
                 card_ids.append(card_id)
 
-        # Phase 2: build widgets outside the lock (pure Python, no shared state).
-        # HTML mode stores no widgets — the document upserts the card data.
+        # Phase 2: cache project paths. The document upserts card data;
+        # there is no per-card GTK widget.
         for card_data, card_id in zip(cards, card_ids):
-            if not self._html_feed:
-                if card_data.metadata.get("needs_approval"):
-                    on_approve, on_deny = self._make_approve_exec_cb(card_id)
-                    widget = build_feed_card(
-                        card_data,
-                        on_review=self._make_review_cb(card_id),
-                        on_accept=on_approve,
-                        on_reject=on_deny,
-                        on_copy=self._make_copy_cb(card_data),
-                    )
-                else:
-                    widget = build_feed_card(
-                        card_data,
-                        on_review=self._make_review_cb(card_id),
-                        on_accept=self._make_accept_cb(card_id),
-                        on_reject=self._make_reject_cb(card_id),
-                        on_copy=self._make_copy_cb(card_data),
-                    )
-                widget_by_id[card_id] = widget
-
             # Cache project_path for the persistence phase
             project_path = (
                 card_data.metadata.get("project_path", "")
@@ -598,10 +527,6 @@ class FeedHandler(
             _cid = card_id
             self._GLib.idle_add(lambda: self._finalize_snapshot(_cid))
 
-        with self._lock:
-            for card_id, widget in widget_by_id.items():
-                self._card_widgets[card_id] = widget
-
         # Phase 3: ONE main-thread pass to append all cards + ONE smart scroll
         def _append_all():
             if self._feed_tab is None:
@@ -609,11 +534,6 @@ class FeedHandler(
             if self._html_feed:
                 for card_data in cards:
                     self._feed_tab.upsert_card(card_data)
-            else:
-                for card_id in card_ids:
-                    widget = widget_by_id.get(card_id)
-                    if widget is not None:
-                        self._feed_tab.append_card(widget, card_id)
             # Single scroll decision for the whole batch
             self._schedule_smart_scroll()
             # MEMRATCHET §2.1: one eviction pass for the whole batch — the
@@ -673,17 +593,13 @@ class FeedHandler(
 
     def update_card(self, card_id: str, card_data: FeedCardData) -> None:
         """
-        Update an existing card's data and re-render its widget.
+        Update an existing card's data and re-render it in the feed document.
 
         Used by AgentRuntimeHandler Phase D to update tool call cards with results.
 
         Steps:
         1. Update in-memory FeedCardData in self._cards
-        2. Refresh the widget. Phase 4 Part A: when the existing widget
-           exposes the child seams added in build_feed_card (`_body_label`),
-           mutate those children by reference (update_card_in_place);
-           otherwise rebuild the card and swap it into FeedTab (the
-           pre-Phase-4 path, unchanged).
+        2. Upsert the card into the feed document when one is attached
         3. Persist to feed_store (Phase 1: background writer, coalesced)
 
         Thread-safe: GTK operations via GLib.idle_add().
@@ -695,8 +611,6 @@ class FeedHandler(
         # Update in-memory data
         with self._lock:
             self._cards[card_id] = card_data
-
-        old_widget = self._card_widgets.get(card_id)
 
         # Phase 1: persist off the main thread (was a synchronous 13.9 MB
         # read-modify-write on the GTK main thread — measured 0.62 s per tool
@@ -733,98 +647,20 @@ class FeedHandler(
 
         if self._html_feed and self._feed_tab is not None:
             self._GLib.idle_add(lambda c=card_data: self._feed_tab.upsert_card(c) if self._feed_tab else None)
-            return
-
-        if old_widget is None:
-            # Evicted (§2.1). Data was updated and persisted above; the widget is
-            # rebuilt from data if the card is rendered again. Rebuilding here
-            # would re-append an old card at the bottom of the feed.
-            return
-
-        # ── Phase 4 Part A: in-place fast path ──────────────────────────
-        # build_feed_card exposes the body label (`_body_label`) — when the
-        # live widget has it, refreshing by reference avoids constructing a
-        # whole new card and doing a FeedTab remove/insert on the main
-        # thread. The mutation is dispatched via idle_add, exactly like the
-        # fallback swap below.
-        if old_widget is not None and getattr(old_widget, "_body_label", None) is not None:
-            _card_data = card_data
-
-            def _mutate_in_place():
-                try:
-                    if update_card_in_place(old_widget, _card_data):
-                        return
-                except Exception:
-                    # A partially mutating refresh must not leave a broken
-                    # card: fall through to the rebuild path.
-                    _logger.exception(
-                        "update_card: in-place refresh failed for %s; rebuilding card",
-                        card_id,
-                    )
-                self._rebuild_and_replace_card(card_id, _card_data, old_widget)
-
-            self._GLib.idle_add(_mutate_in_place)
-            return
-
-        # ── Fallback: rebuild the widget and swap it into FeedTab ────────
-        self._rebuild_and_replace_card(card_id, card_data, old_widget)
 
     def _rebuild_and_replace_card(
         self, card_id: str, card_data: FeedCardData, old_widget
     ) -> None:
-        """Rebuild a card widget and swap it into FeedTab (Phase 4 fallback).
+        """Refresh a card in the feed document.
 
-        Extracted from the pre-Phase-4 update_card body so both the
-        no-seam path and the in-place-refresh-failed path share one
-        implementation. The widget is constructed here (pure Python, no
-        shared state) and the FeedTab swap is dispatched via idle_add.
-
-        `old_widget` is always a live widget: both callers pass a non-None
-        value, because update_card returns early for an evicted card whose
-        widget is gone (§2.1 evicted-card guard). The previous
-        `old_widget is None` → `append_card` branch was therefore unreachable
-        and has been deleted (MEMRATCHET P7b) — re-appending an old card at the
-        bottom of the feed is exactly the behaviour the guard exists to stop.
+        Kept so callers and tests that still name the old widget-swap helper
+        land on the document upsert. There is no GTK card to rebuild.
         """
-        # Rebuild widget (same construction as add_card)
-        # Phase E: approval cards use approve/deny callbacks instead of accept/reject
-        if card_data.metadata.get("needs_approval"):
-            on_approve, on_deny = self._make_approve_exec_cb(card_id)
-            new_widget = build_feed_card(
-                card_data,
-                on_review=self._make_review_cb(card_id),
-                on_accept=on_approve,
-                on_reject=on_deny,
-                on_copy=self._make_copy_cb(card_data),
+        del card_id, old_widget
+        if self._html_feed and self._feed_tab is not None:
+            self._GLib.idle_add(
+                lambda c=card_data: self._feed_tab.upsert_card(c) if self._feed_tab else None
             )
-        else:
-            new_widget = build_feed_card(
-                card_data,
-                on_review=self._make_review_cb(card_id),
-                on_accept=self._make_accept_cb(card_id),
-                on_reject=self._make_reject_cb(card_id),
-                on_copy=self._make_copy_cb(card_data),
-            )
-
-        # Update widget storage
-        with self._lock:
-            self._card_widgets[card_id] = new_widget
-
-        if get_env("DEBUG"):
-            _logger.info("feed card rebuilt (no seam): %s", card_id)
-
-        # Replace widget in FeedTab on main thread
-        _card_id = card_id
-        _new_widget = new_widget
-
-        def _replace():
-            if self._feed_tab is None:
-                return
-            # old_widget is always live (see docstring) — the previous
-            # `is None` → append_card branch was unreachable and is deleted.
-            self._feed_tab.replace_card(_card_id, _new_widget)
-
-        self._GLib.idle_add(_replace)
 
     # ─────────────────────────────────────────────────────────────────
     # Background feed persistence (SPEC-UI-RESPONSIVENESS-2 Phase 1)
@@ -1293,9 +1129,6 @@ class FeedHandler(
         cls_rem = "feed-card-rejected" if accepted else "feed-card-accepted"
         widget.add_css_class(cls_add)
         widget.remove_css_class(cls_rem)
-
-        # Update badge in footer (ACCEPTED/REJECTED label)
-        update_card_badge(widget, accepted)
 
         # Update card data
         card = self._cards.get(card_id)

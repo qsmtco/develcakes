@@ -197,6 +197,12 @@ def test_cleared_transcript_reread_returns_body(tmp_path):
 
 
 def test_walk_log_failure_still_returns_body(tmp_path, monkeypatch):
+    """A walk exception is swallowed; the body is served, not a notice.
+
+    SPEC-40 moved the read_file walk off `_tool_result_limit` (which is
+    consulted only for the exec_command key) onto `_read_key_for_result`,
+    so this fault is injected there.
+    """
     target = tmp_path / "a.txt"
     target.write_text("hello world\n")
     rt, sk, conv = _runtime(str(tmp_path))
@@ -205,16 +211,18 @@ def test_walk_log_failure_still_returns_body(tmp_path, monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError("logger broke")
 
-    def _limit_boom(conv_arg, idx):
+    def _key_boom(conv_arg, idx):
         raise RuntimeError("walk broke")
 
     monkeypatch.setattr("agent.runtime.logger.debug", _boom)
-    rt._context_strategy._tool_result_limit = _limit_boom
+    rt._read_key_for_result = _key_boom
     text = rt._dedup_read_output(sk, conv, {"path": "a.txt"}, "hello world\n")
     assert text == "hello world\n"
 
 
 def test_walk_failure_returns_body(tmp_path):
+    """Same contract without the logger fault: the walk failing is 'unknown',
+    which must resolve to serving the body."""
     target = tmp_path / "a.txt"
     target.write_text("hello world\n")
     rt, sk, conv = _runtime(str(tmp_path))
@@ -223,7 +231,7 @@ def test_walk_failure_returns_body(tmp_path):
     def _boom(conv_arg, idx):
         raise RuntimeError("walk broke")
 
-    rt._context_strategy._tool_result_limit = _boom
+    rt._read_key_for_result = _boom
     text = rt._dedup_read_output(sk, conv, {"path": "a.txt"}, "hello world\n")
     assert text == "hello world\n"
 

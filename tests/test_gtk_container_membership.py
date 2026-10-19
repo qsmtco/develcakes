@@ -9,8 +9,8 @@ These tests use only pure-Python fakes — no GTK widget construction.
 """
 
 import pytest
-from utils.gtk_containers import is_in_container
 
+from utils.gtk_containers import is_in_container
 
 # ── Fakes (revised per spec §3.5.1, 2026-07-28) ───────────────────────
 
@@ -168,12 +168,14 @@ class TestStaticRegression:
     # Lineage: test_is_in_container_imported_in_chat_render RETIRED — its
     # subject DIED (not moved): chat_render_handler.py lost the
     # is_in_container import with the Pango bubble path in SP4 (2a057adc,
-    # render-handler repoint). The feed_tab twin below stays live.
-
-    def test_is_in_container_imported_in_feed_tab(self):
-        """is_in_container is imported in feed_tab.py."""
-        src = self._read(self.FEED_TAB_PATH)
-        assert "from utils.gtk_containers import is_in_container" in src
+    # render-handler repoint).
+    #
+    # Lineage: test_is_in_container_imported_in_feed_tab RETIRED — its subject
+    # DIED too: the GTK card container was removed with the GTK feed path
+    # (WU feed-surface chunk 3b). feed_tab.py no longer imports
+    # is_in_container and no longer owns `_card_container`; membership now
+    # lives in the HTML document (ui/views/feed_surface.py), pinned by
+    # tests/test_feed_html.py.
 
     def test_dispatch_has_exception_logging(self):
         """_dispatch's _wrap has try/except with _logger.exception.

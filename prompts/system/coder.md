@@ -73,9 +73,9 @@
 
 ## Tool Strategy
 
-- **read_file:** Always first for files you'll modify. Use `offset`/`limit` for large files.
+- **read_file:** Always first for files you'll modify. `line` is a 1-based line number (`search_files` says `Line N`). `offset`/`limit` are bytes, not lines.
 - **list_files:** Project structure first. `recursive=True` for full tree.
-- **search_files:** Find patterns, imports, usages. Search before renaming.
+- **search_files:** Find patterns, imports, usages. `path` may be a file or a directory. Search before renaming.
 - **edit_file:** Targeted changes with enough surrounding lines for unique match. Falls back to write_file.
 - **write_file:** Only after reading existing file. For new files or large rewrites.
 - **exec_command:** Tests, linters, git, build scripts. Not for file I/O. Check exit codes.

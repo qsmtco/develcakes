@@ -32,7 +32,12 @@ def _conv() -> Conversation:
     return conv
 
 
-def test_compile_omits_the_read_and_keeps_the_transcript():
+def test_compile_keeps_the_current_turn_read_on_the_wire():
+    """The summary does not paste the read. The wire list keeps it.
+
+    The transcript itself is untouched. A later assistant message does not
+    push the current turn's read back off the wire.
+    """
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
     sk = "special:compile"
@@ -57,14 +62,14 @@ def test_compile_omits_the_read_and_keeps_the_transcript():
     assert "syntax failed" in user["content"]
     assert "READBODY-UNIQUE" not in user["content"]
     blob = "\n".join(m.get("content") or "" for m in wired)
-    assert "READBODY-UNIQUE" not in blob
+    assert "READBODY-UNIQUE" in blob
     assert conv.messages[2].content == "READBODY-UNIQUE"
 
     conv.add_assistant_message("applied the fix")
     wired2 = rt._messages_for_model(sk, conv, 128_000)
     blob2 = "\n".join(m.get("content") or "" for m in wired2)
     assert "applied the fix" in blob2
-    assert "READBODY-UNIQUE" not in blob2
+    assert "READBODY-UNIQUE" in blob2
 
 
 def test_hunk_is_capped_at_4000_chars():
@@ -151,8 +156,11 @@ def test_compiled_call_skips_transcript_budget_when_packet_fits(monkeypatch):
     monkeypatch.setattr("models.conversation._tiktoken_encoding_for", lambda model: None)
     rt = AgentRuntime(_make_cfg())
     conv = Conversation(agent_name="Coder", system_prompt="SYS", model="")
-    conv.add_user_message("goal")
+    # The huge result belongs to the previous turn. Compile keeps the
+    # current turn and drops what came before it.
+    conv.add_user_message("old")
     conv.add_tool_result("r", "Z" * 40_000)
+    conv.add_user_message("goal")
     sk = "special:budget"
     rt._conversations[sk] = conv
     model_max = 8_000

@@ -36,7 +36,7 @@ import tempfile
 import threading
 import time
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -524,6 +524,77 @@ class _LiteFeedTab:
         self.batch_bar_count = pending_count
 
 
+class _LiteHtmlSurface:
+    """Document double for the HTML feed path (the only live path).
+
+    Mirrors ui/views/feed_surface.py's surface API: `card_ids`, `set_cards`,
+    `upsert`, `remove`, `reveal`. There are no per-card GTK widgets any more,
+    so the SP3 retention harness measures the DOCUMENT's row set instead of
+    `_card_widgets`.
+    """
+
+    def __init__(self):
+        self.order: list[str] = []
+        self.removed: list[str] = []
+        self.upserts = 0
+
+    def card_ids(self):
+        return list(self.order)
+
+    def set_cards(self, cards):
+        self.order = [c.card_id for c in cards if c.card_id]
+
+    def upsert(self, card, *, prepend=False):
+        self.upserts += 1
+        if card.card_id not in self.order:
+            if prepend:
+                self.order.insert(0, card.card_id)
+            else:
+                self.order.append(card.card_id)
+
+    def remove(self, card_id):
+        if card_id in self.order:
+            self.order = [cid for cid in self.order if cid != card_id]
+        self.removed.append(card_id)
+
+    def reveal(self, card_id):
+        pass
+
+
+class _LiteHtmlFeedTab(_LiteFeedTab):
+    """`_LiteFeedTab` plus the document surface, so FeedHandler.set_feed_tab()
+    flips `_html_feed` on and the real upsert/evict funnel runs.
+
+    Kept as a SUBCLASS: the SP2 eviction-wiring tests seed `_card_widgets`
+    directly and must keep taking the widget-map branch, so the HTML surface
+    is opt-in per test class.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._surface = _LiteHtmlSurface()
+        self.load_more_counts: list[int] = []
+
+    def attach_html_surface(self, on_action):
+        self._on_action = on_action
+        return self._surface
+
+    def upsert_card(self, card) -> None:
+        self._surface.upsert(card)
+
+    def prepend_html_card(self, card) -> None:
+        self._surface.upsert(card, prepend=True)
+
+    def set_html_cards(self, cards) -> None:
+        self._surface.set_cards(cards)
+
+    def set_html_load_more(self, remaining: int) -> None:
+        self.load_more_counts.append(remaining)
+
+    def set_html_load_more_callback(self, callback) -> None:
+        self._html_load_more_callback = callback
+
+
 class TestEvictionWindowWiring:
     """SPEC-03 SP2 — the eviction cap resolves from the SP1 accessors.
 
@@ -809,11 +880,13 @@ class TestTwoThousandCardRetention:
         with open(os.path.join(project_path, ".gitignore"), "w", encoding="utf-8") as f:
             f.write(".crabcakes/feed.json\n")
 
-        from ui.handlers import feed_handler as fh_mod
         from ui.handlers.feed_handler import FeedHandler
 
         handler = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
-        tab = _LiteFeedTab()
+        # HTML feed document (the only live path): set_feed_tab() attaches the
+        # surface and flips _html_feed, so add_cards_batch runs the real
+        # upsert + _evict_surplus_html_rows funnel with NO GTK widgets.
+        tab = _LiteHtmlFeedTab()
         handler.set_feed_tab(tab)
         handler._project_paths[project] = project_path
         handler._active_project_name = project
@@ -832,12 +905,6 @@ class TestTwoThousandCardRetention:
             for i in range(1, cls.COUNT + 1)
         ]
         t0 = time.monotonic()
-        # Two seams, both GTK-chrome only (probe + first fixture run
-        # evidence: build_feed_card for every card; _build_load_more_widget
-        # from the FIRST eviction pass on — a real Gtk.Box, segfaults
-        # headless). The retention-relevant machinery (persist, seq,
-        # eviction, backlog, accounting) runs for real.
-        #
         # add_cards_batch, not a 2,000-iteration add_card loop (probe
         # evidence): add_card spawns ONE PERSIST THREAD PER CARD, and
         # 2,000 concurrent append_feed_card calls stampede the FEED flock —
@@ -848,16 +915,12 @@ class TestTwoThousandCardRetention:
         # same _append_all → _evict_surplus_card_widgets pass, same
         # per-card append_feed_card persist) with ONE persist thread —
         # the production shape for bulk arrival.
+        # No GTK seam to patch any more: the HTML feed document has no
+        # per-card widgets and no Load-More Gtk.Box (load-more is a row count
+        # pushed through set_html_load_more). The funnel below — seq, index,
+        # document upsert, ONE eviction pass, persist — runs for real.
         threads_before = set(threading.enumerate())
-        with (
-            patch.object(fh_mod, "build_feed_card", lambda *a, **k: _StubWidget()),
-            patch.object(
-                fh_mod.FeedHandler,
-                "_build_load_more_widget",
-                lambda self, remaining: _StubWidget(height=10),
-            ),
-        ):
-            handler.add_cards_batch(cards)
+        handler.add_cards_batch(cards)
         cls._funnel_time = time.monotonic() - t0
 
         # Join the single batch persist thread before reading disk state.
@@ -887,11 +950,23 @@ class TestTwoThousandCardRetention:
         cls._handler = handler
         cls._tab = tab
 
+    def _rows(self):
+        """The live view is the feed document's row set (there are no
+        per-card GTK widgets any more)."""
+        return self._tab._surface.card_ids()
+
     def test_widget_bound(self):
-        """Invariant 1: live widgets ≤ window + 1 (cap + Load-More row
-        allowance). The Load-More sentinel lives in handler._load_more_widget,
-        NOT in _card_widgets — the +1 is headroom, asserted as ≤."""
-        assert len(self._handler._card_widgets) <= self.WINDOW + 1
+        """Invariant 1: live document rows ≤ the effective cap
+        (min(MAX_LIVE_CARD_WIDGETS, live_window) == 120 under window=300,
+        per the R1 ruling) — asserted as ≤ for the Load-More row allowance.
+        Retargeted from `_card_widgets` (now always empty: the HTML path
+        builds no widgets) to the surface's row set, which is the thing the
+        retention budget actually bounds."""
+        assert len(self._handler._card_widgets) == 0, (
+            "HTML feed path must not build per-card GTK widgets"
+        )
+        assert len(self._rows()) <= self.WINDOW + 1
+        assert len(self._rows()) <= self._handler._effective_live_window()
 
     def test_disk_complete(self):
         """Invariant 2: the disk store holds all 2,000 — the view is a
@@ -906,33 +981,39 @@ class TestTwoThousandCardRetention:
         `widgets + backlog + removed` would sum eviction twice).
 
         Exact identities asserted:
-          widgets + backlog == 2000   (live + pushed-back = total)
-          removed == backlog          (each removal pushed its data back)
+          live + backlog == 2000   (live rows + pushed-back = total)
+          removed == backlog       (each removal pushed its data back)
+
+        "live" is the feed document's row set (HTML path; no widgets).
         """
-        widgets = len(self._handler._card_widgets)
+        live = len(self._rows())
         backlog = len(self._handler._backlog)
-        assert widgets + backlog == self.COUNT, (
-            f"loss: widgets={widgets} backlog={backlog} (sum {widgets + backlog})"
+        assert live + backlog == self.COUNT, (
+            f"loss: live={live} backlog={backlog} (sum {live + backlog})"
         )
-        # Excluding the "__load_more__" sentinel: eviction's rebuild tail
-        # calls remove_card("__load_more__") (feed_handler eviction tail;
-        # round-4 BUG #4) — that removal is sentinel bookkeeping, not a
-        # card, so it must not count against push-back.
-        card_removals = [cid for cid in self._tab.removed if cid != "__load_more__"]
+        card_removals = self._tab._surface.removed
         assert len(card_removals) == backlog, (
             f"push-back broken: card removals={len(card_removals)} "
             f"but backlog={backlog}"
         )
 
     def test_no_widget_leak(self):
-        """Invariant 4 — gc census (the chosen proxy, documented): count live
-        _StubWidget instances process-wide. Every card built one stub; if
-        eviction leaked references, the census would track 2,000. Bound =
-        window + Load-More stub + documented slack for the transient old
-        sentinel (replaced each pass, one alive at a time)."""
+        """Invariant 4 — leak census, retargeted to the HTML path.
+
+        The old form counted live _StubWidget instances; the document path
+        builds no widgets at all, so that census would be vacuous. Two
+        assertions carry the original intent instead:
+          - ZERO widget stubs were created (nothing to leak);
+          - eviction released ROWS, never CARD DATA: every one of the 2,000
+            cards still lives in _cards (reachable via the row set or the
+            backlog) — a card dropped from both would be a real leak.
+        """
         stubs = [o for o in gc.get_objects() if isinstance(o, _StubWidget)]
-        assert len(stubs) <= self.WINDOW + 10, (
-            f"{len(stubs)} stub widgets alive — eviction is leaking widgets"
+        assert stubs == [], (
+            f"{len(stubs)} stub widgets alive — the HTML path built widgets"
+        )
+        assert len(self._handler._cards) == self.COUNT, (
+            f"card data lost: {len(self._handler._cards)}/{self.COUNT} in _cards"
         )
 
     def test_speed_guard(self):
@@ -961,7 +1042,6 @@ class TestTwoThousandCardRetention:
         project = "edge-proj"
         project_path = str(tmp_path / project)
         set_live_window(project_path, self.WINDOW)  # 300 — the spec's number
-        from ui.handlers import feed_handler as fh_mod
         from ui.handlers.feed_handler import (
             KEEP_NEWEST_CARDS,
             MAX_LIVE_CARD_WIDGETS,
@@ -969,44 +1049,35 @@ class TestTwoThousandCardRetention:
         )
 
         handler = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
-        tab = _LiteFeedTab()
+        tab = _LiteHtmlFeedTab()
         handler.set_feed_tab(tab)
         handler._project_paths[project] = project_path
         handler._active_project_name = project
-        monkeypatch.setattr(
-            fh_mod.FeedHandler,
-            "_build_load_more_widget",
-            lambda self, remaining: _StubWidget(height=10),
-        )
 
-        widget_cap = min(MAX_LIVE_CARD_WIDGETS, self.WINDOW)
-        assert widget_cap == MAX_LIVE_CARD_WIDGETS  # R1: 120 under window=300
+        cap = min(MAX_LIVE_CARD_WIDGETS, self.WINDOW)
+        assert cap == MAX_LIVE_CARD_WIDGETS  # R1: 120 under window=300
 
         ts = datetime.now(UTC)
         ids = []
-        with patch.object(fh_mod, "build_feed_card", lambda *a, **k: _StubWidget()):
-            for i in range(1, widget_cap + 1):
-                ids.append(
-                    handler.add_card(self._card(i, ts, project=project), persist=False)
-                )
-        assert len(handler._card_widgets) == widget_cap
-        assert len(handler._backlog) == 0
-        assert tab.removed == []
-
-        with patch.object(fh_mod, "build_feed_card", lambda *a, **k: _StubWidget()):
-            handler.add_card(
-                self._card(widget_cap + 1, ts, project=project, title="edge-301"),
-                persist=False,
+        for i in range(1, cap + 1):
+            ids.append(
+                handler.add_card(self._card(i, ts, project=project), persist=False)
             )
-        assert len(handler._card_widgets) == widget_cap
+        assert len(tab._surface.card_ids()) == cap
+        assert len(handler._backlog) == 0
+        assert tab._surface.removed == []
+
+        handler.add_card(
+            self._card(cap + 1, ts, project=project, title="edge-301"),
+            persist=False,
+        )
+        assert len(tab._surface.card_ids()) == cap
         assert len(handler._backlog) == 1
         # add_card assigns uuid ids (not seq-shaped) — the evicted id is
-        # the FIRST card's returned id. (The "__load_more__" sentinel
-        # removal in eviction's rebuild tail is excluded — it is not a
-        # card, same exclusion the accounting identity uses.)
-        card_removes = [c for c in tab.removed if c != "__load_more__"]
+        # the FIRST card's returned id.
+        card_removes = tab._surface.removed
         assert card_removes == [ids[0]], (
-            f"the {widget_cap + 1}th add must evict exactly the oldest card"
+            f"the {cap + 1}th add must evict exactly the oldest card"
         )
         # View ≠ store: disk (if persisted) would keep all — proven at
         # harness scale by test_disk_complete.
@@ -1016,28 +1087,27 @@ class TestTwoThousandCardRetention:
         project_path_low = str(tmp_path / project_low)
         set_live_window(project_path_low, 80)
         handler_low = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
-        tab_low = _LiteFeedTab()
+        tab_low = _LiteHtmlFeedTab()
         handler_low.set_feed_tab(tab_low)
         handler_low._project_paths[project_low] = project_path_low
         handler_low._active_project_name = project_low
         ts2 = datetime.now(UTC)
         ids_low = []
-        with patch.object(fh_mod, "build_feed_card", lambda *a, **k: _StubWidget()):
-            for i in range(1, 81):
-                ids_low.append(
-                    handler_low.add_card(
-                        self._card(i, ts2, project=project_low), persist=False
-                    )
+        for i in range(1, 81):
+            ids_low.append(
+                handler_low.add_card(
+                    self._card(i, ts2, project=project_low), persist=False
                 )
-            assert len(handler_low._card_widgets) == 80
-            assert len(handler_low._backlog) == 0
-            handler_low.add_card(
-                self._card(81, ts2, project=project_low, title="edge-81"),
-                persist=False,
             )
-        assert len(handler_low._card_widgets) == 80
+        assert len(tab_low._surface.card_ids()) == 80
+        assert len(handler_low._backlog) == 0
+        handler_low.add_card(
+            self._card(81, ts2, project=project_low, title="edge-81"),
+            persist=False,
+        )
+        assert len(tab_low._surface.card_ids()) == 80
         assert len(handler_low._backlog) == 1
-        card_removes_low = [c for c in tab_low.removed if c != "__load_more__"]
+        card_removes_low = tab_low._surface.removed
         assert card_removes_low == [ids_low[0]]
         # R2 floor intact: KEEP_NEWEST_CARDS (40) < the 80-config cap, so
         # the newest-40 pin is exercisable at this edge.
@@ -1046,39 +1116,32 @@ class TestTwoThousandCardRetention:
     def test_disk_survives_reload(self, tmp_path, monkeypatch):
         """Test 7: a NEW handler hydrating from disk sees all 2,000 cards.
 
-        Patched seams (documented per instructions): build_feed_card (the
-        sanctioned headless seam — hydration renders the last PAGE_SIZE=15)
-        AND _build_load_more_widget (hydration with a non-empty backlog
-        builds the real Load-More Gtk.Box otherwise — probe-verified
-        segfault source). Hydration runs on a background thread: poll until
-        _loading clears (the thread's final statement) and the backlog is
-        populated."""
-        from ui.handlers import feed_handler as fh_mod
+        No seams needed: the HTML feed document renders the last PAGE_SIZE=15
+        as rows and keeps the rest in the backlog, so hydration builds no GTK
+        widgets (the old build_feed_card / Load-More patches are obsolete).
+        Hydration runs on a background thread: poll until _loading clears
+        (the thread's final statement) and the backlog is populated."""
         from ui.handlers.feed_handler import FeedHandler
         from utils import feed_store as fs
 
         # Disk truth first (the GTK-free loader).
         assert len(fs.load_feed(self._project_path)) == self.COUNT
 
-        monkeypatch.setattr(
-            fh_mod.FeedHandler,
-            "_build_load_more_widget",
-            lambda self, remaining: _StubWidget(height=10),
-        )
         handler = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
-        tab = _LiteFeedTab()
+        tab = _LiteHtmlFeedTab()
         handler.set_feed_tab(tab)
-        with patch.object(fh_mod, "build_feed_card", lambda *a, **k: _StubWidget()):
-            handler.on_project_opened("harness-proj", self._project_path)
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline:
-                if not handler._loading and handler._backlog:
-                    break
-                time.sleep(0.05)
+        handler.on_project_opened("harness-proj", self._project_path)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if not handler._loading and handler._backlog:
+                break
+            time.sleep(0.05)
         assert not handler._loading, "hydration thread did not finish in 10s"
-        # PAGE_SIZE=15 rendered + 1,985 in backlog == 2,000 total hydrated.
-        assert len(handler._backlog) + len(handler._card_widgets) == self.COUNT
-        assert len(handler._card_widgets) <= 16
+        # PAGE_SIZE=15 rendered rows + 1,985 in backlog == 2,000 total.
+        rows = tab._surface.card_ids()
+        assert len(handler._backlog) + len(rows) == self.COUNT
+        assert len(rows) <= 16
+        assert handler._card_widgets == {}
 
     def test_compaction_interplay(self):
         """Test 8 — HONEST documentation of two DIFFERENT mechanisms.

@@ -390,6 +390,20 @@ _HOT_WINDOW_MAX_CHARS = 16 * 1024
 _HOT_WINDOW_SLOTS = 2
 
 
+def _read_call_key(path: str, offset, limit, line=None) -> tuple:
+    """Fingerprint key for one read_file call.
+
+    Byte reads stay ``(path, offset or 0, limit)`` so existing transcripts
+    and tests keep matching. A 1-based ``line`` is a different coordinate
+    and must not collide with byte 0 of the same file.
+    """
+    if isinstance(line, int) and not isinstance(line, bool) and line >= 1:
+        return (path, "line", line, limit)
+    if offset is None:
+        offset = 0
+    return (path, offset, limit)
+
+
 def _reprint_target(command: str, paths: set[str]) -> str | None:
     """Return a known path if one command chunk only displays that file."""
     if not paths:
@@ -3479,7 +3493,21 @@ class AgentRuntime:
         self, conv, packet: dict, map_block: str = "", hot: bool = True,
     ) -> list[dict]:
         from models.conversation import serialize_messages
-        tail = conv.messages[packet["after"]:]
+        after = packet["after"]
+        wire_from = packet.get("wire_from")
+        if (
+            isinstance(wire_from, int)
+            and not isinstance(wire_from, bool)
+            and isinstance(after, int)
+            and 0 <= wire_from <= after
+        ):
+            # Current-turn tool traffic, including the reads that led to
+            # this write. The user message itself stays out: the packet
+            # already carries the goal.
+            turn = conv.messages[wire_from:after]
+        else:
+            turn = []
+        tail = conv.messages[after:]
         fact_lines = ""
         if map_block:
             fact_lines = REPO_MAP_HEADER + "\n\n" + map_block + "\n\n"
@@ -3501,9 +3529,12 @@ class AgentRuntime:
         if hot and packet.get("hot"):
             parts = []
             for w in packet["hot"]:
+                if w.get("line"):
+                    where = f"line={w['line']} limit={w['limit']}"
+                else:
+                    where = f"offset={w['offset']} limit={w['limit']}"
                 parts.append(
-                    f"### {w['path']} offset={w['offset']} "
-                    f"limit={w['limit']} "
+                    f"### {w['path']} {where} "
                     f"(as read before the write above; re-read if unsure)"
                     f"\n\n```\n{w['body']}\n```"
                 )
@@ -3515,6 +3546,7 @@ class AgentRuntime:
         if conv.system_prompt:
             messages.append({"role": "system", "content": conv.system_prompt})
         messages.append({"role": "user", "content": body})
+        messages.extend(serialize_messages(turn, index_base=len(messages)))
         messages.extend(serialize_messages(tail, index_base=len(messages)))
         return messages
 
@@ -3743,12 +3775,18 @@ class AgentRuntime:
                 }
                 for w in self._hot_windows.get(session_key, {}).values()
             )
+        wire_from = 0
+        for i in range(len(conv.messages) - 1, -1, -1):
+            if conv.messages[i].role == MessageRole.USER:
+                wire_from = i + 1
+                break
         self._compile[session_key] = {
             "goal": goal,
             "path": path,
             "hunk": hunk,
             "checks": stored,
             "after": len(conv.messages),
+            "wire_from": wire_from,
             "hot": hot,
         }
         try:
@@ -3955,11 +3993,33 @@ class AgentRuntime:
 
     def _key_body_in_transcript(
         self, conv: Any, path: str, offset: int | None, limit: int | None,
+        line: int | None = None,
     ) -> bool:
-        """SPEC-32 wrapper. Key is ``(path, offset or 0, limit)`` for read_file."""
+        """SPEC-32 wrapper. Byte key is ``(path, offset or 0, limit)``.
+
+        A 1-based ``line`` uses ``(path, "line", line, limit)`` so it does
+        not collide with a byte read of the same file.
+        """
         return self._body_live_in_transcript(
-            conv, "read_file", (path, offset or 0, limit),
+            conv, "read_file", _read_call_key(path, offset, limit, line),
         )
+
+    def _read_key_for_result(self, conv: Any, idx: int) -> tuple | None:
+        """The fingerprint key stored for the read_file call that wrote ``idx``.
+
+        None when the result has no parent call. Byte-mode keys match
+        ``_read_call_key`` with no line, which is what older transcripts hold.
+        """
+        msg = conv.messages[idx]
+        _name, path, _offset, parent = self._context_strategy._tool_result_meta(conv, idx)
+        if parent is None:
+            return None
+        args: dict = {}
+        for tc in parent.tool_calls or []:
+            if tc.call_id == msg.tool_call_id:
+                args = tc.arguments if isinstance(tc.arguments, dict) else {}
+                break
+        return _read_call_key(path, args.get("offset"), args.get("limit", None), args.get("line"))
 
     def _body_live_in_transcript(self, conv: Any, tool: str, key: tuple) -> bool:
         """SPEC-33b: does a real body for this (tool, key) still live here?
@@ -3984,9 +4044,14 @@ class AgentRuntime:
                 name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
                 if name != tool:
                     continue
-                rlimit = strategy._tool_result_limit(conv, i)
-                if (rpath, roffset, rlimit) != key:
-                    continue
+                if tool == "read_file":
+                    got = self._read_key_for_result(conv, i)
+                    if got != key:
+                        continue
+                else:
+                    rlimit = strategy._tool_result_limit(conv, i)
+                    if (rpath, roffset, rlimit) != key:
+                        continue
                 return not (
                     content.startswith("[masked \u2014")
                     or content.startswith("[compacted \u2014")
@@ -4029,9 +4094,14 @@ class AgentRuntime:
                 name, rpath, roffset, _parent = strategy._tool_result_meta(conv, i)
                 if name != tool:
                     continue
-                rlimit = strategy._tool_result_limit(conv, i)
-                if (rpath, roffset, rlimit) != key:
-                    continue
+                if tool == "read_file":
+                    got = self._read_key_for_result(conv, i)
+                    if got != key:
+                        continue
+                else:
+                    rlimit = strategy._tool_result_limit(conv, i)
+                    if (rpath, roffset, rlimit) != key:
+                        continue
                 if (
                     content.startswith("[masked \u2014")
                     or content.startswith("[compacted \u2014")
@@ -4046,7 +4116,12 @@ class AgentRuntime:
         return None
 
     def _wire_cutoff(self, session_key: str, conv: Any) -> int | None:
-        """SPEC-40: the compile packet's ``after``, or None when uncompiled.
+        """First transcript index that is NOT on the compiled wire.
+
+        A packet with ``wire_from`` includes ``messages[wire_from:after]``,
+        so bodies at or after ``wire_from`` are visible and a re-read is a
+        real duplicate. Older packets only have ``after``: everything below
+        that index is off the wire (SPEC-40). None when uncompiled.
 
         Pure dict read — no lock. ``self._compile`` is replaced whole and
         never mutated in place.
@@ -4054,6 +4129,9 @@ class AgentRuntime:
         packet = self._compile.get(session_key)
         if not packet:
             return None
+        wire_from = packet.get("wire_from")
+        if isinstance(wire_from, int) and not isinstance(wire_from, bool):
+            return wire_from
         after = packet.get("after")
         return after if isinstance(after, int) and not isinstance(after, bool) else None
 
@@ -4064,6 +4142,7 @@ class AgentRuntime:
         offset: int | None,
         limit: int | None,
         output: str,
+        line: int | None = None,
     ) -> None:
         """Store one served read window as a hot-carry candidate.
 
@@ -4075,13 +4154,14 @@ class AgentRuntime:
         """
         if not isinstance(output, str) or len(output) < _HOT_WINDOW_MIN_CHARS:
             return
-        key = (path, offset or 0, limit)
+        key = _read_call_key(path, offset, limit, line)
         wins = self._hot_windows.setdefault(session_key, {})
         wins.pop(key, None)
         wins[key] = {
             "path": path,
             "offset": offset or 0,
             "limit": limit,
+            "line": line if isinstance(line, int) and not isinstance(line, bool) and line >= 1 else None,
             "body": output[:_HOT_WINDOW_MAX_CHARS],
         }
         while len(wins) > _HOT_WINDOW_SLOTS:
@@ -4090,7 +4170,8 @@ class AgentRuntime:
     def _dedup_read_output(self, session_key: str, conv, args: dict, output: str) -> str:
         """Return the unchanged notice when this turn already read the same bytes.
 
-        Key is (path, offset or 0, limit). Value is (st_mtime_ns, st_size).
+        Byte key is (path, offset or 0, limit). A 1-based line is
+        (path, "line", line, limit). Value is (st_mtime_ns, st_size).
         An empty project_path or a failed stat skips dedup and returns output.
         A fingerprint match returns output when no live read_file body for
         that key remains in the transcript.
@@ -4100,9 +4181,11 @@ class AgentRuntime:
         path = args.get("path", "")
         offset = args.get("offset")
         limit = args.get("limit")
+        line = args.get("line")
         if not isinstance(path, str):
             return output
-        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
+        line_mode = isinstance(line, int) and not isinstance(line, bool) and line >= 1
+        if not line_mode and offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
             return output
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
             return output
@@ -4114,33 +4197,33 @@ class AgentRuntime:
         except OSError as exc:
             logger.debug("read_file dedup skipped for %s: %s", path, exc)
             return output
-        key = (path, offset or 0, limit)
+        kept_line = line if line_mode else None
+        key = _read_call_key(path, offset, limit, kept_line)
         fp = (st.st_mtime_ns, st.st_size)
         with self._tool_history_lock:
             bucket = self._read_fingerprints.setdefault(session_key, {})
             if bucket.get(key) == fp:
-                if not self._key_body_in_transcript(conv, path, offset, limit):
+                if not self._key_body_in_transcript(conv, path, offset, limit, kept_line):
                     # SPEC-32: the body is masked, compacted, evicted, or
                     # the walk could not prove a live read_file body.
                     # Re-sending once is cheaper than an exec_command loop.
                     bucket[key] = fp
                     self._capture_hot_window(
-                        session_key, path, offset, limit, output)
+                        session_key, path, offset, limit, output, kept_line)
                     return output
                 cutoff = self._wire_cutoff(session_key, conv)
                 if cutoff is not None:
-                    idx = self._last_transcript_body_index(
-                        conv, "read_file", (path, offset or 0, limit))
+                    idx = self._last_transcript_body_index(conv, "read_file", key)
                     if idx is None or idx < cutoff:
                         # Only live body is off the wire (compile packet replaced it).
                         # Serve fresh; reset this key's notice counter.
                         seen = self._reread_notices.setdefault(session_key, {})
-                        seen.pop((path, offset or 0, limit), None)
+                        seen.pop(key, None)
                         # Serving a real body: carry it into the next packet.
                         # This path does NOT re-pin bucket[key] — the
                         # fingerprint already matched, so `fp` is unchanged.
                         self._capture_hot_window(
-                            session_key, path, offset, limit, output)
+                            session_key, path, offset, limit, output, kept_line)
                         return output
                 seen = self._reread_notices.setdefault(session_key, {})
                 seen[key] = seen.get(key, 0) + 1
@@ -4149,16 +4232,20 @@ class AgentRuntime:
                         f"REFUSED: {path} is already in this conversation. "
                         f"Do not read it again. Edit it or run its test."
                     )
+                if line_mode:
+                    where = f"line={line} limit={limit}"
+                else:
+                    where = f"offset={offset or 0} limit={limit}"
                 return (
-                    f"[unchanged \u2014 read_file {path} offset={offset or 0} "
-                    f"limit={limit}; the body is already in this conversation. "
+                    f"[unchanged \u2014 read_file {path} {where}; "
+                    f"the body is already in this conversation. "
                     f"Do not read it again and do not print it with a shell command.]"
                 )
             bucket[key] = fp
             # Fingerprint-miss tail: the bytes are new to this turn, so they
             # are the freshest continuity candidate for the next packet.
             self._capture_hot_window(
-                session_key, path, offset, limit, output)
+                session_key, path, offset, limit, output, kept_line)
         return output
 
     def _block_file_reprint(

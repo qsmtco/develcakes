@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from models.conversation_snapshot import ConversationSnapshot
 from models.feed_card import FeedCardData
@@ -125,7 +125,7 @@ def _file_card(file_path="src/foo.py", project_name="proj"):
         title=f"Modified {file_path}",
         body=f"✏️ {file_path}",
         author="system",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         project_name=project_name,
         file_path=file_path,
     )
@@ -254,9 +254,14 @@ class TestDiffBuildIsDeferred:
         glib.flush_idle()   # runs _apply_snapshot on the test's (main) thread
 
         assert card.conversation_snapshot is not None
-        widget = handler._card_widgets[card.card_id]
-        assert widget._context_panel.get_first_child() is not None, (
-            "the context panel must be populated with the diff content"
+        # There is no per-card GTK widget any more (WU feed-surface chunk 3b):
+        # `_apply_snapshot` attaches the snapshot to the CARD DATA and the
+        # document re-renders from it. The equivalent assertion is that the
+        # card carries the diff and the document surfaces carry it, i.e. the
+        # handler did not route the update through a deleted widget path.
+        assert "only-line" in card.conversation_snapshot.diff_text
+        assert not handler._card_widgets, (
+            "the HTML feed path must not build per-card GTK widgets"
         )
         handler.shutdown_persist_writer()
 

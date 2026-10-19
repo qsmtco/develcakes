@@ -78,10 +78,55 @@ class MockCardContainer:
         return self._tab._card_spacing
 
 
+class MockSurface:
+    """Document double returned by MockFeedTab.attach_html_surface().
+
+    The production feed is a WebKit document (WU feed-surface chunk 3b); the
+    handler's `_html_feed` branch upserts CARD DATA here instead of building
+    per-card GTK widgets. Mirrors FeedSurface's surface API.
+    """
+
+    def __init__(self):
+        self.order = []
+        self.upserts = []
+        self.prepends = []
+        self.removed = []
+        self.revealed = []
+
+    def card_ids(self):
+        return list(self.order)
+
+    def set_cards(self, cards):
+        self.order = [c.card_id for c in cards if c.card_id]
+
+    def upsert(self, card, *, prepend=False):
+        target = self.prepends if prepend else self.upserts
+        target.append(card)
+        if card.card_id not in self.order:
+            if prepend:
+                self.order.insert(0, card.card_id)
+            else:
+                self.order.append(card.card_id)
+
+    def remove(self, card_id):
+        self.order = [cid for cid in self.order if cid != card_id]
+        self.removed.append(card_id)
+
+    def reveal(self, card_id):
+        self.revealed.append(card_id)
+
+
 class MockFeedTab:
     def __init__(self):
         self.cards = []  # list of (card_id, widget)
         self.empty_shown = False
+        # Document surface. Present ⇒ FeedHandler.set_feed_tab() sees an
+        # attachable surface and switches `_html_feed` on, which is the only
+        # production path left after the GTK card list was deleted.
+        self._surface = MockSurface()
+        self._feed_surface = self._surface
+        self.upserts = self._surface.upserts
+        self.html_load_more = []
         # Fake scroll state for smart scroll tests
         self._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
         # Reader intent for the smart-scroll gate. Default False: the default
@@ -188,6 +233,31 @@ class MockFeedTab:
         # The eviction pass only reads get_spacing() through the handler's
         # _card_container_spacing() helper, so a spacing-only stub suffices.
         return MockCardContainer(self)
+
+    # ── HTML document surface (the only live feed path) ──────────────────
+    def attach_html_surface(self, on_action):
+        """Mirror ui/views/feed_tab.py:attach_html_surface().
+
+        Returns the document double so FeedHandler.set_feed_tab() flips
+        `_html_feed` on and routes every card through upsert_card().
+        """
+        self._on_action = on_action
+        return self._surface
+
+    def upsert_card(self, card) -> None:
+        self._surface.upsert(card)
+
+    def prepend_html_card(self, card) -> None:
+        self._surface.upsert(card, prepend=True)
+
+    def set_html_cards(self, cards) -> None:
+        self._surface.set_cards(cards)
+
+    def set_html_load_more(self, remaining: int) -> None:
+        self.html_load_more.append(remaining)
+
+    def set_html_load_more_callback(self, callback) -> None:
+        self._html_load_more_callback = callback
 
 
 # ── Mock GitResult ───────────────────────────────────────────────────────────
@@ -1130,515 +1200,6 @@ class TestLoadOrderingInvariant:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  MEMRATCHET Phase 5 (spec §2.1 eviction, §2.6 cases 1-5, 7) — the live
-#  widget window. `_card_widgets` is bounded once eviction is wired into
-#  the two live append paths; card DATA is never dropped.
-# ═══════════════════════════════════════════════════════════════════
-
-class _StubCardWidget:
-    """Minimal widget double: the eviction pass reads only get_height()."""
-
-    def __init__(self, height: int):
-        self._height = height
-
-    def get_height(self) -> int:
-        return self._height
-
-
-class _ViewportGuard:
-    """Stateful `is_above_viewport` double: one verdict per call, then default.
-
-    Records every widget it is asked about, so a test can prove the loop both
-    consulted the guard (the "attempted" half) and where it broke.
-    """
-
-    def __init__(self, *verdicts, default=False):
-        self._verdicts = list(verdicts)
-        self._default = default
-        self.seen = []
-
-    def __call__(self, widget):
-        self.seen.append(widget)
-        return self._verdicts.pop(0) if self._verdicts else self._default
-
-
-class _FailsafeViewportGuard:
-    """Mirror of FeedTab.is_above_viewport's geometry rule (feed_tab.py:444-467).
-
-    Near-zero extent means "unknown" — never "above" (GTK 4.14 reports
-    `compute_bounds -> (True, zero rect)` for a never-allocated widget, so a
-    naive `bottom <= vadj.value` test would call every unmeasured card
-    "above the viewport" and destroy it). Used to pin that fail-safe
-    direction against a zeroed adjustment.
-    """
-
-    def __init__(self, vadj):
-        self._vadj = vadj
-        self.seen = []
-
-    def __call__(self, widget):
-        self.seen.append(widget)
-        height = widget.get_height() or 0
-        if height <= 0:
-            return False                  # unmeasurable → never evict
-        return height <= self._vadj.get_value()
-
-
-class TestEvictionSurplus:
-    """spec §2.1 eviction wired into add_card/_append + add_cards_batch/_append_all."""
-
-    def _handler(self):
-        from ui.handlers.feed_handler import FeedHandler
-
-        h = FeedHandler(GLib=MockGLib(), on_send_to_agent=MagicMock())
-        h.set_feed_tab(MockFeedTab())
-        return h
-
-    def _burst(self, h, count, project="evict-proj"):
-        """Drive `count` real add_card() calls (MockGLib idles synchronously).
-
-        persist=False: the fixture registers no project path, so a persist
-        thread per card would be pure overhead here.
-        """
-        ts = datetime.now(timezone.utc)
-        ids = []
-        for i in range(count):
-            card = FeedCardData(
-                card_type="diff", source="agent", title=f"c{i}", body="",
-                author="x", timestamp=ts, project_name=project,
-            )
-            ids.append(h.add_card(card, persist=False))
-        return ids
-
-    def _seed(self, h, count, project="evict-proj", height=56, seq_start=1):
-        """Seed N live widgets + card data directly (no GTK widget builds).
-
-        Used where the test needs to reach the over-cap state *without* the
-        append paths' own eviction running first, so a single explicit
-        `_evict_surplus_card_widgets()` call is the thing under test.
-        `seq_start` lets a caller place a set OLDER than another (P6 page tests).
-        """
-        ts = datetime.now(timezone.utc)
-        ids = []
-        for seq in range(seq_start, seq_start + count):
-            cid = f"{project}-c{seq}"
-            h._cards[cid] = FeedCardData(
-                card_type="diff", source="agent", title=cid, body="",
-                author="x", timestamp=ts.replace(microsecond=seq), project_name=project,
-                card_id=cid, seq_num=seq,
-            )
-            h._project_cards.setdefault(project, []).insert(0, cid)
-            h._card_widgets[cid] = _StubCardWidget(height)
-            ids.append(cid)
-        h._project_seq[project] = seq_start + count - 1
-        return ids
-
-    def test_burst_bounds_live_widgets_and_keeps_newest(self):
-        """Case 1: 500 add_card calls → map bounded, newest KEEP_NEWEST survive."""
-        from ui.handlers.feed_handler import KEEP_NEWEST_CARDS, MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        ids = self._burst(h, 500)
-
-        assert len(h._card_widgets) <= MAX_LIVE_CARD_WIDGETS, (
-            f"500 adds left {len(h._card_widgets)} widgets live"
-        )
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS
-        newest = {
-            c.card_id for c in sorted(
-                h._cards.values(), key=lambda c: c.seq_num or 0, reverse=True
-            )[:KEEP_NEWEST_CARDS]
-        }
-        assert newest <= set(h._card_widgets), (
-            "the newest KEEP_NEWEST_CARDS must never be evicted"
-        )
-        # DATA is untouched by eviction — only widgets are released.
-        assert len(h._cards) == 500
-        assert all(cid in h._cards for cid in ids)
-
-    def test_over_cap_with_guard_refusing_evicts_nothing(self):
-        """Case 2: the cap is a bound when the viewport guard permits, not an
-        invariant — a refusing guard must leave the map unchanged."""
-        h = self._handler()
-        h._feed_tab._above_viewport = False
-        ids = self._burst(h, 200)
-
-        assert len(h._card_widgets) == len(ids) == 200
-        assert h._backlog == [], "no card may be pushed back when nothing was released"
-
-    def test_evicted_card_keeps_data_and_leads_backlog(self):
-        """Case 3: evicted FeedCardData stays in _cards, sits at the front of
-        the newest-first _backlog, and Load More re-renders a widget for it."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        ids = self._burst(h, MAX_LIVE_CARD_WIDGETS + 1)   # exactly one over
-
-        evicted = [cid for cid in ids if cid not in h._card_widgets]
-        assert evicted == [ids[0]], (
-            f"precondition: only the oldest card is released, got {evicted}"
-        )
-        assert h._cards[evicted[0]].card_id == evicted[0], "card DATA must survive"
-        assert h._backlog[0].card_id == evicted[0], (
-            "the released card must lead the newest-first backlog"
-        )
-
-        h._load_more()
-        assert evicted[0] in h._card_widgets, "Load More must re-render the evicted card"
-
-    def test_viewport_guard_break_stops_the_loop(self):
-        """Case 4: the first refusal breaks the loop — nothing beyond it is
-        destroyed, even though the map is still over the cap."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 5)          # 125 → target 5
-        guard = _ViewportGuard(True, False, default=False)
-        h._feed_tab.is_above_viewport = guard
-
-        h._evict_surplus_card_widgets()
-
-        assert len(guard.seen) == 2, "one permissive victim, then the refusal"
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS + 4, (
-            "the break must stop at the first refusal, not continue down the list"
-        )
-        assert len(h._backlog) == 1, "only the one permitted victim was released"
-        assert len(h._cards) == MAX_LIVE_CARD_WIDGETS + 5
-
-    def test_near_bottom_pins_the_bottom_after_eviction(self):
-        """Case 5a: released>0 and near-bottom → the bottom is re-pinned.
-
-        The pin writes `upper` (2000); the scrolled-up compensation would have
-        written `value - (height + spacing)` (900 - 64 = 836) — so the recorded
-        write identifies which arm ran."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 1)
-        tab = h._feed_tab
-        tab._near_bottom = True
-        tab._vadjustment = MockVadjustment(value=900, upper=2000, page_size=600)
-
-        h._evict_surplus_card_widgets()
-
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS
-        assert tab.scroll_to_bottom_calls == 1, "the pinned bottom must be restored"
-        assert tab._vadjustment.set_value_calls == [2000], (
-            "the near-bottom arm pins to the upper bound; a compensation write "
-            "(900 - 64 = 836) would mean the wrong arm ran"
-        )
-
-    def test_scrolled_up_compensates_by_height_plus_spacing(self):
-        """Case 5b: scrolled-up → the adjustment is corrected by
-        height + container spacing (asserted explicitly as value - (56 + 8))."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 1, height=56)
-        tab = h._feed_tab
-        tab._near_bottom = False
-        tab._card_spacing = 8
-        tab._vadjustment = MockVadjustment(value=900, upper=2000, page_size=600)
-
-        h._evict_surplus_card_widgets()
-
-        assert tab.scroll_to_bottom_calls == 0, "a reading user must not be yanked"
-        assert tab._vadjustment.set_value_calls == [900 - (56 + 8)], (
-            "compensation must subtract the removed height AND the inter-child "
-            "Gtk.Box spacing (feed_tab.py set_spacing(8))"
-        )
-
-    def test_batch_burst_evicts_down_to_the_cap(self, monkeypatch):
-        """Case 7: the batch path is the second unbounded widget writer — one
-        eviction pass per batch bounds it too."""
-        import ui.handlers.feed_handler as fh
-        from ui.handlers.feed_handler import KEEP_NEWEST_CARDS, MAX_LIVE_CARD_WIDGETS
-
-        # Deterministic: add_cards_batch's persist hop runs inline.
-        monkeypatch.setattr(fh, "threading", _SyncThreading)
-
-        h = self._handler()
-        ts = datetime.now(timezone.utc)
-        cards = [
-            FeedCardData(
-                card_type="diff", source="agent", title=f"b{i}", body="",
-                author="x", timestamp=ts, project_name="batch-proj",
-            )
-            for i in range(200)
-        ]
-
-        h.add_cards_batch(cards)
-
-        assert len(h._card_widgets) <= MAX_LIVE_CARD_WIDGETS
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS
-        newest = {
-            c.card_id for c in sorted(
-                h._cards.values(), key=lambda c: c.seq_num or 0, reverse=True
-            )[:KEEP_NEWEST_CARDS]
-        }
-        assert newest <= set(h._card_widgets)
-        assert len(h._backlog) == len(cards) - MAX_LIVE_CARD_WIDGETS, (
-            "every released card must be pushed back (reachable via Load More)"
-        )
-
-    def test_zeroed_adjustment_destroys_nothing(self):
-        """P2-audit discriminator: a zeroed adjustment (upper=page=value=0) is
-        the "layout never ran" state — indistinguishable from "no container".
-        Eviction must then attempt and refuse, for BOTH an unmeasurable card
-        (zero extent → geometry unknown) and a measurable one sitting below a
-        zero-valued viewport. Neither may be read as "above the viewport"."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        for height in (0, 56):
-            h = self._handler()
-            self._seed(h, MAX_LIVE_CARD_WIDGETS + 1, height=height)
-            tab = h._feed_tab
-            tab._near_bottom = True
-            tab._vadjustment = MockVadjustment(value=0, upper=0, page_size=0)
-            tab.is_above_viewport = _FailsafeViewportGuard(tab._vadjustment)
-
-            h._evict_surplus_card_widgets()
-
-            assert tab.is_above_viewport.seen, (
-                f"height={height}: the pass must reach the viewport guard"
-            )
-            assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS + 1, (
-                f"height={height}: a zeroed adjustment must not classify cards "
-                "as above the viewport — the fail-safe direction must survive"
-            )
-            assert h._backlog == []
-            assert tab.scroll_to_bottom_calls == 0, "nothing released → no correction"
-
-    def test_load_more_page_identity_survives_eviction(self):
-        """§2.6 case 8 / §6 — the exclusion is what keeps Load More from
-        becoming a permanent no-op.
-
-        The page just prepended is the OLDEST content in the feed, i.e. exactly
-        the victim set. Without `exclude=ids_just_loaded` the click would build
-        PAGE_SIZE widgets, evict them and push them straight back (round-3
-        BUG #1). Non-vacuity: a non-page card must still be released in the
-        same pass, or the assertion would hold for a handler that evicts
-        nothing at all."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        tab = h._feed_tab
-        proj = "page-proj"
-        ts = datetime.now(timezone.utc)
-
-        # The backlog page: the oldest cards in the feed (seq 1..20).
-        page_ids = []
-        for s in range(1, 21):
-            cid = f"page-{s}"
-            h._cards[cid] = FeedCardData(
-                card_type="diff", source="agent", title=cid, body="", author="x",
-                timestamp=ts.replace(microsecond=s), project_name=proj,
-                card_id=cid, seq_num=s,
-            )
-            h._project_cards.setdefault(proj, []).append(cid)
-            page_ids.append(cid)
-        h._backlog = [h._cards[cid] for cid in reversed(page_ids)]  # newest-first
-        expected_page = [c.card_id for c in h._backlog[:h.PAGE_SIZE]]
-
-        # 120 live widgets (the cap) + a 15-card page = 135 → over the cap.
-        seeded = self._seed(h, MAX_LIVE_CARD_WIDGETS, project=proj, seq_start=100)
-
-        # Record what the rebuilt bar reports: §6 requires the label to reflect
-        # the backlog AFTER eviction's pushes, not the pre-push `remaining`
-        # baked in by _render (round-4 BUG #4).
-        built = []
-        real_build = h._build_load_more_widget
-
-        def _record(remaining):
-            built.append(remaining)
-            return real_build(remaining)
-
-        h._build_load_more_widget = _record
-
-        h._load_more()
-
-        parented = [cid for _w, cid in tab.cards]
-        for cid in expected_page:
-            assert cid in h._card_widgets, (
-                f"the page id {cid} was evicted by its own Load More click"
-            )
-            assert cid in parented, f"the page id {cid} is no longer parented"
-        released = [cid for cid in seeded if cid not in h._card_widgets]
-        assert released, "non-vacuity: at least one non-page card must be released"
-        assert len(h._backlog) == 5 + len(released), "the released cards are pushed back"
-        assert built[-1] == len(h._backlog), (
-            f"the rebuilt bar must report the post-push backlog size, got {built}"
-        )
-
-    def test_eviction_rebuilds_load_more_when_backlog_drained(self):
-        """§2.6 case 9 / §6 — a drained backlog plus no sentinel must not make
-        the pushed-back cards unreachable (round-3 BUG #2).
-
-        Before eviction existed, `_backlog` only ever shrank, so the Load More
-        widget was only ever built on the load path. Eviction is the first
-        writer that can make cards reachable *again*, so it must rebuild the
-        widget it had just removed."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        tab = h._feed_tab
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 1)
-        h._backlog = []
-        h._load_more_widget = None
-        assert "__load_more__" not in [cid for _w, cid in tab.cards], (
-            "precondition: no sentinel is parented and the backlog is drained"
-        )
-
-        # §6 — the rebuilt bar's label must report the new backlog size.
-        built = []
-        real_build = h._build_load_more_widget
-
-        def _record(remaining):
-            built.append(remaining)
-            return real_build(remaining)
-
-        h._build_load_more_widget = _record
-
-        h._evict_surplus_card_widgets()
-
-        assert len(h._backlog) == 1, "the released card must be pushed back"
-        assert h._load_more_widget is not None, "the sentinel must be rebuilt"
-        assert built == [1], (
-            f"the rebuilt bar must report the pushed-back count, got {built}"
-        )
-        assert "__load_more__" in [cid for _w, cid in tab.cards], (
-            "the rebuilt sentinel must be parented, or the card is unreachable"
-        )
-
-    def _open_project(self, monkeypatch, h, name, path, cards):
-        """Run one project open deterministically (synchronous load thread)."""
-        import ui.handlers.feed_handler as fh
-
-        monkeypatch.setattr(fh, "threading", _SyncThreading)
-        store = MagicMock()
-        store.load_feed.return_value = cards
-        store.load_feed_prefs.return_value = _default_prefs()
-        store.FEED_WINDOW_DEFAULT = FEED_WINDOW_DEFAULT
-        monkeypatch.setattr(fh, "feed_store", store)
-        h._project_paths[name] = path
-        h.on_project_opened(name, path)
-
-    def test_eviction_runs_on_the_project_open_path(self, monkeypatch):
-        """§2.1 call-site row 3 / §6 — the load path is the FOURTH call site
-        (round-7 BUG #2).
-
-        Only reachable when the handler already holds more than the cap from
-        earlier activity: an open renders at most PAGE_SIZE cards, so on a
-        fresh handler the cap can never be crossed by the load path alone."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        proj = "load-evict-proj"
-        ts = datetime.now(timezone.utc)
-
-        # Pre-existing mass from earlier activity, in a DIFFERENT project so
-        # the open (which clears only the previous ACTIVE project) keeps it.
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 5, project="earlier-proj")
-
-        # The opened project resumes from a high-water mark, so its cards are
-        # the newest — eviction must spare them.
-        cards = [
-            FeedCardData(
-                card_type="diff", source="agent", title=f"n{s}", body="",
-                author="x", timestamp=ts.replace(microsecond=s), project_name=proj,
-                card_id=f"n{s}", seq_num=s + 200,
-            )
-            for s in range(1, 6)
-        ]
-        self._open_project(monkeypatch, h, proj, "/tmp/load-evict-proj", cards)
-
-        assert len(h._card_widgets) <= MAX_LIVE_CARD_WIDGETS, (
-            "the load path must run eviction after its appends"
-        )
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS
-        assert all(f"n{s}" in h._card_widgets for s in range(1, 6)), (
-            "the cards just rendered are the newest and must survive"
-        )
-
-    def test_cross_project_cards_are_eviction_candidates(self):
-        """§2.6 case 11 / §6 — the victim set is the union across projects, not
-        the active project's list (round-3 BUG #5).
-
-        `_card_widgets` is one flat dict while widget creation is keyed on the
-        CARD's project, which need not be the active one — so gating on
-        `_active_project_name` would leak widgets for background projects."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        h._active_project_name = "some-other-project"   # NOT the cards' project
-        self._seed(h, MAX_LIVE_CARD_WIDGETS + 1, project="background-proj")
-
-        h._evict_surplus_card_widgets()
-
-        assert len(h._card_widgets) == MAX_LIVE_CARD_WIDGETS, (
-            "cards for a non-active project must still be eviction candidates"
-        )
-        assert len(h._backlog) == 1
-
-    def test_project_seq_not_clobbered_by_parse_window_arrival(self, monkeypatch):
-        """P4-audit regression: the load path must not reset _project_seq below
-        a seq_num a live arrival already consumed during the parse window —
-        otherwise the next arrival reuses that number (duplicate badge, and a
-        non-unique key for the eviction ordering)."""
-        import ui.handlers.feed_handler as fh
-
-        monkeypatch.setattr(fh, "threading", _SyncThreading)
-        h = self._handler()
-        name, path = "seq-proj", "/tmp/seq-proj"
-        ts = datetime.now(timezone.utc)
-
-        snapshot = [
-            FeedCardData(
-                card_type="diff", source="agent", title=f"s{i}", body="",
-                author="x", timestamp=ts.replace(second=i), project_name=name,
-                card_id=f"s{i}", seq_num=i,
-            )
-            for i in range(1, 4)          # snapshot high-water mark: 3
-        ]
-        h._project_seq[name] = 3          # the live counter is already at 3
-        live_seqs = []
-
-        def _load(_path):
-            # A live card arrives during the parse window (the arrival the
-            # loader's background thread cannot see in its snapshot).
-            live = FeedCardData(
-                card_type="diff", source="agent", title="live", body="",
-                author="x", timestamp=ts.replace(second=30), project_name=name,
-            )
-            h.add_card(live, persist=False)
-            live_seqs.append(live.seq_num)
-            return snapshot
-
-        store = MagicMock()
-        store.load_feed.side_effect = _load
-        store.load_feed_prefs.return_value = _default_prefs()
-        store.FEED_WINDOW_DEFAULT = FEED_WINDOW_DEFAULT
-        monkeypatch.setattr(fh, "feed_store", store)
-        h._project_paths[name] = path
-
-        h.on_project_opened(name, path)
-
-        assert live_seqs == [4], "the live arrival takes the next sequence number"
-        assert h._project_seq[name] == 4, (
-            "the load must not clobber the live arrival's sequence number back to 3"
-        )
-
-        nxt = FeedCardData(
-            card_type="diff", source="agent", title="next", body="",
-            author="x", timestamp=ts, project_name=name,
-        )
-        h.add_card(nxt, persist=False)
-        assert nxt.seq_num == 5, (
-            f"the next arrival must not reuse seq 4 (got {nxt.seq_num})"
-        )
-
-
-# ═══════════════════════════════════════════════════════════════════
 #  TestSmartScroll — Phase 4 (consolidated: only schedule_smart_scroll_to_bottom
 #  and schedule_scroll_to_bottom remain in the public API; the old synchronous
 #  scroll_to_bottom() and smart_scroll_to_bottom() were removed during the
@@ -1830,18 +1391,18 @@ class TestAddCardsBatch:
             )
             for i in range(3)
         ]
-        # Snapshot append_card call count before batch
-        before = len(mock_feed_tab.append_calls)
+        # Snapshot document upsert count before batch
+        before = len(mock_feed_tab.upserts)
 
         feed_handler.add_cards_batch(cards)
 
         # MockGLib.idle_add runs callbacks synchronously, so by the time
         # add_cards_batch returns, the bulk _append_all callback has already
-        # fired and appended all 3 cards. No drain needed.
-        appended = len(mock_feed_tab.append_calls) - before
+        # fired and upserted all 3 cards into the document. No drain needed.
+        appended = len(mock_feed_tab.upserts) - before
         assert appended == 3, (
-            f"add_cards_batch should append all cards in one idle callback "
-            f"(3 append_card calls total), got {appended}"
+            f"add_cards_batch should upsert all cards in one idle callback "
+            f"(3 document upserts total), got {appended}"
         )
 
     def test_add_cards_batch_mixed_approval_and_normal(self, feed_handler):
@@ -1864,9 +1425,12 @@ class TestAddCardsBatch:
         ]
         ids = feed_handler.add_cards_batch(cards)
         assert len(ids) == 3
-        # All three cards (normal + approval) should have widgets stored
+        # All three cards (normal + approval) land in the document, in order.
+        upserted = [c.card_id for c in feed_handler._feed_tab.upserts]
         for cid in ids:
-            assert cid in feed_handler._card_widgets
+            assert cid in upserted, (
+                f"{cid} was not upserted into the feed document; got {upserted}"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2116,13 +1680,29 @@ class _FakeAdjustment:
 
 
 class _FakeScrolledWindow:
-    """Minimal stand-in for Gtk.ScrolledWindow holding a _FakeAdjustment."""
+    """Minimal stand-in for Gtk.ScrolledWindow holding a _FakeAdjustment.
+
+    `set_child` / `set_policy` exist because FeedTab.attach_html_surface()
+    swaps the scroll child for the WebKit document; the harness replaces the
+    real ScrolledWindow, so the double must accept the same calls.
+    """
 
     def __init__(self, vadj: _FakeAdjustment):
         self._vadj = vadj
+        self.child = None
+        self.policy = None
 
     def get_vadjustment(self) -> _FakeAdjustment:
         return self._vadj
+
+    def set_child(self, child):
+        self.child = child
+
+    def set_policy(self, horizontal, vertical):
+        self.policy = (horizontal, vertical)
+
+    def get_child(self):
+        return self.child
 
 
 @pytest.fixture
@@ -2139,47 +1719,6 @@ def real_feed_tab():
     adj = _FakeAdjustment(upper=0.0)
     tab._feed_scroll = _FakeScrolledWindow(adj)
     return tab
-
-
-def _geometry_widget(height: float):
-    """A real `Gtk.Box` whose geometry the eviction pass can actually measure.
-
-    The Xvfb harness never realizes widgets, so a genuine card reports
-    `compute_bounds -> (True, zero rect)` and `is_above_viewport` returns False
-    (the round-6 BUG #1 fail-safe) — every eviction would be vacuously refused
-    and the mirror assertion would hold trivially. Instance-level overrides give
-    the widget a positive extent so the real `FeedTab` geometry primitives run
-    their measurable branch.
-    """
-    from gi.repository import Gtk, Graphene
-
-    widget = Gtk.Box()
-    widget.get_height = lambda: height
-
-    def _bounds(_target, _h=height):
-        rect = Graphene.Rect()
-        rect.init(0.0, 0.0, 100.0, _h)
-        return (True, rect)
-
-    widget.compute_bounds = _bounds
-    return widget
-
-
-def _parented_sentinels(tab):
-    """Every parented Load More bar — including ORPHANS no map can reach."""
-    return [
-        child for child in tab.get_card_container()
-        if child.has_css_class("feed-card-load-more")
-    ]
-
-
-def _parented_cards(tab):
-    """Parented card widgets, excluding the sentinel bars and the empty state."""
-    return [
-        child for child in tab.get_card_container()
-        if child.has_css_class("feed-card")
-        and not child.has_css_class("feed-card-load-more")
-    ]
 
 
 class TestBacklogDiscipline:
@@ -2279,22 +1818,18 @@ class TestBacklogDiscipline:
         assert ids[0] == "pushed-survivor", "and it must still be the newest entry"
 
     def test_load_more_label_reports_the_merged_backlog(self, monkeypatch):
-        """§6 "Load More reflects eviction": the sentinel built at the end of
-        the load must count the MERGED list, not the snapshot's backlog slice —
-        otherwise the bar under-reports exactly the cards the merge rescued."""
+        """§6 "Load More reflects eviction": the bar shown at the end of the
+        load must count the MERGED list, not the snapshot's backlog slice —
+        otherwise it under-reports exactly the cards the merge rescued.
+
+        On the HTML path the count is pushed through
+        `FeedTab.set_html_load_more(remaining)`; there is no sentinel widget
+        to build (WU feed-surface chunk 3b).
+        """
         h = self._handler()
         name, path = "label-proj", "/tmp/label-proj"
         snapshot = [self._card(f"s{i}", i, name) for i in range(1, 21)]
         pushed = self._card("pushed-survivor", 999, name)
-
-        built = []
-        real_build = h._build_load_more_widget
-
-        def _record(remaining):
-            built.append(remaining)
-            return real_build(remaining)
-
-        h._build_load_more_widget = _record
 
         def _push(handler):
             handler._cards[pushed.card_id] = pushed
@@ -2305,360 +1840,11 @@ class TestBacklogDiscipline:
 
         # 5 snapshot-backlog cards + 1 survivor = 6, NOT the snapshot's 5.
         assert len(h._backlog) == 6, [c.card_id for c in h._backlog]
-        assert built == [6], (
-            f"the sentinel must report the merged count (6), got {built}"
+        assert h._feed_tab.html_load_more == [6], (
+            f"the bar must report the merged count (6), got "
+            f"{h._feed_tab.html_load_more}"
         )
 
-    def test_loader_builds_widgets_outside_the_lock(self):
-        """Structural guard for round-3 BUG #8: `build_feed_card` must not be
-        lexically inside a `with self._lock` block in `_load_and_render`, while
-        the `_card_widgets` map write must still be inside one.
-
-        Purely structural (AST) — the lock narrowing is behaviour-preserving, so
-        it has no red-before-green claim; this pins the shape instead.
-        """
-        import ast
-        import inspect
-
-        import ui.feed.load as load_mod
-
-        tree = ast.parse(inspect.getsource(load_mod))
-        method = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "_load_and_render"
-        )
-
-        def _inside_lock(node, target, locked=False):
-            """Walk, tracking whether we are under a `with self._lock` block."""
-            for child in ast.iter_child_nodes(node):
-                child_locked = locked
-                if isinstance(child, ast.With):
-                    for item in child.items:
-                        ctx = item.context_expr
-                        if (isinstance(ctx, ast.Attribute) and ctx.attr == "_lock"):
-                            child_locked = True
-                if child is target:
-                    return locked
-                found = _inside_lock(child, target, child_locked)
-                if found is not None:
-                    return found
-            return None
-
-        build_calls = [
-            n for n in ast.walk(method)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-            and n.func.id == "build_feed_card"
-        ]
-        assert build_calls, "expected build_feed_card calls in _load_and_render"
-        for call in build_calls:
-            assert _inside_lock(method, call) is False, (
-                f"build_feed_card at line {call.lineno} is inside the lock — "
-                "up to PAGE_SIZE GTK constructions would block eviction"
-            )
-
-        widget_writes = [
-            n for n in ast.walk(method)
-            if isinstance(n, ast.Assign)
-            and any(
-                isinstance(t, ast.Subscript) and isinstance(t.value, ast.Attribute)
-                and t.value.attr == "_card_widgets"
-                for t in n.targets
-            )
-        ]
-        assert widget_writes, "expected _card_widgets writes in _load_and_render"
-        for write in widget_writes:
-            assert _inside_lock(method, write) is True, (
-                f"_card_widgets write at line {write.lineno} left the lock — "
-                "the map write must stay inside it (spec 'One rule')"
-            )
-
-
-class TestEvictedCardGuard:
-    """MEMRATCHET P7b (§2.1 evicted-card guard, §2.6 case 6).
-
-    `update_card` on a card whose widget eviction released must update and
-    persist the DATA and stop — rebuilding would re-append an old card at the
-    bottom of the feed, which is the ratchet the bound exists to stop.
-    """
-
-    def _handler(self):
-        from ui.handlers.feed_handler import FeedHandler
-
-        h = FeedHandler(GLib=MockGLib(), on_send_to_agent=MagicMock())
-        h.set_feed_tab(MockFeedTab())
-        return h
-
-    def _seed_newer(self, h, count, project, seq_start=2, height=56):
-        """Directly seed newer live widgets (stubs — no GTK widget builds)."""
-        ts = datetime.now(timezone.utc)
-        for seq in range(seq_start, seq_start + count):
-            cid = f"{project}-n{seq}"
-            h._cards[cid] = FeedCardData(
-                card_type="diff", source="agent", title=cid, body="", author="x",
-                timestamp=ts.replace(microsecond=seq), project_name=project,
-                card_id=cid, seq_num=seq,
-            )
-            h._project_cards.setdefault(project, []).insert(0, cid)
-            h._card_widgets[cid] = _StubCardWidget(height)
-        h._project_seq[project] = seq_start + count - 1
-
-    def test_update_card_on_evicted_card_persists_data_without_rebuilding(
-        self, monkeypatch
-    ):
-        """§2.6 case 6: data + persist updated; NO rebuild, NO re-append."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        h = self._handler()
-        tab = h._feed_tab
-        project = "evicted-update-proj"
-        tab._above_viewport = True                 # eviction is permitted
-
-        # The target card is added FIRST (real widget), then surrounded by
-        # newer cards so eviction's oldest-by-seq_num victim is the target.
-        target = FeedCardData(
-            card_type="tool_call", source="agent", title="target", body="before",
-            author="Coder", timestamp=datetime.now(timezone.utc), project_name=project,
-        )
-        card_id = h.add_card(target, persist=False)
-        assert card_id in h._card_widgets, "precondition: the card has a live widget"
-
-        self._seed_newer(h, MAX_LIVE_CARD_WIDGETS + 1, project)   # 121 newer
-
-        h._evict_surplus_card_widgets()
-        assert card_id not in h._card_widgets, (
-            "precondition: the oldest card was evicted"
-        )
-        assert card_id in h._cards, "card DATA must survive eviction"
-
-        # Persist plumbing (mirrors TestBackgroundPersistWriter): no writer
-        # thread, store mocked, drain deterministically.
-        h._ensure_persist_writer = lambda: None
-        store = MagicMock()
-        store.update_feed_card.return_value = True
-        monkeypatch.setattr("ui.handlers.feed_handler.feed_store", store)
-        h._project_paths[project] = "/tmp/evicted-update-proj"
-
-        appended_before = list(tab.append_calls)
-        replaced = []
-        real_replace = tab.replace_card
-
-        def _record_replace(cid, widget):
-            replaced.append(cid)
-            return real_replace(cid, widget)
-
-        tab.replace_card = _record_replace
-        cards_in_tab_before = list(tab.cards)
-
-        updated = FeedCardData(
-            card_type="tool_call", source="agent", title="target",
-            body="AFTER-UPDATE", author="Coder",
-            timestamp=target.timestamp, project_name=project, card_id=card_id,
-        )
-        h.update_card(card_id, updated)
-
-        # 1. DATA updated in memory.
-        assert h._cards[card_id].body == "AFTER-UPDATE"
-        # 2. DATA persisted (the durable copy).
-        h._drain_persist_queue()
-        assert store.update_feed_card.call_count == 1
-        payload = store.update_feed_card.call_args[0][2]
-        assert payload.get("body") == "AFTER-UPDATE", (
-            f"the updated body must reach disk; payload was {payload!r}"
-        )
-        # 3. NO rebuild, NO re-append, NO replace.
-        assert replaced == [], f"an evicted card must not be replace_card'd: {replaced}"
-        assert tab.append_calls == appended_before, (
-            "an evicted card must NOT be re-appended at the bottom of the feed"
-        )
-        assert tab.cards == cards_in_tab_before, "the tab's card list must not grow"
-        assert card_id not in h._card_widgets, (
-            "the guard must not resurrect a widget for an evicted card"
-        )
-
-    def test_guard_returns_before_any_widget_work(self, monkeypatch):
-        """Structural companion: with no live widget, `update_card` returns
-        BEFORE the in-place/rebuild dispatch — proven by spying on the two
-        widget paths (neither may be entered)."""
-        h = self._handler()
-        project = "guard-proj"
-        card = FeedCardData(
-            card_type="tool_call", source="agent", title="t", body="b",
-            author="Coder", timestamp=datetime.now(timezone.utc), project_name=project,
-        )
-        card_id = h.add_card(card, persist=False)
-        h._card_widgets.pop(card_id)               # as eviction leaves it
-        h._ensure_persist_writer = lambda: None
-        h._project_paths[project] = "/tmp/guard-proj"
-
-        rebuild = MagicMock()
-        monkeypatch.setattr(h, "_rebuild_and_replace_card", rebuild)
-        idles = []
-        real_idle = h._GLib.idle_add
-
-        def _record_idle(fn, *a, **kw):
-            idles.append(fn)
-            return real_idle(fn, *a, **kw)
-
-        monkeypatch.setattr(h._GLib, "idle_add", _record_idle)
-
-        h.update_card(card_id, card)
-
-        assert rebuild.call_count == 0, "no rebuild for an evicted card"
-        assert idles == [], (
-            "the guard must return before any idle_add widget dispatch"
-        )
-        assert h._cards[card_id].body == "b"
-
-
-class TestLoadPathSentinelsAndOrphans:
-    """MEMRATCHET P6 (§2.1 round-6 BUG #3, round-7 BUG #2) — real FeedTab.
-
-    These use the real container because the bugs are about *parenting*, which
-    no map can express: both `_card_widgets` and `_cards_by_id` agree even when
-    an orphan is still attached, so a map-based assertion cannot see it.
-    """
-
-    def _handler_on_real_tab(self, tab):
-        from ui.handlers.feed_handler import FeedHandler
-
-        h = FeedHandler(GLib=MockGLib(), on_send_to_agent=MagicMock())
-        h.set_feed_tab(tab)
-        return h
-
-    def _open(self, monkeypatch, h, name, path, cards):
-        """Run one project open deterministically (synchronous load thread)."""
-        import ui.handlers.feed_handler as fh
-
-        monkeypatch.setattr(fh, "threading", _SyncThreading)
-        store = MagicMock()
-        store.load_feed.return_value = cards
-        store.load_feed_prefs.return_value = _default_prefs()
-        store.FEED_WINDOW_DEFAULT = FEED_WINDOW_DEFAULT
-        monkeypatch.setattr(fh, "feed_store", store)
-        h._project_paths[name] = path
-        h.on_project_opened(name, path)
-
-    @staticmethod
-    def _cards(project_name, count, first_seq=1):
-        ts = datetime.now(timezone.utc)
-        return [
-            FeedCardData(
-                card_type="diff", source="agent", title=f"{project_name}-{s}", body="",
-                author="x", timestamp=ts.replace(microsecond=s), project_name=project_name,
-                card_id=f"{project_name}-c{s}", seq_num=s,
-            )
-            for s in range(first_seq, first_seq + count)
-        ]
-
-    def test_same_project_reopen_parents_one_sentinel(self, real_feed_tab, monkeypatch):
-        """Round-5 BUG #1: at most one `__load_more__` is ever parented —
-        kept below the cap so eviction never fires and cannot be the guard."""
-        tab = real_feed_tab
-        h = self._handler_on_real_tab(tab)
-        cards = self._cards("reopen-a", 20)          # > PAGE_SIZE → backlog + bar
-
-        self._open(monkeypatch, h, "reopen-a", "/tmp/reopen-a", cards)
-        assert len(_parented_sentinels(tab)) == 1, "first open parents one bar"
-
-        # Same project again (no close callback in between) — the fresh
-        # snapshot builds brand-new card objects, as a disk re-read returns.
-        self._open(monkeypatch, h, "reopen-a", "/tmp/reopen-a", self._cards("reopen-a", 20))
-        assert len(_parented_sentinels(tab)) == 1, (
-            "a same-project reopen must unparent the previous bar, not add a second"
-        )
-        assert len(h._card_widgets) <= 120, "precondition: eviction never fired"
-
-    def test_switch_to_project_without_backlog_clears_the_bar(
-        self, real_feed_tab, monkeypatch
-    ):
-        """Round-6 BUG #3: the cleanup is hoisted OUT of the `if`, so switching
-        to a project that builds no sentinel still drops the previous bar."""
-        tab = real_feed_tab
-        h = self._handler_on_real_tab(tab)
-
-        self._open(monkeypatch, h, "with-backlog", "/tmp/with-backlog", self._cards("with-backlog", 20))
-        assert len(_parented_sentinels(tab)) == 1, "precondition: the bar exists"
-
-        # ≤ PAGE_SIZE cards → no backlog → load builds no sentinel at all.
-        self._open(monkeypatch, h, "small-proj", "/tmp/small-proj", self._cards("small-proj", 3))
-        assert _parented_sentinels(tab) == [], (
-            "the previous project's bar must not survive the switch"
-        )
-
-    def test_same_project_reopen_leaves_no_orphan_widgets(
-        self, real_feed_tab, monkeypatch
-    ):
-        """Round-7 BUG #2: `FeedTab.append_card` only overwrites the map entry,
-        so without a `remove_card` first the previous widget stays parented and
-        is unreachable by every map and every removal path."""
-        tab = real_feed_tab
-        h = self._handler_on_real_tab(tab)
-
-        self._open(monkeypatch, h, "orph", "/tmp/orph", self._cards("orph", 3))
-        self._open(monkeypatch, h, "orph", "/tmp/orph", self._cards("orph", 3))
-
-        parented = _parented_cards(tab)
-        mapped = [cid for cid in tab._cards_by_id if cid != "__load_more__"]
-        assert len(parented) == len(mapped), (
-            f"{len(parented)} card widgets are parented but only {len(mapped)} "
-            "ids are in the tab map — orphans"
-        )
-        assert len(set(parented)) == len(parented), (
-            "the same widget must not be counted twice (duplicate parenting)"
-        )
-        assert len(mapped) == 3, "precondition: the project's 3 cards are mapped"
-
-    def test_mirror_membership_with_non_vacuity(self, real_feed_tab):
-        """§6 — for every id in `_project_cards[active]` (sentinel excluded),
-        membership of `_cards_by_id` equals membership of `_card_widgets`.
-
-        The non-vacuity precondition is asserted FIRST: the unallocated-widget
-        case makes this mirror hold trivially, so the pass must demonstrably
-        remove at least one id from BOTH maps. Driven with measurable fake
-        widgets per the spec's round-6 warning."""
-        from ui.handlers.feed_handler import MAX_LIVE_CARD_WIDGETS
-
-        tab = real_feed_tab
-        h = self._handler_on_real_tab(tab)
-        proj = "mirror-proj"
-        ts = datetime.now(timezone.utc)
-
-        ids = []
-        for s in range(1, MAX_LIVE_CARD_WIDGETS + 2):        # 121 → over the cap
-            cid = f"m{s}"
-            h._cards[cid] = FeedCardData(
-                card_type="diff", source="agent", title=cid, body="", author="x",
-                timestamp=ts.replace(microsecond=s), project_name=proj,
-                card_id=cid, seq_num=s,
-            )
-            h._project_cards.setdefault(proj, []).insert(0, cid)
-            widget = _geometry_widget(56.0)
-            h._card_widgets[cid] = widget
-            tab.append_card(widget, cid)
-            ids.append(cid)
-
-        # Measurable geometry + a viewport below every card's bottom edge, so
-        # `is_above_viewport` takes its real, non-vacuous branch.
-        tab._feed_scroll.get_vadjustment().set_value(1000.0)
-        h._active_project_name = proj
-
-        h._evict_surplus_card_widgets()
-
-        released = [cid for cid in ids if cid not in h._card_widgets]
-        assert released, "non-vacuity: at least one id must leave _card_widgets"
-        assert all(cid not in tab._cards_by_id for cid in released), (
-            "non-vacuity: the same ids must leave _cards_by_id in the same pass"
-        )
-        assert len(_parented_sentinels(tab)) == 1, (
-            "the pushed-back cards must be reachable (exactly one bar)"
-        )
-
-        for cid in h._project_cards[proj]:
-            if cid == "__load_more__":
-                continue
-            assert (cid in tab._cards_by_id) == (cid in h._card_widgets), (
-                f"{cid}: tab map and handler map disagree"
-            )
 
 
 def _pump_feed_idles(limit: int = 20) -> None:
@@ -2916,293 +2102,6 @@ class TestScheduleScrollToBottom:
 
         assert tab.get_vadjustment() is None
         assert tab.is_near_bottom() is True
-
-    def test_is_above_viewport_false_for_unallocated_widget(self, real_feed_tab):
-        """Round-6 BUG #1 — the zero-rect trap.
-
-        GTK 4.14 returns `compute_bounds -> (True, zero rect)` for a widget that
-        has never been allocated. Verified live under Xvfb: an unrealized,
-        unmapped Gtk.Label in the real card container gives ok=True,
-        origin=(0.0, 0.0), size=(0.0, 0.0). A naive
-        `origin.y + height <= value` test would call that "above the viewport"
-        and destroy cards that are merely not laid out yet. The
-        `rect.size.height <= 0` guard must classify it "unknown" instead.
-
-        Non-vacuity: the raw compute_bounds result and the adjustment value are
-        asserted first, so this test genuinely exercises the extent guard. It
-        fails if the guard is removed (0.0 + 0.0 <= 0.0 → True) and it fails if
-        GTK ever starts reporting ok=False (which would take the other branch and
-        stop exercising the guard at all).
-        """
-        from gi.repository import Gtk
-
-        tab = real_feed_tab
-        label = Gtk.Label(label="never allocated")
-        tab.append_card(label)
-
-        # Precondition: the tab is never realized/mapped in this harness.
-        assert label.get_mapped() is False, "precondition: the tab is never mapped"
-
-        container = tab.get_card_container()
-        ok, rect = label.compute_bounds(container)
-        assert ok is True, (
-            f"precondition: GTK must report ok=True with a zero rect, got ok={ok}"
-        )
-        assert rect.size.height == 0.0, (
-            f"precondition: expected a zero-height rect, got {rect.size.height}"
-        )
-        assert tab.get_vadjustment().get_value() == 0.0, (
-            "precondition: at value=0.0 the naive test 0.0 + 0.0 <= 0.0 is True, "
-            "so the guard is the only thing that can make this False"
-        )
-
-        assert tab.is_above_viewport(label) is False
-
-    def test_is_above_viewport_false_for_mock_widget(self, real_feed_tab):
-        """Fail-safe: a widget with no `compute_bounds` (a mock / test double) is
-        treated as unmeasurable, never as "above the viewport" — the
-        AttributeError branch of §2.2. Without the try/except the AttributeError
-        would escape into the eviction pass.
-        """
-        class _NoGeometry:
-            """Test double with no compute_bounds — like the cards MockFeedTab holds."""
-
-        widget = _NoGeometry()
-        assert not hasattr(widget, "compute_bounds"), (
-            "precondition: the double must not define compute_bounds"
-        )
-
-        assert real_feed_tab.is_above_viewport(widget) is False
-
-    def test_is_above_viewport_false_for_non_ancestor(self, real_feed_tab):
-        """The `not ok` half of the geometry guard.
-
-        `test_is_above_viewport_false_for_unallocated_widget` pins the
-        `rect.size.height <= 0` half; this pins the other half. GTK 4.14
-        returns `compute_bounds -> (False, zero rect)` whenever the target
-        widget is not an ancestor of the widget being measured (verified in
-        the P2 audit probe, `.debug/p2_geometry_probe.py` §3), so a foreign
-        widget — one living in a different container — must never be
-        classified "above the viewport" and destroyed.
-
-        Non-vacuity: the raw ok=False and the naive-test comparison are
-        asserted first. NOTE (P3 audit correction): this test pins the
-        observable False and GTK's ok=False-for-non-ancestors contract, but
-        NOT the `not ok` guard half in isolation — GTK couples ok=False with
-        a zero rect, so the `height <= 0` half intercepts even if `not ok`
-        is deleted (mutation-equivalent halves). The half is pinned
-        independently by
-        `test_is_above_viewport_false_when_ok_false_alone` (synthetic rect
-        bypassing the height guard).
-        """
-        from gi.repository import Gtk
-
-        tab = real_feed_tab
-        foreign_box = Gtk.Box()          # NOT tab.get_card_container()
-        label = Gtk.Label(label="not in the feed")
-        foreign_box.append(label)
-
-        container = tab.get_card_container()
-        ok, rect = label.compute_bounds(container)
-        assert ok is False, (
-            f"precondition: a non-ancestor target must report ok=False, "
-            f"got ok={ok}"
-        )
-        naive_above = rect.origin.y + rect.size.height <= tab.get_vadjustment().get_value()
-        assert naive_above is True, (
-            "precondition: the raw rect must satisfy the naive above-viewport "
-            "test at value=0.0, otherwise the guard is not the discriminator"
-        )
-
-        assert tab.is_above_viewport(label) is False
-
-    def test_is_above_viewport_false_when_ok_false_alone(self, real_feed_tab):
-        """Pins the `not ok` guard half INDEPENDENT of the height half.
-
-        The P3 audit showed GTK couples ok=False with a zero rect for
-        non-ancestors, so deleting `not ok` alone is invisible to every
-        real-GTK test (the `height <= 0` half intercepts). A synthetic
-        widget whose compute_bounds reports ok=False with a NEGATIVE-y,
-        POSITIVE-height rect bypasses the height guard: the naive
-        comparison (origin.y + height <= value, i.e. -50 <= 0) would say
-        "above the viewport", so this test fails if the `not ok` half is
-        dropped, tightened, or the guard is re-ordered.
-        """
-        tab = real_feed_tab
-
-        class _OkFalseRect:
-            def compute_bounds(self, _container):
-                return (False, _SyntheticRect(origin_y=-100.0, height=50.0))
-
-        assert tab.is_above_viewport(_OkFalseRect()) is False
-
-
-class _SyntheticRect:
-    """Minimal Graphene.Rect stand-in for guard-branch pinning (P3 audit)."""
-
-    def __init__(self, origin_y, height):
-        class _Pt:
-            def __init__(self, y):
-                self.y = y
-
-        class _Size:
-            def __init__(self, h):
-                self.height = h
-
-        self.origin = _Pt(origin_y)
-        self.size = _Size(height)
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  TestClearWidgetStateRecursive — Phase 4D-2
-#  Tests _clear_widget_state_recursive on real Gtk.Box/Button/Label trees.
-#  Verifies the recursive walk clears PRELIGHT/ACTIVE/SELECTED on self +
-#  all descendants.
-# ═══════════════════════════════════════════════════════════════════
-
-class TestClearWidgetStateRecursive:
-    """
-    Phase 4D-2: Test _clear_widget_state_recursive against real GTK4 widgets.
-
-    Uses Gtk.Box + Gtk.Button + Gtk.Label trees because these are the exact
-    widget types used in feed cards.
-    """
-
-    def test_clear_widget_state_visits_self_and_all_descendants(self):
-        """Build a real widget tree: Box → [Button(label=A, child=Label), Button(label=B)].
-        Set PRELIGHT on box + both buttons + label. Call _clear_widget_state_recursive.
-        Assert PRELIGHT is cleared on all 4 widgets.
-        """
-        from ui.views.feed_tab import FeedTab
-        from gi.repository import Gtk
-
-        # Build tree
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        btn_a = Gtk.Button(label="A")
-        lbl = Gtk.Label(label="nested")
-        btn_a.set_child(lbl)  # btn_a has a child Label
-        btn_b = Gtk.Button(label="B")
-        outer.append(btn_a)
-        outer.append(btn_b)
-
-        # Set PRELIGHT on all 4 widgets
-        outer.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        btn_a.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        btn_b.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        lbl.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-
-        # Verify PRELIGHT is set before clearing
-        assert bool(outer.get_state_flags() & Gtk.StateFlags.PRELIGHT)
-        assert bool(btn_a.get_state_flags() & Gtk.StateFlags.PRELIGHT)
-        assert bool(btn_b.get_state_flags() & Gtk.StateFlags.PRELIGHT)
-        assert bool(lbl.get_state_flags() & Gtk.StateFlags.PRELIGHT)
-
-        # Call the method via a FeedTab instance (it's a method on FeedTab)
-        # But we don't need the full FeedTab — we can call the unbound method
-        # Actually, _clear_widget_state_recursive uses self only for dispatch,
-        # not for any instance state. But it's a method, so we need an instance.
-        # Create a minimal FeedTab.
-        tab = FeedTab()
-        tab._clear_widget_state_recursive(outer)
-
-        # Assert PRELIGHT is cleared on all 4 widgets
-        assert not bool(outer.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"outer still has PRELIGHT: {outer.get_state_flags()}"
-        )
-        assert not bool(btn_a.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"btn_a still has PRELIGHT: {btn_a.get_state_flags()}"
-        )
-        assert not bool(btn_b.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"btn_b still has PRELIGHT: {btn_b.get_state_flags()}"
-        )
-        assert not bool(lbl.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"lbl still has PRELIGHT: {lbl.get_state_flags()}"
-        )
-
-    def test_clear_widget_state_handles_widget_without_state_safely(self):
-        """Call _clear_widget_state_recursive on a fresh Gtk.Box that has never
-        had any state flags set. Must not raise.
-        """
-        from ui.views.feed_tab import FeedTab
-        from gi.repository import Gtk
-
-        box = Gtk.Box()  # never had flags set
-
-        # Verify it starts clean (only DIR_LTR is default)
-        flags_before = box.get_state_flags()
-        assert not bool(flags_before & Gtk.StateFlags.PRELIGHT)
-        assert not bool(flags_before & Gtk.StateFlags.ACTIVE)
-        assert not bool(flags_before & Gtk.StateFlags.SELECTED)
-
-        tab = FeedTab()
-        # Must not raise
-        tab._clear_widget_state_recursive(box)
-
-        # Still clean
-        flags_after = box.get_state_flags()
-        assert not bool(flags_after & Gtk.StateFlags.PRELIGHT)
-        assert not bool(flags_after & Gtk.StateFlags.ACTIVE)
-        assert not bool(flags_after & Gtk.StateFlags.SELECTED)
-
-    def test_clear_widget_state_handles_unset_exception_gracefully(self):
-        """If unset_state_flags raises on a widget, the recursion must continue
-        to siblings and children. This documents the try/except in the production
-        code.
-
-        We build a real tree and monkey-patch unset_state_flags on ONE widget
-        to raise. Then verify its child and sibling are still processed.
-        """
-        from ui.views.feed_tab import FeedTab
-        from gi.repository import Gtk
-
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        btn_problem = Gtk.Button(label="problem")
-        lbl_inside_problem = Gtk.Label(label="inside")
-        btn_problem.set_child(lbl_inside_problem)
-        btn_ok = Gtk.Button(label="ok")
-        outer.append(btn_problem)
-        outer.append(btn_ok)
-
-        # Set PRELIGHT on all
-        outer.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        btn_problem.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        lbl_inside_problem.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-        btn_ok.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
-
-        # Monkey-patch unset_state_flags on btn_problem to raise
-        original_unset = btn_problem.unset_state_flags
-
-        def raising_unset(flags):
-            raise RuntimeError("simulated widget disposal")
-
-        btn_problem.unset_state_flags = raising_unset
-
-        tab = FeedTab()
-        # Must not propagate the exception
-        tab._clear_widget_state_recursive(outer)
-
-        # btn_problem: exception was caught, but PRELIGHT might still be set
-        # because unset_state_flags raised. That's acceptable — the production
-        # code uses try/except Exception: pass.
-        # Restore original to verify
-        btn_problem.unset_state_flags = original_unset
-        # btn_problem may still have PRELIGHT (the exception prevented clearing)
-        # This is documented behavior — the recursive walker continues despite errors.
-
-        # CRITICAL assertions: sibling and child must be cleared
-        assert not bool(btn_ok.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"btn_ok should have been cleared but still has PRELIGHT: "
-            f"{btn_ok.get_state_flags()}"
-        )
-        assert not bool(lbl_inside_problem.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"lbl_inside_problem should have been cleared (recursion continued "
-            f"past the exception) but still has PRELIGHT: "
-            f"{lbl_inside_problem.get_state_flags()}"
-        )
-        assert not bool(outer.get_state_flags() & Gtk.StateFlags.PRELIGHT), (
-            f"outer should have been cleared but still has PRELIGHT: "
-            f"{outer.get_state_flags()}"
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -5053,141 +3952,6 @@ class TestPendingSaveIdStaleRegression:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestHideCardButtonsBug:
-    """Bug #13: hide_card_buttons() was a silent no-op.
-
-    The original implementation looked up `_<name>_button` attributes on
-    the card widget. But `build_feed_card()` constructs local `btn_accept`
-    and `btn_reject` variables and appends them inline — it NEVER stores
-    them as named attributes on the returned card widget. So
-    `getattr(card_widget, "_approve_button", None)` returned None every
-    time, and the buttons stayed visible after auto-approve.
-
-    User-visible symptom: in Show mode, an exec card auto-approved via
-    `_auto_approve_exec_card()` still showed its Approve/Deny buttons.
-    Clicking Approve again called `handle_approve_exec(cid, True)` → ARTH
-    a second time. Not idempotent → double-action risk.
-
-    Fix: map each hide_card_buttons arg name to its CSS class
-    (`build_feed_card` sets `feed-btn-accept` / `feed-btn-reject` / 
-    `feed-btn-review`) and walk the widget subtree.
-    """
-
-    def _make_card_widget(self, button_labels=("Approve", "Deny")):
-        """Build a minimal Gtk.Box mimicking build_feed_card's structure:
-        a root card box with a children Btns row containing the given
-        buttons. Returns the root box."""
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import Gtk
-
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        actions.add_css_class("feed-card-actions")
-
-        css_classes = {
-            "Approve": "feed-btn-accept",
-            "Deny": "feed-btn-reject",
-            "Accept": "feed-btn-accept",
-            "Reject": "feed-btn-reject",
-            "Review": "feed-btn-review",
-        }
-        for label in button_labels:
-            btn = Gtk.Button(label=label)
-            btn.add_css_class(css_classes.get(label, "feed-btn-custom"))
-            actions.append(btn)
-        card.append(actions)
-        return card
-
-    def test_hide_card_buttons_hides_approve(self):
-        """hide_card_buttons(['approve']) hides an Approve button."""
-        from ui.views.feed_tab import FeedTab
-        tab = FeedTab()  # FeedTab.__init__() takes no args
-        
-        card = self._make_card_widget(button_labels=("Approve", "Deny"))
-        tab._cards_by_id["test_card"] = card
-        
-        tab.hide_card_buttons("test_card", ["approve"])
-        
-        # Find the Approve button in the subtree
-        approve_btn = None
-        deny_btn = None
-        for child in [c for c in card.get_first_child().get_first_child().__iter__()] if False else []:
-            pass
-        # Simpler: walk via known structure
-        actions_box = card.get_first_child()
-        first_button = actions_box.get_first_child()
-        second_button = first_button.get_next_sibling()
-        assert first_button.get_visible() is False, (
-            "Approve button must be hidden after hide_card_buttons(['approve'])"
-        )
-        assert second_button.get_visible() is True, (
-            "Deny button must remain visible — only 'approve' was requested"
-        )
-
-    def test_hide_card_buttons_hides_deny(self):
-        """hide_card_buttons(['deny']) hides a Deny button."""
-        from ui.views.feed_tab import FeedTab
-        tab = FeedTab()
-        
-        card = self._make_card_widget(button_labels=("Approve", "Deny"))
-        tab._cards_by_id["test_card"] = card
-        
-        tab.hide_card_buttons("test_card", ["deny"])
-        
-        actions_box = card.get_first_child()
-        first_button = actions_box.get_first_child()
-        second_button = first_button.get_next_sibling()
-        assert first_button.get_visible() is True, (
-            "Approve button must remain visible — only 'deny' was requested"
-        )
-        assert second_button.get_visible() is False, (
-            "Deny button must be hidden after hide_card_buttons(['deny'])"
-        )
-
-    def test_hide_card_buttons_hides_both(self):
-        """hide_card_buttons(['approve', 'deny']) hides both."""
-        from ui.views.feed_tab import FeedTab
-        tab = FeedTab()
-        
-        card = self._make_card_widget(button_labels=("Approve", "Deny"))
-        tab._cards_by_id["test_card"] = card
-        
-        tab.hide_card_buttons("test_card", ["approve", "deny"])
-        
-        actions_box = card.get_first_child()
-        first_button = actions_box.get_first_child()
-        second_button = first_button.get_next_sibling()
-        assert first_button.get_visible() is False
-        assert second_button.get_visible() is False
-
-    def test_hide_card_buttons_unknown_card_is_noop(self):
-        """Unknown card_id is a no-op (no exception)."""
-        from ui.views.feed_tab import FeedTab
-        tab = FeedTab()
-        
-        # Should not raise
-        tab.hide_card_buttons("nonexistent_card_id", ["approve", "deny"])
-
-    def test_hide_card_buttons_accept_alias_hides_approve(self):
-        """Both 'approve' (needs_approval label) and 'accept' (file_change
-        label) should map to feed-btn-accept CSS class. The caller may
-        pass either depending on card_type — both must work."""
-        from ui.views.feed_tab import FeedTab
-        tab = FeedTab()
-        
-        card = self._make_card_widget(button_labels=("Accept",))
-        tab._cards_by_id["test_card"] = card
-        
-        tab.hide_card_buttons("test_card", ["accept"])
-        
-        btn = card.get_first_child().get_first_child()
-        assert btn.get_visible() is False, (
-            "Accept button (file-change label) must be hidden when "
-            "passed as 'accept' to hide_card_buttons"
-        )
-
-
 # ── TestAutoAcceptLevel — SPEC-PROJECT-SETTINGS-BAR-ENHANCED-FIX-3 §5 Step 2
 # Phase I.5. Regression tests for the settings-bar auto-accept level API:
 #   get_auto_accept_level / set_auto_accept_level / _commit_auto_accept_level
@@ -5543,17 +4307,16 @@ class TestBackgroundPersistWriter:
             f"clobbering a recorded decision); payload was {updates!r}"
         )
 
-    # ── F1 REBUILD-PATH parity (Debugger audit BUG #1, bf0fe54) ──────────
-    #  The two tests above seed `tool_call` cards, which now expose the
-    #  `_body_label` seam — so they exercise the IN-PLACE branch of
-    #  update_card. These two force the REBUILD branch (`file_modified`
-    #  renders via _render_file_event_body, no `_text_label`, so
-    #  card._body_label is None), proving the enqueue block's F1 shape is
-    #  branch-independent: a future refactor that moves the enqueue into
-    #  one branch cannot silently regress the other.
+    # ── F1 HTML-PATH parity (Debugger audit BUG #1, bf0fe54) ─────────────
+    #  The two tests above seed `tool_call` cards. These two seed a
+    #  `file_modified` card, the type that used to take the widget REBUILD
+    #  branch instead of the in-place refresh. With the GTK widget path gone
+    #  (WU feed-surface chunk 3b) BOTH branches collapse onto the document
+    #  upsert, so the remaining contract is that the F1 payload shape is
+    #  branch-independent and the update still reaches the document.
 
     def _seed_rebuild_path_card(self, h, project_name="proj"):
-        """Seed a file_modified card — no _body_label seam → rebuild path."""
+        """Seed a file_modified card (the old rebuild-branch type)."""
         card = FeedCardData(
             card_type="file_modified", source="agent", title="file changed",
             body="", author="Coder",
@@ -5570,13 +4333,12 @@ class TestBackgroundPersistWriter:
         project_path = h._project_paths["proj"]
         self._no_writer(h)
 
-        # Precondition guard: this fixture really takes the rebuild branch.
-        old_widget = h._card_widgets[card_id]
-        assert getattr(old_widget, "_body_label", "MISSING") is None, (
-            "fixture precondition: file_modified card must lack _body_label "
-            "(if the renderer gained a seam, this test no longer covers the "
-            "rebuild path)"
+        # Precondition guard: the card is in the document, not a GTK widget.
+        assert h._html_feed is True, "precondition: the handler runs the HTML path"
+        assert card_id not in h._card_widgets, (
+            "fixture precondition: the GTK widget path must be gone"
         )
+        upserts_before = len(h._feed_tab.upserts)
 
         store = MagicMock()
         store.update_feed_card.return_value = True
@@ -5588,13 +4350,14 @@ class TestBackgroundPersistWriter:
 
         updates = store.update_feed_card.call_args[0][2]
         assert updates.get("accepted") is True, (
-            f"rebuild path must persist the durable decision; "
+            f"the update must persist the durable decision; "
             f"payload was {updates!r}"
         )
-        # Structural: the widget was rebuilt + swapped, not mutated in place.
-        assert h._card_widgets[card_id] is not old_widget, (
-            "rebuild branch must replace the widget"
+        # Structural: the card was re-upserted into the document.
+        assert len(h._feed_tab.upserts) == upserts_before + 1, (
+            "the update must re-upsert the card into the feed document"
         )
+        assert h._feed_tab.upserts[-1].card_id == card_id
 
     def test_rebuild_path_omits_accepted_when_none(self, monkeypatch):
         h = self._make_handler()
@@ -5602,9 +4365,7 @@ class TestBackgroundPersistWriter:
         project_path = h._project_paths["proj"]
         self._no_writer(h)
 
-        assert getattr(h._card_widgets[card_id], "_body_label", "MISSING") is None, (
-            "fixture precondition: rebuild branch required"
-        )
+        assert h._html_feed is True, "precondition: the handler runs the HTML path"
 
         store = MagicMock()
         store.update_feed_card.return_value = True
@@ -5616,8 +4377,7 @@ class TestBackgroundPersistWriter:
 
         updates = store.update_feed_card.call_args[0][2]
         assert "accepted" not in updates, (
-            f"rebuild path: accepted=None must NOT be written; "
-            f"payload was {updates!r}"
+            f"accepted=None must NOT be written; payload was {updates!r}"
         )
 
 
@@ -6540,163 +5300,15 @@ class TestWindowCompaction:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TestUpdateCardInPlace — SPEC-UI-RESPONSIVENESS-2 §2.4 Phase 4 Part A
+#  RETIRED — TestUpdateCardInPlace (SPEC-UI-RESPONSIVENESS-2 §2.4 Part A).
 #
-#  update_card() must refresh a LIVE card widget by reference when the
-#  widget exposes the child seams added in build_feed_card
-#  (`_body_label`), and fall back to rebuild + FeedTab.replace_card when
-#  it does not. The seams are what make the in-place path possible; the
-#  RED assertions below fail on the pre-Phase-4 code (which always
-#  rebuilt), because no widget ever carried `_body_label`.
+#  Those tests pinned update_card()'s in-place widget refresh via the
+#  `_body_label` seam and the rebuild fallback via FeedTab.replace_card().
+#  Both widget factories were deleted with the GTK feed path (WU feed-surface
+#  chunk 3b): an update is now a document upsert, so there is no widget to
+#  mutate and no rebuild fallback. The F1 persist-payload contract that the
+#  class also covered is still pinned by TestBackgroundPersistWriter above.
 # ═══════════════════════════════════════════════════════════════════
-
-class TestUpdateCardInPlace:
-    """Phase 4 Part A — in-place feed card updates."""
-
-    def _make(self):
-        """Handler + MockFeedTab, with replace_card recorded."""
-        from ui.handlers.feed_handler import FeedHandler
-        h = FeedHandler(GLib=MockGLib(), on_send_to_agent=MagicMock())
-        tab = MockFeedTab()
-        replaced = []
-        original_replace = tab.replace_card
-
-        def _record(card_id, new_widget):
-            replaced.append((card_id, new_widget))
-            original_replace(card_id, new_widget)
-
-        tab.replace_card = _record
-        h.set_feed_tab(tab)
-        return h, tab, replaced
-
-    @staticmethod
-    def _agent_card(**overrides):
-        fields = dict(
-            card_type="agent_action",
-            source="agent",
-            title="Coder is calling read_file",
-            body="⏳ Running...",
-            author="Coder",
-            timestamp=datetime.now(timezone.utc),
-            project_name="proj",
-            metadata={"status": "running"},
-        )
-        fields.update(overrides)
-        return FeedCardData(**fields)
-
-    # ── In-place path (widget exposes the body seam) ──────────────────────
-
-    def test_in_place_update_keeps_same_widget_instance(self):
-        """A seam-bearing widget is mutated, not rebuilt or swapped."""
-        h, tab, replaced = self._make()
-        card = self._agent_card()
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-        assert widget._body_label is not None, "fixture precondition: body seam exposed"
-
-        card.body = "read_file → 12 lines"
-        card.metadata["status"] = "complete"
-        h.update_card(card_id, card)
-
-        assert h._card_widgets[card_id] is widget, "in-place update must keep the widget"
-        assert replaced == [], "in-place update must not call FeedTab.replace_card"
-        assert tab.cards[0][0] is widget, "the live widget must stay in the feed"
-
-    def test_in_place_update_refreshes_body_and_state_classes(self):
-        """Body text + agent_action sub-state classes follow the new card data."""
-        h, tab, replaced = self._make()
-        card = self._agent_card()
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-        assert "feed-card-running" in widget.get_css_classes(), "fixture precondition"
-
-        card.body = "read_file → 12 lines"
-        card.metadata["status"] = "error"
-        h.update_card(card_id, card)
-
-        assert widget._body_label.get_text() == "read_file → 12 lines"
-        assert "feed-card-error" in widget.get_css_classes()
-        assert "feed-card-running" not in widget.get_css_classes(), (
-            "the stale running class must be removed"
-        )
-
-    def test_in_place_update_adds_accepted_badge(self):
-        """approve_exec's accepted=True decision lands on the live widget."""
-        h, tab, replaced = self._make()
-        card = self._agent_card(metadata={"needs_approval": True, "status": "running"})
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-        assert widget._status_label is None, "fixture precondition: no badge yet"
-
-        card.accepted = True
-        card.metadata["status"] = "approved"
-        h.update_card(card_id, card)
-
-        assert h._card_widgets[card_id] is widget
-        assert widget._status_label is not None
-        assert widget._status_label.get_text() == "ACCEPTED"
-        assert "feed-card-accepted" in widget.get_css_classes()
-
-    # ── Fallback path (widget lacks the seam) ─────────────────────────────
-
-    def test_fallback_rebuilds_widget_without_body_seam(self):
-        """No text-body seam → rebuild + replace_card.
-
-        MEMRATCHET P8: a file-event card with a NON-empty body now exposes the
-        seam, so the no-seam case must be driven with an EMPTY body (the
-        renderer only sets `_text_label` inside its non-empty branch).
-        """
-        h, tab, replaced = self._make()
-        card = FeedCardData(
-            card_type="file_modified", source="system",
-            title="Modified src/foo.py", body="",
-            author="system", file_path="src/foo.py",
-            timestamp=datetime.now(timezone.utc), project_name="proj",
-        )
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-        assert getattr(widget, "_body_label", None) is None, "fixture precondition: no seam"
-
-        h.update_card(card_id, card)
-
-        new_widget = h._card_widgets[card_id]
-        assert new_widget is not widget, "fallback must rebuild the widget"
-        assert [cid for cid, _w in replaced] == [card_id]
-
-    def test_update_card_in_place_returns_false_without_seam(self):
-        """The view helper reports 'not handled' instead of raising.
-
-        MEMRATCHET P8: the empty-body file-event card is the remaining
-        no-seam case (the non-empty one is covered by the True-path tests in
-        tests/test_feed_card.py).
-        """
-        from ui.views.feed_card import update_card_in_place
-        h, tab, replaced = self._make()
-        card = FeedCardData(
-            card_type="file_modified", source="system",
-            title="Modified src/foo.py", body="",
-            author="system", file_path="src/foo.py",
-            timestamp=datetime.now(timezone.utc), project_name="proj",
-        )
-        card_id = h.add_card(card)
-
-        assert update_card_in_place(h._card_widgets[card_id], card) is False
-
-    def test_in_place_failure_falls_back_to_rebuild(self):
-        """A refresh that raises mid-flight must still leave a valid card."""
-        h, tab, replaced = self._make()
-        card = self._agent_card()
-        card_id = h.add_card(card)
-        widget = h._card_widgets[card_id]
-
-        with patch("ui.handlers.feed_handler.update_card_in_place",
-                   side_effect=RuntimeError("boom")):
-            h.update_card(card_id, card)
-
-        assert h._card_widgets[card_id] is not widget, (
-            "the failed in-place refresh must fall back to a rebuild"
-        )
-        assert [cid for cid, _w in replaced] == [card_id]
 
 
 class TestNonGitDecisionPersist:

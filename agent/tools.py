@@ -404,7 +404,41 @@ def _resolve_project_path(path: str, project_path: str) -> str | None:
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 
-def _read_file(path: str, project_path: str, offset: int | None = None, limit: int | None = None) -> ToolResult:
+def _start_byte_for_line(path: str, line: int) -> int | None:
+    """Byte offset of a 1-based line, or None if the file ends first.
+
+    Line 1 is byte 0, including an empty file. A request past the last
+    line is None so the caller does not return a window from byte 0.
+    """
+    if line <= 1:
+        return 0
+    need = line - 1
+    pos = 0
+    with open(path, "rb") as fh:
+        while need > 0:
+            chunk = fh.read(65536)
+            if not chunk:
+                return None
+            start = 0
+            while need > 0:
+                nl = chunk.find(b"\n", start)
+                if nl < 0:
+                    break
+                need -= 1
+                start = nl + 1
+                if need == 0:
+                    return pos + start
+            pos += len(chunk)
+    return None
+
+
+def _read_file(
+    path: str,
+    project_path: str,
+    offset: int | None = None,
+    limit: int | None = None,
+    line: int | None = None,
+) -> ToolResult:
     """Read a file relative to project_path."""
     resolved = _resolve_project_path(path, project_path)
     if resolved is None:
@@ -432,11 +466,29 @@ def _read_file(path: str, project_path: str, offset: int | None = None, limit: i
         # that byte window.
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
             return ToolResult(success=False, error="limit must be an integer >= 0")
-        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
+        if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
+            return ToolResult(success=False, error="line must be an integer >= 1")
+        if line is not None and line < 1:
+            return ToolResult(success=False, error="line must be an integer >= 1")
+        # line is the search_files coordinate ("Line N"). When it is set,
+        # offset is not a line number and is ignored.
+        if (
+            line is None
+            and offset is not None
+            and (isinstance(offset, bool) or not isinstance(offset, int))
+        ):
             return ToolResult(success=False, error="offset must be an integer")
         if limit is not None and limit < 0:
             return ToolResult(success=False, error="limit must be >= 0")
-        start = 0 if offset is None else offset
+        if line is not None:
+            start = _start_byte_for_line(resolved, line)
+            if start is None or (line > 1 and start >= size):
+                return ToolResult(
+                    success=False,
+                    error=f"line {line} is past the end of {path}",
+                )
+        else:
+            start = 0 if offset is None else offset
         # A caller-supplied limit smaller than the cap is honored with no notice.
         # A larger limit is clamped. An omitted limit uses the cap.
         clamped = limit is not None and limit > MAX_READ_SIZE
@@ -453,10 +505,17 @@ def _read_file(path: str, project_path: str, offset: int | None = None, limit: i
         hit_byte_cap = len(raw) == cap and (start + len(raw)) < size
         if (hit_byte_cap or cut_lines) and stopped_by_us:
             next_offset = start + len(raw) if not cut_lines else start + len(content.encode("utf-8"))
-            content += (
+            notice = (
                 f"\n[... truncated at {len(content)} bytes; "
-                f"file is {size} bytes; continue with offset={next_offset} ...]"
+                f"file is {size} bytes; continue with offset={next_offset}"
             )
+            if line is not None:
+                # A byte window that ends mid-line repeats that line on
+                # the next read. Ending on a newline advances past it.
+                notice += f" or line={line + content.count(chr(10))}"
+            content += notice + " ...]"
+        if line is not None:
+            content = f"[line {line} of {path}]\n" + content
         return ToolResult(success=True, output=content)
 
     except PermissionError:
@@ -817,19 +876,24 @@ def _run_grep(
     search_root: str,
     file_type: str | None = None,
     timeout: int = 10,
+    target: str = ".",
 ) -> tuple[int, str, str]:
     """Run grep and return (returncode, stdout, stderr).
 
     Shared by _search_files (tool) and _file_search (tool) to guarantee
     identical grep behavior: same flags (-n -H --directories=skip -r),
     same --include filter, same -- separator, same timeout.
+    ``target`` is ``.`` for a directory search and the file's basename
+    when ``path`` is a file (cwd is then the parent; a file cannot be cwd).
     """
     if not search_root or not isinstance(search_root, str):
         raise ValueError(f"search_root must be a non-empty string, got {search_root!r}")
+    if not target or not isinstance(target, str):
+        raise ValueError(f"target must be a non-empty string, got {target!r}")
     cmd = ["grep", "-n", "-H", "--directories=skip", "-r"]
     if file_type:
         cmd += ["--include=*." + file_type]
-    cmd += ["--", pattern, "."]
+    cmd += ["--", pattern, target]
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -888,7 +952,8 @@ def _search_files(
     """Name-or-content search. One grep, grouped by file.
 
     Content matches come from ``_run_grep``. Filename matches come from
-    ``_find_matching_files`` (a name fragment). Each hit is path, size from
+    ``_find_matching_files`` (a name fragment). A file ``path`` is grepped
+    as that file; it is not used as the working directory. Each hit is path, size from
     ``stat``, and at most 5 preview lines taken from the grep hit. The hit
     file is not opened to count lines. ``file_search`` calls this function.
     Sandbox, timeout, and ``file_type`` stay on this path.
@@ -910,22 +975,57 @@ def _search_files(
 
     from agent.context import _find_matching_files, _load_gitignore_patterns
 
-    root_rel = _search_root_rel(search_root, project_path)
-    patterns = _load_gitignore_patterns(project_path)
-    name_matches = [
-        _norm_search_rel(rel)
-        for rel in _find_matching_files(
-            project_path, pattern, patterns, max_files=max_results,
-            file_type=file_type, root_rel=root_rel,
+    # A file path cannot be grep's cwd (Errno 20). Search that file from
+    # its parent, and do not walk sibling names into the result.
+    file_rel: str | None = None
+    if os.path.isfile(search_root):
+        file_rel = _search_root_rel(search_root, project_path)
+        grep_cwd = os.path.dirname(search_root)
+        grep_target = os.path.basename(search_root)
+        root_rel = _search_root_rel(grep_cwd, project_path)
+    elif os.path.isdir(search_root):
+        grep_cwd = search_root
+        grep_target = "."
+        root_rel = _search_root_rel(search_root, project_path)
+    else:
+        return ToolResult(
+            success=False,
+            error=f"Not a file or directory: {path or '.'}",
         )
-    ]
-    name_matches = [
-        rel for rel in name_matches
-        if _under_search_root(rel, root_rel) and _matches_file_type(rel, file_type)
-    ]
+
+    if file_rel is not None:
+        base = os.path.basename(file_rel)
+        name_matches = []
+        if pattern.lower() in base.lower() and _matches_file_type(file_rel, file_type):
+            name_matches = [_norm_search_rel(file_rel)]
+    else:
+        patterns = _load_gitignore_patterns(project_path)
+        name_matches = [
+            _norm_search_rel(rel)
+            for rel in _find_matching_files(
+                project_path, pattern, patterns, max_files=max_results,
+                file_type=file_type, root_rel=root_rel,
+            )
+        ]
+        name_matches = [
+            rel for rel in name_matches
+            if _under_search_root(rel, root_rel) and _matches_file_type(rel, file_type)
+        ]
 
     try:
-        returncode, stdout, stderr = _run_grep(pattern, search_root, file_type)
+        if file_rel is not None and not _matches_file_type(file_rel, file_type):
+            # --include drops nothing useful here: the only candidate is
+            # this file, and it failed the extension filter.
+            returncode, stdout, stderr = 1, "", ""
+        else:
+            # An explicit file plus --include is grep-version-dependent.
+            # The extension check above already applied file_type.
+            returncode, stdout, stderr = _run_grep(
+                pattern,
+                grep_cwd,
+                None if file_rel is not None else file_type,
+                target=grep_target,
+            )
     except subprocess.TimeoutExpired:
         return ToolResult(success=False, error="Search timed out after 10s")
     except FileNotFoundError:
@@ -1196,23 +1296,24 @@ def _register_tools() -> None:
         ToolDefinition(
             name="read_file",
             description=(
-                "Read a file's text, a window capped at 16KB; use "
-                "offset/limit for more."
+                "Read a file's text, a window capped at 16KB. "
+                "offset/limit are bytes. line is a 1-based line and ignores offset."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Relative path"},
-                    "offset": {"type": "integer", "description": "Byte offset"},
+                    "offset": {"type": "integer", "description": "Byte offset, not a line number"},
                     "limit": {"type": "integer", "description": "Max bytes"},
+                    "line": {"type": "integer", "description": "1-based start line (search_files Line N); ignores offset"},
                 },
                 "required": ["path"],
             },
             # NOTE: descriptions below stay one line each; do not expand.
             requires_approval=False,
         ),
-        lambda path, project_path, offset=None, limit=None, **kwargs:  # type: ignore
-            _read_file(path, project_path, offset, limit),
+        lambda path, project_path, offset=None, limit=None, line=None, **kwargs:  # type: ignore
+            _read_file(path, project_path, offset, limit, line),
     )
 
     # write_file
@@ -1320,7 +1421,7 @@ def _register_tools() -> None:
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Text or regex"},
-                    "path": {"type": "string", "description": "Search path (default '.')"},
+                    "path": {"type": "string", "description": "File or directory to search (default '.')"},
                     "file_type": {"type": "string", "description": "Extension filter, e.g. 'py'"},
                 },
                 "required": ["pattern"],
