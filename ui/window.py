@@ -53,6 +53,11 @@ from models import work_store
 
 from utils.config import COMMAND_PREFIX
 
+# Opaque project-feed bar (28px + 4px margin) overlays the top of every
+# notebook page. Canvas documents fill the viewport from y=0; push their
+# content below the bar. 40px = bar (32px) + 8px breathing room.
+_CANVAS_TOP_SPACER_HTML = '<div style="height:40px"></div>'
+
 
 class MainWindow(Gtk.ApplicationWindow):
     """Main window for the develcakes application."""
@@ -1126,6 +1131,8 @@ class MainWindow(Gtk.ApplicationWindow):
             )
 
         def _canvas(_session_key, slug, html):
+            if not html.startswith(_CANVAS_TOP_SPACER_HTML):
+                html = _CANVAS_TOP_SPACER_HTML + html
             done = threading.Event()
             box: dict = {}
 

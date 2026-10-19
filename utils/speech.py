@@ -52,7 +52,7 @@ def speak(text: str):
         return ToolResult(success=False, error="another talk is still playing")
     path = ""
     try:
-        audio = _fetch_audio(cfg["endpoint"], cfg["model"], cfg["token"], text)
+        audio = _fetch_audio(cfg, text)
         if isinstance(audio, str):
             return ToolResult(success=False, error=audio)
         path = _write_temp(audio)
@@ -69,18 +69,22 @@ def speak(text: str):
         _PLAY_LOCK.release()
 
 
-def _fetch_audio(endpoint: str, model: str, token: str, text: str) -> bytes | str:
+def _fetch_audio(cfg: dict, text: str) -> bytes | str:
     """Return audio bytes, or an error string. Never raises."""
-    body = json.dumps({
-        "model": model,
+    payload = {
+        "model": cfg["model"],
         "input": text,
-        "response_format": "mp3",
-    }).encode("utf-8")
+        "response_format": cfg.get("format") or "mp3",
+    }
+    voice = (cfg.get("voice") or "").strip()
+    if voice:
+        payload["voice"] = voice
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint,
+        cfg["endpoint"],
         data=body,
         headers={
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {cfg['token']}",
             "Content-Type": "application/json",
         },
         method="POST",
