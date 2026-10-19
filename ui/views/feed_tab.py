@@ -96,7 +96,11 @@ class FeedTab(Gtk.Box):
         scroll = Gtk.ScrolledWindow()
         scroll.add_css_class("feed-scroll")
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.AUTOMATIC)
+        # Vertical scrolling belongs to the WebKit document attached below
+        # (FeedSurface's webview). NEVER prevents a second, dead scrollbar
+        # around the webview; attach_html_surface() re-asserts this once the
+        # child exists.
+        scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
         scroll.set_halign(Gtk.Align.FILL)
         scroll.set_valign(Gtk.Align.FILL)
         self._feed_scroll = scroll
@@ -227,15 +231,22 @@ class FeedTab(Gtk.Box):
             return None
         from ui.views.feed_surface import create_feed_surface
 
+        # The document owns scrolling now: FeedSurface reads the page's own
+        # scroll_state reports, so the legacy GTK probes are not wired. The
+        # hooks stay in the signature for call compatibility.
         surface = create_feed_surface(
             on_action,
-            is_near_bottom=self.is_near_bottom,
-            on_load_finished=self.schedule_smart_scroll_to_bottom,
+            is_near_bottom=None,
+            on_load_finished=None,
         )
         if surface is None:
             return None
         self._html_surface = surface
         self._feed_scroll.set_child(surface.webview)
+        # Vertical scrolling belongs to the document (the webview fills the
+        # viewport; its own scrollbars move the page). A vertical AUTOMATIC
+        # here would add a second, dead scrollbar around the webview.
+        self._feed_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
         surface.set_cards([])
         return surface
 
@@ -563,6 +574,13 @@ class FeedTab(Gtk.Box):
         Reading intent instead keeps following until the reader actually
         scrolls away, which is the documented contract for this method.
         """
+        # HTML surface: the document owns the scroll position. Under
+        # Gtk.PolicyType.NEVER the vadjustment never changes, so both the
+        # `_was_near_bottom` tracker and the GTK scroll choreography are
+        # inert. The follow decision lives in FeedSurface._flush, which reads
+        # the page's own `_doc_near_bottom` report.
+        if self._html_surface is not None:
+            return
         if self._feed_scroll is None:
             return
         vadj = self._feed_scroll.get_vadjustment()
@@ -612,7 +630,16 @@ class FeedTab(Gtk.Box):
         return self._feed_scroll.get_vadjustment() if self._feed_scroll else None
 
     def is_near_bottom(self, slack: int = 80) -> bool:
-        """True when the viewport is within `slack` px of the feed bottom."""
+        """True when the feed is within `slack` px of its bottom.
+
+        With an HTML surface attached the document scrolls itself, so the GTK
+        vadjustment is frozen under PolicyType.NEVER and cannot answer this.
+        Delegate to the surface's own `_doc_near_bottom` (fed by the page's
+        `scroll_state` reports); fall back to the adjustment when no surface
+        is attached.
+        """
+        if self._html_surface is not None:
+            return self._html_surface._doc_near_bottom
         vadj = self.get_vadjustment()
         if vadj is None:
             return True                       # nothing rendered: eviction is safe

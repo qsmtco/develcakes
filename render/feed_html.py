@@ -43,19 +43,55 @@ button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
 # Static. Not formatted with card data.
 FEED_SCRIPT = """
 (function () {
+  var bridge = window.webkit && window.webkit.messageHandlers
+    && window.webkit.messageHandlers.feed;
+
+  function post(obj) {
+    if (bridge) bridge.postMessage(obj);
+  }
+
   document.addEventListener("click", function (ev) {
     var node = ev.target;
     if (!node || !node.closest) return;
     var btn = node.closest("button[data-feed-action]");
     if (!btn) return;
-    var bridge = window.webkit && window.webkit.messageHandlers
-      && window.webkit.messageHandlers.feed;
-    if (!bridge) return;
-    bridge.postMessage({
+    post({
       action: btn.getAttribute("data-feed-action"),
       card_id: btn.getAttribute("data-feed-card")
     });
   });
+
+  var doc = document.documentElement;
+  var pending = false;
+  var lastAt = 0;
+
+  function scrollTop() {
+    return window.scrollY || doc.scrollTop || 0;
+  }
+
+  function nearBottom() {
+    var viewport = window.innerHeight || doc.clientHeight || 0;
+    return (doc.scrollHeight - viewport - scrollTop()) <= 80;
+  }
+
+  function postScroll() {
+    pending = false;
+    lastAt = Date.now();
+    post({
+      action: "scroll_state",
+      near_bottom: nearBottom(),
+      y: scrollTop(),
+      h: doc.scrollHeight
+    });
+  }
+
+  window.addEventListener("scroll", function () {
+    if (pending) return;
+    var wait = 150 - (Date.now() - lastAt);
+    if (wait <= 0) { postScroll(); return; }
+    pending = true;
+    setTimeout(postScroll, wait);
+  }, { passive: true });
 })();
 """
 

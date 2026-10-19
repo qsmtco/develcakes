@@ -39,8 +39,22 @@ else:
         WebKit = None
 
 
-def create_feed_surface(on_action, *, is_near_bottom, on_load_finished):
-    """A feed document, or None when WebKit is off or the click channel fails."""
+# Document-scroll scripts. The page owns scrolling (the host ScrolledWindow has
+# PolicyType.NEVER vertical), so Python never reads a GTK adjustment.
+_BOTTOM_SCRIPT = "window.scrollTo(0, document.documentElement.scrollHeight);"
+
+
+def _restore_script(y: float) -> str:
+    return f"window.scrollTo(0, {float(y)!r});"
+
+
+def create_feed_surface(on_action, *, is_near_bottom=None, on_load_finished=None):
+    """A feed document, or None when WebKit is off or the click channel fails.
+
+    `is_near_bottom` / `on_load_finished` are the pre-document-scroll hooks.
+    They are accepted for call compatibility and are NOT called: follow state
+    now comes from the document's own scroll_state messages.
+    """
     if WebKit is None:
         return None
     try:
@@ -70,8 +84,19 @@ class FeedSurface:
         self._dirty = False
         self._render_source = None
         self._load_in_flight = False
+        # Document-scroll state, reported by FEED_SCRIPT's scroll listener
+        # (see `_on_script_message`). `_doc_near_bottom` is the reader's follow
+        # intent; `_doc_y` is the last known document offset, restored after a
+        # full-document reload. Python NEVER reads a GTK adjustment for these.
+        self._doc_near_bottom = True
+        self._doc_y: float | None = None
         self._scroll_after = False
         self._webview = WebKit.WebView()
+        # The document scrolls ITSELF: the host ScrolledWindow runs with
+        # PolicyType.NEVER vertical (feed_tab.attach_html_surface) and the
+        # webview fills the viewport, so its own scrollbars move the page.
+        self._webview.set_vexpand(True)
+        self._webview.set_hexpand(True)
         self._webview.get_settings().set_enable_javascript(True)
         manager = self._webview.get_user_content_manager()
         # Signature recorded from the probe above. A False return means the
@@ -176,11 +201,10 @@ class FeedSurface:
         if self._load_in_flight:
             return False
         self._dirty = False
-        try:
-            self._scroll_after = bool(self._is_near_bottom())
-        except Exception:
-            logger.exception("feed near-bottom check failed")
-            self._scroll_after = False
+        # Follow decision comes from the DOCUMENT's own scroll_state reports
+        # (see `_on_script_message`), never from a GTK adjustment probe — the
+        # host ScrolledWindow does not scroll this content at all.
+        self._scroll_after = bool(self._doc_near_bottom)
         document = render_feed_document(self._fragments())
         self._load_in_flight = True
         try:
@@ -190,6 +214,27 @@ class FeedSurface:
             self._load_in_flight = False
         return False
 
+    def _eval_document_scroll(self, script: str) -> None:
+        """Fire-and-forget document scroll in the page's own world.
+
+        The page owns scrolling (host ScrolledWindow is PolicyType.NEVER
+        vertically); Python only asks the document to move. The callback is a
+        no-op — a failed eval must never break the render loop.
+        """
+        view = self._webview
+        if view is None:
+            return
+
+        def _done(*_args) -> None:
+            return None
+
+        try:
+            view.evaluate_javascript(
+                script, len(script.encode("utf-8")), None, None, None, _done, None,
+            )
+        except Exception:
+            logger.exception("feed document scroll eval failed")
+
     def _on_load_changed(self, view, event) -> None:
         if WebKit is None or event != WebKit.LoadEvent.FINISHED:
             return
@@ -197,10 +242,11 @@ class FeedSurface:
         follow = self._scroll_after
         self._scroll_after = False
         if follow:
-            try:
-                self._on_load_finished()
-            except Exception:
-                logger.exception("feed scroll-after-load failed")
+            # Reader was following: land on the newest card.
+            self._eval_document_scroll(_BOTTOM_SCRIPT)
+        elif self._doc_y is not None:
+            # Reader was reading older cards: put the document back.
+            self._eval_document_scroll(_restore_script(self._doc_y))
         if self._dirty:
             self._schedule()
 
@@ -227,6 +273,9 @@ class FeedSurface:
         if not isinstance(data, dict):
             return
         action = data.get("action")
+        if action == "scroll_state":
+            self._on_scroll_state(data)
+            return
         card_id = data.get("card_id")
         if not isinstance(action, str) or not isinstance(card_id, str):
             return
@@ -234,3 +283,17 @@ class FeedSurface:
             self._on_action(card_id, action)
         except Exception:
             logger.exception("feed action %s failed", action)
+
+    def _on_scroll_state(self, data: dict) -> None:
+        """Record the document's own scroll report (FEED_SCRIPT).
+
+        The page is the only thing that knows where the reader is: the host
+        ScrolledWindow never scrolls this content. `near_bottom` is the follow
+        intent used by `_flush`; `y` is restored after a full-document reload.
+        """
+        near_bottom = data.get("near_bottom")
+        if isinstance(near_bottom, bool):
+            self._doc_near_bottom = near_bottom
+        y = data.get("y")
+        if isinstance(y, (int, float)) and not isinstance(y, bool):
+            self._doc_y = float(y)
