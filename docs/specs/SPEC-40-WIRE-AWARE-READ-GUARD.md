@@ -396,3 +396,25 @@ cannot see the body).
 - Acceptance rewritten: defined double, body-arrival assertion, no
   "under 15 iterations" hand-wave; probe/eviction/ordering properties
   pinned.
+
+---
+
+## Turn-4 Backlog (post-implementation, 2026-10-18)
+
+- **Reprint-refusal UX — option B, deferred.** Write-evicts-its-own-
+  fingerprints: in `_note_tool_path`'s `edit_file`/`write_file` branch,
+  also pop the written path's keys from `_read_fingerprints` alongside the
+  hot-window eviction. Post-write `sed`/`cat` of that path becomes allowed
+  and `read_file` re-serves fresh bytes. Deferred because it widens what
+  the guard permits (reopens shell-dump-of-just-written-file up to the
+  100KB exec cap); Part A's off-wire serve remains the sanctioned path for
+  post-write re-inspection. Origin: the coder fix-chunk turn — 19 REFUSED
+  `sed`/`head`/`git diff` calls, all re-inspecting the just-edited file,
+  turn dead on the iteration cap with the work already complete. The
+  interim fix (shipped): refusal text now names a reachable action —
+  "Read it at a different offset, or edit it." — instead of "Edit it or
+  run its test.", which was unreachable for the Coder role.
+- **Restart requirement.** Refusal-message wording is served by the
+  running app process; a wording change needs a runtime restart to take
+  effect (observed 2026-10-18: old wording served after the edit landed
+  on disk).
