@@ -136,7 +136,13 @@ def save_speech_config(
     if not parent_existed:
         os.makedirs(parent, exist_ok=True)
 
-    data = {"endpoint": endpoint, "model": model, "token": token, "format": fmt}
+    data = {
+        "endpoint": endpoint,
+        "model": model,
+        "token": token,
+        "voice": voice.strip(),
+        "format": fmt,
+    }
     tmp_path = path + ".tmp"
     try:
         try:

@@ -2,7 +2,7 @@
 #
 # Manifest:
 #   Reads:  speech.yaml via speech_config (token stays out of logs and results)
-#   Writes: a mode-0o600 temp mp3, deleted after playback
+#   Writes: a mode-0o600 temp .mp3/.raw, deleted after playback
 #   Network: POST to the user-configured speech endpoint
 #   External: pw-play, paplay, or ffplay
 
@@ -25,6 +25,8 @@ _PLAYERS = ("pw-play", "paplay", "ffplay")
 _HTTP_TIMEOUT_S = 30
 _PLAY_TIMEOUT_S = 60
 _LOCK_TIMEOUT_S = 60
+_DEFAULT_PCM_RATE = 24000
+_SUFFIXES = {"mp3": ".mp3", "pcm": ".raw"}
 
 
 def speak(text: str):
@@ -52,11 +54,13 @@ def speak(text: str):
         return ToolResult(success=False, error="another talk is still playing")
     path = ""
     try:
-        audio = _fetch_audio(cfg, text)
-        if isinstance(audio, str):
-            return ToolResult(success=False, error=audio)
-        path = _write_temp(audio)
-        played = _play(path)
+        fetched = _fetch_audio(cfg, text)
+        if isinstance(fetched, str):
+            return ToolResult(success=False, error=fetched)
+        audio, rate = fetched
+        fmt = cfg.get("format") or "mp3"
+        path = _write_temp(audio, fmt)
+        played = _play(path, fmt, rate)
         if played is not None:
             return ToolResult(success=False, error=played)
         return ToolResult(success=True, output=f"spoke {len(text)} characters")
@@ -69,8 +73,24 @@ def speak(text: str):
         _PLAY_LOCK.release()
 
 
-def _fetch_audio(cfg: dict, text: str) -> bytes | str:
-    """Return audio bytes, or an error string. Never raises."""
+def _parse_rate(content_type: str) -> int:
+    """Sample rate from ``audio/pcm;rate=NNNN``. Default 24000 when absent."""
+    for param in content_type.split(";")[1:]:
+        key, _, value = param.partition("=")
+        if key.strip().lower() != "rate":
+            continue
+        try:
+            rate = int(value.strip().strip('"'))
+        except ValueError:
+            break
+        if rate > 0:
+            return rate
+        break
+    return _DEFAULT_PCM_RATE
+
+
+def _fetch_audio(cfg: dict, text: str) -> tuple[bytes, int] | str:
+    """Return (audio bytes, pcm rate), or an error string. Never raises."""
     payload = {
         "model": cfg["model"],
         "input": text,
@@ -104,11 +124,16 @@ def _fetch_audio(cfg: dict, text: str) -> bytes | str:
         return "speech request failed"
     if not data:
         return "speech request failed"
-    return data
+    rate = _DEFAULT_PCM_RATE
+    if payload["response_format"] == "pcm":
+        rate = _parse_rate(content_type)
+    return data, rate
 
 
-def _write_temp(audio: bytes) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+def _write_temp(audio: bytes, fmt: str = "mp3") -> str:
+    """Write audio to an owner-only temp file; suffix follows the format."""
+    suffix = _SUFFIXES.get(fmt, _SUFFIXES["mp3"])
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
         handle.write(audio)
         handle.flush()
         path = handle.name
@@ -119,8 +144,10 @@ def _write_temp(audio: bytes) -> str:
     return path
 
 
-def _play(path: str) -> str | None:
+def _play(path: str, fmt: str = "mp3", rate: int = _DEFAULT_PCM_RATE) -> str | None:
     """Play path. None on success, an error string otherwise."""
+    if fmt == "pcm":
+        return _play_pcm(path, rate)
     player = next((name for name in _PLAYERS if shutil.which(name)), None)
     if player is None:
         return "no audio player (pw-play, paplay, or ffplay)"
@@ -128,6 +155,26 @@ def _play(path: str) -> str | None:
         cmd = [player, "-nodisp", "-autoexit", "-loglevel", "quiet", path]
     else:
         cmd = [player, path]
+    return _run_player(cmd)
+
+
+def _play_pcm(path: str, rate: int) -> str | None:
+    """Raw 16-bit mono PCM: ffplay if present, else pw-play with explicit flags."""
+    ffplay = shutil.which("ffplay")
+    if ffplay is not None:
+        cmd = [
+            ffplay, "-f", "s16le", "-ar", str(rate), "-ch_layout", "mono",
+            "-nodisp", "-autoexit", "-loglevel", "quiet", path,
+        ]
+    else:
+        pw_play = shutil.which("pw-play")
+        if pw_play is None:
+            return "no audio player for pcm (ffplay or pw-play)"
+        cmd = [pw_play, "--format=s16", f"--rate={rate}", "--channels=1", path]
+    return _run_player(cmd)
+
+
+def _run_player(cmd: list[str]) -> str | None:
     try:
         result = subprocess.run(
             cmd, timeout=_PLAY_TIMEOUT_S, check=False,

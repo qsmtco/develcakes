@@ -1021,6 +1021,14 @@ class SettingsDialog:
         self._speech_model_entry = Gtk.Entry()
         self._speech_model_entry.set_hexpand(True)
         self._speech_model_entry.set_placeholder_text("provider/model-id")
+        self._speech_voice_entry = Gtk.Entry()
+        self._speech_voice_entry.set_hexpand(True)
+        self._speech_voice_entry.set_placeholder_text("algenib (optional)")
+        self._speech_formats: list[str] = ["mp3", "pcm"]
+        self._speech_format_dropdown = Gtk.DropDown.new_from_strings(
+            self._speech_formats
+        )
+        self._speech_format_dropdown.set_hexpand(True)
         self._speech_token_entry = Gtk.Entry()
         self._speech_token_entry.set_hexpand(True)
         self._speech_token_entry.set_visibility(False)
@@ -1033,6 +1041,10 @@ class SettingsDialog:
         token_box.append(reveal)
         self._speech_form.append(self._labeled_row("Endpoint", self._speech_endpoint_entry))
         self._speech_form.append(self._labeled_row("Model", self._speech_model_entry))
+        self._speech_form.append(self._labeled_row("Voice", self._speech_voice_entry))
+        self._speech_form.append(
+            self._labeled_row("Format", self._speech_format_dropdown)
+        )
         self._speech_form.append(self._labeled_row("Token", token_box))
         self._speech_save_btn = Gtk.Button(label="Save")
         self._speech_save_btn.add_css_class("suggested-action")
@@ -1056,6 +1068,8 @@ class SettingsDialog:
         self._speech_add_btn.set_sensitive(not inert)
         self._speech_endpoint_entry.set_sensitive(not inert)
         self._speech_model_entry.set_sensitive(not inert)
+        self._speech_voice_entry.set_sensitive(not inert)
+        self._speech_format_dropdown.set_sensitive(not inert)
         self._speech_token_entry.set_sensitive(not inert)
         self._speech_save_btn.set_sensitive(not inert)
         if inert:
@@ -1069,6 +1083,11 @@ class SettingsDialog:
             self._speech_add_btn.set_label("Edit Speech")
             self._speech_endpoint_entry.set_text(cfg.get("endpoint", ""))
             self._speech_model_entry.set_text(cfg.get("model", ""))
+            self._speech_voice_entry.set_text(cfg.get("voice", ""))
+            fmt = (cfg.get("format") or "mp3").strip().lower()
+            self._speech_format_dropdown.set_selected(
+                self._speech_formats.index(fmt) if fmt in self._speech_formats else 0
+            )
             self._speech_token_entry.set_text("")
             self._speech_token_entry.set_placeholder_text("leave blank to keep the saved token")
         else:
@@ -1086,10 +1105,18 @@ class SettingsDialog:
     def _on_speech_save_clicked(self, _btn) -> None:
         from utils.speech_config import save_speech_config
         try:
+            selected = self._speech_format_dropdown.get_selected()
+            fmt = (
+                self._speech_formats[selected]
+                if 0 <= selected < len(self._speech_formats)
+                else self._speech_formats[0]
+            )
             save_speech_config(
                 self._speech_endpoint_entry.get_text(),
                 self._speech_model_entry.get_text(),
                 self._speech_token_entry.get_text(),
+                voice=self._speech_voice_entry.get_text(),
+                fmt=fmt,
             )
         except ValueError as e:
             self._speech_status_label.set_text(f"❌ {e}")
