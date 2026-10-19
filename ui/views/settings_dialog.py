@@ -42,6 +42,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Stack child name, button label. Order matches the old header switcher.
+_SETTINGS_GROUPS = (
+    ("providers", "Providers"),
+    ("telegram", "Telegram Bridge"),
+    ("decision-model", "Decision Model"),
+    ("stt", "STT Model"),
+    ("speech", "Speech"),
+)
+
 
 class _ProviderCard:
     """A single provider's edit form. Pure view — delegates to handler."""
@@ -249,12 +258,12 @@ class _ProviderCard:
             self._supports_reasoning_check.set_active(False)
 
     def _labeled(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
-        """Create a label + widget row."""
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        """Label above the control so the row fits the settings sidebar."""
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         label = Gtk.Label(label=text)
-        label.set_size_request(100, -1)
         label.set_halign(Gtk.Align.START)
-        label.set_valign(Gtk.Align.CENTER)
+        label.add_css_class("dim-label")
+        widget.set_hexpand(True)
         row.append(label)
         row.append(widget)
         return row
@@ -402,7 +411,7 @@ class _ProviderCard:
 
         name = self._provider.name
         dialog = Gtk.MessageDialog(
-            transient_for=self._dialog._window,
+            transient_for=self._dialog._parent,
             modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.YES_NO,
@@ -495,15 +504,15 @@ class _ProviderCard:
 
 
 class SettingsDialog:
-    """GTK4 dialog for managing LLM provider settings.
+    """Settings surface hosted in the left-notebook Settings tab.
 
     Pure view — delegates all persistence to SettingsHandler.
-    Called from the toolbar ⚙ button (wired in Phase 7).
+    Not a window. LeftPanel parents ``widget()`` into the Settings page.
 
     Args:
-        parent: Parent Gtk.Window for transient setting.
+        parent: Parent Gtk.Window for transient MessageDialogs (may be None).
         handler: SettingsHandler — the data gateway.
-        on_close: Optional callback when the dialog is closed.
+        on_close: Optional callback invoked from release(). Idempotent.
         telegram_controller: Optional TelegramSettingsController — the data
             gateway for the "Telegram Bridge" section (SPEC-15 SP2). Injected
             (never imported by the view — layer rule) so the section stays
@@ -521,38 +530,20 @@ class SettingsDialog:
     ):
         self._handler = handler
         self._on_close = on_close
+        self._parent = parent
         self._telegram = telegram_controller
         self._cards: list[_ProviderCard] = []
+        self._group_buttons: list[tuple[str, Gtk.Button]] = []
 
-        # ── Window setup ──────────────────────────────────────────────
-        self._window = Gtk.Window(title="Settings")
-        if parent is not None:
-            self._window.set_transient_for(parent)
-        self._window.set_modal(True)
-        self._window.set_default_size(560, 480)
-        self._window.add_css_class("settings-dialog")
-        self._window.connect("close-request", self._on_close_request)
+        self._root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._root.set_vexpand(True)
 
-        # ── Build layout ──────────────────────────────────────────────
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        # Sectioned layout (SPEC-15 SP2): a Gtk.Stack switched by a
-        # Gtk.StackSwitcher placed in the header bar. Tab "providers" holds
-        # the byte-identical legacy provider content; tab "telegram" is the
-        # new Telegram Bridge section.
+        # Sectioned layout: a Gtk.Stack. The vertical group list below
+        # replaces the old header StackSwitcher. Page names are unchanged.
         self._stack = Gtk.Stack()
         self._stack.set_vexpand(True)
+        self._stack.set_hexpand(True)
         self._stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self._stack_switcher = Gtk.StackSwitcher()
-        self._stack_switcher.set_stack(self._stack)
-
-        # Header bar
-        header = Gtk.HeaderBar()
-        header.set_title_widget(self._stack_switcher)
-        close_btn = Gtk.Button(label="Close")
-        close_btn.connect("clicked", lambda *_: self.close())
-        header.pack_end(close_btn)
-        content.append(header)
 
         # ── Providers page (existing content, byte-identical behavior) ─
         providers_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -610,21 +601,73 @@ class SettingsDialog:
         self._speech_page = self._build_speech_page()
         self._stack.add_titled(self._speech_page, "speech", "Speech")
 
-        content.append(self._stack)
-        self._window.set_child(content)
+        self._group_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._group_box.set_margin_start(8)
+        self._group_box.set_margin_end(8)
+        self._group_box.set_margin_top(8)
+        self._group_box.set_margin_bottom(4)
+        for name, title in _SETTINGS_GROUPS:
+            button = Gtk.Button()
+            button.add_css_class("settings-group-btn")
+            button.set_hexpand(True)
+            label = Gtk.Label(label=title)
+            label.set_wrap(True)
+            label.set_xalign(0)
+            button.set_child(label)
+            button.connect("clicked", self._on_group_button_clicked, name)
+            self._group_box.append(button)
+            self._group_buttons.append((name, button))
+        # Providers is the stack's first page. Highlight it without a
+        # set_visible_child_name call so the default stays "providers".
+        self._group_buttons[0][1].add_css_class("settings-group-active")
+
+        page_scroll = Gtk.ScrolledWindow()
+        page_scroll.set_vexpand(True)
+        page_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        page_scroll.set_child(self._stack)
+
+        self._root.append(self._group_box)
+        self._root.append(page_scroll)
 
         # Populate from current handler state
         self.refresh_providers(handler.list_providers())
 
     # ── Public API ────────────────────────────────────────────────────
 
-    def show(self) -> None:
-        """Present the settings dialog."""
-        self._window.present()
+    def widget(self) -> Gtk.Widget:
+        """The box LeftPanel parents into the Settings page. No window."""
+        return self._root
 
-    def close(self) -> None:
-        """Close the settings dialog."""
-        self._window.close()
+    def release(self) -> None:
+        """Cancel an in-flight Telegram pairing poll. Idempotent.
+
+        Does not reload the token entry — _refresh_telegram_section writes
+        the stored token back and would wipe an unsaved edit.
+        """
+        if self._telegram is not None:
+            try:
+                self._telegram.cancel_pairing()
+            except Exception as e:  # noqa: BLE001 — teardown must not block close
+                logger.warning("telegram pairing teardown failed: %s", e)
+            pair_btn = getattr(self, "_telegram_pair_btn", None)
+            if pair_btn is not None:
+                pair_btn.set_sensitive(bool(self._telegram.has_saved_token()))
+            if getattr(self, "_telegram_status_label", None) is not None:
+                self._telegram_set_status("")
+        if self._on_close is not None:
+            self._on_close()
+
+    def _on_group_button_clicked(self, _button, name: str) -> None:
+        self._select_group(name)
+
+    def _select_group(self, name: str) -> None:
+        """Show one existing stack page and highlight its button."""
+        self._stack.set_visible_child_name(name)
+        for group_name, button in self._group_buttons:
+            if group_name == name:
+                button.add_css_class("settings-group-active")
+            else:
+                button.remove_css_class("settings-group-active")
 
     def refresh_providers(self, providers: list[ProviderConfig]) -> None:
         """Incrementally update the card list from the given provider list.
@@ -703,21 +746,6 @@ class SettingsDialog:
             self._cards.remove(card)
             self._list_box.remove(card.get_widget())
         self._empty_state.set_visible(len(self._cards) == 0)
-
-    def _on_close_request(self, *args) -> bool:
-        """Handle window close-request signal.
-
-        SPEC-15 SP2: leaving the dialog tears down any in-flight pairing poll
-        (a throwaway transport must never outlive the settings window).
-        """
-        if self._telegram is not None:
-            try:
-                self._telegram.cancel_pairing()
-            except Exception as e:  # noqa: BLE001 — teardown must not block close
-                logger.warning("telegram pairing teardown on close failed: %s", e)
-        if self._on_close is not None:
-            self._on_close()
-        return False  # allow close
 
     # ── Telegram Bridge section (SPEC-15 SP2) ─────────────────────────
 
@@ -1231,12 +1259,12 @@ class SettingsDialog:
         self._refresh_stt_section()
 
     def _labeled_row(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
-        """Label + widget row (mirrors _ProviderCard._labeled)."""
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        """Label above the control (mirrors _ProviderCard._labeled)."""
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         label = Gtk.Label(label=text)
-        label.set_size_request(100, -1)
         label.set_halign(Gtk.Align.START)
-        label.set_valign(Gtk.Align.CENTER)
+        label.add_css_class("dim-label")
+        widget.set_hexpand(True)
         row.append(label)
         row.append(widget)
         return row
@@ -1320,7 +1348,7 @@ class SettingsDialog:
             return
         shown = f"{handle} ({chat_id})" if handle else f"chat {chat_id}"
         dialog = Gtk.MessageDialog(
-            transient_for=self._window,
+            transient_for=self._parent,
             modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,

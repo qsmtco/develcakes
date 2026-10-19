@@ -64,10 +64,17 @@ class TestNoGatewaySendSites:
         assert "get_gateway_url" not in src
         assert "get_identity_dir" not in src
 
-    def test_toolbar_tooltip_honest(self):
-        """SPEC-05 SP3c: toolbar.py carries no gateway references at all."""
-        src = (REPO / "ui/toolbar.py").read_text(encoding="utf-8")
-        assert "gateway" not in src.lower()
+    def test_project_bar_transport_has_no_gateway_word(self):
+        """SPEC-05 SP3c, retargeted: the connect/stop tooltips must not
+        revive gateway wording. The rest of main_content.py still mentions
+        the retired gateway in unrelated comments, so the pin is the
+        tooltip block only."""
+        src = (REPO / "ui/views/main_content.py").read_text(encoding="utf-8")
+        start = src.index("_CONNECT_TIPS")
+        end = src.index("class MainContent")
+        block = src[start:end].lower()
+        assert "gateway" not in block
+        assert "post-mvp" not in block
 
     def test_send_raw_message_gone(self):
         src = (REPO / "ui/handlers/chat_handler.py").read_text(encoding="utf-8")

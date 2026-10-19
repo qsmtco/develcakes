@@ -471,7 +471,7 @@ class TestPairing:
         )
         ctrl.start_pairing(lambda *a: None)
         assert ctrl.is_pairing() is True
-        d._on_close_request()
+        d.release()
         assert ctrl.is_pairing() is False
 
 

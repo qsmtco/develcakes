@@ -69,7 +69,7 @@ class FakeBridge:
 def win(tmp_config_dir):
     """Bare MainWindow with mocked toolbar/bridge/feed handlers."""
     w = MainWindow.__new__(MainWindow)
-    w._toolbar = MagicMock()
+    w._main_content = MagicMock()
     w._bridge_handler = FakeBridge()
     w._feed_handler = MagicMock()
     ph = MagicMock()
@@ -92,30 +92,30 @@ class TestInitialToolbarState:
 
     @staticmethod
     def _assert_initial(win, *, configured, expected):
-        win._toolbar.reset_mock()
+        win._main_content.reset_mock()
         win._init_bridge_toolbar_state()  # what _build() calls, no click
-        win._toolbar.set_telegram_bridge_state.assert_called_once_with(expected)
+        win._main_content.set_telegram_bridge_state.assert_called_once_with(expected)
 
 
 class TestConnectUnconfigured:
     def test_unconfigured_sets_honest_label_and_starts_nothing(self, win):
         # No token/chat saved.
         win._on_connect_clicked()
-        win._toolbar.set_telegram_bridge_state.assert_called_once_with("unconfigured")
+        win._main_content.set_telegram_bridge_state.assert_called_once_with("unconfigured")
         assert win._bridge_handler.started == 0
         assert win._bridge_handler.stopped == 0
 
     def test_token_only_still_unconfigured(self, win):
         telegram_store.save_bridge_config(bot_token="123:abc")  # no chat_id
         win._on_connect_clicked()
-        win._toolbar.set_telegram_bridge_state.assert_called_once_with("unconfigured")
+        win._main_content.set_telegram_bridge_state.assert_called_once_with("unconfigured")
         assert win._bridge_handler.started == 0
 
     def test_no_bridge_wired_configured_is_safe(self, win):
         telegram_store.save_bridge_config(bot_token="123:abc", chat_id=42)
         win._bridge_handler = None
         win._on_connect_clicked()  # must not raise
-        win._toolbar.set_telegram_bridge_state.assert_not_called()
+        win._main_content.set_telegram_bridge_state.assert_not_called()
 
 
 class TestConnectConfigured:
@@ -155,7 +155,7 @@ class TestBridgeStateChange:
     def test_each_state_reaches_toolbar(self, win):
         for state in ("connecting", "connected", "disconnected", "unconfigured"):
             win._on_bridge_state_change(state)
-        calls = [c.args[0] for c in win._toolbar.set_telegram_bridge_state.call_args_list]
+        calls = [c.args[0] for c in win._main_content.set_telegram_bridge_state.call_args_list]
         assert calls == ["connecting", "connected", "disconnected", "unconfigured"]
 
     def test_error_state_emits_feed_card(self, win):

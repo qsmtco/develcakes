@@ -19,6 +19,32 @@ from ui.views.chat_input_toolbar import ChatInputToolbar
 from ui.views.session_menu import show_session_menu, show_project_menu
 from utils.config import get_project_root
 
+_PIP_CLASSES = (
+    "project-bar-connect-off",
+    "project-bar-connect-pending",
+    "project-bar-connect-on",
+    "project-bar-connect-error",
+)
+
+_CONNECT_TIPS = {
+    "unconfigured": (
+        "No transport (configure a bot token in Settings → Telegram Bridge)"
+    ),
+    "disconnected": (
+        "Connect the Supervisor to your phone over Telegram "
+        "(chat + exec approvals; configure a bot token in Settings)"
+    ),
+    "connecting": "Connecting…",
+    "connected": "Disconnect the Telegram bridge",
+    "error": "Offline — check the bot token and pairing in Settings",
+}
+
+_STOP_ALL_TIP = (
+    "Halt every agent: cancel in-flight turns, kill spawned process "
+    "groups, abort pending review checkpoints."
+)
+
+
 class MainContent(Gtk.Box):
     """
     Main content area widget.
@@ -52,6 +78,7 @@ class MainContent(Gtk.Box):
 
         # --- TOP: Notebook (with chat scroll overlaid by project settings bar) ---
         top_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._top_box = top_box
 
         self._chat_notebook = Gtk.Notebook()
         self._chat_notebook.set_show_tabs(True)
@@ -127,29 +154,18 @@ class MainContent(Gtk.Box):
         self._project_settings.set_margin_top(4)
         self._project_settings.set_margin_bottom(0)
         self._project_settings.add_css_class("project-feed-bar")
-        self._project_settings.set_visible(False)  # first update_project_settings() shows it (pill-only or full)
-        _feed_lbl = Gtk.Label()
-        _feed_lbl.set_halign(Gtk.Align.END)
-        _feed_lbl.set_margin_start(8)
-        _feed_lbl.set_margin_end(8)
-        _feed_lbl.set_markup('<span foreground="#6b6b7a" font_desc="Sans 10">Project Settings</span>')
-        self._project_settings.append(_feed_lbl)
+        self._project_settings.set_visible(False)
 
         # UI-PILLBAR Phase 1 — the SHARED activity-status pill lives at the
         # bar's right end (info_box is hexpand+START, so the pill lands at
-        # the right edge). One pill for every tab: the ActivityPillAdapter
-        # in window.py resolves THIS widget (no per-surface pills anymore —
-        # those retire with chat_surface's copy in Phase 2). Hosted by BOTH
-        # bar rebuild paths (update_project_settings and the pill-only
-        # branch) after _clear_settings_bar() removes all children.
+        # the right edge). One pill for every tab. Re-appended after every
+        # _clear_settings_bar().
         self._activity_pill = ActivityPillLabel()
-        # Audit suggestion (UI-PILLBAR P1): append at construction too —
-        # between the first tab open and the first update_project_settings
-        # the bar is a visible overlay with no pill (empty strip). The
-        # rebuild paths re-append after clearing; this closes the transient.
-        self._project_settings.append(self._activity_pill)
         self._on_agent_cycle = None
         self._on_autoaccept_cycle = None
+        self._on_connect_clicked = None
+        self._on_stop_all_clicked = None
+        self._build_transport_cluster()
 
         # Phase 5b: scroll-to-bottom floating button
         self._scroll_btn = Gtk.Button(label="↓")
@@ -273,6 +289,81 @@ class MainContent(Gtk.Box):
 
         self.append(paned)
 
+        # Pill-only shape, visible, hosted above the notebook until the
+        # first chat tab overlays it under the tab strip.
+        self.update_project_settings("", 0, None, "off", None)
+        self._top_box.prepend(self._project_settings)
+
+    def _build_transport_cluster(self) -> None:
+        """Icon connect, state pip, and stop-all. Built once and reparented."""
+        self._transport_cluster = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        self._transport_cluster.add_css_class("project-bar-transport")
+
+        self._connect_btn = self._make_bar_icon("network-transmit-receive-symbolic")
+        self._connect_btn.connect("clicked", self._on_transport_connect_clicked)
+
+        self._connect_pip = Gtk.Button()
+        self._connect_pip.add_css_class("project-bar-connect-pip")
+        self._connect_pip.add_css_class("project-bar-connect-off")
+        self._connect_pip.connect("clicked", self._on_transport_connect_clicked)
+
+        self._stop_all_btn = self._make_bar_icon("process-stop-symbolic")
+        self._stop_all_btn.add_css_class("project-bar-stop")
+        self._stop_all_btn.set_tooltip_text(_STOP_ALL_TIP)
+        self._stop_all_btn.connect("clicked", self._on_transport_stop_clicked)
+
+        tip = _CONNECT_TIPS["disconnected"]
+        self._connect_btn.set_tooltip_text(tip)
+        self._connect_pip.set_tooltip_text(tip)
+
+        self._transport_cluster.append(self._connect_btn)
+        self._transport_cluster.append(self._connect_pip)
+        self._transport_cluster.append(self._stop_all_btn)
+
+    @staticmethod
+    def _make_bar_icon(icon_name: str) -> Gtk.Button:
+        button = Gtk.Button()
+        button.add_css_class("project-bar-icon")
+        image = Gtk.Image.new_from_icon_name(icon_name)
+        image.set_pixel_size(12)
+        button.set_child(image)
+        return button
+
+    def _on_transport_connect_clicked(self, *_args) -> None:
+        if self._on_connect_clicked is not None:
+            self._on_connect_clicked()
+
+    def _on_transport_stop_clicked(self, *_args) -> None:
+        if self._on_stop_all_clicked is not None:
+            self._on_stop_all_clicked()
+
+    def set_on_connect_clicked(self, cb) -> None:
+        self._on_connect_clicked = cb
+
+    def set_on_stop_all_clicked(self, cb) -> None:
+        self._on_stop_all_clicked = cb
+
+    def set_telegram_bridge_state(self, state: str) -> None:
+        """Paint the connect pip. Unknown states match disconnected."""
+        pip_class = {
+            "unconfigured": "project-bar-connect-off",
+            "disconnected": "project-bar-connect-off",
+            "connecting": "project-bar-connect-pending",
+            "connected": "project-bar-connect-on",
+            "error": "project-bar-connect-error",
+        }.get(state, "project-bar-connect-off")
+        tip = _CONNECT_TIPS.get(state, _CONNECT_TIPS["disconnected"])
+        for css_class in _PIP_CLASSES:
+            self._connect_pip.remove_css_class(css_class)
+        self._connect_pip.add_css_class(pip_class)
+        self._connect_btn.set_tooltip_text(tip)
+        self._connect_pip.set_tooltip_text(tip)
+
+    def _detach(self, widget) -> None:
+        """Unparent a singleton before the next bar rebuild parents it."""
+        if widget.get_parent() is not None:
+            widget.unparent()
+
     def _clear_settings_bar(self) -> None:
         """Remove all children from the settings bar box (sibling-walk safe)."""
         while self._project_settings.get_first_child() is not None:
@@ -285,21 +376,20 @@ class MainContent(Gtk.Box):
         Called by window.py when project opens/closes, members change, solo
         target changes, auto-accept level changes, or branch refresh lands.
 
-        Empty project (project_name falsy) -> PILL-ONLY mode: the bar stays
-        VISIBLE with just the shared activity pill (Supervisor ruling,
-        UI-PILLBAR P1 — status stays visible on project-less tabs). The bar
-        goes fully hidden only while no chat tab exists at all.
+        Empty project (project_name falsy) -> the transport cluster, then
+        the shared activity pill. Connect and Stop All are app-global, so
+        they stay on the bar when there is no Git label.
         """
         if not project_name:
             self._clear_settings_bar()
-            # PILL-ONLY MODE — PM ruling 2026-10-02: project-less tabs keep
-            # the bar in a 28px strip hosting ONLY the activity pill, so
-            # agent status remains visible everywhere. No project info.
+            self._detach(self._transport_cluster)
+            self._project_settings.append(self._transport_cluster)
             self._project_settings.append(self._activity_pill)
             self._project_settings.set_visible(True)
             return
 
         self._clear_settings_bar()
+        self._detach(self._transport_cluster)
         self._project_settings.set_visible(True)
 
         info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -364,6 +454,7 @@ class MainContent(Gtk.Box):
         )
         branch_label.set_margin_start(4)
         info_box.append(branch_label)
+        info_box.append(self._transport_cluster)
 
         self._project_settings.append(info_box)
         # Re-append the shared pill — _clear_settings_bar() removed it.
@@ -429,6 +520,7 @@ class MainContent(Gtk.Box):
         fully rebuilds the row.
         """
         self._clear_settings_bar()
+        self._detach(self._transport_cluster)
         lbl = Gtk.Label()
         lbl.set_halign(Gtk.Align.END)
         lbl.set_margin_start(8)
@@ -438,6 +530,7 @@ class MainContent(Gtk.Box):
         else:
             lbl.set_text(text)
         self._project_settings.append(lbl)
+        self._project_settings.append(self._transport_cluster)
         self._project_settings.append(self._activity_pill)
 
     def set_on_buffer_changed(self, cb: callable) -> None:
@@ -490,6 +583,7 @@ class MainContent(Gtk.Box):
         activity pill so it is never lost.
         """
         self._clear_settings_bar()
+        self._detach(self._transport_cluster)
         if text:
             lbl = Gtk.Label()
             lbl.set_halign(Gtk.Align.END)
@@ -500,6 +594,7 @@ class MainContent(Gtk.Box):
             else:
                 lbl.set_text(text)
             self._project_settings.append(lbl)
+        self._project_settings.append(self._transport_cluster)
         self._project_settings.append(self._activity_pill)
 
     # ── Tab management ──────────────────────────────────────────────────────
@@ -534,8 +629,10 @@ class MainContent(Gtk.Box):
         # Only add singleton overlays to the FIRST tab.
         # On subsequent tabs, they'll be moved via _on_notebook_switch_page.
         if len(self._tab_sessions) == 0:
-            chat_overlay.add_overlay(self._project_settings)
-            chat_overlay.add_overlay(self._scroll_btn_box)
+            for widget in (self._project_settings, self._scroll_btn_box):
+                if widget.get_parent() is not None:
+                    widget.unparent()
+                chat_overlay.add_overlay(widget)
 
         # Vertical box for chat messages
         chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -809,6 +906,9 @@ class MainContent(Gtk.Box):
         # Hide tab bar when empty to prevent GtkGizmo min-height < 0 warning
         if self._chat_notebook.get_n_pages() == 0:
             self._chat_notebook.set_show_tabs(False)
+            self._detach(self._project_settings)
+            self._top_box.prepend(self._project_settings)
+            self._project_settings.set_visible(True)
         if not self._bulk_closing:
             self._reindex_tabs()
 

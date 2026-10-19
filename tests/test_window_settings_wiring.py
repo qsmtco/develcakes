@@ -167,44 +167,35 @@ except (ImportError, ValueError):
 
 
 @pytest.mark.skipif(not _GTK_AVAILABLE, reason="GTK not available")
-class TestSettingsDialogLifecycle:
-    """Regression: each open constructs a fresh dialog (no caching)."""
+class TestSettingsPaneLifecycle:
+    """The settings surface is one pane for the window, not a fresh dialog per open."""
 
-    def test_open_close_reopen_constructs_fresh_dialog(
-        self, tmp_config_dir
-    ):
-        """Open → close → reopen must construct a fresh SettingsDialog."""
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import Gtk
+    def test_window_hosts_one_pane(self, tmp_config_dir):
+        import pathlib
+        from unittest.mock import MagicMock
+
         from ui.handlers.settings_handler import SettingsHandler
         from ui.views.settings_dialog import SettingsDialog
 
-        # Harness mirrors the new no-caching _open_settings
-        class _Harness:
-            def __init__(self):
-                self._settings_handler = SettingsHandler()
+        src = pathlib.Path("ui/window.py").read_text()
+        assert "set_settings_pane(" in src
+        assert "def _open_settings" not in src
 
-            def _open_settings(self) -> None:
-                dialog = SettingsDialog(
-                    parent=None,
-                    handler=self._settings_handler,
-                    on_close=lambda: None,
-                )
-                return dialog
+        pane = SettingsDialog(parent=None, handler=SettingsHandler())
+        assert pane.widget() is not None
+        assert not hasattr(pane, "_window")
+        pane.release()
 
-        win = _Harness()
-
-        # First open
-        dlg1 = win._open_settings()
-        assert dlg1 is not None
-
-        # Close
-        dlg1._window.close()
-
-        # Reopen — must be a different instance
-        dlg2 = win._open_settings()
-        assert dlg2 is not dlg1, "Reopen returned the same dialog instance"
-
-        # Cleanup
-        dlg2._window.close()
+        controller = MagicMock()
+        controller.load.return_value = {
+            "bot_token": "", "chat_id": None, "paired_handle": "",
+        }
+        controller.paired_label.return_value = "Not paired"
+        controller.has_saved_token.return_value = False
+        wired = SettingsDialog(
+            parent=None,
+            handler=SettingsHandler(),
+            telegram_controller=controller,
+        )
+        wired.release()
+        controller.cancel_pairing.assert_called_once()

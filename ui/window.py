@@ -1,5 +1,5 @@
 # ui/window.py
-# Main application window — assembles toolbar, left panel, and main content.
+# Main application window — assembles left panel and main content.
 #
 # ── Handler Organization ────────────────────────────────────────────────────────
 # All callback handlers are defined as private methods on this class.
@@ -32,7 +32,6 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, Gio, GLib
 
 # Import UI components
-from ui.toolbar import Toolbar
 from ui.views.left_panel import LeftPanel
 from ui.views.activity_pill import ActivityPillAdapter
 from ui.views.main_content import MainContent
@@ -124,6 +123,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 bridge.stop_bridge()
             except Exception:
                 logger.exception("close-request: bridge shutdown failed")
+        pane = getattr(self, "_settings_pane", None)
+        if pane is not None:
+            try:
+                pane.release()
+            except Exception:
+                logger.exception("close-request: settings release failed")
         return False  # allow default close handling
 
     def _build(self):
@@ -134,10 +139,10 @@ class MainWindow(Gtk.ApplicationWindow):
         their dependencies here. See ARCHITECTURE.md §3.6 for the pattern.
         """
         # Chat render handler — owns text→bubble pipeline (Phase 2 refactor)
-        toolbar = self._wire_chat()
+        self._wire_chat()
         left_panel = self._wire_projects()
         self._wire_agents(left_panel)
-        self._wire_feed(toolbar, left_panel)
+        self._wire_feed(left_panel)
 
     def _wire_chat(self):
         # Created here and injected into both MainContent and ChatHandler so neither
@@ -146,24 +151,16 @@ class MainWindow(Gtk.ApplicationWindow):
         from ui.handlers.chat_render_handler import ChatRenderHandler
         self._chat_render_handler = ChatRenderHandler(GLib_module=GLib)
 
-        # Create UI components
-        toolbar = Toolbar(
-            on_connect_clicked=self._on_connect_clicked,
-            on_settings_clicked=self._open_settings,
-            # SPEC-09 SP3: lazy closure — AgentRuntimeHandler is built later
-            # in _build; _on_stop_all_clicked resolves it inside the confirm
-            # branch, never at wiring time.
-            on_stop_all_clicked=lambda: self._on_stop_all_clicked(),
-        )
-        self._toolbar = toolbar
-        self._toolbar.update_connection_state("offline")
-        # SPEC-15 SP2 BUG#6: the Connect button must be honest BEFORE any
-        # click — 'unconfigured' when no bridge config exists, else
-        # 'disconnected'. Without this the toolbar showed the generic legacy
-        # offline label, which reads as "a transport is available".
-        self._init_bridge_toolbar_state()
-
         self._main_content = MainContent()
+        # SPEC-09 SP3: lazy closure — AgentRuntimeHandler is built later
+        # in _build; _on_stop_all_clicked resolves it inside the confirm
+        # branch, never at wiring time.
+        self._main_content.set_on_connect_clicked(self._on_connect_clicked)
+        self._main_content.set_on_stop_all_clicked(lambda: self._on_stop_all_clicked())
+        # SPEC-15 SP2 BUG#6: the connect pip must be honest BEFORE any
+        # click — 'unconfigured' when no bridge config exists, else
+        # 'disconnected'.
+        self._init_bridge_toolbar_state()
 
         # Session switch menu needs AgentManager — None in MVP (gateway strip:
         # handlers fall back to the local special-agent registry)
@@ -184,7 +181,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Wire Send button
         self._main_content.send_button.connect("clicked", self._chat_handler.on_send_clicked)
-        return toolbar
 
     def _wire_projects(self):
 
@@ -279,12 +275,22 @@ class MainWindow(Gtk.ApplicationWindow):
             on_status_changed=None,
         )
 
-        # Wire the SettingsHandler callbacks to the toolbar (and lazily to the settings dialog)
+        # Settings pane lives in the left notebook for the life of the window.
+        from ui.handlers.telegram_settings_controller import TelegramSettingsController
+        from ui.views.settings_dialog import SettingsDialog
         from ui.wiring import wire_settings_handler
+        self._telegram_settings = TelegramSettingsController(GLib_module=GLib)
+        self._settings_pane = SettingsDialog(
+            parent=self,
+            handler=self._settings_handler,
+            telegram_controller=self._telegram_settings,
+        )
+        self._left_panel.set_settings_pane(self._settings_pane.widget())
+        self._left_panel.set_on_settings_hidden(self._settings_pane.release)
         self._settings_handler = wire_settings_handler(
             self._settings_handler,
-            self._toolbar,
-            settings_dialog_factory=lambda: None,
+            self._left_panel,
+            settings_dialog_factory=lambda: self._settings_pane,
             agent_builder_factory=lambda: getattr(self, "_builder_dialog", None),
             on_runtimes_refresh=self._on_providers_changed,  # SPEC-01
         )
@@ -457,7 +463,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._main_content.set_on_project_settings_update(self._on_feed_bar_update)
 
 
-    def _wire_feed(self, toolbar, left_panel):
+    def _wire_feed(self, left_panel):
         # ── Feed handler + feed tab (Phase 2) ────────────────────────────────
         # ── Feed handler + feed tab (Phase 2 — Project Feed) ─────────────────────
         #
@@ -552,9 +558,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # ── Project settings bar — wire all callbacks (SPEC-...-FIX-3 §2.2) ──
         # Round 2 BUG #4: main_content clicks → window handlers.
-        # UI-PILLBAR P1: the bar's gear is GONE — no set_on_settings_clicked
-        # wiring. The toolbar's ⚙ Settings (wired to _open_settings at
-        # construction) is the sole settings path.
+        # Settings live on the left-notebook Settings tab. The project bar
+        # has no gear.
         self._main_content.set_on_agent_cycle(self._on_agent_cycle_clicked)
         self._main_content.set_on_autoaccept_cycle(self._on_autoaccept_cycle_clicked)
 
@@ -878,9 +883,8 @@ class MainWindow(Gtk.ApplicationWindow):
         paned.set_shrink_end_child(False)
         paned.set_position(250)
 
-        # Vertical layout: toolbar → paned → status bar
+        # Vertical layout: paned → status bar
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        main_box.append(toolbar)
         main_box.append(paned)
 
         # A-9: Status bar with agent_id display
@@ -1238,8 +1242,8 @@ class MainWindow(Gtk.ApplicationWindow):
         'disconnected' (a ready-but-idle bridge). Runs before any click so the
         button never advertises a transport that cannot exist.
         """
-        toolbar = getattr(self, "_toolbar", None)
-        if toolbar is None:
+        main = getattr(self, "_main_content", None)
+        if main is None:
             return
         try:
             from utils import telegram_store
@@ -1250,7 +1254,7 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception:
             logger.exception("failed to read Telegram bridge config at startup")
             configured = False
-        toolbar.set_telegram_bridge_state(
+        main.set_telegram_bridge_state(
             "disconnected" if configured else "unconfigured"
         )
 
@@ -1266,8 +1270,10 @@ class MainWindow(Gtk.ApplicationWindow):
         """
         from utils import telegram_store
         cfg = telegram_store.load_bridge_config()
+        main = getattr(self, "_main_content", None)
         if not telegram_store.is_configured(cfg):
-            self._toolbar.set_telegram_bridge_state("unconfigured")
+            if main is not None:
+                main.set_telegram_bridge_state("unconfigured")
             logger.info(
                 "Connect pressed — Telegram bridge not configured "
                 "(set a token + pair in Settings)"
@@ -1367,9 +1373,9 @@ class MainWindow(Gtk.ApplicationWindow):
         callbacks are already dispatched via GLib.idle_add), so the toolbar
         update is safe here.
         """
-        toolbar = getattr(self, "_toolbar", None)
-        if toolbar is not None:
-            toolbar.set_telegram_bridge_state(state)
+        main = getattr(self, "_main_content", None)
+        if main is not None:
+            main.set_telegram_bridge_state(state)
         if state == "error":
             # BUG#1 (SP2 audit): a bridge refusal that already emitted a
             # SPECIFIC notice (e.g. "Supervisor agent not registered") must not
@@ -2092,27 +2098,6 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_builder_cancel(self) -> None:
         """Called when the builder dialog is cancelled."""
         pass  # dialog already closes itself
-
-    # ── Settings integration ─────────────────────────────────────────────
-
-    def _open_settings(self) -> None:
-        """Open the Settings dialog (fresh instance each time)."""
-        from gi.repository import GLib
-
-        from ui.handlers.telegram_settings_controller import (
-            TelegramSettingsController,
-        )
-        from ui.views.settings_dialog import SettingsDialog
-        dialog = SettingsDialog(
-            parent=self,
-            handler=self._settings_handler,
-            on_close=lambda: None,
-            telegram_controller=TelegramSettingsController(GLib_module=GLib),
-        )
-        dialog.show()
-
-
-
 
 
 

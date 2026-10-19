@@ -234,6 +234,7 @@ def test_utils_gtk_imports_are_documented():
         "gtk_containers.py",
         "gtk_safe_link.py",
         "icons.py",
+        "live_guard.py",
         "stt.py",
     }
     root_dir = os.path.dirname(os.path.dirname(__file__))

@@ -72,7 +72,11 @@ def wire_settings_handler(
     agent_builder_factory: Callable | None = None,
     on_runtimes_refresh: Callable[[], None] | None = None,
 ) -> SettingsHandler:
-    """Wire the SettingsHandler's callbacks to the toolbar and (optionally) the dialogs.
+    """Wire the SettingsHandler's callbacks to a status target and (optionally) the dialogs.
+
+    ``toolbar`` is any object with ``set_settings_status(bool) -> None``.
+    The window passes the left panel (the Settings-tab dot). The parameter
+    name is unchanged so existing positional callers keep working.
 
     - on_status_changed  → toolbar.set_settings_status(verified)
     - on_providers_changed → settings_dialog_factory().refresh_providers(providers)

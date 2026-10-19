@@ -51,6 +51,12 @@ class _FakeWidget:
     def get_parent(self):
         return self._parent
 
+    def unparent(self):
+        parent = self._parent
+        if parent is not None and hasattr(parent, "children") and self in parent.children:
+            parent.children.remove(self)
+        self._parent = None
+
 
 class _FakeBox(_FakeWidget):
     """Fake Gtk.Box. Implements append/remove/get_first_child as a list.
@@ -178,14 +184,13 @@ def mc(fake_gtk):
     The real method bodies (the units under test) execute against the fake
     Gtk classes. No real GTK widgets are constructed.
 
-    UI-PILLBAR P1: the singleton gear is DELETED (window.py's toolbar ⚙ is
-    the sole settings path) — the shared activity pill replaces it as the
-    preserved right-end widget. The fixture mirrors the new __init__ state
-    (ActivityPillLabel + cycle callbacks; no gear, no settings callback)."""
+    The transport cluster is a singleton re-appended on every rebuild.
+    The fixture mirrors that state without constructing real GTK widgets."""
     instance = MainContent.__new__(MainContent)
     instance._project_settings = _FakeBox()
     # Mirror the __init__ pill construction (same class the real code uses).
     instance._activity_pill = _FakeGtk.Label()
+    instance._transport_cluster = _FakeBox()
     instance._on_agent_cycle = None
     instance._on_autoaccept_cycle = None
     instance._agent_mgr = None
@@ -220,15 +225,13 @@ class TestClearSettingsBar:
 
 class TestUpdateProjectSettings:
     def test_update_project_settings_pill_only_on_empty(self, mc):
-        """Falsy project_name -> PILL-ONLY mode (UI-PILLBAR P1 Supervisor
-        ruling): bar stays VISIBLE with exactly one child — the shared
-        activity pill. Status stays visible on project-less tabs; the old
-        hide-the-bar behavior is retired."""
+        """Falsy project_name keeps the bar visible: transport cluster, then pill."""
         mc.update_project_settings("", 0, None, "off", None)
         assert mc._project_settings.visible is True
         children = mc._project_settings.children
-        assert len(children) == 1
-        assert children[0] is mc._activity_pill
+        assert len(children) == 2
+        assert children[0] is mc._transport_cluster
+        assert children[1] is mc._activity_pill
 
     def test_update_project_settings_shows_on_nonempty(self, mc):
         """Valid args -> set_visible(True) and info_box + pill appended.
@@ -245,6 +248,7 @@ class TestUpdateProjectSettings:
         )
         info_box = children[0]
         assert isinstance(info_box, _FakeBox)
+        assert info_box.children[-1] is mc._transport_cluster
 
 
 class TestPillPreservation:
@@ -255,17 +259,18 @@ class TestPillPreservation:
     def test_pill_preserved_in_set_project_settings_text(self, mc):
         """set_project_settings_text re-appends the pill."""
         mc.set_project_settings_text("legacy")
-        # label + pill
         assert mc._activity_pill.get_parent() is mc._project_settings
-        assert len(mc._project_settings.children) == 2
-        assert mc._project_settings.children[1] is mc._activity_pill
+        assert mc._transport_cluster in mc._project_settings.children
+        assert len(mc._project_settings.children) == 3
+        assert mc._project_settings.children[-1] is mc._activity_pill
 
     def test_pill_preserved_in_set_feed_bar_text(self, mc):
         """set_feed_bar_text re-appends the pill."""
         mc.set_feed_bar_text("status")
         assert mc._activity_pill.get_parent() is mc._project_settings
-        assert len(mc._project_settings.children) == 2
-        assert mc._project_settings.children[1] is mc._activity_pill
+        assert mc._transport_cluster in mc._project_settings.children
+        assert len(mc._project_settings.children) == 3
+        assert mc._project_settings.children[-1] is mc._activity_pill
 
     def test_pill_preserved_through_repeated_calls(self, mc):
         """Repeated rebuilds never lose the pill."""
@@ -290,7 +295,10 @@ class TestXmlEscapeHardening:
         """Branch '<script>' renders escaped (BUG #6)."""
         mc.update_project_settings("proj", 1, None, "off", "<script>")
         info_box = mc._project_settings.children[0]
-        branch_label = info_box.children[-1]
+        branch_label = next(
+            child for child in info_box.children
+            if "Git:" in (getattr(child, "markup", None) or "")
+        )
         assert branch_label.markup is not None
         assert "<script>" not in branch_label.markup
         assert "&lt;script&gt;" in branch_label.markup

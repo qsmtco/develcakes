@@ -139,7 +139,6 @@ develcakes/
 ├── ui/                        # All UI components
 │   ├── __init__.py
 │   ├── constants.py           # Cross-cutting UI constants (STREAMING_ENABLED toggle)
-│   ├── toolbar.py             # Toolbar widget — connect button + status label
 │   ├── styles.py              # All CSS — single source of truth (APP_CSS + apply_styles)
 │   ├── window.py              # MainWindow — assembles all components, wires callbacks
 │   ├── wiring.py              # Stateless wiring helpers (SettingsHandler callbacks, LOW-7 project path)
@@ -181,7 +180,7 @@ develcakes/
 │       ├── diff_card.py         # Diff card widget factories — build_file_diff_card, build_diff_summary_card (Phase 7)
 │       ├── review_bar.py        # ReviewBar widget — review mode dropdown + action buttons (Phase 7)
 │       ├── file_tree.py        # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
-│       ├── left_panel.py         # ~1004 lines — LeftPanel (Prompts/Agents/Projects notebook + right-click copy menu)
+│       ├── left_panel.py         # LeftPanel (Prompts/Agents/Projects/Settings notebook)
 │       ├── main_content.py     # MainContent — chat notebook + input + button bar
 │       ├── session_menu.py     # Right-click session switcher popover
 │       ├── chat_input_toolbar.py # ~480 lines — ChatInputToolbar — find/replace bar + spell check toggle (view only)
@@ -275,7 +274,7 @@ develcakes/
 
 **Live action bridge (SPEC-19 SP4 / SPEC-20a).** Consequential methods stay approval-only; read_file is the read-only registry and returns validated local image bytes (LOW-7 roots, image allowlist, 8 MB) on the same develcakes:result seam, with no approval card.
 
-**`utils/` GTK carve-out (documented exceptions):** Four files in `utils/`
+**`utils/` GTK carve-out (documented exceptions):** Five files in `utils/`
 import `gi.repository` despite the "no GTK" rule above. These are
 narrowly-scoped exceptions that have been reviewed and accepted:
 
@@ -285,6 +284,7 @@ narrowly-scoped exceptions that have been reviewed and accepted:
 | `utils/icons.py` | `gi.repository.Gdk` (module-level) | Pure texture rendering — no widget hierarchy, no layout, no signals | `Gdk.Texture` is the only way to render SVGs to pixel buffers; callers pass textures as plain objects |
 | `utils/gtk_safe_link.py` | `gi.repository.Gtk, Pango` (lazy, inside functions) | Link-safety guard; callers are GTK-bound labels | Function-level import minimizes the GTK surface; the logic is scheme-string validation that happens to need Pango markup parsing |
 | `utils/stt.py` | `gi.repository.GLib` (lazy, inside thread callback) | `GLib.idle_add` marshals STT results from the transcription thread to the main loop | Thread-dispatch mechanism only — no widgets, no windows, no signals. Has `except ImportError` fallback |
+| `utils/live_guard.py` | `gi.repository.WebKit`, `GLib` (lazy, inside functions) | SPEC-19 content filter + navigation lock for the live chat surface | WebKit filter store and `GLib` idle dispatch. No widget subclass. Lazy import so unit tests can fake it |
 
 **Rule:** Do not add new GTK imports to `utils/` without documenting them
 here and justifying why the file cannot live in `ui/`.
@@ -535,20 +535,9 @@ owned by `utils/work_persistence.py`.
     def can_checkpoint() -> bool   # review mode on, no active session
 ```
 
-### 3.4 `ui/toolbar.py` — Top Bar
+### 3.4 App-level toolbar — removed
 
-**Responsibility:** App-level actions bar (Stream toggle, Settings button, status label, Connect button).
-
-**Layout:** `[Stream | ⚙ Settings]  ←—expanding spacer—→  [status label | Connect]`
-
-**Public API:**
-```python
-toolbar = Toolbar(on_connect_clicked=callback_fn, on_settings_clicked=callback_fn)
-toolbar.update_connection_state("disconnected" | "connecting" | "connected" | "offline")
-toolbar.set_settings_status(has_verified_provider: bool)  # shows/hides the red dot on ⚙ Settings
-```
-
-**Internal state:** Owns the Stream toggle, Settings button (wrapped in a `Gtk.Overlay` with a status dot), status label, and Connect button. Updates them based on calls to `update_connection_state()` and `set_settings_status()`.
+The top `Toolbar` widget is gone. Settings is the fourth page of the left notebook. Connect and Stop All sit on the project bar (`MainContent.set_telegram_bridge_state`, `set_on_connect_clicked`, `set_on_stop_all_clicked`). The unverified-provider dot is `LeftPanel.set_settings_status`. The find/replace bar remains `ChatInputToolbar`.
 
 ### 3.5 `ui/styles.py` — Global CSS (~1045 lines)
 
@@ -615,7 +604,9 @@ self._agent_to_project = AgentRoutingTable()  # shared with ProjectHandler (writ
 
 | Setter | Window impl | Action |
 |--------|-------------|--------|
-| `main_content.set_on_settings_clicked` | `_on_settings_btn_clicked` | ⚙ -> `_open_settings()` (fresh dialog each click) |
+| `left_panel.set_settings_pane` | `_wire_agents` | one `SettingsDialog` parented into the Settings tab; `wire_settings_handler` factory returns that pane |
+| `main_content.set_on_connect_clicked` | `_on_connect_clicked` | project-bar connect icon and pip toggle the Telegram bridge |
+| `main_content.set_on_stop_all_clicked` | `_on_stop_all_clicked` | project-bar stop icon; confirm dialog unchanged |
 | `main_content.set_on_agent_cycle` | `_on_agent_cycle_clicked` | cycle solo member -> `set_solo_target` (bar refreshes via solo-changed callback) |
 | `main_content.set_on_autoaccept_cycle` | `_on_autoaccept_cycle_clicked` | `FeedHandler.set_auto_accept_level(next)` — NO optimistic bar rebuild (BUG #4; bar updates post-confirmation) |
 | `project_handler.set_on_solo_target_changed` | `_on_solo_target_changed` | bar refresh, active-project guarded (BUG #3) |
@@ -676,13 +667,15 @@ class InputToolbarHandler:
 
 ### 3.7 `ui/views/left_panel.py` — Left Sidebar
 
-**Responsibility:** Three-tab notebook: Prompts, Agents, Projects.
+**Responsibility:** Four-tab notebook: Prompts, Agents, Projects, Settings.
 
 **Prompts tab:** PromptsHandler-backed list with search, favorites, and rich metadata rows. Star/favorite persisted to `~/.config/develcakes/favorites.json`. Double-click or `+` button calls `on_prompt_loaded(filepath, name, content)`, which loads content into chat input. Search filters by name (case-insensitive). Favorites sort to top. Right-click on a prompt row opens a 2-item popover menu ("Copy path" / "Copy prompt"); the selection is copied to the system clipboard via `Gdk.Display.get_clipboard()` and a transient "Copied path" / "Copied prompt" confirmation appears in the tab header for 2.5s (auto-cleared via `GLib.timeout_add`).
 
 **Agents tab:** Initially empty placeholder. After `set_agents()` is called, builds avatar cards (colored circle + initials + name + +/− toggle button). Double-click calls `on_agent_selected(session_key, name)`. CSS for agent rows is scoped to `left_panel`. When a project is open, the toggle button is visible — `+` adds the agent to the project, `−` removes them. Toggle button uses `.agent-add-btn` (green) or `.agent-remove-btn` (red) CSS classes.
 
 **Projects tab:** `FileTree` widget — `Gtk.TreeView` with `Gtk.TreeStore`, lazy-loading subdirectories, back button.
+
+**Settings tab:** Hosts one `SettingsDialog.widget()` for the life of the window. Five groups (Providers, Telegram Bridge, Decision Model, STT Model, Speech) are a vertical list over the existing stack. `set_settings_status(False)` shows a red dot on the tab label. `set_on_settings_hidden` runs when the notebook leaves this page (cancels Telegram pairing).
 
 **Public API:**
 ```python
@@ -697,6 +690,9 @@ panel.refresh_prompts()                       # rebuilds the prompts list
 panel.set_on_project_opened(cb)               # fires when project tab opens
 panel.refresh_agents_with_project(name)      # rebuilds agents list with +/− buttons
 panel.set_toggle_agent_callback(cb)            # wires +/− toggle to ProjectHandler.toggle_agent()
+panel.set_settings_pane(widget)               # parents SettingsDialog.widget()
+panel.set_settings_status(has_verified)       # red dot on the Settings tab
+panel.set_on_settings_hidden(cb)              # leave-page hook (pairing cancel)
 ```
 
 ### 3.7a Prompts Tab Right-Click Copy Menu
@@ -797,22 +793,23 @@ content.replace_input_text(text) # replace input with improved text
 content.append_stt_text(text)    # append STT partial transcript
 content.update_stt_state(state) # "idle" | "recording" — button label/style
 
-# Spec PROJECT-SETTINGS-BAR-ENHANCED: project settings bar (agent name,
-# auto-accept level, git branch, ⚙ button) rebuilt from resolved primitives.
+# Project bar: name, Chat, Files, Git, then the transport cluster
+# (connect icon, state pip, stop icon), then the activity pill.
 def update_project_settings(project_name, member_count, solo_target,
                             auto_accept_level, branch_name) -> None
-    # Rebuild the settings bar with all 5 elements. Falsy project_name hides
-    # the bar and returns. xml_escape_text()s the UNTRUSTED project_name and
-    # branch (BUG #6). Re-appends the singleton gear button last.
-def set_on_settings_clicked(cb) -> None   # ⚙ -> _on_settings_btn_clicked -> Settings dialog
+    # Falsy project_name keeps the bar visible: transport cluster, then pill.
+    # xml_escape_text()s the UNTRUSTED project_name and branch (BUG #6).
+def set_telegram_bridge_state(state: str) -> None  # pip color + connect tooltips
+def set_on_connect_clicked(cb) -> None
+def set_on_stop_all_clicked(cb) -> None
 def set_on_agent_cycle(cb) -> None        # agent label clicked -> cycle solo member
 def set_on_autoaccept_cycle(cb) -> None   # auto label clicked -> cycle level (off->diffs->files->all->off)
 # _clear_settings_bar() — sibling-walk child removal (get_first_child()/remove()
 #   loop; NEVER `for child in list(box)` — gtk-container-membership bug class).
-# Gear-preservation invariant (BUG #5): BOTH legacy methods
-#   set_project_settings_text(text) and set_feed_bar_text(text) clear the bar,
-#   append their label, then re-append _settings_btn so the gear is never lost
-#   across rebuilds.
+# The transport cluster is nested in info_box, so rebuilds call _detach()
+# before re-appending it. Legacy set_project_settings_text / set_feed_bar_text
+# re-append the cluster and the pill. With no chat tab the bar is prepended
+# to top_box; the first tab unparents it onto the chat overlay.
 ```
 
 **Tab close:** Each tab has an × button (top-right of tab label) and responds to middle-click. Both call `_close_tab(page_idx)` which removes the page and re-indexes tracking dicts.
@@ -2512,9 +2509,9 @@ class AgentBuilderDialog:
 
 ### 3.21u.a `ui/wiring.py` — SettingsHandler Callback Wiring (Phase 1 of SPEC-AGENT-BUILDER-PROVIDER-DROPDOWN)
 
-**Responsibility:** Wire the `SettingsHandler`'s `on_status_changed` and `on_providers_changed` callbacks to the toolbar and dialogs. Pure composition — no business logic, no GTK widget creation.
+**Responsibility:** Wire the `SettingsHandler`'s `on_status_changed` and `on_providers_changed` callbacks to a status target and the settings pane. Pure composition — no business logic, no GTK widget creation. The second argument is still named `toolbar` and only needs `set_settings_status(bool)`. The window passes `LeftPanel`.
 
-**Owns:** None — this is a stateless wiring function. The handler is owned by the window; the toolbar is owned by the window; the dialogs are owned by the window.
+**Owns:** None — this is a stateless wiring function. The handler, the left panel, and the settings pane are owned by the window.
 
 **Public API:**
 ```python
@@ -4062,7 +4059,6 @@ panel.refresh_agents_with_project(name)
 
 **Constructor pattern** (for data available at construction):
 ```python
-toolbar = Toolbar(on_connect_clicked=self._on_connect_clicked)
 file_tree = FileTree(on_file_selected=self._on_project_selected)
 ```
 
@@ -4573,7 +4569,6 @@ develcakes/
 ├── ui/
 │   ├── __init__.py               # 1 line
 │   ├── constants.py              # 16 lines — cross-cutting UI constants (STREAMING_ENABLED)
-│   ├── toolbar.py                # ~142 lines — Toolbar widget (connect button + status label)
 │   ├── styles.py                 # ~1245 lines — APP_CSS constant + apply_styles()
 │   ├── window.py                 # ~957 lines — MainWindow — assembles all components, wires callbacks
 │   ├── wiring.py                 # ~128 lines — settings callback wiring + LOW-7 project path helpers
@@ -4615,7 +4610,7 @@ develcakes/
 │       ├── feed_card.py          # ~616 lines — feed_card widget factory (Phase 5)
 │       ├── feed_tab.py           # ~387 lines — FeedTab (view only)
 │       ├── file_tree.py          # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
-│       ├── left_panel.py         # ~1004 lines — LeftPanel (Prompts/Agents/Projects notebook)
+│       ├── left_panel.py         # LeftPanel (Prompts/Agents/Projects/Settings notebook)
 │       ├── main_content.py       # ~942 lines — MainContent (tabs + input + review bar)
 │       ├── review_bar.py         # ~166 lines — ReviewBar widget (Phase 7)
 │       ├── session_menu.py       # ~216 lines — session/project switcher popover

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 class LeftPanel(Gtk.Box):
     """
     Left sidebar panel widget.
-    Contains a Gtk.Notebook with three tabs: Prompts, Agents, Projects.
+    Contains a Gtk.Notebook with four tabs: Prompts, Agents, Projects, Settings.
     """
 
     def __init__(self, on_prompt_selected=None, on_project_selected=None,
@@ -63,6 +63,7 @@ class LeftPanel(Gtk.Box):
         self._prompts_tab_header = None  # [title, search] box
         self._prompt_copy_status_label = None      # built in _build_prompts_tab
         self._prompt_copy_status_timeout_id = None  # GLib source id for the auto-clear
+        self._on_settings_hidden = None
 
         # Create the notebook (tabbed interface)
         PAP_notebook = Gtk.Notebook()
@@ -135,12 +136,53 @@ class LeftPanel(Gtk.Box):
             Gtk.Label(label="Projects")
         )
 
+        # Tab 4: Settings — pane is injected by the composition root.
+        self._settings_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._settings_page.set_vexpand(True)
+        self._settings_tab_label = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=4
+        )
+        self._settings_tab_label.append(Gtk.Label(label="Settings"))
+        self._settings_dot = Gtk.Label(label="●")
+        self._settings_dot.add_css_class("settings-tab-dot")
+        self._settings_dot.set_visible(False)
+        self._settings_tab_label.append(self._settings_dot)
+        PAP_notebook.append_page(self._settings_page, self._settings_tab_label)
+        PAP_notebook.connect("switch-page", self._on_pap_switch_page)
+
         # Store references needed by window
-        self._PAP_notebook = PAP_notebook  # outer notebook (Prompts/Agents/Projects)
+        self._PAP_notebook = PAP_notebook  # outer notebook (Prompts/Agents/Projects/Settings)
 
         self.append(PAP_notebook)
 
         # CSS for agent rows is in ui/styles.py (applied globally at startup)
+
+    # ── Settings tab ────────────────────────────────────────────────────────
+
+    def set_settings_pane(self, widget: Gtk.Widget) -> None:
+        """Parent the settings box into the Settings page. Call once."""
+        widget.set_vexpand(True)
+        self._settings_page.append(widget)
+
+    def set_settings_status(self, has_verified_provider: bool) -> None:
+        """Show the red dot when no provider is verified."""
+        self._settings_dot.set_visible(not has_verified_provider)
+
+    def set_on_settings_hidden(self, cb) -> None:
+        """``cb() -> None``, fired when the notebook leaves the Settings page."""
+        self._on_settings_hidden = cb
+
+    def _on_pap_switch_page(self, _notebook, page, _page_num) -> None:
+        """Cancel pairing work when the user leaves the Settings page.
+
+        Switching among the five settings groups is an inner stack, not
+        this notebook, so that does not fire here.
+        """
+        if page is self._settings_page:
+            return
+        cb = self._on_settings_hidden
+        if cb is not None:
+            cb()
 
     # ── Agents tab ──────────────────────────────────────────────────────────
 

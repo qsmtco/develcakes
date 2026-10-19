@@ -1432,19 +1432,56 @@ notebook > header > tabs > tab {
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-/* -- Toolbar status dot -------------------------------------------- */
-.toolbar-status-dot {
+/* -- Settings tab (left notebook) ---------------------------------- */
+button.settings-group-btn {
+    background: transparent;
+    color: #cfd8e8;
+    border: none;
+    box-shadow: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+    min-height: 0;
+}
+button.settings-group-btn.settings-group-active {
+    background: rgba(99, 102, 241, 0.35);
+    color: #e0e7ff;
+}
+
+.settings-tab-dot {
     color: #ef4444;
     font-size: 14px;
     font-weight: 700;
 }
 
-/* -- Settings dialog ------------------------------------------------ */
-.settings-dialog {
-    min-width: 560px;
-    min-height: 480px;
+/* -- Project bar transport cluster ---------------------------------- */
+button.project-bar-icon {
+    min-height: 0;
+    min-width: 0;
+    padding: 0 2px;
+    margin: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
 }
+button.project-bar-stop {
+    color: #ef4444;
+}
+button.project-bar-connect-pip {
+    min-height: 8px;
+    min-width: 8px;
+    padding: 0;
+    margin: 0 2px;
+    border-radius: 8px;
+    border: none;
+    box-shadow: none;
+    background: #6b6b7a;
+}
+button.project-bar-connect-pip.project-bar-connect-off { background: #6b6b7a; }
+button.project-bar-connect-pip.project-bar-connect-pending { background: #f59e0b; }
+button.project-bar-connect-pip.project-bar-connect-on { background: #22c55e; }
+button.project-bar-connect-pip.project-bar-connect-error { background: #ef4444; }
 
+/* -- Settings forms ------------------------------------------------- */
 .settings-provider-card {
     background: rgba(40, 40, 55, 0.45);
     border-radius: 8px;
