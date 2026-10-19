@@ -97,8 +97,63 @@ _STATUS_RE = re.compile(
 # must not make a non-provider exception look like one). `\b` prevents matching
 # "500" inside "5000".
 _BARE_STATUS_RE = re.compile(r"\b(401|402|403|404|429|5\d\d)\b")
+# MiniMax reports business errors inside an HTTP 200 envelope:
+# {"base_resp":{"status_code":NNNN,"status_msg":"..."}}. minimax_provider
+# surfaces them as RuntimeError(f"MiniMax API error (status_code={code}): msg").
+# Those codes are NOT HTTP statuses — they live in their own numeric space
+# (1000–2056) and must be looked up in the table below instead of being fed
+# through _class_for_status, which would return UNKNOWN for all of them.
+# Table follows the official MiniMax error-code reference.
+_MINIMAX_STATUS_RE = re.compile(
+    r"MiniMax API error\s*\(status_code=(\d{3,5})\)",
+    re.IGNORECASE,
+)
+_MINIMAX_BODY_CODES: dict[int, FailureClass] = {
+    1000: FailureClass.TRANSIENT,        # unknown error
+    1001: FailureClass.TRANSIENT,        # request timeout
+    1002: FailureClass.TRANSIENT,        # rate limit
+    1004: FailureClass.PERMANENT_AUTH,   # not authorized / login fail
+    1024: FailureClass.TRANSIENT,        # internal error
+    1033: FailureClass.TRANSIENT,        # system error
+    1039: FailureClass.TRANSIENT,        # token limit
+    # 2013: "invalid params" — in practice the tool_call/tool_result pairing
+    # rejection. Our payload is malformed, so halt rather than fail over to a
+    # provider that would accept the same bad transcript.
+    2013: FailureClass.BAD_REQUEST,
+    2045: FailureClass.TRANSIENT,        # rate growth limit
+    2049: FailureClass.PERMANENT_AUTH,   # invalid API Key
+}
 _SECRET_RE = re.compile(r"(?:sk-|Bearer\s+)[A-Za-z0-9_\-\.]+", re.IGNORECASE)
 _URL_USERINFO_RE = re.compile(r"(https?://)[^\s/@]+:[^\s/@]+@")
+
+
+def _minimax_body_code(exc: object) -> int | None:
+    """MiniMax business code carried in the exception text, else None.
+
+    Scoped to the exact `MiniMax API error (status_code=NNNN)` shape that
+    minimax_provider raises, so an ordinary `status_code=401` wrapper from
+    another provider is never re-routed here. Never raises.
+    """
+    if not isinstance(exc, str):
+        exc = str(exc or "")
+    match = _MINIMAX_STATUS_RE.search(exc)
+    return int(match.group(1)) if match else None
+
+
+def _class_for_minimax(body_code: int) -> FailureClass:
+    """Map a MiniMax body-level status code. Unknown codes fall back to the
+    generic textual markers, which is all `_class_for_status` would do for an
+    HTTP-shaped number anyway."""
+    known = _MINIMAX_BODY_CODES.get(body_code)
+    if known is not None:
+        return known
+    # A code in HTTP space inside a MiniMax envelope (some gateways relay the
+    # upstream HTTP status) still obeys HTTP semantics: 429 → retryable.
+    if body_code == 429:
+        return FailureClass.TRANSIENT
+    if body_code in (401, 402, 403):
+        return FailureClass.PERMANENT_AUTH
+    return FailureClass.UNKNOWN
 
 
 def class_label(failure_class: FailureClass) -> str:
@@ -228,6 +283,18 @@ def classify_exception(exc: BaseException, provider: str = "", model: str = "") 
     del provider, model
     if not isinstance(exc, BaseException):
         return FailureClass.UNKNOWN
+    # MiniMax business codes ride inside an HTTP 200 envelope, so they must be
+    # resolved before the HTTP-shaped status parse below (which would read
+    # 2013/1004 as a status number and return UNKNOWN). The regex is scoped to
+    # the provider's own raise shape, so another provider's "status_code=401"
+    # wrapper is unaffected.
+    minimax_code = _minimax_body_code(exc)
+    if minimax_code is not None:
+        kind = _class_for_minimax(minimax_code)
+        if kind is not FailureClass.UNKNOWN:
+            return kind
+        # Unlisted code: stay in the generic flow so textual auth markers still
+        # apply, instead of short-circuiting to UNKNOWN.
     status, body, from_http = _extract_status(exc)
     if status is not None:
         return _class_for_status(status, body, from_http=from_http)

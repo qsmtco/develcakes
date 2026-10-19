@@ -226,6 +226,7 @@ class TurnResult:
 from agent.llm.cost import cost_for_model
 
 # ── Anthropic converters (extracted to agent/llm/convert.py, Phase B2) ──────
+from agent.llm.convert import normalize_tool_history
 
 # ── LLM providers (extracted to agent/llm/, Phase B4) ───────────────────────
 # Re-exported under legacy names for backward compatibility.
@@ -2962,6 +2963,11 @@ class AgentRuntime:
         Make a single LLM API call. Uses SSE streaming when on_text_delta is set
         (Phase 1.3b), otherwise falls back to blocking.
         """
+        # WU minimax-2013: repair tool_call/tool_result pairing at the dispatch
+        # seam so providers that reject unpaired histories receive a valid
+        # transcript. Idempotent — the streaming path normalizes again, no-op.
+        messages = normalize_tool_history(messages)
+
         # Phase CB-3: prepend pending stuck messages as transient prefixes.
         # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.3 (BUG #4 fix).
         pending = self._pending_stuck_messages.pop(session_key, [])
@@ -3210,6 +3216,10 @@ class AgentRuntime:
         Returns:
             Assembled response dict compatible with extract_tool_calls / extract_text_content.
         """
+        # WU minimax-2013: same pairing repair as _call_llm_once. Idempotent —
+        # a history already normalized at the blocking seam passes unchanged.
+        messages = normalize_tool_history(messages)
+
         # PHASE-11: caller_key is resolved by _call_llm before calling this method
         # (explicit caller > default_model prefix > model prefix). Symmetric with
         # the non-streaming path.

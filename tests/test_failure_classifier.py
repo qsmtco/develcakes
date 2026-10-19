@@ -86,6 +86,29 @@ class TestClassifyException:
         exc = RuntimeError("MiniMax API error (status_code=1004): login fail")
         assert classify_exception(exc) == FailureClass.PERMANENT_AUTH
 
+    def test_minimax_2013_invalid_params_is_bad_request(self):
+        """WU minimax-2013: business codes ride an HTTP 200 envelope, so the
+        digits are NOT an HTTP status. 2013 ('invalid params', in practice the
+        tool_call/tool_result pairing rejection) means our payload is malformed
+        — halt instead of failing over to a provider that accepts it."""
+        exc = RuntimeError(
+            "MiniMax API error (status_code=2013): invalid params, "
+            "tool_call must be followed by tool_result"
+        )
+        assert classify_exception(exc, "minimax", "MiniMax-Text-01") == FailureClass.BAD_REQUEST
+
+    def test_minimax_1004_auth_resolved_by_code_table_not_text(self):
+        """No 'login fail'/'invalid api key' text: proves the mapping comes
+        from the code table, not the generic textual auth fallback."""
+        exc = RuntimeError("MiniMax API error (status_code=1004): base_resp rejected the call")
+        assert classify_exception(exc) == FailureClass.PERMANENT_AUTH
+
+    def test_minimax_envelope_429_is_rate_limit(self):
+        """A gateway-relayed HTTP 429 inside the MiniMax envelope stays
+        retryable rather than falling through to UNKNOWN."""
+        exc = RuntimeError("MiniMax API error (status_code=429): too many requests")
+        assert classify_exception(exc) == FailureClass.TRANSIENT
+
     def test_timeout(self):
         assert classify_exception(TimeoutError("timed out")) == FailureClass.TRANSIENT
 
