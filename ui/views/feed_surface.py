@@ -116,13 +116,23 @@ class FeedSurface:
         return list(self._order)
 
     def set_cards(self, cards: list) -> None:
-        """Replace the document. `cards` is oldest-first."""
+        """Replace the document. `cards` is oldest-first.
+
+        A new document is a new reading context: reset the scroll state with
+        it. Both fields are reported by the PREVIOUS document's FEED_SCRIPT,
+        so carrying them over makes a switched-to project inherit the old
+        project's pixel offset AND its follow-off state (it opens mid-page and
+        its new cards land below the fold forever). A fresh project starts at
+        the top and follows.
+        """
         self._order = []
         self._cards = {}
         self._html = {}
         self._body = {}
         self._revealed = set()
         self._context_open = set()
+        self._doc_near_bottom = True
+        self._doc_y = None
         for card in cards:
             cid = card.card_id or ""
             if not cid:

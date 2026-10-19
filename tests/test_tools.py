@@ -309,6 +309,52 @@ class TestReadFile:
                 assert r.success is False
                 assert "line must be an integer >= 1" in r.error
 
+    def test_read_continuation_hint_after_mid_line_window(self):
+        """SPEC-41 P3 (c): a window that ends MID-LINE leaves an incomplete
+        line whose newline was never counted. That line is already (partly)
+        shown, so the next UNREAD line is line + newlines + 1.
+
+        The notice only appears on a CAP-sized window (an explicit limit
+        smaller than the cap is honored silently), so the fixture is a
+        16 KB+ file of 23-byte lines: 16_384 == 712 * 23 + 8, i.e. 712
+        complete lines and 8 bytes of line 713 — the pre-fix hint said 713
+        (a line the model already has); the next unread line is 714.
+        """
+        from agent.tools import MAX_READ_SIZE
+
+        line_text = "0123456789012345678901\n"  # 23 bytes
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write(line_text * 720)  # 16_560 bytes
+            r = execute_tool("read_file", {"path": "t.txt", "line": 1}, proj)
+            assert r.success is True
+            assert "truncated" in r.output
+            assert r.output.startswith("[line 1 of t.txt]\n")
+            assert "or line=714" in r.output
+            assert "or line=713" not in r.output
+            # The offset= alternative is unchanged: the byte cap.
+            assert f"offset={MAX_READ_SIZE}" in r.output
+
+    def test_read_continuation_hint_after_newline_terminated_window(self):
+        """SPEC-41 P3 (c), other half: a window that ENDS on a newline has
+        consumed exactly `newlines` lines → next is line + newlines.
+
+        Same 16-byte lines: 16_384 == 1024 * 16 exactly, so the cap window
+        holds 1024 complete lines and the next unread line is 1025.
+        """
+        from agent.tools import MAX_READ_SIZE
+
+        line_text = "012345678901234\n"  # 16 bytes
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write(line_text * 1026)  # 16_416 bytes
+            r = execute_tool("read_file", {"path": "t.txt", "line": 1}, proj)
+            assert r.success is True
+            assert "truncated" in r.output
+            assert "or line=1025" in r.output
+            assert "or line=1026" not in r.output
+            assert f"offset={MAX_READ_SIZE}" in r.output
+
     def test_read_binary_file_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
             binary = os.path.join(proj, "bin.dat")

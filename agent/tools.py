@@ -510,9 +510,19 @@ def _read_file(
                 f"file is {size} bytes; continue with offset={next_offset}"
             )
             if line is not None:
-                # A byte window that ends mid-line repeats that line on
-                # the next read. Ending on a newline advances past it.
-                notice += f" or line={line + content.count(chr(10))}"
+                # The hint must point at the first line the window did NOT
+                # show. `line` numbers the window's first line and each
+                # complete line contributes one newline, so a window that
+                # ENDS on a newline has consumed exactly `newlines` lines →
+                # next is line + newlines. A window that ends MID-LINE holds
+                # an incomplete line whose newline was never counted; that
+                # line is already (partly) read, so next is line + newlines
+                # + 1.
+                newlines = content.count(chr(10))
+                next_line = line + newlines
+                if not content.endswith(chr(10)):
+                    next_line += 1
+                notice += f" or line={next_line}"
             content += notice + " ...]"
         if line is not None:
             content = f"[line {line} of {path}]\n" + content

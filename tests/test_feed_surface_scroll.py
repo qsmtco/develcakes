@@ -259,3 +259,50 @@ class TestAttachHtmlSurfaceIntegration:
         assert tab._scroll_handler_id is None
         assert tab._scroll_timeout_id is None
         assert tab._settle_source is None
+
+
+class TestSetCardsResetsScrollState:
+    """SPEC-41 P3 (a): a new document is a new reading context.
+
+    `_doc_near_bottom` / `_doc_y` are reported by the PREVIOUS document's
+    FEED_SCRIPT. Without a reset, a project switch inherits the old
+    project's offset AND its follow-off state: the new project opens
+    mid-page and its new cards land below the fold forever.
+    """
+
+    def _frozen(self, near_bottom, y) -> FeedSurface:
+        """A surface whose _schedule() will not queue a real GLib idle.
+
+        `_load_in_flight = True` is the production "a document load is in
+        flight" state — _schedule() sets _dirty and returns. The fields under
+        test are written by set_cards itself, before any scheduling.
+        """
+        surface = _surface(near_bottom=near_bottom, y=y)
+        surface._load_in_flight = True
+        return surface
+
+    def test_set_cards_resets_scrolled_up_state(self):
+        surface = self._frozen(near_bottom=False, y=512.5)
+        surface.set_cards([_card()])
+        assert surface._doc_near_bottom is True
+        assert surface._doc_y is None
+        assert surface.card_ids() == ["card-1"]
+
+    def test_set_cards_resets_even_with_no_remembered_offset(self):
+        surface = self._frozen(near_bottom=False, y=None)
+        surface.set_cards([_card("a"), _card("b")])
+        assert surface._doc_near_bottom is True
+        assert surface._doc_y is None
+        assert surface.card_ids() == ["a", "b"]  # oldest-first preserved
+
+    @pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
+    def test_new_document_follows_the_bottom(self):
+        """User-visible consequence: after a switch the next load lands on
+        the newest card instead of restoring the previous project's offset."""
+        surface = self._frozen(near_bottom=False, y=900.0)
+        surface.set_cards([_card()])
+        surface._load_in_flight = False
+        surface._flush()
+        assert surface._scroll_after is True
+        _finish(surface)
+        assert surface._webview.evals == [_BOTTOM_SCRIPT]

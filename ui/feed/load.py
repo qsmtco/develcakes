@@ -270,9 +270,13 @@ class FeedLoadMixin:
             def _render_html():
                 if self._feed_tab is None:
                     return
-                # page is newest-first. Prepend the oldest of the page first
-                # so the whole page lands above the cards already on screen.
-                for card in reversed(page):
+                # page is newest-first and prepend inserts at index 0, so the
+                # LAST card inserted wins the front. Iterate page DIRECTLY
+                # (newest → oldest) so the oldest insert ends up at index 0 —
+                # the document contract is oldest-first (render_feed_document,
+                # set_cards' docstring). reversed(page) landed the page
+                # newest-first (seq badges 15, 14, 13 …).
+                for card in page:
                     data = self._cards.get(card.card_id, card)
                     self._feed_tab.prepend_html_card(data)
                     if data.card_id:

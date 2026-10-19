@@ -1188,3 +1188,88 @@ class TestTwoThousandCardRetention:
         pruned_to_300 = fs.compact_feed(self._project_path, window=self.WINDOW)
         assert pruned_to_300 == self.COUNT - self.WINDOW
         assert len(fs.load_feed(self._project_path)) == self.WINDOW
+
+
+class TestLoadMoreDocumentOrder:
+    """SPEC-41 P3 (b): a Load More page must land OLDEST-FIRST.
+
+    `_load_more` slices `page` off the newest-first backlog and prepends each
+    card; `prepend_html_card` → `upsert(prepend=True)` → `insert(0, cid)`, so
+    the LAST card inserted wins the front. Iterating `reversed(page)` therefore
+    left the page newest-first, inverting seq badges (15, 14, 13 …) against the
+    oldest-first contract documented on `render_feed_document` and `set_cards`.
+    """
+
+    PAGE = 4
+
+    def _setup(self):
+        from ui.handlers.feed_handler import FeedHandler
+
+        h = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
+        tab = _LiteHtmlFeedTab()
+        h.set_feed_tab(tab)
+        h.PAGE_SIZE = self.PAGE
+        ts = datetime.now(UTC)
+
+        def card(seq):
+            return FeedCardData(
+                card_type="diff",
+                source="agent",
+                title=f"c{seq}",
+                body="",
+                author="x",
+                timestamp=ts.replace(microsecond=seq),
+                project_name="order-proj",
+                card_id=f"c{seq}",
+                seq_num=seq,
+            )
+
+        # 9 cards: seq 6..9 on screen (oldest-first), 5..1 in the backlog
+        # (newest-first, exactly as on_project_opened builds it from
+        # reversed(backlog)).
+        for seq in range(1, 10):
+            h._cards[f"c{seq}"] = card(seq)
+        tab._surface.order = [f"c{s}" for s in range(6, 10)]
+        h._backlog = [card(s) for s in range(5, 0, -1)]
+        return h, tab
+
+    def test_page_lands_oldest_first_in_the_document(self):
+        """First click: page = c5, c4, c3, c2 (newest→oldest). Inserted at
+        index 0 each, the OLDEST of the page (c2) wins the front; c1 stays in
+        the backlog for the next click."""
+        h, tab = self._setup()
+        h._load_more()
+        assert tab._surface.card_ids() == [f"c{s}" for s in range(2, 10)]
+        assert [c.card_id for c in h._backlog] == ["c1"]
+
+    def test_page_seq_numbers_ascend(self):
+        """The visible symptom the audit probe found: seq badges read
+        newest-first after a Load More click."""
+        h, tab = self._setup()
+        h._load_more()
+        seqs = [h._cards[cid].seq_num for cid in tab._surface.card_ids()]
+        assert seqs == sorted(seqs), f"document order is not oldest-first: {seqs}"
+
+    def test_second_page_lands_above_the_first(self):
+        """Two clicks: each new page sits above the previous one and the whole
+        document still reads oldest-first."""
+        h, tab = self._setup()
+        h._load_more()
+        assert tab._surface.card_ids() == [f"c{s}" for s in range(2, 10)]
+        h._load_more()  # page = c1 → lands at the very top
+        assert tab._surface.card_ids() == [f"c{s}" for s in range(1, 10)]
+        seqs = [h._cards[cid].seq_num for cid in tab._surface.card_ids()]
+        assert seqs == sorted(seqs), f"second page inverted the order: {seqs}"
+
+    def test_oversized_page_preserves_ascending_seq(self):
+        """A page larger than the backlog slice keeps the same invariant:
+        ascending seq badges, no duplicates."""
+        h, tab = self._setup()
+        h.PAGE_SIZE = 8  # page = c5..c1 plus three cards already on screen
+        h._backlog = [h._cards[f"c{s}"] for s in range(5, 0, -1)]
+        h._load_more()
+        ids = tab._surface.card_ids()
+        assert len(ids) == len(set(ids)), f"duplicate ids in document: {ids}"
+        seqs = [h._cards[cid].seq_num for cid in ids]
+        assert seqs == sorted(seqs), f"document order is not oldest-first: {seqs}"
+        assert ids == [f"c{s}" for s in range(1, 10)]
