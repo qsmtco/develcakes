@@ -3529,7 +3529,7 @@ class AgentRuntime:
         if hot and packet.get("hot"):
             parts = []
             for w in packet["hot"]:
-                if w.get("line"):
+                if w.get("line") is not None:
                     where = f"line={w['line']} limit={w['limit']}"
                 else:
                     where = f"offset={w['offset']} limit={w['limit']}"
@@ -3546,8 +3546,11 @@ class AgentRuntime:
         if conv.system_prompt:
             messages.append({"role": "system", "content": conv.system_prompt})
         messages.append({"role": "user", "content": body})
-        messages.extend(serialize_messages(turn, index_base=len(messages)))
-        messages.extend(serialize_messages(tail, index_base=len(messages)))
+        # SPEC-41 §2: ONE serializer pass over the contiguous slices. Two
+        # passes let `serialize_messages` demote a result whose declaring
+        # assistant sat in the other slice (orphan -> user row), splitting a
+        # tool call from its result on the wire (MiniMax 2013 shape).
+        messages.extend(serialize_messages(turn + tail, index_base=len(messages)))
         return messages
 
     def _wire_char_tokens(self, messages: list[dict]) -> int:
@@ -3771,6 +3774,9 @@ class AgentRuntime:
                     "path": w["path"],
                     "offset": w["offset"],
                     "limit": w["limit"],
+                    # SPEC-41 §2: line-mode windows replay as `line=N`, not
+                    # `offset=0`. _capture_hot_window already stores it.
+                    "line": w.get("line"),
                     "body": w["body"],
                 }
                 for w in self._hot_windows.get(session_key, {}).values()

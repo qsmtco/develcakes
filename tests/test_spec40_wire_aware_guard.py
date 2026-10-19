@@ -531,6 +531,141 @@ def test_enforced_write_keeps_current_turn_reads_on_the_wire(tmp_path):
     assert "CURRENT-TURN-READ-BODY" not in again
 
 
+# --- SPEC-41 §2: wire adjacency (one serializer pass) --------------------
+
+
+def _declared_ids(wired: list[dict]) -> set[str]:
+    ids: set[str] = set()
+    for entry in wired:
+        for tc in entry.get("tool_calls") or []:
+            ids.add(tc["id"])
+    return ids
+
+
+def test_split_shape_wire_keeps_every_tool_result_adjoining(tmp_path):
+    """Tool calls and their results must never be split by the slice boundary.
+
+    Transcript: [user, assistant(call_write+call_read), tool(call_write),
+    user-nudge, tool(call_read)]. The packet cut lands mid-conversation, so
+    `turn` holds the declaring assistant while `tail` holds one of its
+    results. Two serialize passes demote that result to a user row
+    (MiniMax 2013 / Anthropic strict-ordering shape).
+    """
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    conv.add_assistant_message(
+        "doing both",
+        [
+            ToolCall(
+                call_id="call_write", tool_name="edit_file",
+                arguments={"path": "b.py", "old_text": "a", "new_text": "b"},
+            ),
+            ToolCall(
+                call_id="call_read", tool_name="read_file",
+                arguments={"path": "a.py"},
+            ),
+        ],
+    )
+    conv.add_tool_result("call_write", "OK")
+    conv.add_user_message("nudge")
+    conv.add_tool_result("call_read", _BODY)
+    # The cut: turn = [assistant, tool(call_write)], tail = [nudge, tool(call_read)].
+    packet = {
+        "goal": "g", "path": "a.py", "hunk": "h", "checks": [],
+        "after": 3, "wire_from": 1, "hot": (),
+    }
+
+    wired = rt._compiled_messages(conv, packet, "")
+
+    declared = _declared_ids(wired)
+    assert declared == {"call_write", "call_read"}
+    tool_rows = [m for m in wired if m.get("role") == "tool"]
+    assert {m["tool_call_id"] for m in tool_rows} == declared
+    # No demoted orphan rows anywhere on the wire.
+    assert not [
+        m for m in wired
+        if m.get("role") == "user" and str(m.get("content", "")).startswith("[tool result ")
+    ]
+    # Both tool rows sit immediately after the declaring assistant row.
+    idx = next(i for i, m in enumerate(wired) if m.get("role") == "assistant")
+    assert all(m.get("role") == "tool" for m in wired[idx + 1:idx + 1 + len(declared)])
+
+    # Control: the old two-pass shape demoted call_read.
+    from models.conversation import serialize_messages
+    two_pass = [
+        {"role": "user", "content": "body"},
+        *serialize_messages(conv.messages[1:3], index_base=1),
+        *serialize_messages(conv.messages[3:], index_base=3),
+    ]
+    assert [
+        m for m in two_pass
+        if m.get("role") == "user" and str(m.get("content", "")).startswith("[tool result ")
+    ]
+
+
+def test_normal_wire_is_unchanged_by_the_one_pass_switch(tmp_path):
+    """A transcript with no interleave serializes byte-identically to two passes."""
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    conv.add_assistant_message(
+        "reading",
+        [ToolCall(call_id="r1", tool_name="read_file", arguments={"path": "a.py"})],
+    )
+    conv.add_tool_result("r1", _BODY)
+    conv.add_assistant_message(
+        "editing",
+        [ToolCall(
+            call_id="w1", tool_name="edit_file",
+            arguments={"path": "b.py", "old_text": "a", "new_text": "b"},
+        )],
+    )
+    conv.add_tool_result("w1", "OK")
+    packet = {
+        "goal": "g", "path": "b.py", "hunk": "h", "checks": [],
+        "after": len(conv.messages), "wire_from": 1, "hot": (),
+    }
+
+    wired = rt._compiled_messages(conv, packet, "")
+
+    from models.conversation import serialize_messages
+    head = wired[:2]  # system + compiled user body
+    two_pass = [
+        *head,
+        *serialize_messages(conv.messages[1:packet["after"]], index_base=2),
+        *serialize_messages(conv.messages[packet["after"]:], index_base=2),
+    ]
+    assert wired == two_pass
+
+
+def test_hot_window_line_mode_replays_as_line_not_offset(tmp_path):
+    """A 1-based line window replays `line=42`, never `offset=0`."""
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", None, 40, _BIG, 42)
+    packet = _compile_packet(rt, conv)
+
+    assert packet["hot"][0]["line"] == 42
+    user = next(
+        m for m in rt._compiled_messages(conv, packet, "") if m["role"] == "user"
+    )["content"]
+    assert "### a.py line=42 limit=40" in user
+    assert "offset=0" not in user
+
+
+def test_hot_window_snapshot_without_line_still_replays_offset(tmp_path):
+    """The byte branch survives the `is not None` switch."""
+    rt = _runtime()
+    conv = _conv(tmp_path)
+    rt._capture_hot_window(_SK, "a.py", 8, 40, _BIG)
+    packet = _compile_packet(rt, conv)
+
+    assert packet["hot"][0]["line"] is None
+    user = next(
+        m for m in rt._compiled_messages(conv, packet, "") if m["role"] == "user"
+    )["content"]
+    assert "### a.py offset=8 limit=40" in user
+
+
 def test_previous_turn_read_is_off_the_wire_after_a_write(tmp_path):
     """A read from before this turn is not in the packet, so a re-read serves it."""
     _write_read_file(tmp_path)
