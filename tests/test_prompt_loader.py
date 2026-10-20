@@ -118,7 +118,7 @@ class TestComposeSystemPrompt:
     def test_coder_template_included(self):
         prompt = compose_system_prompt(agent_name="Coder", agent_role="coder")
         assert "Coder" in prompt
-        assert "Core Principles" in prompt or "software" in prompt.lower()
+        assert "Read each file you will change" in prompt
 
     def test_debugger_template_included(self):
         prompt = compose_system_prompt(agent_name="Debugger", agent_role="debugger")
@@ -198,6 +198,18 @@ class TestComposeSystemPrompt:
         prompt = compose_system_prompt(agent_name="Coder", tools=["read_file", "exec_command"])
         assert "read_file" in prompt
         assert "exec_command" in prompt
+
+    def test_coder_role_is_work_order_only(self):
+        prompt = compose_system_prompt(
+            agent_name="Coder",
+            agent_role="coder",
+            tools=["read_file", "exec_command"],
+        )
+        assert "read_file" in prompt
+        assert "exec_command" in prompt
+        assert "Phase History" not in prompt
+        assert "File index" not in prompt
+        assert "suggest the next phase" not in prompt
 
     def test_no_project_no_project_template(self):
         prompt = compose_system_prompt(agent_name="Coder")
@@ -312,30 +324,44 @@ class TestProjectContextInjection:
         crab_dir = tmp_path / ".crabcakes"
         crab_dir.mkdir()
         (crab_dir / "coder-bugs.md").write_text("## Bug #1 — test bug\n\nMistake: test")
+        (crab_dir / "debugger-bugs.md").write_text("## Bug #1 — test bug\n\nMistake: test")
 
-        result = compose_system_prompt(
+        coder = compose_system_prompt(
             agent_name="Coder",
             agent_role="coder",
             project_path=str(tmp_path),
         )
+        debugger = compose_system_prompt(
+            agent_name="Debugger",
+            agent_role="debugger",
+            project_path=str(tmp_path),
+        )
 
-        assert "Bug #1" in result
-        assert "test bug" in result
+        assert "Bug #1" not in coder
+        assert "Bug #1" in debugger
+        assert "test bug" in debugger
 
     def test_project_rules_injected_by_role(self, tmp_path):
         """When project has {role}-rules.md, it appears in prompt."""
         crab_dir = tmp_path / ".crabcakes"
         crab_dir.mkdir()
         (crab_dir / "coder-rules.md").write_text("# Coder Rules\ntest rule")
+        (crab_dir / "debugger-rules.md").write_text("# Debugger Rules\ntest rule")
 
-        result = compose_system_prompt(
+        coder = compose_system_prompt(
             agent_name="Coder",
             agent_role="coder",
             project_path=str(tmp_path),
         )
+        debugger = compose_system_prompt(
+            agent_name="Debugger",
+            agent_role="debugger",
+            project_path=str(tmp_path),
+        )
 
-        assert "Coder Rules" in result
-        assert "test rule" in result
+        assert "Coder Rules" not in coder
+        assert "Debugger Rules" in debugger
+        assert "test rule" in debugger
 
     def test_different_roles_get_different_files(self, tmp_path):
         """Debugger gets debugger-bugs.md, not coder-bugs.md."""
@@ -351,7 +377,7 @@ class TestProjectContextInjection:
             agent_name="Debugger", agent_role="debugger", project_path=str(tmp_path),
         )
 
-        assert "CODER_BUG_MARKER" in coder_result
+        assert "CODER_BUG_MARKER" not in coder_result
         assert "DEBUGGER_BUG_MARKER" not in coder_result
         assert "DEBUGGER_BUG_MARKER" in debugger_result
         assert "CODER_BUG_MARKER" not in debugger_result
@@ -439,20 +465,20 @@ class TestProjectContextInjection:
         """Bug journal appears AFTER the agent-specific template in the prompt."""
         crab_dir = tmp_path / ".crabcakes"
         crab_dir.mkdir()
-        (crab_dir / "coder-bugs.md").write_text("BUG_JOURNAL_MARKER")
+        (crab_dir / "debugger-bugs.md").write_text("BUG_JOURNAL_MARKER")
 
         result = compose_system_prompt(
-            agent_name="Coder",
-            agent_role="coder",
+            agent_name="Debugger",
+            agent_role="debugger",
             project_path=str(tmp_path),
         )
 
-        # coder.md content should appear before the bug journal
-        coder_pos = result.find("Common Pitfalls")
+        # Role template content appears before the bug journal.
+        role_pos = result.find("Start from facts")
         journal_pos = result.find("BUG_JOURNAL_MARKER")
-        assert coder_pos > 0  # coder.md loaded
-        assert journal_pos > 0  # journal loaded
-        assert coder_pos < journal_pos  # correct order
+        assert role_pos > 0
+        assert journal_pos > 0
+        assert role_pos < journal_pos
 
     def test_load_project_context_file_function(self, tmp_path):
         """Direct test of the _load_project_context_file helper."""
@@ -486,7 +512,7 @@ class TestSystemPromptBudget:
         with tempfile.TemporaryDirectory() as proj:
             (Path(proj) / "huge.txt").write_text("x" * 60_000)
             prompt = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=None,
             )
             assert "huge.txt" in prompt or len(prompt) > 50_000
@@ -504,7 +530,7 @@ class TestSystemPromptBudget:
             (Path(proj) / "medium.txt").write_text("y" * 2_000)
             (Path(proj) / "small.txt").write_text("z" * 500)
             prompt = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=1_000,
             )
             # Budget = 1000 * 0.15 = 150 tokens = 600 chars
@@ -516,7 +542,7 @@ class TestSystemPromptBudget:
         with tempfile.TemporaryDirectory() as proj:
             (Path(proj) / "file.txt").write_text("x" * 20_000)
             prompt = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=0,
             )
             # 16K hard cap = 64K chars. File context is 20K, fits.
@@ -535,7 +561,7 @@ class TestSystemPromptBudget:
             (Path(proj) / "README.md").write_text("# Project Readme")
             (Path(proj) / "AGENTS.md").write_text("# Agent Specs")
             prompt = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=50_000,
                 context_mode="preload",
             )

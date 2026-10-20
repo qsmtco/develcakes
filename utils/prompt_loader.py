@@ -191,6 +191,23 @@ def compose_system_prompt(
     awareness = project_awareness or {}
     parts: list[str] = []
 
+    # SPEC-43: the Coder gets the work order and the tool list only.
+    # Shared templates, the file index, and context_mode do not apply.
+    if agent_role == "coder":
+        coder_only = load_prompt_template("coder")
+        if not coder_only:
+            _logger.warning("coder template missing; Coder prompt is empty")
+            return ""
+        if tools:
+            tool_list_str = "## Tools\n" + "\n".join(f"  - {t}" for t in tools)
+        else:
+            tool_list_str = ""
+        variables = {
+            "AGENT_NAME": agent_name or "",
+            "TOOL_LIST": tool_list_str,
+        }
+        return fill_template(coder_only, variables)
+
     # 1. Always load default
     default = load_prompt_template("default")
     if default:

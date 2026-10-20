@@ -275,6 +275,7 @@ MAX_READ_SIZE = 16 * 1024       # 16 KB — matches CONV_OUTPUT_CAP
                                  # window itself no longer overhangs what the
                                  # conversation keeps.
 MAX_READ_LINES = 2000
+LINE_WINDOW = 200
 MAX_LIST_ENTRIES = 400
 MAX_WRITE_SIZE = 2 * 1024 * 1024  # 2 MB
 MAX_EXEC_OUTPUT = 100 * 1024     # 100 KB
@@ -499,6 +500,13 @@ def _read_file(
             raw = f.read(cap)
         content = raw.decode("utf-8", errors="replace")
         lines = content.splitlines(keepends=True)
+        # SPEC-43: a line request with no byte limit is a line window.
+        # Do not append a continuation notice; that footer made the model
+        # keep paging. An explicit limit still uses the byte-cap path below.
+        if line is not None and limit is None:
+            content = "".join(lines[:LINE_WINDOW])
+            content = f"[line {line} of {path}]\n" + content
+            return ToolResult(success=True, output=content)
         cut_lines = len(lines) > MAX_READ_LINES
         if cut_lines:
             content = "".join(lines[:MAX_READ_LINES])
@@ -957,14 +965,14 @@ def _search_files(
     path: str | None = None,
     file_type: str | None = None,
     max_results: int = 20,
-    preview_lines: int = 5,
+    preview_lines: int = 40,
 ) -> ToolResult:
     """Name-or-content search. One grep, grouped by file.
 
     Content matches come from ``_run_grep``. Filename matches come from
     ``_find_matching_files`` (a name fragment). A file ``path`` is grepped
     as that file; it is not used as the working directory. Each hit is path, size from
-    ``stat``, and at most 5 preview lines taken from the grep hit. The hit
+    ``stat``, and at most 40 preview lines taken from the grep hit. The hit
     file is not opened to count lines. ``file_search`` calls this function.
     Sandbox, timeout, and ``file_type`` stay on this path.
     """
@@ -973,8 +981,8 @@ def _search_files(
     if not isinstance(max_results, int) or isinstance(max_results, bool) or max_results <= 0:
         max_results = 20
     if not isinstance(preview_lines, int) or isinstance(preview_lines, bool) or preview_lines <= 0:
-        preview_lines = 5
-    preview_lines = min(preview_lines, 5)
+        preview_lines = 40
+    preview_lines = min(preview_lines, 40)
 
     search_root = _resolve_project_path(path or ".", project_path)
     if search_root is None:
@@ -1096,7 +1104,7 @@ def _search_files(
             lines.append("  [name match only — use read_file for content]")
 
     lines.append("")
-    lines.append('[Use read_file("path") for the file body.]')
+    lines.append("[Open with read_file line=N only to edit.]")
     output = "\n".join(lines)
     if len(output) > MAX_EXEC_OUTPUT:
         output = output[:MAX_EXEC_OUTPUT] + "\n[... truncated ...]"
@@ -1108,7 +1116,7 @@ def _file_search(
     project_path: str,
     file_type: str | None = None,
     max_results: int = 20,
-    preview_lines: int = 5,
+    preview_lines: int = 40,
 ) -> ToolResult:
     """Old name for ``_search_files``. One code path, no second grep."""
     return _search_files(
@@ -1306,8 +1314,8 @@ def _register_tools() -> None:
         ToolDefinition(
             name="read_file",
             description=(
-                "Read a file's text, a window capped at 16KB. "
-                "offset/limit are bytes. line is a 1-based line and ignores offset."
+                "Read a file. line is a 1-based start line and returns at most "
+                "200 lines. offset and limit are bytes."
             ),
             parameters={
                 "type": "object",
@@ -1380,7 +1388,8 @@ def _register_tools() -> None:
             description=(
                 "Run a shell command; needs PM approval per call (dangerous "
                 "ones denied). Returns output, stdout, stderr, exit_code, "
-                "error. Timeout 30s (max 120); output truncated at 100KB."
+                "error. Timeout 30s (max 120); output truncated at 100KB. "
+                "Coder is limited to git status/diff/log, py_compile, and pytest on one tests/ path."
             ),
             parameters={
                 "type": "object",
@@ -1424,8 +1433,7 @@ def _register_tools() -> None:
             name="search_files",
             description=(
                 "Find files by name or content. One group per file: path, "
-                "size, and up to 5 preview lines. Times out after 10s. "
-                "Use read_file for the body."
+                "size, and up to 40 matching lines. Times out after 10s."
             ),
             parameters={
                 "type": "object",
@@ -1448,7 +1456,7 @@ def _register_tools() -> None:
             name="file_search",
             description=(
                 "Find files by name or content; grouped per file with size and up to\n"
-                "5 preview lines. Reads no full bodies — use read_file to open one.\n"
+                "40 matching lines. Reads no full bodies — open with read_file line=N only to edit.\n"
                 "search_files is plain grep."
             ),
             parameters={

@@ -30,8 +30,10 @@ class TestBuildSystemPrompt:
 
     def test_contains_project_path(self):
         with tempfile.TemporaryDirectory() as proj:
-            prompt = build_system_prompt("Coder", proj, [])
+            prompt = build_system_prompt("Debugger", proj, [], agent_role="debugger")
             assert proj in prompt
+            coder = build_system_prompt("Coder", proj, [], agent_role="coder")
+            assert proj not in coder
 
     def test_no_project_shows_placeholder(self):
         prompt = build_system_prompt("Coder", None, [])
@@ -43,8 +45,12 @@ class TestBuildSystemPrompt:
         assert "exec_command" in prompt
 
     def test_review_mode_awareness(self):
-        prompt = build_system_prompt("Coder", "/tmp", [], review_mode="review")
+        prompt = build_system_prompt(
+            "Debugger", "/tmp", [], agent_role="debugger", review_mode="review",
+        )
         assert "REVIEW MODE ACTIVE" in prompt or "review" in prompt.lower()
+        coder = build_system_prompt("Coder", "/tmp", [], review_mode="review")
+        assert "REVIEW MODE ACTIVE" not in coder
 
     def test_review_mode_off_no_warning(self):
         prompt = build_system_prompt("Coder", "/tmp", [], review_mode="off")
@@ -77,23 +83,24 @@ class TestBuildSystemPrompt:
 
 
     def test_collab_prompt_in_all_agents(self):
-        """collab.md is composed into all agents regardless of role."""
+        """collab.md is composed into every role except the Coder work order."""
         p_coder = build_system_prompt("Coder", "/tmp", [])
         p_gateway = build_system_prompt("QTR", "/tmp", [], agent_role="")
         p_debugger = build_system_prompt("Debugger", "/tmp", [], agent_role="debugger")
-        for p, label in [(p_coder, "coder"), (p_gateway, "gateway"), (p_debugger, "debugger")]:
+        assert "Agent Collaboration" not in p_coder
+        for p, label in [(p_gateway, "gateway"), (p_debugger, "debugger")]:
             assert "Agent Collaboration" in p, f"collab missing in {label} prompt"
 
     def test_collab_comes_after_default(self):
         """collab.md loads after default.md in the composition order."""
-        prompt = build_system_prompt("Coder", "/tmp", [])
+        prompt = build_system_prompt("Debugger", "/tmp", [], agent_role="debugger")
         default_pos = prompt.find("You are")
         collab_pos = prompt.find("Agent Collaboration")
         assert 0 <= default_pos < collab_pos, "collab should come after default"
 
     def test_collab_in_no_project_prompt(self):
         """collab.md applies even when no project is active."""
-        prompt = build_system_prompt("Coder", None, [])
+        prompt = build_system_prompt("Debugger", None, [], agent_role="debugger")
         assert "Agent Collaboration" in prompt, "collab should be in no-project prompt"
 
 
@@ -423,17 +430,17 @@ class TestBuildSystemPromptBudget:
             (Path(proj) / "huge.txt").write_text("x" * 30_000)
             (Path(proj) / "small.txt").write_text("y" * 100)
             prompt_small = build_system_prompt(
-                "Coder", proj, [], agent_role="coder", model_max_tokens=500,
+                "Debugger", proj, [], agent_role="debugger", model_max_tokens=500,
             )
             prompt_large = build_system_prompt(
-                "Coder", proj, [], agent_role="coder", model_max_tokens=200_000,
+                "Debugger", proj, [], agent_role="debugger", model_max_tokens=200_000,
             )
             assert len(prompt_small) < len(prompt_large)
 
     def test_no_model_max_means_no_truncation(self):
         with tempfile.TemporaryDirectory() as proj:
             (Path(proj) / "file.txt").write_text("z" * 5_000)
-            prompt = build_system_prompt("Coder", proj, [], agent_role="coder")
+            prompt = build_system_prompt("Debugger", proj, [], agent_role="debugger")
             assert "file.txt" in prompt
 
 

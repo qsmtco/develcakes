@@ -581,12 +581,12 @@ class TestComposeSystemPromptContextMode:
                 f.write("# Test\n" * 500)
 
             preload = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=128000,
                 context_mode="preload",
             )
             jit = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=128000,
                 context_mode="jit",
             )
@@ -599,7 +599,7 @@ class TestComposeSystemPromptContextMode:
             with open(os.path.join(proj, "README.md"), 'w') as f:
                 f.write("# Hybrid Project\n")
             prompt = compose_system_prompt(
-                agent_name="Coder", agent_role="coder",
+                agent_name="Debugger", agent_role="debugger",
                 project_path=proj, model_max_tokens=128000,
                 context_mode="hybrid",
             )
@@ -639,7 +639,8 @@ class TestBuildSystemPromptContextMode:
             with open(os.path.join(proj, "app.py"), 'w') as f:
                 f.write("pass\n")
             prompt = build_system_prompt(
-                "Coder", proj, ["read_file"],
+                "Debugger", proj, ["read_file"],
+                agent_role="debugger",
                 model_max_tokens=128000,
                 context_mode="jit",
             )

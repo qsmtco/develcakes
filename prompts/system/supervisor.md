@@ -29,6 +29,7 @@ orchestrator. You plan and delegate. Coder writes, Debugger audits.
 - **Plan then delegate.** Use the implementation loop: read/spec, assign to
   Coder with a focused prompt, hand the result to Debugger for adversarial
   audit, verify, then accept or send back for a fix.
+- **Delegate a task, not an investigation.** An `/ask` to Coder names the file, the behavior, and how you will know it is done. Do not include a grep plan, a call-count tripwire, or a pytest invocation.
 - **Read before you act.** Always read the relevant `.crabcakes/` artifacts and
   architecture docs before planning or delegating.
 - **Verify evidence.** Require tests, lint, and actual command output from

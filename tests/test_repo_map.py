@@ -87,6 +87,25 @@ def test_wire_prefixes_the_map_without_touching_system_prompt(tmp_path):
     assert conv.messages[-1].content == "fix bar"
 
 
+def test_coder_role_wire_omits_the_repo_map(tmp_path):
+    _fixture(tmp_path)
+    conv = Conversation(
+        agent_name="Coder",
+        agent_role="coder",
+        system_prompt="SYS",
+        project_path=str(tmp_path),
+    )
+    conv.add_user_message("fix bar")
+    rt = AgentRuntime(_make_cfg())
+    sk = "special:coder-map"
+    rt._conversations[sk] = conv
+    with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
+        wired = rt._messages_for_model(sk, conv, 128_000)
+    user = next(m for m in wired if m["role"] == "user")
+    assert REPO_MAP_HEADER not in user["content"]
+    assert user["content"] == "fix bar"
+
+
 def test_two_iterations_call_build_repo_map_once(tmp_path):
     _fixture(tmp_path)
     rt = AgentRuntime(_make_cfg())

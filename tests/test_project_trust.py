@@ -201,11 +201,11 @@ class TestComposeSystemPromptGate:
         from utils.prompt_loader import compose_system_prompt
         d = tmp_path / ".crabcakes"
         d.mkdir()
-        (d / "coder-bugs.md").write_text("BUG-CONTENT-SHOULD-NOT-APPEAR")
+        (d / "debugger-bugs.md").write_text("BUG-CONTENT-SHOULD-NOT-APPEAR")
         # No callback → fail-secure skip
         prompt = compose_system_prompt(
-            agent_name="Coder",
-            agent_role="coder",
+            agent_name="Debugger",
+            agent_role="debugger",
             project_path=str(tmp_path),
         )
         assert "BUG-CONTENT-SHOULD-NOT-APPEAR" not in prompt
@@ -216,11 +216,11 @@ class TestComposeSystemPromptGate:
         from utils.prompt_loader import compose_system_prompt
         d = tmp_path / ".crabcakes"
         d.mkdir()
-        (d / "coder-bugs.md").write_text("BUG-CONTENT-SHOULD-APPEAR")
+        (d / "debugger-bugs.md").write_text("BUG-CONTENT-SHOULD-APPEAR")
         trust_project(str(tmp_path))
         prompt = compose_system_prompt(
-            agent_name="Coder",
-            agent_role="coder",
+            agent_name="Debugger",
+            agent_role="debugger",
             project_path=str(tmp_path),
         )
         # HIGH-5 fence wraps the content; the content itself appears inside

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import threading
 import time
 import uuid
@@ -420,6 +421,81 @@ def _reprint_target(command: str, paths: set[str]) -> str | None:
             if path and path in chunk:
                 return path
     return None
+
+
+_CODER_GIT = frozenset({"status", "diff", "log"})
+_SHELL_META = frozenset({"|", "||", "&", "&&", ";", ">", ">>", "<", "<<", "`"})
+_CODER_SHELL_REFUSAL = (
+    "REFUSED: Coder shell is limited to git status, git diff, git log, "
+    "py_compile, and pytest on one path under tests/. "
+    "Use read_file or search_files to read code."
+)
+
+
+def _coder_shell_allowed(command: str, project_path: str) -> str | None:
+    """None when a Coder shell command is on the allowlist. Else a refusal.
+
+    One optional leading ``cd <path> &&``, then exactly one of:
+    git status|diff|log, python -m py_compile <files>, pytest <one tests/ path>.
+    """
+    if not isinstance(project_path, str) or not project_path or not os.path.isdir(project_path):
+        return _CODER_SHELL_REFUSAL
+    if not isinstance(command, str) or not command.strip():
+        return _CODER_SHELL_REFUSAL
+    if "\n" in command or "\r" in command:
+        return _CODER_SHELL_REFUSAL
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return _CODER_SHELL_REFUSAL
+    if not tokens:
+        return _CODER_SHELL_REFUSAL
+    if tokens[0] == "cd":
+        if len(tokens) < 4 or tokens[2] != "&&":
+            return _CODER_SHELL_REFUSAL
+        from agent.tools import _resolve_project_path
+        if _resolve_project_path(tokens[1], project_path) is None:
+            return _CODER_SHELL_REFUSAL
+        tokens = tokens[3:]
+    # shlex keeps process substitution as one token (`<(cat`), so a
+    # whole-token membership test would let the shell run it.
+    if any(tok in _SHELL_META or any(ch in tok for ch in "|&;<>$`") for tok in tokens):
+        return _CODER_SHELL_REFUSAL
+    if any(tok == "--output" or tok.startswith("--output=") for tok in tokens):
+        return _CODER_SHELL_REFUSAL
+    if not tokens:
+        return _CODER_SHELL_REFUSAL
+    head = os.path.basename(tokens[0])
+    if head == "git" and len(tokens) >= 2 and tokens[1] in _CODER_GIT:
+        return None
+    if head in {"python", "python3"} and tokens[1:3] == ["-m", "py_compile"] and len(tokens) > 3:
+        from agent.tools import _resolve_project_path
+        files = [tok for tok in tokens[3:] if not tok.startswith("-")]
+        if files and all(_resolve_project_path(tok, project_path) is not None for tok in files):
+            return None
+        return _CODER_SHELL_REFUSAL
+    if head == "pytest" and _one_tests_path(tokens[1:], project_path):
+        return None
+    if head in {"python", "python3"} and tokens[1:3] == ["-m", "pytest"] and _one_tests_path(tokens[3:], project_path):
+        return None
+    return _CODER_SHELL_REFUSAL
+
+
+def _one_tests_path(args: list[str], project_path: str) -> bool:
+    """True when args contain exactly one path and it stays under tests/."""
+    from agent.tools import _resolve_project_path
+    paths = [a for a in args if not a.startswith("-")]
+    if len(paths) != 1:
+        return False
+    resolved = _resolve_project_path(paths[0], project_path)
+    if resolved is None:
+        return False
+    root = os.path.realpath(project_path)
+    try:
+        rel = os.path.relpath(resolved, root)
+    except ValueError:
+        return False
+    return rel == "tests" or rel.startswith("tests" + os.sep)
 
 
 def _assemble_streamed_tool_calls(tool_calls_partial: dict) -> list[dict]:
@@ -2313,6 +2389,23 @@ class AgentRuntime:
         for call_id, tool_name, args in tool_calls_raw:
             tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
 
+            # SPEC-43: Coder may not use the shell as a reader. Refuse
+            # before approval so a denied grep never opens a card.
+            if tool_name == "exec_command" and getattr(conv, "agent_role", "") == "coder":
+                command = args.get("command") if isinstance(args, dict) else None
+                refusal = _coder_shell_allowed(
+                    command if isinstance(command, str) else "",
+                    conv.project_path or "",
+                )
+                if refusal is not None:
+                    tc.mark_failed(refusal)
+                    tc.result = None
+                    conv.add_tool_result(call_id, refusal)
+                    self._dispatch(
+                        self._on_tool_call_result, session_key, tool_name, refusal, False,
+                    )
+                    continue
+
             # A shell dump of a file already read this turn is how the
             # read-loop avoids the unchanged notice.
             if tool_name == "exec_command":
@@ -2416,6 +2509,9 @@ class AgentRuntime:
             # (post-write verification) and StuckDetectionMiddleware
             # (loop detection). Approval was already resolved inline
             # above (before on_tool_call_start) per spec §A.2.4.
+            enf = self._config.enforcement
+            if getattr(conv, "agent_role", "") == "coder":
+                enf = dataclasses.replace(enf, lint_check=False, test_run=False)
             ctx = ToolContext(
                 session_key=session_key,
                 project_path=conv.project_path,
@@ -2423,7 +2519,7 @@ class AgentRuntime:
                 bypass_approval=bypass_approval,
                 audit_log=self._audit_log,
                 user_id=getattr(self._config, "user_id", ""),
-                enforcement_config=self._config.enforcement,
+                enforcement_config=enf,
                 si_enforcement=conv.si_enforcement,
             )
             result = self._tool_chain.run(
@@ -3690,6 +3786,8 @@ class AgentRuntime:
         """
         effective = model_max - self._RESPONSE_RESERVE_TOKENS
         block = self._repo_map_block_for(session_key, conv)
+        if getattr(conv, "agent_role", "") == "coder":
+            block = ""
         packet = self._compile.get(session_key)
         if packet is None:
             schema_tokens = self._schema_tokens(conv, tools)
