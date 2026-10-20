@@ -528,7 +528,10 @@ class TestFileSearchToolRegistration:
         """The model sees search_files once. file_search still executes.
 
         Both names call the same function, so one fixture returns the same
-        grouped shape, and the hit file is not opened to count lines.
+        grouped shape. The match count comes from grep, not from opening the
+        file: a search with more than three hits reads no neighbors and so
+        never opens the matched file. (One to three hits DO open it, to read
+        the surrounding lines — see test_search_one_hit_includes_neighbors.)
         """
         defs = get_tool_definitions_for_api()
         names = [item["function"]["name"] for item in defs]
@@ -536,8 +539,10 @@ class TestFileSearchToolRegistration:
         assert "file_search" not in names
         with tempfile.TemporaryDirectory() as proj:
             hit = os.path.join(proj, "mod.py")
+            # Four hits: past the 1-3 neighbor window, so the count must come
+            # from grep alone and the file is never opened.
             with open(hit, "w", encoding="utf-8") as fh:
-                fh.write("UNIQUE_SENTINEL_42\n")
+                fh.write("UNIQUE_SENTINEL_42\n" * 4)
             opened: list[str] = []
             real_open = open
 

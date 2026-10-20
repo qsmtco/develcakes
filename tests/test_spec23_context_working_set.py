@@ -31,10 +31,16 @@ def test_third_identical_read_is_refused(tmp_path):
             sk, None, conv, "reading", [("c%d" % n, "read_file", {"path": "a.txt"})], n,
         ) is False
     bodies = _tool_bodies(conv)
-    assert bodies[0] == "hello world\n"
+    assert bodies[0] == _read_text("a.txt", "hello world\n")
     assert bodies[1].startswith("[unchanged")
     assert bodies[2].startswith("REFUSED:")
     assert "hello world" not in bodies[2]
+
+
+def _read_text(name: str, text: str) -> str:
+    lines = text.splitlines()
+    body = "\n".join(f"{i}|{line}" for i, line in enumerate(lines, 1))
+    return f"[line 1 of {name}]\n{body}"
 
 
 def test_shell_reprint_of_a_read_file_is_refused(tmp_path):
@@ -63,9 +69,9 @@ def test_second_identical_read_is_unchanged_notice(tmp_path):
     assert rt._execute_tool_batch(sk, None, conv, "reading", first, 1) is False
     assert rt._execute_tool_batch(sk, None, conv, "reading", second, 2) is False
     bodies = _tool_bodies(conv)
-    assert bodies[0] == "hello world\n"
+    assert bodies[0] == _read_text("a.txt", "hello world\n")
     assert bodies[1] == (
-        "[unchanged \u2014 read_file a.txt offset=0 limit=None; "
+        "[unchanged \u2014 read_file a.txt line=1 max_lines=None; "
         "the body is already in this conversation. "
         "Do not read it again and do not print it with a shell command.]"
     )
@@ -84,7 +90,7 @@ def test_changed_mtime_is_not_deduped(tmp_path):
     os.utime(target, (st.st_atime, st.st_mtime + 10))
     rt._execute_tool_batch(sk, None, conv, "reading", [("c2", "read_file", {"path": "a.txt"})], 2)
     bodies = _tool_bodies(conv)
-    assert bodies[1] == "hello world\n"
+    assert bodies[1] == _read_text("a.txt", "hello world\n")
     assert "unchanged" not in bodies[1]
 
 
@@ -99,7 +105,7 @@ def test_different_limit_is_not_deduped(tmp_path):
         2,
     )
     bodies = _tool_bodies(conv)
-    assert bodies[1] == "hello"
+    assert bodies[1] == _read_text("a.txt", "hello world\n")
     assert "unchanged" not in bodies[1]
 
 
@@ -111,7 +117,7 @@ def test_cleanup_drops_fingerprint_so_next_turn_rereads(tmp_path):
     rt._cleanup_tool_history(sk)
     rt._execute_tool_batch(sk, None, conv, "reading", [("c2", "read_file", {"path": "a.txt"})], 2)
     bodies = _tool_bodies(conv)
-    assert bodies[1] == "hello world\n"
+    assert bodies[1] == _read_text("a.txt", "hello world\n")
 
 
 def test_drop_read_cache_missing_key_is_noop():
@@ -241,7 +247,10 @@ def test_next_turn_rereads_instead_of_reporting_unchanged(tmp_path):
         rt._run_loop(sk, "first")
         rt._run_loop(sk, "second")
     bodies = _tool_bodies(rt.get_conversation(sk))
-    assert bodies == ["hello world\n", "hello world\n"]
+    assert bodies == [
+        _read_text("a.txt", "hello world\n"),
+        _read_text("a.txt", "hello world\n"),
+    ]
 
 
 def test_task_card_prefixes_only_the_last_user_message():

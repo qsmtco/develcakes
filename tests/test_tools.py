@@ -79,7 +79,7 @@ class TestSandbox:
                 f.write("hello")
             r = execute_tool("read_file", {"path": testfile}, proj)
             assert r.success is True
-            assert r.output == "hello"
+            assert r.output == f"[line 1 of {testfile}]\n1|hello"
 
     def test_read_file_relative_inside_sandbox(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -89,7 +89,7 @@ class TestSandbox:
                 f.write("print('hi')")
             r = execute_tool("read_file", {"path": "src/a.py"}, proj)
             assert r.success is True
-            assert r.output == "print('hi')"
+            assert r.output == "[line 1 of src/a.py]\n1|print('hi')"
 
     def test_write_file_absolute_outside_sandbox_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -211,9 +211,10 @@ class TestReadFile:
             assert r.success is True
             assert "truncated" in r.output
             assert len(r.output) <= MAX_READ_SIZE + 200
-            assert r.output.count("x") == MAX_READ_SIZE
-            # Window fills the read cap exactly; continuation points at the cap.
-            assert f"offset={MAX_READ_SIZE}" in r.output
+            content_line = next(ln for ln in r.output.splitlines() if ln.startswith("1|"))
+            assert content_line == "1|" + ("x" * MAX_READ_SIZE)
+            assert "continue with line=1" in r.output
+            assert "offset=" not in r.output
             assert "chars omitted" not in r.output  # not the conversation head/tail cutter
 
     def test_read_explicit_limit_cannot_exceed_cap(self):
@@ -233,10 +234,10 @@ class TestReadFile:
         with tempfile.TemporaryDirectory() as proj:
             f = os.path.join(proj, "test.txt")
             with open(f, "w") as fh:
-                fh.write("0123456789abcdefghij")
-            r = execute_tool("read_file", {"path": "test.txt", "offset": 5, "limit": 5}, proj)
+                fh.write("only\n")
+            r = execute_tool("read_file", {"path": "test.txt", "limit": 1}, proj)
             assert r.success is True
-            assert r.output == "56789"
+            assert r.output == "[line 1 of test.txt]\n1|only"
             assert "truncated" not in r.output
 
     def test_read_negative_limit_rejected(self):
@@ -246,19 +247,20 @@ class TestReadFile:
                 fh.write("hello")
             r = execute_tool("read_file", {"path": "test.txt", "limit": -1}, proj)
             assert r.success is False
-            assert r.error == "limit must be >= 0"
+            assert "limit must be an integer >= 1" in r.error
             r0 = execute_tool("read_file", {"path": "test.txt", "limit": 0}, proj)
-            assert r0.success is True
-            assert r0.output == ""
+            assert r0.success is False
+            assert "limit must be an integer >= 1" in r0.error
 
-    def test_read_negative_offset_is_oserror(self):
+    def test_read_offset_is_ignored(self):
+        """offset used to be a byte index. A negative one must not fail the read."""
         with tempfile.TemporaryDirectory() as proj:
             f = os.path.join(proj, "test.txt")
             with open(f, "w") as fh:
                 fh.write("hello")
             r = execute_tool("read_file", {"path": "test.txt", "offset": -1}, proj)
-            assert r.success is False
-            assert r.error.startswith("Cannot read test.txt:")
+            assert r.success is True
+            assert "1|hello" in r.output
 
     def test_read_exact_cap_has_no_notice(self):
         from agent.tools import MAX_READ_SIZE
@@ -268,8 +270,9 @@ class TestReadFile:
                 fh.write(b"z" * MAX_READ_SIZE)
             r = execute_tool("read_file", {"path": "exact.txt"}, proj)
             assert r.success is True
-            assert r.output == "z" * MAX_READ_SIZE
+            assert f"1|{'z' * MAX_READ_SIZE}" in r.output
             assert "truncated" not in r.output
+            assert "continue with line=" not in r.output
 
     def test_read_bad_limit_type(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -293,9 +296,9 @@ class TestReadFile:
             )
             assert r.success is True
             assert r.output.startswith("[line 2 of t.py]\n")
-            body = r.output.split("\n", 1)[1]
-            assert body.startswith("beta\n")
-            assert "alpha" not in body
+            assert "2|beta" in r.output
+            assert "3|gamma" in r.output
+            assert "alpha" not in r.output
 
     def test_read_line_past_end_and_bad_line(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -319,8 +322,9 @@ class TestReadFile:
             assert r.success is True
             assert r.output.startswith("[line 1 of t.txt]\n")
             assert "continue with offset" not in r.output
-            body = r.output.split("\n", 1)[1]
-            assert body.count("\n") <= 200
+            assert "continue with line=201" in r.output
+            numbered = [ln for ln in r.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(numbered) == 200
 
     def test_read_continuation_hint_after_newline_terminated_window(self):
         """SPEC-43: a newline-terminated file still stops at 200 lines."""
@@ -332,18 +336,112 @@ class TestReadFile:
             assert r.success is True
             assert r.output.startswith("[line 1 of t.txt]\n")
             assert "continue with offset" not in r.output
-            body = r.output.split("\n", 1)[1]
-            assert body.count("\n") <= 200
+            assert "continue with line=201" in r.output
+            numbered = [ln for ln in r.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(numbered) == 200
 
-    def test_read_byte_mode_still_names_the_next_offset(self):
-        from agent.tools import MAX_READ_SIZE
-
+    def test_read_past_the_window_names_the_next_line(self):
         with tempfile.TemporaryDirectory() as proj:
             with open(os.path.join(proj, "t.txt"), "w") as fh:
-                fh.write("x" * (MAX_READ_SIZE + 10))
+                fh.write("x\n" * 250)
             r = execute_tool("read_file", {"path": "t.txt"}, proj)
             assert r.success is True
-            assert f"offset={MAX_READ_SIZE}" in r.output
+            assert "continue with line=201" in r.output
+            assert "offset=" not in r.output
+
+    def test_read_max_lines_shortens_line_window(self):
+        """max_lines shrinks the line window; it never grows it."""
+        line_text = "0123456789012345678901\n"
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write(line_text * 720)
+            r = execute_tool(
+                "read_file", {"path": "t.txt", "line": 1, "max_lines": 5}, proj
+            )
+            assert r.success is True
+            assert r.output.startswith("[line 1 of t.txt]\n")
+            assert "continue with line=6" in r.output
+            numbered = [ln for ln in r.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(numbered) == 5
+            assert numbered[0].startswith("1|")
+
+            grown = execute_tool(
+                "read_file", {"path": "t.txt", "line": 1, "max_lines": 1000}, proj
+            )
+            grown_lines = [ln for ln in grown.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(grown_lines) == 200
+
+    def test_read_line_limit_counts_lines(self):
+        """A positive limit with line is a line count, not a byte cap."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write("".join(f"line {i:04d} pad\n" for i in range(1, 120)))
+            r = execute_tool(
+                "read_file", {"path": "t.txt", "line": 5, "limit": 80}, proj
+            )
+            assert r.success is True
+            numbered = [ln for ln in r.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(numbered) == 80
+            assert numbered[0] == "5|line 0005 pad"
+            assert "continue with offset" not in r.output
+
+    def test_read_max_lines_overrides_limit(self):
+        """max_lines wins when line and limit are both set."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write("".join(f"line {i:04d} pad\n" for i in range(1, 120)))
+            r = execute_tool(
+                "read_file",
+                {"path": "t.txt", "line": 5, "limit": 80, "max_lines": 3},
+                proj,
+            )
+            assert r.success is True
+            numbered = [ln for ln in r.output.splitlines() if ln.split("|", 1)[0].isdigit()]
+            assert len(numbered) == 3
+            assert numbered[0] == "5|line 0005 pad"
+
+    def test_read_line_window_says_when_the_byte_cap_cuts_it(self):
+        """A long line must not make a short read look like the full window."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write("".join(("x" * 4000) + "\n" for _ in range(20)))
+            r = execute_tool(
+                "read_file", {"path": "t.txt", "line": 1, "limit": 10}, proj
+            )
+            assert r.success is True
+            assert "line window cut" in r.output
+            assert "continue with line=" in r.output
+            body = r.output.split("\n", 1)[1]
+            assert body.count("\n") < 10
+
+    def test_read_max_lines_overrides_a_larger_limit(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write("one\ntwo\nthree\nfour\n")
+            plain = execute_tool(
+                "read_file", {"path": "t.txt", "offset": 5, "limit": 5}, proj
+            )
+            with_ml = execute_tool(
+                "read_file",
+                {"path": "t.txt", "offset": 5, "limit": 5, "max_lines": 2},
+                proj,
+            )
+            assert plain.success is True and with_ml.success is True
+            assert "3|three" in plain.output
+            assert "1|one" in with_ml.output
+            assert "2|two" in with_ml.output
+            assert "three" not in with_ml.output
+
+    def test_read_max_lines_validation(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "t.txt"), "w") as fh:
+                fh.write("x\n")
+            for bad in (0, True, "5"):
+                r = execute_tool(
+                    "read_file", {"path": "t.txt", "line": 1, "max_lines": bad}, proj
+                )
+                assert r.success is False
+                assert "max_lines must be an integer >= 1" in r.error
 
     def test_read_binary_file_rejected(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -361,7 +459,7 @@ class TestReadFile:
                 fh.write("0123456789abcdefghij")
             r = execute_tool("read_file", {"path": "test.txt", "offset": 5, "limit": 5}, proj)
             assert r.success is True
-            assert r.output == "56789"
+            assert r.output == "[line 1 of test.txt]\n1|0123456789abcdefghij"
 
 
 class TestWriteFile:
@@ -400,6 +498,143 @@ class TestWriteFile:
         assert "read the full file" not in desc
         assert "read_file returns a window" in desc
         assert "already have in hand" in desc
+
+    def test_edit_replaces_one_exact_match_and_shows_the_lines(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("keep\nx = 1\ntail\n")
+            r = execute_tool(
+                "edit_file",
+                {"path": "a.py", "old_text": "x = 1\n", "new_text": "x = 2\n"},
+                proj,
+            )
+            assert r.success is True
+            assert "1|keep" in r.output
+            assert "2|x = 2" in r.output
+            with open(os.path.join(proj, "a.py")) as fh:
+                assert fh.read() == "keep\nx = 2\ntail\n"
+
+    def test_edit_reindents_a_unique_loosely_indented_block(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("def outer():\n    def foo():\n        return 1\n")
+            r = execute_tool(
+                "edit_file",
+                {
+                    "path": "a.py",
+                    "old_text": "def foo():\n    return 1\n",
+                    "new_text": "def foo():\n    return 2\n",
+                },
+                proj,
+            )
+            assert r.success is True, r.error
+            with open(os.path.join(proj, "a.py")) as fh:
+                assert fh.read() == "def outer():\n    def foo():\n        return 2\n"
+
+    def test_edit_keeps_crlf_on_lines_it_does_not_change(self):
+        with tempfile.TemporaryDirectory() as proj:
+            path = os.path.join(proj, "a.py")
+            with open(path, "wb") as fh:
+                fh.write(b"def outer():\r\n    def foo():\r\n        return 1\r\n")
+            r = execute_tool(
+                "edit_file",
+                {
+                    "path": "a.py",
+                    "old_text": "def foo():\n    return 1\n",
+                    "new_text": "def foo():\n    return 2\n",
+                },
+                proj,
+            )
+            assert r.success is True, r.error
+            data = open(path, "rb").read()
+            assert data == b"def outer():\r\n    def foo():\r\n        return 2\r\n"
+
+    def test_edit_refuses_two_indent_matches_and_names_the_lines(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("    def foo():\n        return 1\n    def foo():\n        return 1\n")
+            r = execute_tool(
+                "edit_file",
+                {
+                    "path": "a.py",
+                    "old_text": "def foo():\n    return 1\n",
+                    "new_text": "def foo():\n    return 2\n",
+                },
+                proj,
+            )
+            assert r.success is False
+            assert "indentation" in r.error
+            assert "lines 1, 3" in r.error
+            with open(os.path.join(proj, "a.py")) as fh:
+                assert "return 1" in fh.read()
+                assert "return 2" not in fh.read()
+
+    def test_edit_miss_shows_nearby_lines(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("alpha\nbeta\ngamma\n")
+            r = execute_tool(
+                "edit_file",
+                {"path": "a.py", "old_text": "betx", "new_text": "beta"},
+                proj,
+            )
+            assert r.success is False
+            assert "Nearby lines:" in r.error
+            assert "2|beta" in r.error
+
+    def test_edit_replace_all_changes_every_exact_match(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("name = 1\nname = 2\n")
+            refused = execute_tool(
+                "edit_file",
+                {"path": "a.py", "old_text": "name", "new_text": "title"},
+                proj,
+            )
+            assert refused.success is False
+            applied = execute_tool(
+                "edit_file",
+                {
+                    "path": "a.py",
+                    "old_text": "name",
+                    "new_text": "title",
+                    "replace_all": True,
+                },
+                proj,
+            )
+            assert applied.success is True
+            assert "2 occurrences replaced" in applied.output
+            with open(os.path.join(proj, "a.py")) as fh:
+                assert fh.read() == "title = 1\ntitle = 2\n"
+
+    def test_edit_replace_all_false_string_is_false(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("name\nname\n")
+            r = execute_tool(
+                "edit_file",
+                {
+                    "path": "a.py",
+                    "old_text": "name",
+                    "new_text": "title",
+                    "replace_all": "false",
+                },
+                proj,
+            )
+            assert r.success is False
+            assert "not unique" in r.error
+
+    def test_edit_rejects_empty_old_text(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as fh:
+                fh.write("x\n")
+            r = execute_tool(
+                "edit_file",
+                {"path": "a.py", "old_text": "", "new_text": "y"},
+                proj,
+            )
+            assert r.success is False
+            assert "non-empty" in r.error
 
 
 class TestExecCommand:
@@ -588,7 +823,7 @@ class TestSearchFiles:
             assert "zpkg/big.py" in filtered.output
             assert ".txt" not in filtered.output
             # Control: without file_type the file is still found. The output
-            # layer sorts lexicographically and caps at max_results, so raise
+            # layer sorts by modification time and caps at max_results, so raise
             # it past the 26 candidates. Called via _search_files directly:
             # the search_files execute_tool registration swallows **kwargs
             # and never forwards max_results, so the kwarg would be silently
@@ -644,6 +879,367 @@ class TestSearchFiles:
             )
             assert missing.success is False
             assert "Not a file or directory" in missing.error
+
+    # ── SPEC-44 Phase 1: per-file match counts + count_only ─────────
+
+    def test_search_reports_match_count(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("def foo():\n    pass\n# foo\nx = foo\nbar\n")
+            r = execute_tool("search_files", {"pattern": "foo"}, proj)
+            assert r.success is True
+            assert "counts.py (" in r.output
+            assert "3 matches)" in r.output
+            assert " of " not in r.output  # nothing was capped here
+
+    def test_search_reports_true_total_when_capped(self):
+        # 41 matching lines against a 40-line preview cap: the header must
+        # report the true total, not the number of lines emitted.
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "many.py"), "w") as f:
+                f.writelines(f"def foo_{n}(): pass\n" for n in range(41))
+            r = execute_tool("search_files", {"pattern": "def foo_"}, proj)
+            assert r.success is True
+            assert "many.py (" in r.output
+            assert "40 of 41 matches" in r.output
+            # The captain's standing order: at most 40 match lines EMITTED.
+            # The header count is computed from the full hits list, so a header
+            # assertion alone does NOT prove the cap holds — this does.
+            assert r.output.count("  Line ") == 40
+
+    def test_search_emission_cap_40_on_large_file(self):
+        """The 40-line emission cap holds even when the header reports a big total.
+
+        Standing order (PM 2026-10-20): at most 40 match lines per file. The
+        header's "N of M" is computed from the FULL hits list, so only counting
+        the emitted "  Line " entries proves the cap. A mutant that drops the
+        `hits[:preview_lines]` slice at the emission site passes every header
+        assertion while dumping the whole file.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "big.py"), "w") as f:
+                f.write("".join(f"def foo_{i:03d}(): pass\n" for i in range(120)))
+            r = execute_tool("search_files", {"pattern": "def foo_"}, proj)
+            assert r.success is True
+            assert "40 of 120 matches" in r.output
+            assert r.output.count("  Line ") == 40
+
+    def test_search_count_only_returns_counts(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("def foo():\n    pass\n# foo\nx = foo\nbar\n")
+            r = execute_tool(
+                "search_files", {"pattern": "foo", "count_only": True}, proj
+            )
+            assert r.success is True
+            assert "3 matches)" in r.output
+            assert "Line " not in r.output
+            assert "[Open with read_file line=N only to edit.]" not in r.output
+
+    def test_search_count_only_shows_true_total(self):
+        # BUG #5: no preview slice is applied in count_only mode, so shown
+        # equals total — a 41-match file must not read "40 of 41 matches".
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "many.py"), "w") as f:
+                f.writelines(f"def foo_{n}(): pass\n" for n in range(41))
+            r = execute_tool(
+                "search_files", {"pattern": "def foo_", "count_only": True}, proj
+            )
+            assert r.success is True
+            assert "41 matches)" in r.output
+            assert "40 of 41" not in r.output
+            assert " of " not in r.output
+
+    def test_search_count_only_name_match(self):
+        # BUG #4: a filename-only hit has no content lines; in count_only
+        # mode the header itself must carry the "name match" signal.
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "needle_file.py"), "w") as f:
+                f.write("unrelated content\n")
+            r = execute_tool(
+                "search_files", {"pattern": "needle", "count_only": True}, proj
+            )
+            assert r.success is True
+            assert "needle_file.py (" in r.output
+            assert "name match)" in r.output
+            assert "0 matches" not in r.output
+
+    def test_search_count_reaches_public_tool_path(self):
+        """The registration lambda must FORWARD count_only to _search_files.
+
+        The lambda's `**kwargs` sink silently discards an unforwarded parameter,
+        so without the forward this call returns content lines and no count
+        difference — no error is raised. This test calls the same function
+        directly as the CONTROL, proving the public path and the direct path
+        agree.
+        """
+        from agent.tools import _search_files
+
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as f:
+                f.write("def foo():\n    pass\n")
+            via_tool = execute_tool(
+                "search_files", {"pattern": "foo", "count_only": True}, proj
+            )
+            direct = _search_files("foo", proj, path=".", count_only=True)
+            assert via_tool.success is True
+            assert direct.success is True
+            # Both paths must produce the same count_only output.
+            assert via_tool.output == direct.output
+            assert "  Line " not in via_tool.output
+            assert "Open with read_file" not in via_tool.output
+
+    def test_search_count_only_output_is_exact(self):
+        """count_only emits ONLY the header: no body, no footer, no blank, no newline."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("def foo():\n    pass\n")
+            r = execute_tool("search_files", {"pattern": "foo", "count_only": True}, proj)
+            assert r.success is True
+            assert r.output.splitlines() == [
+                "[1 matches in 1 files]",
+                r.output.splitlines()[1],
+            ]
+            assert r.output.splitlines()[1].endswith("1 matches)")
+            assert not r.output.endswith("\n")
+            assert "Open with read_file" not in r.output
+            assert "  Line " not in r.output
+
+    def test_search_count_only_name_only_output_is_exact(self):
+        """A name-only file in count_only mode emits the header and NOTHING else.
+
+        Pins the `if count_only: continue` guard: without it the
+        "[name match only ...]" body line leaks, and it contains no "Line "
+        so a substring assertion on "Line " cannot catch it.
+        """
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "needle.py"), "w") as f:
+                f.write("x = 1\n")
+            r = execute_tool("search_files", {"pattern": "needle", "count_only": True}, proj)
+            assert r.success is True
+            assert r.output.splitlines()[0] == "[1 matches in 1 files]"
+            assert "name match)" in r.output.splitlines()[1]
+            assert "name match only" not in r.output
+            assert len(r.output.splitlines()) == 2
+
+    def test_search_count_only_is_in_the_schema(self):
+        """The model must be able to DISCOVER count_only."""
+        defn = next(t for t in get_all_tools() if t.name == "search_files")
+        assert "count_only" in defn.parameters["properties"]
+        assert defn.parameters["properties"]["count_only"]["type"] == "boolean"
+
+    def test_search_description_advertises_the_count(self):
+        """The description must tell the model the count and count_only exist.
+
+        Without this, the feature ships invisible: the model never learns to use it.
+        """
+        defn = next(t for t in get_all_tools() if t.name == "search_files")
+        assert "match count" in defn.description.lower()
+        assert "count_only" in defn.description
+
+    def test_search_count_only_false_string_is_false(self):
+        """The string \"false\" must not turn count_only on."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as f:
+                f.write("def foo():\n    pass\n")
+            r = execute_tool(
+                "search_files", {"pattern": "foo", "count_only": "false"}, proj
+            )
+            assert r.success is True
+            assert "  Line " in r.output
+
+    def test_search_count_only_reports_unlisted_files(self):
+        """Files past max_results stay in the summary, with a drop marker."""
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(25):
+                path = os.path.join(proj, f"f{i:02d}.py")
+                with open(path, "w") as f:
+                    f.write("def foo():\n    pass\n")
+                # f00 is the newest, so the mtime cap keeps it and drops f24.
+                os.utime(path, (2_000_000_000 - i, 2_000_000_000 - i))
+            r = execute_tool(
+                "search_files", {"pattern": "def foo", "count_only": True}, proj
+            )
+            assert r.success is True
+            lines = r.output.splitlines()
+            assert lines[0] == "[25 matches in 25 files] (+5 more files not listed)"
+            assert len(lines) == 21  # summary + 20 headers
+            assert "f24.py" not in r.output
+            assert "f00.py" in r.output
+
+    def test_search_count_preserves_line_format(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("def foo():\n    pass\n")
+            r = execute_tool("search_files", {"pattern": "foo"}, proj)
+            assert r.success is True
+            assert "\n  Line 1: def foo" in r.output
+
+    def test_search_footer_pinned(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("def foo():\n    pass\n")
+            r = execute_tool("search_files", {"pattern": "foo"}, proj)
+            assert r.success is True
+            assert "[Open with read_file line=N only to edit.]" in r.output
+
+    def test_search_line_indent_pinned(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "counts.py"), "w") as f:
+                f.write("alpha\nbeta\nfoo\n")
+            r = execute_tool("search_files", {"pattern": "foo"}, proj)
+            assert r.success is True
+            assert "\n  Line 3: " in r.output
+
+    def test_search_name_match_does_not_crash(self):
+        # BUG #1: grep_hits.get(rel) is None for a name-only file. Without
+        # the `or []` guard the first name-only result raises TypeError, so
+        # the sorted-first file below must be the name-only one.
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "aaa_needle.txt"), "w") as f:
+                f.write("nothing here\n")
+            with open(os.path.join(proj, "zfound.py"), "w") as f:
+                f.write("x = 1  # needle\n")
+            # Newest first. The name-only file has to be the first header so a
+            # crash on a name-only hit still fails this test.
+            os.utime(os.path.join(proj, "aaa_needle.txt"), (2_000_000_000, 2_000_000_000))
+            os.utime(os.path.join(proj, "zfound.py"), (1_000_000_000, 1_000_000_000))
+            r = execute_tool("search_files", {"pattern": "needle"}, proj)
+            assert r.success is True
+            lines = r.output.splitlines()
+            assert lines[0] == "[2 matches in 2 files]"
+            assert lines[1].startswith("aaa_needle.txt (")
+            assert "name match" in lines[1]
+            assert "Line 1:" in r.output
+
+    def test_search_skips_ignored_hidden_and_git(self):
+        """A directory search drops ignored, hidden, and .git hits."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, ".gitignore"), "w") as f:
+                f.write("secret.py\n")
+            with open(os.path.join(proj, "secret.py"), "w") as f:
+                f.write("NEEDLE\n")
+            with open(os.path.join(proj, "visible.py"), "w") as f:
+                f.write("NEEDLE\n")
+            with open(os.path.join(proj, ".hidden.py"), "w") as f:
+                f.write("NEEDLE\n")
+            os.makedirs(os.path.join(proj, ".git"))
+            with open(os.path.join(proj, ".git", "HEAD"), "w") as f:
+                f.write("NEEDLE\n")
+            r = execute_tool("search_files", {"pattern": "NEEDLE"}, proj)
+            assert r.success is True
+            assert "visible.py" in r.output
+            assert "secret.py" not in r.output
+            assert ".hidden.py" not in r.output
+            assert ".git" not in r.output
+
+    def test_search_explicit_ignored_file_is_still_searched(self):
+        """Passing the ignored path searches that file."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, ".gitignore"), "w") as f:
+                f.write("secret.py\n")
+            with open(os.path.join(proj, "secret.py"), "w") as f:
+                f.write("NEEDLE\n")
+            r = execute_tool(
+                "search_files", {"pattern": "NEEDLE", "path": "secret.py"}, proj
+            )
+            assert r.success is True
+            assert "secret.py" in r.output
+            assert "  Line 1:" in r.output
+
+    def test_search_one_hit_includes_neighbors_in_a_large_file(self):
+        """One hit seeks to that line. The rest of a big file stays out."""
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [f"line {i:04d} " + ("p" * 70) + "\n" for i in range(1, 401)]
+            lines[0] = "FILE_START\n"
+            lines[298] = "BEFORE_MARK\n"
+            lines[299] = "UNIQUE_HIT\n"
+            lines[300] = "AFTER_MARK\n"
+            with open(os.path.join(proj, "big.py"), "w") as f:
+                f.writelines(lines)
+            assert os.path.getsize(os.path.join(proj, "big.py")) > 16 * 1024
+            r = execute_tool("search_files", {"pattern": "UNIQUE_HIT"}, proj)
+            assert r.success is True
+            assert "\n  Line 300: UNIQUE_HIT" in r.output
+            assert "\n  big.py-299:BEFORE_MARK" in r.output
+            assert "\n  big.py-301:AFTER_MARK" in r.output
+            assert "FILE_START" not in r.output
+            assert r.output.count("\n  Line ") == 1
+
+    def test_search_four_hits_do_not_add_neighbors(self):
+        """Past three hits, the 40-line preview stays and neighbors stay out."""
+        with tempfile.TemporaryDirectory() as proj:
+            body = "".join(
+                f"HIT {i}\nONLY_NEIGHBOR {i}\n" for i in range(4)
+            )
+            with open(os.path.join(proj, "quad.py"), "w") as f:
+                f.write(body)
+            r = execute_tool("search_files", {"pattern": "HIT"}, proj)
+            assert r.success is True
+            assert r.output.count("\n  Line ") == 4
+            assert "ONLY_NEIGHBOR" not in r.output
+
+    def test_search_lists_newest_file_first(self):
+        with tempfile.TemporaryDirectory() as proj:
+            for name, stamp in (("alpha.py", 1_000_000_000), ("zebra.py", 2_000_000_000)):
+                path = os.path.join(proj, name)
+                with open(path, "w") as f:
+                    f.write("NEEDLE\n")
+                os.utime(path, (stamp, stamp))
+            r = execute_tool("search_files", {"pattern": "NEEDLE"}, proj)
+            assert r.success is True
+            headers = [
+                ln for ln in r.output.splitlines()
+                if ln.endswith("matches)") or ln.endswith("name match)")
+            ]
+            assert headers[0].startswith("zebra.py ")
+            assert headers[1].startswith("alpha.py ")
+
+    def test_search_rejected_pattern_returns_the_engine_diagnostic(self):
+        """A bad regex is an error the model can correct, not an empty search."""
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "a.py"), "w") as f:
+                f.write("abc\n")
+            r = execute_tool("search_files", {"pattern": "["}, proj)
+            assert r.success is False
+            assert r.error
+            assert "(no matches)" not in (r.output or "")
+            low = r.error.lower()
+            assert "regex" in low or "invalid" in low or "error" in low
+
+    def test_search_grep_fallback_skips_ignored_files(self, monkeypatch):
+        """Without ripgrep, GNU grep still drops a gitignored hit.
+
+        ``foo+`` is a literal plus for GNU grep and ``fo`` plus extra o's for
+        ripgrep. The result proves which engine ran.
+        """
+        monkeypatch.setattr("agent.tools._rg_path", lambda: None)
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, ".gitignore"), "w") as f:
+                f.write("secret.py\n")
+            with open(os.path.join(proj, "a.py"), "w") as f:
+                f.write("foooo\n")
+            with open(os.path.join(proj, "b.py"), "w") as f:
+                f.write("foo+\n")
+            with open(os.path.join(proj, "secret.py"), "w") as f:
+                f.write("foo+\n")
+            r = execute_tool("search_files", {"pattern": "foo+"}, proj)
+            assert r.success is True, r.error
+            assert "b.py" in r.output
+            assert "a.py" not in r.output
+            assert "secret.py" not in r.output
+
+    def test_search_long_line_is_marked_cut(self):
+        with tempfile.TemporaryDirectory() as proj:
+            with open(os.path.join(proj, "long.py"), "w") as f:
+                f.write("NEEDLE" + ("x" * 600) + "\n")
+            r = execute_tool("search_files", {"pattern": "NEEDLE"}, proj)
+            assert r.success is True
+            assert (
+                "omitted end of long line" in r.output
+                or "[... line cut ...]" in r.output
+            )
+            assert "x" * 600 not in r.output
 
 
 class TestWebSearch:

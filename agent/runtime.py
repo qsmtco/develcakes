@@ -3626,9 +3626,9 @@ class AgentRuntime:
             parts = []
             for w in packet["hot"]:
                 if w.get("line") is not None:
-                    where = f"line={w['line']} limit={w['limit']}"
+                    where = f"line={w['line']} max_lines={w.get('limit')}"
                 else:
-                    where = f"offset={w['offset']} limit={w['limit']}"
+                    where = f"line=1 max_lines={w.get('limit')}"
                 parts.append(
                     f"### {w['path']} {where} "
                     f"(as read before the write above; re-read if unsure)"
@@ -4055,8 +4055,10 @@ class AgentRuntime:
         if not isinstance(path, str):
             path = ""
         if tool_name == "read_file":
-            offset = args.get("offset")
-            return f"read {path} offset={offset or 0}"
+            line = args.get("line")
+            if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+                line = 1
+            return f"read {path} line={line}"
         if tool_name in ("edit_file", "write_file"):
             return f"{tool_name} {path}"
         if tool_name == "exec_command":
@@ -4337,9 +4339,9 @@ class AgentRuntime:
                         f"Do not read it again. Edit it or run its test."
                     )
                 if line_mode:
-                    where = f"line={line} limit={limit}"
+                    where = f"line={line} max_lines={args.get('max_lines', limit)}"
                 else:
-                    where = f"offset={offset or 0} limit={limit}"
+                    where = f"line=1 max_lines={args.get('max_lines', limit)}"
                 return (
                     f"[unchanged \u2014 read_file {path} {where}; "
                     f"the body is already in this conversation. "

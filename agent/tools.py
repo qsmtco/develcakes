@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -276,6 +277,11 @@ MAX_READ_SIZE = 16 * 1024       # 16 KB — matches CONV_OUTPUT_CAP
                                  # conversation keeps.
 MAX_READ_LINES = 2000
 LINE_WINDOW = 200
+# A search with one content hit shows this many lines on either side.
+# Two or three hits show the smaller window. More than three keep the
+# 40-line preview and do not open the file.
+SEARCH_CONTEXT_ONE = 50
+SEARCH_CONTEXT_FEW = 15
 MAX_LIST_ENTRIES = 400
 MAX_WRITE_SIZE = 2 * 1024 * 1024  # 2 MB
 MAX_EXEC_OUTPUT = 100 * 1024     # 100 KB
@@ -433,14 +439,28 @@ def _start_byte_for_line(path: str, line: int) -> int | None:
     return None
 
 
+def _numbered_line_block(lines: list[str], start: int) -> str:
+    """Render file lines as ``N|text``. The number and bar are not file content."""
+    rendered: list[str] = []
+    for i, line in enumerate(lines):
+        rendered.append(f"{start + i}|{line.rstrip(chr(10)).rstrip(chr(13))}")
+    return "\n".join(rendered)
+
+
 def _read_file(
     path: str,
     project_path: str,
     offset: int | None = None,
     limit: int | None = None,
     line: int | None = None,
+    max_lines: int | None = None,
 ) -> ToolResult:
-    """Read a file relative to project_path."""
+    """Read a file relative to project_path.
+
+    Coordinates are lines. ``offset`` is accepted and ignored so an old
+    byte index cannot slice the file.
+    """
+    del offset
     resolved = _resolve_project_path(path, project_path)
     if resolved is None:
         return ToolResult(success=False, error=f"Path escapes project sandbox: {path}")
@@ -459,81 +479,57 @@ def _read_file(
         if b"\x00" in header:
             return ToolResult(success=False, error=f"Binary file (not readable as text): {path}")
 
-        # Read with optional offset/limit using binary mode
-        # (to correctly handle byte offsets in UTF-8 multi-byte files).
-        # offset/limit stay byte offsets. A caller limit smaller than the
-        # cap is honored with no notice. A larger limit is clamped. An
-        # omitted limit uses the cap. A line window is an extra cut inside
-        # that byte window.
-        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)):
-            return ToolResult(success=False, error="limit must be an integer >= 0")
-        if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
-            return ToolResult(success=False, error="line must be an integer >= 1")
-        if line is not None and line < 1:
-            return ToolResult(success=False, error="line must be an integer >= 1")
-        # line is the search_files coordinate ("Line N"). When it is set,
-        # offset is not a line number and is ignored.
-        if (
-            line is None
-            and offset is not None
-            and (isinstance(offset, bool) or not isinstance(offset, int))
+        # Every read is a line window. offset is ignored: it used to be a
+        # byte index, and models passed it as a line. limit is a line count
+        # when max_lines is omitted. The byte cap only stops one huge line
+        # from filling the result; the continuation is still a line number.
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
         ):
-            return ToolResult(success=False, error="offset must be an integer")
-        if limit is not None and limit < 0:
-            return ToolResult(success=False, error="limit must be >= 0")
-        if line is not None:
-            start = _start_byte_for_line(resolved, line)
-            if start is None or (line > 1 and start >= size):
-                return ToolResult(
-                    success=False,
-                    error=f"line {line} is past the end of {path}",
-                )
+            return ToolResult(success=False, error="limit must be an integer >= 1")
+        if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line < 1):
+            return ToolResult(success=False, error="line must be an integer >= 1")
+        if max_lines is not None and (
+            isinstance(max_lines, bool) or not isinstance(max_lines, int) or max_lines < 1
+        ):
+            return ToolResult(success=False, error="max_lines must be an integer >= 1")
+        start_line = 1 if line is None else line
+        if max_lines is not None:
+            window = min(max_lines, LINE_WINDOW)
+        elif limit is not None:
+            window = min(limit, LINE_WINDOW)
         else:
-            start = 0 if offset is None else offset
-        # A caller-supplied limit smaller than the cap is honored with no notice.
-        # A larger limit is clamped. An omitted limit uses the cap.
-        clamped = limit is not None and limit > MAX_READ_SIZE
-        stopped_by_us = limit is None or clamped
-        cap = MAX_READ_SIZE if limit is None else min(limit, MAX_READ_SIZE)
+            window = LINE_WINDOW
+        start = _start_byte_for_line(resolved, start_line)
+        if start is None or (start_line > 1 and start >= size):
+            return ToolResult(
+                success=False,
+                error=f"line {start_line} is past the end of {path}",
+            )
         with open(resolved, "rb") as f:
             f.seek(start)
-            raw = f.read(cap)
-        content = raw.decode("utf-8", errors="replace")
-        lines = content.splitlines(keepends=True)
-        # SPEC-43: a line request with no byte limit is a line window.
-        # Do not append a continuation notice; that footer made the model
-        # keep paging. An explicit limit still uses the byte-cap path below.
-        if line is not None and limit is None:
-            content = "".join(lines[:LINE_WINDOW])
-            content = f"[line {line} of {path}]\n" + content
-            return ToolResult(success=True, output=content)
-        cut_lines = len(lines) > MAX_READ_LINES
-        if cut_lines:
-            content = "".join(lines[:MAX_READ_LINES])
-        hit_byte_cap = len(raw) == cap and (start + len(raw)) < size
-        if (hit_byte_cap or cut_lines) and stopped_by_us:
-            next_offset = start + len(raw) if not cut_lines else start + len(content.encode("utf-8"))
-            notice = (
-                f"\n[... truncated at {len(content)} bytes; "
-                f"file is {size} bytes; continue with offset={next_offset}"
+            raw = f.read(MAX_READ_SIZE)
+        decoded = raw.decode("utf-8", errors="replace")
+        lines = decoded.splitlines(keepends=True)
+        if not lines and size == 0:
+            return ToolResult(
+                success=True,
+                output=f"[line {start_line} of {path}]\n(empty)",
             )
-            if line is not None:
-                # The hint must point at the first line the window did NOT
-                # show. `line` numbers the window's first line and each
-                # complete line contributes one newline, so a window that
-                # ENDS on a newline has consumed exactly `newlines` lines →
-                # next is line + newlines. A window that ends MID-LINE holds
-                # an incomplete line whose newline was never counted; that
-                # line is already (partly) read, so next is line + newlines
-                # + 1.
-                newlines = content.count(chr(10))
-                next_line = line + newlines
-                if not content.endswith(chr(10)):
-                    next_line += 1
-                notice += f" or line={next_line}"
-            content += notice + " ...]"
-        if line is not None:
-            content = f"[line {line} of {path}]\n" + content
+        got = lines[:window]
+        body = _numbered_line_block(got, start_line)
+        content = f"[line {start_line} of {path}]\n" + body
+        file_continues = (start + len(raw)) < size or len(lines) > len(got)
+        last_partial = bool(got) and not got[-1].endswith("\n")
+        if file_continues and last_partial:
+            next_line = start_line + len(got) - 1
+            content += (
+                f"\n[... truncated; line window cut after {len(raw)} bytes; "
+                f"continue with line={next_line} ...]"
+            )
+        elif file_continues:
+            next_line = start_line + len(got)
+            content += f"\n[... truncated; continue with line={next_line} ...]"
         return ToolResult(success=True, output=content)
 
     except PermissionError:
@@ -610,16 +606,150 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
         return ToolResult(success=False, error=f"Cannot write {path}: {e}")
 
 
-def _edit_file(path: str, old_text: str, new_text: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
-    """Replace exact old_text with new_text in a file within project_path.
+def _leading_indent(line: str) -> str:
+    i = 0
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return line[:i]
 
-    Both old_text and new_text are matched exactly — no regex, no fuzzy matching.
-    old_text must be unique in the file; otherwise the edit is rejected.
-    Falls back to a full file rewrite if the file has only one occurrence.
+
+def _reindent_block(new_text: str, file_indent: str) -> str:
+    """Shift new_text so its first line uses the file's indentation.
+
+    Relative indentation inside the block is kept. Blank lines stay blank.
+    """
+    lines = new_text.split("\n")
+    base = ""
+    for line in lines:
+        if line.strip():
+            base = _leading_indent(line)
+            break
+    out: list[str] = []
+    for line in lines:
+        if not line.strip():
+            out.append("")
+            continue
+        ind = _leading_indent(line)
+        rel = ind[len(base):] if ind.startswith(base) else ""
+        out.append(file_indent + rel + line.lstrip(" \t"))
+    return "\n".join(out)
+
+
+def _file_line_spans(content: str) -> list[tuple[int, int, str]]:
+    """(start, end, text without the newline) for each line. end includes the newline."""
+    spans: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(content):
+        nl = content.find("\n", i)
+        if nl < 0:
+            spans.append((i, len(content), content[i:]))
+            break
+        spans.append((i, nl + 1, content[i:nl]))
+        i = nl + 1
+    return spans
+
+
+def _indent_flexible_spans(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    """Spans where each line matches old_text once leading indentation is removed.
+
+    Returns (start, end, indent of the first file line). An empty old_text
+    matches nothing.
+    """
+    old_lines = old_text.split("\n")
+    if old_text.endswith("\n"):
+        old_lines = old_lines[:-1]
+    if not old_lines or not any(line.strip() for line in old_lines):
+        return []
+    stripped = [line.lstrip(" \t") for line in old_lines]
+    file_lines = _file_line_spans(content)
+    n = len(old_lines)
+    hits: list[tuple[int, int, str]] = []
+    for start_i in range(len(file_lines) - n + 1):
+        window = file_lines[start_i:start_i + n]
+        if all(window[k][2].rstrip("\r").lstrip(" \t") == stripped[k].rstrip("\r") for k in range(n)):
+            hits.append((window[0][0], window[-1][1], _leading_indent(window[0][2])))
+    return hits
+
+
+def _occurrence_line_numbers(content: str, needle: str) -> list[int]:
+    nums: list[int] = []
+    start = 0
+    step = max(len(needle), 1)
+    while True:
+        found = content.find(needle, start)
+        if found < 0:
+            break
+        nums.append(content.count("\n", 0, found) + 1)
+        start = found + step
+    return nums
+
+
+def _nearby_edit_lines(content: str, old_text: str) -> str:
+    """Up to three close spots, numbered, so a miss can be retried."""
+    file_lines = content.splitlines()
+    needle = ""
+    for line in old_text.splitlines() or [old_text]:
+        if line.strip():
+            needle = line.strip()
+            break
+    if not needle or not file_lines:
+        return ""
+    hits = [i for i, line in enumerate(file_lines) if needle in line]
+    if not hits:
+        import difflib
+        stripped = [line.strip() for line in file_lines]
+        choices = difflib.get_close_matches(needle, stripped, n=3, cutoff=0.6)
+        for choice in choices:
+            for i, line in enumerate(stripped):
+                if line == choice and i not in hits:
+                    hits.append(i)
+                    break
+    if not hits:
+        return ""
+    shown: list[str] = []
+    for i in hits[:3]:
+        lo = max(0, i - 2)
+        hi = min(len(file_lines), i + 3)
+        shown.append(_numbered_line_block(file_lines[lo:hi], lo + 1))
+    return "Nearby lines:\n" + "\n\n".join(shown)
+
+
+def _snippet_around(content: str, index: int, radius: int = 5) -> str:
+    lines = content.splitlines()
+    if not lines:
+        return "(empty)"
+    line_no = content.count("\n", 0, index) + 1
+    lo = max(1, line_no - radius)
+    hi = min(len(lines), line_no + radius)
+    return _numbered_line_block(lines[lo - 1:hi], lo)
+
+
+def _edit_file(
+    path: str,
+    old_text: str,
+    new_text: str,
+    project_path: str,
+    session_key: str = "",
+    approval_callback=None,
+    replace_all: bool = False,
+) -> ToolResult:
+    """Replace old_text with new_text. Exact and unique, unless replace_all.
+
+    When the exact text is missing but the same lines match once with the
+    indentation removed, that one match is applied and new_text is shifted
+    to the file's indentation. A miss includes nearby numbered lines.
     """
     resolved = _resolve_project_path(path, project_path)
     if resolved is None:
         return ToolResult(success=False, error=f"Path escapes project sandbox: {path}")
+
+    if not isinstance(old_text, str) or old_text == "":
+        return ToolResult(success=False, error="old_text must be a non-empty string")
+    if not isinstance(new_text, str):
+        return ToolResult(success=False, error="new_text must be a string")
+    replace_all, replace_error = _coerce_bool(replace_all, "replace_all")
+    if replace_error is not None:
+        return ToolResult(success=False, error=replace_error)
 
     if _is_context_md(path, project_path):
         return ToolResult(
@@ -644,7 +774,10 @@ def _edit_file(path: str, old_text: str, new_text: str, project_path: str, sessi
         return ToolResult(success=False, error=f"Not a file: {path}")
 
     try:
-        with open(resolved, "r", encoding="utf-8") as f:
+        size = os.path.getsize(resolved)
+        if size > 50 * 1024 * 1024:
+            return ToolResult(success=False, error=f"File too large (>50MB): {path}")
+        with open(resolved, "r", encoding="utf-8", newline="") as f:
             content = f.read()
     except PermissionError:
         return ToolResult(success=False, error=f"Permission denied: {path}")
@@ -653,40 +786,88 @@ def _edit_file(path: str, old_text: str, new_text: str, project_path: str, sessi
     except OSError as e:
         return ToolResult(success=False, error=f"Cannot read {path}: {e}")
 
-    # Count occurrences of old_text in the file
-    count = content.count(old_text)
-    if count == 0:
+    needle = old_text
+    if old_text not in content and "\r\n" in content and "\r\n" not in old_text:
+        crlf = old_text.replace("\n", "\r\n")
+        if crlf in content:
+            needle = crlf
+    replacement_text = new_text if needle == old_text else new_text.replace("\n", "\r\n")
+    count = content.count(needle)
+    new_content = content
+    replaced = 0
+    anchor = 0
+    if count >= 1 and replace_all:
+        anchor = content.find(needle)
+        new_content = content.replace(needle, replacement_text)
+        replaced = count
+    elif count == 1:
+        anchor = content.find(needle)
+        new_content = content.replace(needle, replacement_text, 1)
+        replaced = 1
+    elif count > 1:
+        sites = _occurrence_line_numbers(content, needle)
+        listed = ", ".join(str(n) for n in sites[:8])
+        extra = "" if len(sites) <= 8 else f" (+{len(sites) - 8} more)"
         return ToolResult(
             success=False,
             error=(
-                f"old_text not found in {path}.\n"
-                f"Verify the exact text you want to replace — whitespace and newlines matter.\n"
-                f"Use write_file if you need a full file rewrite."
+                f"old_text is not unique in {path} — found {count} occurrences "
+                f"at lines {listed}{extra}.\n"
+                f"Pass replace_all=true to change every one, or include more "
+                f"surrounding lines so only one matches."
             ),
         )
-    if count > 1:
-        return ToolResult(
-            success=False,
-            error=(
-                f"old_text is not unique in {path} — found {count} occurrences.\n"
-                f"Specify a larger, unique portion of surrounding context so the replacement\n"
-                f"is unambiguous. Use write_file if you need a full file rewrite."
-            ),
-        )
+    else:
+        spans = _indent_flexible_spans(content, old_text)
+        if len(spans) == 1:
+            span_start, span_end, file_indent = spans[0]
+            # Keep a trailing newline the file line already had.
+            replacement = _reindent_block(new_text.replace("\r\n", "\n"), file_indent)
+            if "\r\n" in content[span_start:span_end]:
+                replacement = replacement.replace("\n", "\r\n")
+            if content[span_start:span_end].endswith("\n") and not replacement.endswith("\n"):
+                replacement += "\r\n" if "\r\n" in content[span_start:span_end] else "\n"
+            new_content = content[:span_start] + replacement + content[span_end:]
+            anchor = span_start
+            replaced = 1
+        elif len(spans) > 1:
+            sites = [content.count("\n", 0, start) + 1 for start, _end, _ind in spans]
+            listed = ", ".join(str(n) for n in sites[:8])
+            return ToolResult(
+                success=False,
+                error=(
+                    f"old_text matches {len(spans)} places in {path} once indentation "
+                    f"is ignored, at lines {listed}.\n"
+                    f"Include more surrounding lines so only one matches."
+                ),
+            )
+        else:
+            nearby = _nearby_edit_lines(content, old_text)
+            detail = f"\n{nearby}" if nearby else ""
+            return ToolResult(
+                success=False,
+                error=(
+                    f"old_text not found in {path}.\n"
+                    f"The number and bar in a read_file line are not part of the file. "
+                    f"Whitespace and newlines matter."
+                    f"{detail}"
+                ),
+            )
 
-    # Exactly one match — safe to replace
-    new_content = content.replace(old_text, new_text, 1)
     try:
         byte_count = len(new_content.encode("utf-8"))
         if byte_count > MAX_WRITE_SIZE:
             return ToolResult(success=False, error=f"Resulting file too large ({byte_count} bytes, max {MAX_WRITE_SIZE})")
-        with open(resolved, "w", encoding="utf-8") as f:
+        with open(resolved, "w", encoding="utf-8", newline="") as f:
             f.write(new_content)
+        word = "occurrence" if replaced == 1 else "occurrences"
+        snippet = _snippet_around(new_content, anchor)
         return ToolResult(
             success=True,
             output=(
                 f"OK — edited {path}\n"
-                f"[enforcement:edit] {count} occurrence replaced"
+                f"[enforcement:edit] {replaced} {word} replaced\n"
+                f"{snippet}"
             ),
         )
     except PermissionError:
@@ -889,6 +1070,11 @@ def _list_files(path: str, project_path: str, recursive: bool = False) -> ToolRe
         return ToolResult(success=False, error=f"Cannot list {path}: {e}")
 
 
+def _rg_path() -> str | None:
+    """Ripgrep binary, or None when the host does not have one."""
+    return shutil.which("rg")
+
+
 def _run_grep(
     pattern: str,
     search_root: str,
@@ -896,29 +1082,57 @@ def _run_grep(
     timeout: int = 10,
     target: str = ".",
 ) -> tuple[int, str, str]:
-    """Run grep and return (returncode, stdout, stderr).
+    """Run ripgrep, or GNU grep when ripgrep is absent.
 
-    Shared by _search_files (tool) and _file_search (tool) to guarantee
-    identical grep behavior: same flags (-n -H --directories=skip -r),
-    same --include filter, same -- separator, same timeout.
-    ``target`` is ``.`` for a directory search and the file's basename
-    when ``path`` is a file (cwd is then the parent; a file cannot be cwd).
+    Shared by _search_files and _file_search. Output is ``path:line:content``
+    either way. ``target`` is ``.`` for a directory and the file's basename
+    when ``path`` is a file (a file cannot be the working directory).
+    Ripgrep is preferred because its regex is the one models write and a
+    rejected pattern comes back as its diagnostic. It also skips hidden
+    files. ``.gitignore`` is applied again by the caller, because ripgrep
+    honors it only inside a git work tree. ``--`` keeps a pattern that
+    starts with ``-`` from becoming a flag. ``-r`` is recursive only for
+    GNU grep; ripgrep uses ``-r`` to mean replace, so that flag is not shared.
     """
     if not search_root or not isinstance(search_root, str):
         raise ValueError(f"search_root must be a non-empty string, got {search_root!r}")
     if not target or not isinstance(target, str):
         raise ValueError(f"target must be a non-empty string, got {target!r}")
-    cmd = ["grep", "-n", "-H", "--directories=skip", "-r"]
-    if file_type:
-        cmd += ["--include=*." + file_type]
+    rg = _rg_path()
+    if rg:
+        cmd = [
+            rg, "-n", "-H", "--color=never", "--no-config",
+            "--max-columns", "500", "--max-columns-preview",
+        ]
+        if file_type:
+            cmd += ["--glob", "*." + file_type.lstrip(".")]
+    else:
+        cmd = ["grep", "-n", "-H", "--directories=skip", "-r", "--exclude-dir=.git"]
+        if file_type:
+            cmd += ["--include=*." + file_type.lstrip(".")]
     cmd += ["--", pattern, target]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        timeout=timeout,
-        cwd=search_root,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout,
+            cwd=search_root,
+            text=True,
+        )
+    except FileNotFoundError:
+        if not rg:
+            raise
+        cmd = ["grep", "-n", "-H", "--directories=skip", "-r", "--exclude-dir=.git"]
+        if file_type:
+            cmd += ["--include=*." + file_type.lstrip(".")]
+        cmd += ["--", pattern, target]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout,
+            cwd=search_root,
+            text=True,
+        )
     return result.returncode, result.stdout, result.stderr
 
 
@@ -959,6 +1173,173 @@ def _project_rel_from_grep(grep_path: str, root_rel: str) -> str:
     return f"{root_rel}/{rel}"
 
 
+def _match_count_header(rel: str, size_str: str, shown: int, total: int,
+                        name_only: bool = False) -> str:
+    """Per-file group header with the true match count.
+
+    ``shown`` is how many match lines the preview cap let through; ``total``
+    is the file's true count of matching LINES (not occurrences). When the
+    cap truncated, the header says so: "3 of 57 matches". Otherwise:
+    "3 matches".
+
+    ``name_only`` is True for a file that matched only by filename. Those
+    files have no content matches; they are labeled "name match" rather
+    than "0 matches" so a case-insensitive name hit is not misread as a
+    file with zero hits.
+    """
+    if name_only:
+        return f"{rel} ({size_str}, name match)"
+    if total <= 0:
+        return f"{rel} ({size_str}, 0 matches)"
+    if shown < total:
+        return f"{rel} ({size_str}, {shown} of {total} matches)"
+    return f"{rel} ({size_str}, {total} matches)"
+
+
+def _coerce_bool(value, name: str) -> tuple[bool, str | None]:
+    """Parse a tool boolean. The string ``\"false\"`` is false, not true."""
+    if isinstance(value, bool):
+        return value, None
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value), None
+        return False, f"{name} must be a boolean"
+    if isinstance(value, str):
+        folded = value.strip().lower()
+        if folded in ("true", "1"):
+            return True, None
+        if folded in ("false", "0"):
+            return False, None
+    return False, f"{name} must be a boolean"
+
+
+def _search_summary(n_matches: int, n_files: int, unlisted: int) -> str:
+    """First output line. Literal plurals, marker only when files were dropped."""
+    line = f"[{n_matches} matches in {n_files} files]"
+    if unlisted > 0:
+        line += f" (+{unlisted} more files not listed)"
+    return line
+
+
+def _directory_search_skips(rel: str, project_path: str, patterns: list[str]) -> bool:
+    """True when a directory search must not report this path.
+
+    Hidden names and ``.git`` are skipped on both engines. ``.gitignore``
+    uses the same matcher as filename search. An explicit file path is not
+    passed through here, so a caller can still open an ignored file.
+    """
+    from agent.context import _is_ignored
+
+    parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
+    if any(p.startswith(".") for p in parts):
+        return True
+    return _is_ignored(rel, project_path, patterns)
+
+
+def _search_mtime_key(project_real: str, rel: str) -> tuple[float, str]:
+    """Newest file first. Equal times break ties by path so the order is stable."""
+    full = os.path.join(project_real, *rel.split("/"))
+    try:
+        mtime = os.stat(full).st_mtime
+    except OSError:
+        mtime = float("-inf")
+    return (-mtime, rel)
+
+
+def _merged_line_windows(linenos: list[int], radius: int) -> list[tuple[int, int]]:
+    """1-based inclusive windows. Overlapping or touching windows become one."""
+    merged: list[tuple[int, int]] = []
+    for lineno in sorted(linenos):
+        start, end = max(1, lineno - radius), lineno + radius
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _context_slice(path: str, start_line: int, end_line: int) -> dict[int, str] | None:
+    """Lines ``start_line``..``end_line`` without reading the rest of the file.
+
+    None when the file cannot be opened. A line past EOF is absent. A line
+    longer than 500 characters is cut and marked, matching ripgrep's column cap.
+    """
+    start_line = max(1, start_line)
+    if end_line < start_line:
+        return {}
+    try:
+        offset = _start_byte_for_line(path, start_line)
+    except OSError:
+        return None
+    if offset is None:
+        return {}
+    out: dict[int, str] = {}
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            lineno = start_line
+            while lineno <= end_line:
+                raw = fh.readline(4096)
+                if not raw:
+                    break
+                if len(raw) >= 4096 and not raw.endswith(b"\n"):
+                    while True:
+                        more = fh.readline(4096)
+                        if not more or more.endswith(b"\n"):
+                            break
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if len(text) > 500:
+                    text = text[:500] + " [... line cut ...]"
+                out[lineno] = text
+                lineno += 1
+    except OSError:
+        return None
+    return out
+
+
+def _cut_search_line(text: str) -> str:
+    """Cap a displayed line. Ripgrep's own cut marker is left intact."""
+    if len(text) <= 500 or "omitted end of long line" in text:
+        return text
+    return text[:500] + " [... line cut ...]"
+
+
+def _emit_search_hits(
+    rel: str,
+    full_path: str,
+    previewed: list[tuple[int, str]],
+    radius: int,
+) -> list[str]:
+    """Match lines, plus neighbors when ``radius`` is positive.
+
+    A match line keeps grep's stripped text. A neighbor keeps the file's
+    leading whitespace and is marked with a dash so it is not a ``Line`` hit.
+    If the file cannot be read, only the match lines are returned.
+    """
+    match_text = {
+        lineno: _cut_search_line(content.strip())
+        for lineno, content in previewed
+    }
+    plain = [f"  Line {n}: {match_text[n]}" for n in sorted(match_text)]
+    if radius <= 0 or not match_text:
+        return plain
+    windows = _merged_line_windows(list(match_text), radius)
+    sliced: dict[int, str] = {}
+    for start, end in windows:
+        got = _context_slice(full_path, start, end)
+        if got is None:
+            return plain
+        sliced.update(got)
+    out: list[str] = []
+    for start, end in windows:
+        for n in range(start, end + 1):
+            if n in match_text:
+                out.append(f"  Line {n}: {match_text[n]}")
+            elif n in sliced:
+                out.append(f"  {rel}-{n}:{sliced[n]}")
+    return out
+
+
 def _search_files(
     pattern: str,
     project_path: str,
@@ -966,14 +1347,19 @@ def _search_files(
     file_type: str | None = None,
     max_results: int = 20,
     preview_lines: int = 40,
+    count_only: bool = False,
 ) -> ToolResult:
     """Name-or-content search. One grep, grouped by file.
 
     Content matches come from ``_run_grep``. Filename matches come from
     ``_find_matching_files`` (a name fragment). A file ``path`` is grepped
     as that file; it is not used as the working directory. Each hit is path, size from
-    ``stat``, and at most 40 preview lines taken from the grep hit. The hit
-    file is not opened to count lines. ``file_search`` calls this function.
+    ``stat``, a match count, and at most 40 preview lines taken from the grep hit.
+    The count is the file's true number of matching LINES, reported in the header
+    even when the preview cap hides the rest. The file is opened only when
+    the search has one to three content matches, and only the lines around
+    those matches are read. ``count_only=True`` returns the headers without
+    any content lines and without the footer. ``file_search`` calls this function.
     Sandbox, timeout, and ``file_type`` stay on this path.
     """
     if not isinstance(pattern, str) or not pattern.strip():
@@ -983,6 +1369,9 @@ def _search_files(
     if not isinstance(preview_lines, int) or isinstance(preview_lines, bool) or preview_lines <= 0:
         preview_lines = 40
     preview_lines = min(preview_lines, 40)
+    count_only, count_error = _coerce_bool(count_only, "count_only")
+    if count_error is not None:
+        return ToolResult(success=False, error=count_error)
 
     search_root = _resolve_project_path(path or ".", project_path)
     if search_root is None:
@@ -1052,9 +1441,12 @@ def _search_files(
         return ToolResult(success=False, error=f"Search failed: {e}")
 
     if returncode not in (0, 1):
+        detail = (stderr or "").strip()[:400]
+        if detail:
+            return ToolResult(success=False, error=detail)
         return ToolResult(
             success=False,
-            error=f"grep exited with {returncode}: {stderr[:200]}",
+            error=f"search exited with {returncode}",
         )
 
     grep_hits: dict[str, list[tuple[int, str]]] = {}
@@ -1071,6 +1463,13 @@ def _search_files(
             rel = _project_rel_from_grep(fpath, root_rel)
             grep_hits.setdefault(rel, []).append((lineno, content))
 
+    if file_rel is None:
+        grep_hits = {
+            rel: hits
+            for rel, hits in grep_hits.items()
+            if not _directory_search_skips(rel, project_path, patterns)
+        }
+
     ordered: list[str] = []
     seen: set[str] = set()
     for rel in list(name_matches) + list(grep_hits):
@@ -1078,12 +1477,26 @@ def _search_files(
             continue
         seen.add(rel)
         ordered.append(rel)
-    ordered = sorted(ordered)[:max_results]
+    project_real = os.path.realpath(project_path)
+    ordered = sorted(
+        ordered, key=lambda rel: _search_mtime_key(project_real, rel)
+    )[:max_results]
     if not ordered:
         return ToolResult(success=True, output="(no matches)")
 
-    project_real = os.path.realpath(project_path)
-    lines: list[str] = []
+    name_only_count = sum(1 for rel in name_matches if not grep_hits.get(rel))
+    total_matched = len(grep_hits) + name_only_count
+    n_matches = sum(len(v) for v in grep_hits.values()) + name_only_count
+    unlisted = total_matched - len(ordered)
+    content_hits = sum(len(v) for v in grep_hits.values())
+    if count_only or content_hits <= 0 or content_hits > 3:
+        auto_radius = 0
+    elif content_hits == 1:
+        auto_radius = SEARCH_CONTEXT_ONE
+    else:
+        auto_radius = SEARCH_CONTEXT_FEW
+
+    lines: list[str] = [_search_summary(n_matches, total_matched, unlisted)]
     for rel in ordered:
         full_path = os.path.join(project_real, *rel.split("/"))
         try:
@@ -1095,16 +1508,23 @@ def _search_files(
                 size_str = f"{size // 1024}KB"
             else:
                 size_str = f"{size // (1024 * 1024)}MB"
-        lines.append(f"{rel} ({size_str})")
-        hits = grep_hits.get(rel)
+        hits = grep_hits.get(rel) or []
+        total = len(hits)
+        shown = total if count_only else len(hits[:preview_lines])
+        name_only = (not hits) and (rel in name_matches)
+        lines.append(_match_count_header(rel, size_str, shown, total, name_only=name_only))
+        if count_only:
+            continue
         if hits:
-            for lineno, content in hits[:preview_lines]:
-                lines.append(f"  Line {lineno}: {content.strip()}")
+            lines.extend(
+                _emit_search_hits(rel, full_path, hits[:preview_lines], auto_radius)
+            )
         else:
             lines.append("  [name match only — use read_file for content]")
 
-    lines.append("")
-    lines.append("[Open with read_file line=N only to edit.]")
+    if not count_only:
+        lines.append("")
+        lines.append("[Open with read_file line=N only to edit.]")
     output = "\n".join(lines)
     if len(output) > MAX_EXEC_OUTPUT:
         output = output[:MAX_EXEC_OUTPUT] + "\n[... truncated ...]"
@@ -1314,24 +1734,27 @@ def _register_tools() -> None:
         ToolDefinition(
             name="read_file",
             description=(
-                "Read a file. line is a 1-based start line and returns at most "
-                "200 lines. offset and limit are bytes."
+                "Read a file as lines. line is the 1-based start (default 1). "
+                "max_lines is the count (1-200, default 200) and overrides limit. "
+                "limit is the line count when max_lines is omitted. "
+                "Each line is N|text. The number and the bar are not part of the file. "
+                "A cut window says continue with line=N."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Relative path"},
-                    "offset": {"type": "integer", "description": "Byte offset, not a line number"},
-                    "limit": {"type": "integer", "description": "Max bytes"},
-                    "line": {"type": "integer", "description": "1-based start line (search_files Line N); ignores offset"},
+                    "line": {"type": "integer", "description": "1-based start line (default 1)"},
+                    "max_lines": {"type": "integer", "description": "Line count, 1-200 (default 200). Overrides limit"},
+                    "limit": {"type": "integer", "description": "Line count when max_lines is omitted, 1-200"},
                 },
                 "required": ["path"],
             },
             # NOTE: descriptions below stay one line each; do not expand.
             requires_approval=False,
         ),
-        lambda path, project_path, offset=None, limit=None, line=None, **kwargs:  # type: ignore
-            _read_file(path, project_path, offset, limit, line),
+        lambda path, project_path, limit=None, line=None, max_lines=None, **kwargs:  # type: ignore
+            _read_file(path, project_path, None, limit, line, max_lines),
     )
 
     # write_file
@@ -1362,23 +1785,27 @@ def _register_tools() -> None:
         ToolDefinition(
             name="edit_file",
             description=(
-                "Replace old_text with new_text; literal match, old_text must be "
-                "unique. read_file returns a window — use write_file for a full "
+                "Replace old_text with new_text. Exact and unique unless "
+                "replace_all is true. A miss shows nearby lines. If the lines "
+                "match once with different indentation, that one match is applied. "
+                "The result includes numbered lines around the change. "
+                "read_file returns a window — use write_file for a full "
                 "rewrite you already have in hand."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Relative path"},
-                    "old_text": {"type": "string", "description": "Exact text to replace; must be unique"},
+                    "old_text": {"type": "string", "description": "Exact text to replace; must be unique unless replace_all"},
                     "new_text": {"type": "string", "description": "Replacement text"},
+                    "replace_all": {"type": "boolean", "description": "Replace every exact match. Default false."},
                 },
                 "required": ["path", "old_text", "new_text"],
             },
             requires_approval=False,
         ),
-        lambda path, old_text, new_text, project_path, **kwargs:  # type: ignore
-            _edit_file(path, old_text, new_text, project_path, session_key=kwargs.get("session_key", ""), approval_callback=kwargs.get("approval_callback")),
+        lambda path, old_text, new_text, project_path, replace_all=False, **kwargs:  # type: ignore
+            _edit_file(path, old_text, new_text, project_path, session_key=kwargs.get("session_key", ""), approval_callback=kwargs.get("approval_callback"), replace_all=replace_all),
     )
 
     # exec_command
@@ -1432,8 +1859,12 @@ def _register_tools() -> None:
         ToolDefinition(
             name="search_files",
             description=(
-                "Find files by name or content. One group per file: path, "
-                "size, and up to 40 matching lines. Times out after 10s."
+                "Find files by name or content. Skips ignored and hidden files. "
+                "One to three hits include surrounding lines. "
+                "First line is the true total, "
+                "including files not listed. Per file: path, size, match count, "
+                "up to 40 matching lines. count_only: counts only, no lines. "
+                "Times out after 10s."
             ),
             parameters={
                 "type": "object",
@@ -1441,13 +1872,14 @@ def _register_tools() -> None:
                     "pattern": {"type": "string", "description": "Text or regex"},
                     "path": {"type": "string", "description": "File or directory to search (default '.')"},
                     "file_type": {"type": "string", "description": "Extension filter, e.g. 'py'"},
+                    "count_only": {"type": "boolean", "description": "Counts only, no lines. Header shows true total."},
                 },
                 "required": ["pattern"],
             },
             requires_approval=False,
         ),
-        lambda pattern, project_path, path=None, file_type=None, **kwargs:  # type: ignore
-            _search_files(pattern, project_path, path, file_type),
+        lambda pattern, project_path, path=None, file_type=None, count_only=False, **kwargs:  # type: ignore
+            _search_files(pattern, project_path, path, file_type, count_only=count_only),
     )
 
     # file_search

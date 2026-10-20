@@ -33,9 +33,15 @@ def _read(rt, sk, conv, call_id: str, args: dict, iteration: int = 1):
     ) is False
 
 
-def _notice(path: str, offset, limit) -> str:
+def _read_text(name: str, text: str) -> str:
+    lines = text.splitlines()
+    body = "\n".join(f"{i}|{line}" for i, line in enumerate(lines, 1))
+    return f"[line 1 of {name}]\n{body}"
+
+
+def _notice(path: str, max_lines=None, line: int = 1) -> str:
     return (
-        f"[unchanged \u2014 read_file {path} offset={offset or 0} limit={limit}; "
+        f"[unchanged \u2014 read_file {path} line={line} max_lines={max_lines}; "
         "the body is already in this conversation. "
         "Do not read it again and do not print it with a shell command.]"
     )
@@ -92,7 +98,7 @@ def test_masked_reread_returns_full_body(tmp_path):
     _plant_masked(conv, _tool_indexes(conv)[0])
     assert _tool_bodies(conv)[0].startswith("[masked \u2014")
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[1] == "hello world\n"
+    assert _tool_bodies(conv)[1] == _read_text("a.txt", "hello world\n")
     _assert_fingerprint(rt, sk, "a.txt", None, None, str(target))
 
 
@@ -105,7 +111,7 @@ def test_compacted_reread_returns_full_body(tmp_path):
         "[compacted \u2014 read_file output, 12 chars removed]"
     )
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[1] == "hello world\n"
+    assert _tool_bodies(conv)[1] == _read_text("a.txt", "hello world\n")
 
 
 def test_summarize_stub_returns_full_body_not_tail(tmp_path):
@@ -122,10 +128,10 @@ def test_summarize_stub_returns_full_body_not_tail(tmp_path):
     )
     stub = conv.messages[idx].content
     assert stub.startswith("[masked \u2014")
-    assert stub.split("\n", 1)[1] == body[:200]
-    assert stub != body
+    assert stub.split("\n", 1)[1] == original_body[:200]
+    assert stub != original_body
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[1] == body
+    assert _tool_bodies(conv)[1] == original_body
 
 
 def test_live_body_second_read_is_unchanged_notice(tmp_path):
@@ -134,8 +140,8 @@ def test_live_body_second_read_is_unchanged_notice(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[0] == "hello world\n"
-    assert _tool_bodies(conv)[1] == _notice("a.txt", None, None)
+    assert _tool_bodies(conv)[0] == _read_text("a.txt", "hello world\n")
+    assert _tool_bodies(conv)[1] == _notice("a.txt")
 
 
 def test_other_window_does_not_decide(tmp_path):
@@ -146,14 +152,14 @@ def test_other_window_does_not_decide(tmp_path):
     _read(rt, sk, conv, "c2", {"path": "a.txt", "limit": 5}, 2)
     _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
-    assert _tool_bodies(conv)[2] == "hello world\n"
+    assert _tool_bodies(conv)[2] == _read_text("a.txt", "hello world\n")
 
     rt2, sk2, conv2 = _runtime(str(tmp_path))
     _read(rt2, sk2, conv2, "c1", {"path": "a.txt"})
     _read(rt2, sk2, conv2, "c2", {"path": "a.txt", "offset": 6}, 2)
     _plant_masked(conv2, _tool_indexes(conv2)[1])
     _read(rt2, sk2, conv2, "c3", {"path": "a.txt"}, 3)
-    assert _tool_bodies(conv2)[2] == _notice("a.txt", None, None)
+    assert _tool_bodies(conv2)[2] == _notice("a.txt")
 
 
 def test_notice_does_not_shadow_masked_body(tmp_path):
@@ -162,10 +168,10 @@ def test_notice_does_not_shadow_masked_body(tmp_path):
     rt, sk, conv = _runtime(str(tmp_path))
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[1] == _notice("a.txt", None, None)
+    assert _tool_bodies(conv)[1] == _notice("a.txt")
     _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
-    assert _tool_bodies(conv)[2] == "hello world\n"
+    assert _tool_bodies(conv)[2] == _read_text("a.txt", "hello world\n")
 
 
 def test_recovery_then_unchanged_then_remask_keeps_fingerprint(tmp_path):
@@ -175,13 +181,13 @@ def test_recovery_then_unchanged_then_remask_keeps_fingerprint(tmp_path):
     _read(rt, sk, conv, "c1", {"path": "a.txt"})
     _plant_masked(conv, _tool_indexes(conv)[0])
     _read(rt, sk, conv, "c2", {"path": "a.txt"}, 2)
-    assert _tool_bodies(conv)[1] == "hello world\n"
+    assert _tool_bodies(conv)[1] == _read_text("a.txt", "hello world\n")
     _assert_fingerprint(rt, sk, "a.txt", None, None, str(target))
     _read(rt, sk, conv, "c3", {"path": "a.txt"}, 3)
-    assert _tool_bodies(conv)[2] == _notice("a.txt", None, None)
+    assert _tool_bodies(conv)[2] == _notice("a.txt")
     _plant_masked(conv, _tool_indexes(conv)[1])
     _read(rt, sk, conv, "c4", {"path": "a.txt"}, 4)
-    assert _tool_bodies(conv)[3] == "hello world\n"
+    assert _tool_bodies(conv)[3] == _read_text("a.txt", "hello world\n")
     _assert_fingerprint(rt, sk, "a.txt", None, None, str(target))
 
 
@@ -266,4 +272,4 @@ def test_newer_write_does_not_replace_a_live_read_body(tmp_path):
     conv.add_assistant_message("list", [tc])
     conv.add_tool_result("w1", "a.txt\n")
     text = rt._dedup_read_output(sk, conv, {"path": "a.txt"}, "hello world\n")
-    assert text == _notice("a.txt", None, None)
+    assert text == _notice("a.txt")
