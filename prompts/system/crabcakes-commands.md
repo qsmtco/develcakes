@@ -31,19 +31,3 @@ Subcommands: `/work "Title"` (create, status `draft`) · `/work list` · `/work 
 The legacy task-centric commands are still accepted and route to the Work Handler: `/task` → `/work` (create), `/tasks` → `/work list`, `/start` → `/work start`, `/done` → `/work done`, `/blocked` → `/work blocked`, `/cancel` → `/work cancel`, `/assign` → `/work assign`, `/priority` → `/work priority`.
 
 The legacy `/t` alias for `/task` is **gone** (SPEC-TASK-SYSTEM-FULL-REDESIGN §5.1) — use `/work`.
-
-## Feed cards
-
-Post to the project Feed with the `feed_card` tool. Never write a `crabcard`
-block — that format is gone.
-
-- `type` — `diff` when you change a file, `agent_action` for a decision or a
-  finding, `audit_report` for an audit result.
-- `title` — one line, max 200 characters. `body` — the card text, max 100,000.
-- `file` — project-relative path. `additions` / `deletions` — line counts.
-  `task_id` — optional work unit id.
-- The tool returns the new card id. A rejected call returns an error — read it
-  and fix the field; do not retry the same arguments unchanged.
-- Do **not** post for `file_created/modified/deleted` (CrabWatch detects those),
-  `git_commit` (automatic), or `system` (internal). Those types are not accepted.
-- `diff` body: unified diff, `+`/`-` prefixes, context lines unprefixed.
