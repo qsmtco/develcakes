@@ -1,0 +1,15 @@
+diff --git a/ui/handlers/feed_handler.py b/ui/handlers/feed_handler.py
+index 218109da..f484ae0c 100644
+--- a/ui/handlers/feed_handler.py
++++ b/ui/handlers/feed_handler.py
+@@ -628,6 +628,10 @@ class FeedHandler(
+             _logger.warning("update_card: card %s not found", card_id)
+             return
+ 
++        # SPEC-47 R-7 mutation: deliberate delay to blow the perf time bound
++        import time
++        time.sleep(0.25)
++
+         # Update in-memory data
+         with self._lock:
+             self._cards[card_id] = card_data

@@ -1,0 +1,47 @@
+# SPEC-47 acceptance gate — CI wiring (§2.8).
+#
+# Runs the gate's rows + smokes on every push to main and every PR.
+#
+# FOLLOW-UP (deliberate, recorded here per SPEC-47 §2.8): the `suite`
+# subcommand is NOT wired into CI on first landing. `suite` diffs the full
+# pytest fail-set against tests/known_failures.txt (shrink-only); wiring it in
+# waits until the baseline is small enough to be meaningful. Track the
+# baseline's size and wire `suite` in when it is.
+
+name: acceptance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Fail loudly on unplanned subprocess writes, per the gate's isolation rule.
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (GTK4 — cannot come from pip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-1 libgtk-4-dev \
+            libgirepository1.0-dev gir1.2-gtk-4.0 \
+            xvfb
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Acceptance rows (mutated-then-clean evidence per row)
+        run: python scripts/acceptance.py rows
+
+      - name: Acceptance smokes (committed smoke nodes)
+        run: python scripts/acceptance.py smokes

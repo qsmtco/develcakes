@@ -63,3 +63,6 @@ scratch/
 jev_junit*.xml
 icons/*.b64.txt
 tests/test_dump_logo_b64.py
+
+# Acceptance gate (SPEC-47) — runtime output, never committed
+.acceptance/

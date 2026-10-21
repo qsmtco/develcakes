@@ -1,0 +1,67 @@
+# docs/acceptance/rows.yaml
+# SPEC-47 §2.1 — the acceptance row registry.
+#
+# Each row binds ONE behavioural claim to two runnable things:
+#   node      — the pytest node id or committed script that proves the claim.
+#   mutation  — a diff (tests/mutations/<id>.diff) that breaks the node; the
+#               MUTATED run MUST fail (a pass = vacuous = the gate refuses).
+#
+# Run semantics (SPEC-47 §2.3): every row runs mutated-then-clean inside a
+# throwaway temp copy (`git archive HEAD` + working-tree overlay). Skip_ok
+# rows tolerate a skipped clean/pytest node.
+- id: R-1
+  claim: "/clear durably clears: next load → None; a refused clear leaves store rows AND the in-memory conversation intact."
+  source: docs/specs/SPEC-19-LIVE-CHAT-SURFACE.md §6 (clear-conversation behaviour)
+  node: tests/test_live_bridge.py::test_clear_conversation_deletes_json_only
+  mutation: tests/mutations/R-1.diff
+  runner: xvfb
+  added: 2026-10-09
+
+- id: R-2
+  claim: "Injected rows follow the bottom; reading position holds when scrolled up."
+  source: docs/specs/SPEC-19-LIVE-CHAT-SURFACE.md §6 G1b/F10 (2026-10-08 re-derivation)
+  node: >-
+    tests/test_live_guard.py::TestInjectionScroll::test_injected_rows_follow_at_bottom
+  mutation: tests/mutations/R-2.diff
+  runner: xvfb
+  added: 2026-10-09
+
+- id: R-3
+  claim: "MainWindow constructs; the AgentRuntimeHandler wiring is ordered after construction (launch-crash class, 2026-10-08)."
+  source: docs/proposals/PROPOSAL-acceptance-gate.md §2.2 (window smoke)
+  node: scripts/window-smoke.py
+  mutation: tests/mutations/R-3.diff
+  runner: xvfb
+  added: 2026-10-09
+
+- id: R-4
+  claim: "(registers with the stale-turn fix) a superseded/cancelled turn executes nothing further."
+  source: SPEC-47 (placeholder — the node lands with the stale-turn fix)
+  node: null
+  mutation: null
+  skip_ok: true
+  added: 2026-10-09
+
+- id: R-5
+  claim: "HEAD is self-contained — the app imports from a clean archive (F-1 class)."
+  source: docs/proposals/PROPOSAL-acceptance-gate.md §2.2 (clean-checkout smoke)
+  node: scripts/clean-checkout-smoke.py
+  mutation: tests/mutations/R-5.diff
+  runner: plain
+  added: 2026-10-09
+
+- id: R-6
+  claim: "No gate-run writes reach live state — every subprocess config resolution is isolated."
+  source: docs/proposals/PROPOSAL-acceptance-gate.md §2.2 (live-state tripwire)
+  node: tests/test_acceptance_tripwire.py::test_runner_isolates_xdg_config_home
+  mutation: tests/mutations/R-6.diff
+  runner: plain
+  added: 2026-10-09
+
+- id: R-7
+  claim: "update_card meets the feed-update latency bound (perf row)."
+  source: SPEC-47 (perf; the node is the Coder's test_perf_feed.py)
+  node: tests/test_perf_feed.py
+  mutation: tests/mutations/R-7.diff
+  runner: plain
+  added: 2026-10-09

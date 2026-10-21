@@ -1,0 +1,24 @@
+# SPEC-47 §2.5 — the shrink-only baseline.
+# One pytest node id per line. '#' starts a comment; blank lines ignored.
+# Generated 2026-10-21 from one full suite run (9 failed, 3355 passed,
+# 2162 skipped, 700s) at base 9b70695; every entry reproduced in a pristine
+# clone of that commit — none are artifacts of SPEC-47.
+#
+# REVIEW NOTES (per spec: a record of known-broken things, not a dump):
+# - test_tools budget (3): supervisor/coder/debugger tool-schema JSON grew
+#   past the 4000-char budget (supervisor at 7786). Real, tracked debt from
+#   tool additions; the budget needs a deliberate revisit, not a quick bump.
+# - SPEC-40 wire-aware guard (3): hot-window replay offset/line-mode
+#   expectations drifted after the 2026-10-21 guard changes.
+# - enforcement resolved-binary gate (2): shim/dot-in-path refusals regressed.
+# - awareness index (1): index-vs-facts separation invariant.
+# A `suite` run may only shrink this set; any NEW failure refuses.
+tests/test_awareness_memory_index.py::test_index_is_separate_from_facts
+tests/test_enforcement.py::TestV1ResolvedBinaryGate::test_dot_in_path_refused
+tests/test_enforcement.py::TestV1ResolvedBinaryGate::test_shim_refused_marker_untouched
+tests/test_spec40_wire_aware_guard.py::test_compiled_message_replays_the_hot_section
+tests/test_spec40_wire_aware_guard.py::test_hot_window_line_mode_replays_as_line_not_offset
+tests/test_spec40_wire_aware_guard.py::test_hot_window_snapshot_without_line_still_replays_offset
+tests/test_tools.py::TestToolSchemaSizeBudget::test_default_agent_tool_payload_under_budget[coder]
+tests/test_tools.py::TestToolSchemaSizeBudget::test_default_agent_tool_payload_under_budget[debugger]
+tests/test_tools.py::TestToolSchemaSizeBudget::test_default_agent_tool_payload_under_budget[supervisor]

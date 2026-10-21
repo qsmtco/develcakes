@@ -1,0 +1,9 @@
+--- a/scripts/acceptance.py
++++ b/scripts/acceptance.py
+@@ -54,6 +54,5 @@
+ def _isolated_env(xdg_home: str) -> dict:
+     """Environment for every app subprocess: config resolution is forced into
+     a throwaway temp dir so gate runs can never write live state."""
+     env = dict(os.environ)
+-    env["XDG_CONFIG_HOME"] = xdg_home
+     return env

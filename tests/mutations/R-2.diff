@@ -1,0 +1,13 @@
+--- a/ui/views/chat_surface.py
++++ b/ui/views/chat_surface.py
+@@ -190,10 +190,9 @@
+         "  var wasBottom = atBottom();"
+         "  var tpl = document.createElement('template');"
+         f"  tpl.innerHTML = {json.dumps(row_html)};"
+         "  host.appendChild(tpl.content);"
+         "  if (!wasBottom) { return 'held'; }"
+-        "  el.scrollTop = el.scrollHeight;"
+         + _settle_tail_js()
+         + "  return 'followed';"
+         "})();"
+     )

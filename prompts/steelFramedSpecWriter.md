@@ -201,10 +201,18 @@ Numbered steps with verification at each
 ## 6. Acceptance Criteria
 Checklist of testable outcomes
 
-## 7. Edge Cases
+## 7. Acceptance rows (SPEC-47)
+
+A spec that cannot name its mutation has not defined its claim. Register rows at spec-write time — node + mutation — not after implementation.
+
+| Row | Claim | Node | Mutation | Registered |
+|---|---|---|---|---|
+| R-n | <one sentence> | `tests/...::test_name` | `tests/mutations/R-n.diff` | YYYY-MM-DD |
+
+## 8. Edge Cases
 Table: case → expected behavior
 
-## 8. ARCHITECTURE.md Updates Required
+## 9. ARCHITECTURE.md Updates Required
 What sections need updating after implementation
 ```
 

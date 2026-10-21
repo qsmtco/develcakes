@@ -1,0 +1,31 @@
+diff --git a/ui/window.py b/ui/window.py
+index be0075f5..5ce9fdf2 100644
+--- a/ui/window.py
++++ b/ui/window.py
+@@ -220,12 +220,6 @@ class MainWindow(Gtk.ApplicationWindow):
+ 
+         # AgentRuntime handler — owns AgentRuntime instances for special agents (Phase 1.4)
+         from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+-        self._agent_runtime_handler = AgentRuntimeHandler(
+-            main_content=self._main_content,
+-            chat_render_handler=self._chat_render_handler,
+-            GLib_module=GLib,
+-            review_handler=None,  # ReviewHandler created later in _build; Phase 1.5 will wire via setter
+-        )
+         # Register built-in special agents from the registry
+         # SPEC-12 (R3): the launch-time auto-open is GONE — agent tabs are not
+         # created on boot; the Chat button opens the ACTIVE project's group
+@@ -241,6 +235,13 @@ class MainWindow(Gtk.ApplicationWindow):
+         self._left_panel.set_special_agents(self._agent_runtime_handler)
+         self._main_content.set_agent_runtime_handler(self._agent_runtime_handler)
+ 
++        self._agent_runtime_handler = AgentRuntimeHandler(
++            main_content=self._main_content,
++            chat_render_handler=self._chat_render_handler,
++            GLib_module=GLib,
++            review_handler=None,  # ReviewHandler created later in _build; Phase 1.5 will wire via setter
++        )
++
+         # SPEC-19 SP4 Part C: wire the live-bridge approver/resolver. MUST run
+         # AFTER the ARH is constructed above — before this point in _build the
+         # attribute is None (wiring it earlier crashed every launch with

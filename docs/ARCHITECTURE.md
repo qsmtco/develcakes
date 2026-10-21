@@ -199,7 +199,8 @@ develcakes/
 │   └── troubleshooting.md    # Common problems and solutions
 │
 ├── scripts/                  # Standalone utility scripts
-│   └── rebuild_kb_index.py    # offline indexer — builds knowledge/.index/ from knowledge/*.md
+│   ├── rebuild_kb_index.py    # offline indexer — builds knowledge/.index/ from knowledge/*.md
+│   └── acceptance.py          # SPEC-47 acceptance gate — rows + mutations, mutated-then-clean, temp copy only
 │
 ├── prompts/                  # System prompt templates and default agent definitions
 │   ├── system/                # Agent system prompt templates (loaded by utils/prompt_loader.py)
@@ -3636,6 +3637,12 @@ class FeedTab(Gtk.Box):
 **Thread safety:** All GTK operations via `GLib.idle_add()`. Spell check runs synchronously on the main thread (Enchant is fast).
 
 ---
+
+### 3.37 `scripts/acceptance.py` — Acceptance Gate (SPEC-47)
+
+**Responsibility:** Runs acceptance *rows* — claims pinned by a node (pytest node id or committed smoke script) and a mutation (unified diff in `tests/mutations/`). Each row runs **mutated-then-clean**: the mutation is applied to a throwaway `git archive` + overlay temp copy (never the live tree), the node must **fail** there; the same node must **pass** clean. A mutated run that passes is *vacuous* — the gate refuses the row. Every subprocess gets an isolated `XDG_CONFIG_HOME` so gate runs can never write live state. Rows live in `docs/acceptance/rows.yaml`; subcommands `rows|smokes|suite|all` emit per-row evidence and `.acceptance/last-run.json`.
+
+**Rationale:** Verifying a test by making it fail is stronger evidence than making it pass. The registry makes claims first-class: what each row proves is written down, not implied by a green CI dot.
 
 ## 4. Data Flow
 
