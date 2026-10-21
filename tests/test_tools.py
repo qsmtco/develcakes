@@ -1241,6 +1241,424 @@ class TestSearchFiles:
             )
             assert "x" * 600 not in r.output
 
+    # ── SEARCH-CONTEXT-FIX-PHASE-1 tests ────────────────────────────
+    # Each fails on the pre-fix code (commit c0ffc179).
+
+    def test_search_wide_lines_keep_the_match_line(self):
+        # Pins Bug A: a single hit in a wide file. Pre-fix, the 101-line
+        # context block (~50KB) blows CONV_OUTPUT_CAP and bound_tool_output
+        # drops the middle — the match line at line 150 is deleted.
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [("w" * 492) + f" {i:03d}\n" for i in range(1, 301)]
+            lines[149] = "THE_HIT " + ("w" * 490) + "\n"
+            with open(os.path.join(proj, "wide.py"), "w") as f:
+                f.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "THE_HIT"}, proj)
+            assert r.success is True, r.error
+            assert "Line 150: " in r.output
+            assert "THE_HIT" in r.output
+            assert len(r.output) <= 16 * 1024
+
+    def test_search_wide_lines_context_is_bounded(self):
+        # Pins Fix A's budget: the context block must shrink so it fits
+        # SEARCH_FILE_CHARS-scale space. Pre-fix the block is ~50KB, output
+        # exceeds 16KB, and bound_tool_output fires ("chars omitted").
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [("w" * 492) + f" {i:03d}\n" for i in range(1, 301)]
+            lines[149] = "THE_HIT " + ("w" * 490) + "\n"
+            with open(os.path.join(proj, "wide.py"), "w") as f:
+                f.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "THE_HIT"}, proj)
+            assert r.success is True, r.error
+            assert "\n  wide.py-" in r.output  # context lines are emitted
+            assert "Line 150: " in r.output
+            assert "chars omitted" not in r.output  # bound_tool_output never fired
+            assert len(r.output) <= 8000  # far below the 16KB conversation cap
+
+    def test_search_context_radius_is_per_file(self):
+        # Pins Bug B: pre-fix the search-wide content_hits sum (4 hits > 3)
+        # zeroes the radius for EVERY file, so no file gets context lines.
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(4):
+                path = os.path.join(proj, f"f{i}.py")
+                with open(path, "w") as f:
+                    f.write("".join(f"line {n}\n" for n in range(1, 41)))
+                    f.write("NEEDLE\n")
+            r = execute_tool("search_files", {"pattern": "NEEDLE"}, proj)
+            assert r.success is True, r.error
+            for i in range(4):
+                assert f"\n  f{i}.py-" in r.output
+
+    def test_search_match_lines_survive_many_hits_in_a_wide_file(self):
+        # Pins Fix A's "match lines are never dropped" guarantee for a wide
+        # file with several hits. Pre-fix the 15-radius context block around
+        # the three ~500-char hits is ~47KB — far over CONV_OUTPUT_CAP — so
+        # bound_tool_output fires and the middle match lines are deleted.
+        # Post-fix the block shrinks (radius floor 0) until it fits
+        # SEARCH_FILE_CHARS, so every match line survives.
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [("w" * 486) + f" {i:03d}\n" for i in range(1, 301)]
+            for n, tag in ((100, "HIT_A"), (150, "HIT_B"), (200, "HIT_C")):
+                lines[n - 1] = tag + " " + ("w" * 482) + "\n"
+            with open(os.path.join(proj, "wide.py"), "w") as f:
+                f.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "HIT_[ABC]"}, proj)
+            assert r.success is True, r.error
+            assert "Line 100: HIT_A" in r.output
+            assert "Line 150: HIT_B" in r.output
+            assert "Line 200: HIT_C" in r.output
+            assert len(r.output) <= 16 * 1024
+
+    # ── SEARCH-CONTEXT-FIX-PHASE-2 tests ────────────────────────────
+
+    def test_search_many_files_one_hit_each_all_match_lines_survive(self):
+        # Pins BUG #1 (a regression Phase 1 introduced): 20 files x 1 hit
+        # must keep all 20 match lines. Per-file radii with no aggregate
+        # bound made the joined output exceed CONV_OUTPUT_CAP, so
+        # bound_tool_output cut the middle — where the match lines are (only
+        # 3 of 20 survived). The aggregate budget must sacrifice context,
+        # never match lines.
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(20):
+                lines = [f"line {n:03d}\n" for n in range(1, 201)]
+                lines[149] = f"HIT_{i:02d}\n"
+                with open(os.path.join(proj, f"f{i:02d}.py"), "w") as fh:
+                    fh.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert r.success is True, r.error
+            assert "chars omitted" not in r.output  # bound_tool_output never fired
+            assert len(r.output) <= 16 * 1024
+            assert r.output.count("  Line ") == 20
+            for i in range(20):
+                assert f"Line 150: HIT_{i:02d}" in r.output
+
+    def test_search_many_wide_hits_count_is_exact(self):
+        # Pins BUG #4: mutant M4 truncates match lines to the budget and
+        # mutant M11 drops them entirely when the plain block alone exceeds
+        # it. 40 hits with ~500-char match text blow the 4000-char file
+        # budget, so a truncated or dropped match line must be caught.
+        # Two layers are asserted (BUG #6): the direct _search_files layer
+        # pins the per-file emission contract, and the execute_tool layer
+        # observes the shipped path, where the aggregate bound (Fix #1)
+        # must keep every match line and never let bound_tool_output fire.
+        from agent.tools import _search_files
+
+        with tempfile.TemporaryDirectory() as proj:
+            # Direct layer — per-file guarantee. Every match line keeps its
+            # full 480-char text although the plain block alone (~20 KB)
+            # blows the 4000-char file budget. A mutant that truncates or
+            # drops match lines fails here.
+            body = "".join(f"HIT_{i:02d} " + ("x" * 480) + "\n" for i in range(40))
+            with open(os.path.join(proj, "many.py"), "w") as fh:
+                fh.write(body)
+            r = _search_files("HIT_", proj, path=".")
+            assert r.success is True, r.error
+            # The summary and header both imply all 40 match lines were found.
+            assert "[40 matches in 1 files]" in r.output
+            assert "40 matches)" in r.output
+            assert r.output.count("  Line ") == 40
+            # Truncating a match line to fit the budget loses its 480-char
+            # tail; the full text must survive.
+            assert r.output.count("x" * 480) == 40
+
+            # Tool-visible layer — shipped path, aggregate across six files.
+            # Each file has one hit among wide neighbours, so per-file context
+            # blocks are large. Phase 1 had no aggregate bound on the joined
+            # output: the six blocks summed past CONV_OUTPUT_CAP and
+            # bound_tool_output deleted the middle — the match lines. Fix #1
+            # bounds the joined output, so all six match lines survive and
+            # the omission marker stays absent.
+            for k in range(6):
+                wlines = [("w" * 492) + f" {i:03d}\n" for i in range(1, 301)]
+                wlines[149] = f"HIT_WIDE_{k}\n"
+                with open(os.path.join(proj, f"wide{k}.py"), "w") as fh:
+                    fh.writelines(wlines)
+            r2 = execute_tool("search_files", {"pattern": "HIT_WIDE"}, proj)
+            assert r2.success is True, r2.error
+            assert "chars omitted" not in r2.output
+            assert len(r2.output) <= 16 * 1024
+            assert r2.output.count("  Line ") == 6
+            for k in range(6):
+                assert f"Line 150: HIT_WIDE_{k}" in r2.output
+
+    def test_search_wide_hit_does_not_starve_narrow_hit(self):
+        # Pins BUG #3: one wide-neighbour hit must not collapse the radius of
+        # a narrow-neighbour hit in the same file. Phase 1 shrunk one shared
+        # radius for all merged windows, so the wide window's shrink dropped
+        # the narrow hit's neighbours (lines 1-9 vanished). Per-window radii
+        # keep the narrow window whole.
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [f"line {n:03d}\n" for n in range(1, 231)]
+            for n in range(180, 221):
+                lines[n - 1] = ("w" * 490) + f" {n:03d}\n"
+            lines[9] = "NARROW_HIT\n"
+            lines[199] = "WIDE_HIT " + ("w" * 485) + "\n"
+            with open(os.path.join(proj, "mix.py"), "w") as fh:
+                fh.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "HIT"}, proj)
+            assert r.success is True, r.error
+            assert "Line 10: NARROW_HIT" in r.output
+            assert "Line 200: WIDE_HIT" in r.output
+            # The narrow hit keeps its full radius-15 window: both edges of
+            # [1, 25] must appear. Phase 1 shrank it to radius 2, losing
+            # line 1 and line 25.
+            assert "  mix.py-1:line 001" in r.output
+            assert "  mix.py-25:line 025" in r.output
+
+    def test_search_context_slice_called_once_per_window(self, monkeypatch):
+        # Pins BUG #2: Phase 1 re-read the file at every shrink step — up to
+        # 48 _context_slice calls for a single 1-hit file with wide lines.
+        # The file must be read exactly once per merged window; shrinking then
+        # trims the already-read slice with no further opens or seeks.
+        # Wide (~496-char) lines make the radius-50 block (101 lines, ~50 KB)
+        # exceed the 4000-char budget so the shrink loop really iterates — on
+        # the Phase-1 tree each iteration re-opened the file (48 calls).
+        from agent.tools import _context_slice, _emit_search_hits
+
+        calls = []
+        real = _context_slice
+
+        def spy(path, start, end):
+            calls.append((path, start, end))
+            return real(path, start, end)
+
+        monkeypatch.setattr("agent.tools._context_slice", spy)
+        with tempfile.TemporaryDirectory() as proj:
+            lines = [("w" * 492) + f" {i:03d}\n" for i in range(1, 301)]
+            lines[149] = "UNIQUE_HIT\n"
+            full = os.path.join(proj, "big.py")
+            with open(full, "w") as fh:
+                fh.writelines(lines)
+            r = _emit_search_hits("big.py", full, [(150, "UNIQUE_HIT")], radius=50)
+            assert len(calls) == 1
+            # The single read must cover the whole window and feed every
+            # shrink step's render.
+            assert r.count("  Line 150: UNIQUE_HIT") == 1
+            assert any(line.startswith("  big.py-") for line in r)
+
+    @pytest.mark.parametrize("segments", [
+        [],
+        ["A" * 100, "B" * 100],
+    ])
+    def test_search_deep_paths_keep_all_match_lines(self, segments):
+        # Pins BUG #1 (HIGH): SEARCH_TOTAL_CHARS bounded only the hit blocks,
+        # so headers, context prefixes and the footer were never charged. Deep
+        # rel prefixes pushed the joined output over CONV_OUTPUT_CAP and
+        # bound_tool_output deleted match lines (19/20 at 2x100). Fix #1
+        # bounds the WHOLE joined output and reserves every header, so all 20
+        # match lines survive with no omission at every path depth that fits
+        # under the cap.
+        with tempfile.TemporaryDirectory() as proj:
+            d = proj
+            for seg in segments:
+                d = os.path.join(d, seg)
+                os.makedirs(d, exist_ok=True)
+            for i in range(20):
+                lines = [f"line {n:03d}\n" for n in range(1, 201)]
+                lines[149] = f"HIT_{i:02d}\n"
+                with open(os.path.join(d, f"f{i:02d}.py"), "w") as fh:
+                    fh.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert r.success is True, r.error
+            assert "chars omitted" not in r.output
+            assert len(r.output) <= 16 * 1024
+            assert r.output.count("  Line ") == 20
+            for i in range(20):
+                assert f"Line 150: HIT_{i:02d}" in r.output
+
+    def test_search_extremely_deep_paths_keep_per_file_guarantee(self):
+        # Phase 3b: at depth 4 (4 x 250-char segments) each rel is 1010
+        # chars, so 20 headers alone (~20.6 KB) exceed CONV_OUTPUT_CAP. The
+        # dynamic listing cap derives from header cost and lists only what
+        # fits in the joined-output budget: 13 files, each with its match
+        # line intact. The per-file guarantee now means every LISTED file
+        # keeps its match line, the direct output itself is bounded under the
+        # conversation cap, and the summary reports the true totals with a
+        # +7 omission marker instead of silently dropping middle content.
+        from agent.tools import _search_files
+
+        with tempfile.TemporaryDirectory() as proj:
+            d = proj
+            for seg in ("A" * 250, "B" * 250, "C" * 250, "D" * 250):
+                d = os.path.join(d, seg)
+                os.makedirs(d, exist_ok=True)
+            for i in range(20):
+                lines = [f"line {n:03d}\n" for n in range(1, 201)]
+                lines[149] = f"HIT_{i:02d}\n"
+                with open(os.path.join(d, f"f{i:02d}.py"), "w") as fh:
+                    fh.writelines(lines)
+            r = _search_files("HIT_", proj, path=".")
+            assert r.success is True, r.error
+            assert "[20 matches in 20 files] (+7 more files not listed)" in r.output
+            assert r.output.count("  Line ") == 13
+            assert len(r.output) <= 16 * 1024
+            assert "chars omitted" not in r.output
+            # Every listed file's match line survives; no context leaked.
+            for line in r.output.splitlines():
+                if line.startswith("  Line "):
+                    assert "HIT_" in line
+            assert not any(ln.startswith("  A") and "-" in ln for ln in r.output.splitlines())
+            b = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert b.success is True, b.error
+            assert len(b.output) <= 16 * 1024
+            assert "chars omitted" not in b.output
+            assert b.output.count("  Line ") == 13
+
+    # ── SEARCH-CONTEXT-FIX-PHASE-3B tests ────────────────────────────
+    # The listing cap is DERIVED from the measured per-file header cost, not
+    # a static constant: depth 1/2 still list all 20 files, depth 4/8 list
+    # only what fits (13 and 6), each listed file keeps its match line, and
+    # the summary reports the derived omission count.
+
+    @staticmethod
+    def _phase3b_fixture(proj, segments):
+        d = proj
+        for seg in segments:
+            d = os.path.join(d, seg)
+            os.makedirs(d, exist_ok=True)
+        for i in range(20):
+            lines = [f"line {n:03d}\n" for n in range(1, 201)]
+            lines[149] = f"HIT_{i:02d}\n"
+            with open(os.path.join(d, f"f{i:02d}.py"), "w") as fh:
+                fh.writelines(lines)
+
+    def test_search_dynamic_cap_depth1_2_list_all_20(self):
+        # Measured per-file minimum: 56 files fit at depth 1, 30 at depth 2
+        # — so 20/20 always fit and the dynamic cap must never slice shallow
+        # results.
+        for segments in (["A" * 250], ["A" * 250, "B" * 250]):
+            with tempfile.TemporaryDirectory() as proj:
+                self._phase3b_fixture(proj, segments)
+                r = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+                assert r.success is True, r.error
+                assert "[20 matches in 20 files]" in r.output
+                assert "more files not listed" not in r.output
+                assert r.output.count("  Line ") == 20
+                assert len(r.output) <= 16 * 1024
+                assert "chars omitted" not in r.output
+
+    def test_search_dynamic_cap_depth8_lists_6(self):
+        # Depth 8: 6 files fit under the cap; every listed match line
+        # survives, the summary counts the 14 dropped files.
+        with tempfile.TemporaryDirectory() as proj:
+            self._phase3b_fixture(proj, ["A" * 250] * 8)
+            r = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert r.success is True, r.error
+            assert "[20 matches in 20 files] (+14 more files not listed)" in r.output
+            assert r.output.count("  Line ") == 6
+            assert len(r.output) <= 16 * 1024
+            assert "chars omitted" not in r.output
+            for i in range(20):
+                tag = f"HIT_{i:02d}"
+                if tag in r.output:
+                    assert f"Line 150: {tag}" in r.output
+
+    def test_search_dynamic_cap_count_only_respects_cap(self):
+        # count_only headers must obey the same derived cap: 13 headers at
+        # depth 4, true totals in the summary, no content lines.
+        with tempfile.TemporaryDirectory() as proj:
+            self._phase3b_fixture(proj, ["A" * 250] * 4)
+            r = execute_tool(
+                "search_files", {"pattern": "HIT_", "count_only": True}, proj
+            )
+            assert r.success is True, r.error
+            assert "[20 matches in 20 files] (+7 more files not listed)" in r.output
+            assert len(r.output) <= 16 * 1024
+            assert "  Line " not in r.output
+            assert "chars omitted" not in r.output
+            assert r.output.count("\n") == 13  # summary + 13 header lines
+
+    def test_search_dynamic_cap_slice_is_required(self):
+        # Mutation trap (Phase 3b): deleting the dynamic slice reverts to
+        # listing all 20 deep files — the summary loses its +7 omission
+        # marker, the direct output blows past 16 KiB, and bound_tool_output
+        # strips middle match lines. Every assertion below fails on that
+        # mutant, so this test guards the slice itself.
+        from agent.tools import _search_files
+
+        with tempfile.TemporaryDirectory() as proj:
+            self._phase3b_fixture(proj, ["A" * 250] * 4)
+            r = _search_files("HIT_", proj, path=".")
+            assert r.success is True, r.error
+            assert "[20 matches in 20 files] (+7 more files not listed)" in r.output
+            assert r.output.count("  Line ") == 13
+            assert len(r.output) <= 16 * 1024
+            assert "chars omitted" not in r.output
+            b = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert b.success is True, b.error
+            assert "chars omitted" not in b.output
+            assert b.output.count("  Line ") == 13
+
+    def test_file_search_max_results_is_clamped(self):
+        # Pins BUG #3 (MEDIUM): file_search forwards max_results=200
+        # unchecked, so 200 matching files emitted 200 headers + context and
+        # the joined output exceeded CONV_OUTPUT_CAP, dropping 11 of 200
+        # match lines (189/200). MAX_SEARCH_FILES clamps to 20: every listed
+        # file keeps its match line, the omission marker is absent and the
+        # summary still reports the true totals.
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(200):
+                lines = [f"line {n:03d}\n" for n in range(1, 201)]
+                lines[149] = f"HIT_{i:03d}\n"
+                with open(os.path.join(proj, f"f{i:03d}.py"), "w") as fh:
+                    fh.writelines(lines)
+            r = execute_tool("file_search", {"query": "HIT_", "max_results": 200}, proj)
+            assert r.success is True, r.error
+            assert "chars omitted" not in r.output
+            assert len(r.output) <= 16 * 1024
+            assert r.output.count("  Line ") == 20
+            assert "[200 matches in 200 files]" in r.output
+            assert "+180 more files not listed" in r.output
+
+    def test_search_joined_output_budget_is_enforced(self):
+        # Pins Fix #1's joined-output bound. The other deep/many-file tests
+        # use ~14-char lines, so the per-file radius-15 context block is far
+        # smaller than SEARCH_FILE_CHARS and the aggregate budget never
+        # binds: removing "block_budget = min(SEARCH_FILE_CHARS, max(0,
+        # remaining))" left every one of them green. Padding each line to 35
+        # chars makes 20 files x 1 hit x ~31 context lines overflow the
+        # joined output once context is charged, which is the only shape
+        # where the budget actually decides anything. Without the bound the
+        # joined string hits ~16.7KB, bound_tool_output fires, and the middle
+        # match line is lost (19/20).
+        with tempfile.TemporaryDirectory() as proj:
+            for i in range(20):
+                lines = [f"line {n:03d} {'.' * 15}\n" for n in range(1, 201)]
+                lines[149] = f"HIT_{i:02d} {'.' * 15}\n"
+                with open(os.path.join(proj, f"f{i:02d}.py"), "w") as fh:
+                    fh.writelines(lines)
+            r = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert r.success is True, r.error
+            assert "chars omitted" not in r.output
+            assert len(r.output) <= 16 * 1024
+            assert r.output.count("  Line ") == 20
+            for i in range(20):
+                assert f"HIT_{i:02d}" in r.output
+
+    def test_search_match_line_aggregate_limit_is_pinned(self):
+        # Documents the accepted pre-existing limitation (BUG #2, identical at
+        # c0ffc179): 20 files x 3 hits with ~490-char hit text produces
+        # ~30,500 chars; only ~20 of 60 match lines reach the model because
+        # the aggregate exceeds CONV_OUTPUT_CAP and bound_tool_output keeps
+        # head/tail. The per-file guarantee holds — _search_files returns all
+        # 60 match lines untruncated. Aggregate truncation is a known accepted
+        # limitation, NOT a regression introduced by this phase; it is pinned,
+        # not fixed.
+        from agent.tools import _search_files
+
+        with tempfile.TemporaryDirectory() as proj:
+            body = "".join(f"HIT_{i:02d} " + ("x" * 480) + "\n" for i in range(3))
+            for k in range(20):
+                with open(os.path.join(proj, f"f{k:02d}.py"), "w") as fh:
+                    fh.write(body)
+            r = _search_files("HIT_", proj, path=".")
+            assert r.success is True, r.error
+            assert r.output.count("  Line ") == 60
+            assert r.output.count("x" * 480) == 60
+            b = execute_tool("search_files", {"pattern": "HIT_"}, proj)
+            assert b.success is True, b.error
+            assert len(b.output) <= 16 * 1024
+
 
 class TestWebSearch:
     def test_web_search_without_api_key(self):

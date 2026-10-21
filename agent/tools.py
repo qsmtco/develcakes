@@ -282,6 +282,21 @@ LINE_WINDOW = 200
 # 40-line preview and do not open the file.
 SEARCH_CONTEXT_ONE = 50
 SEARCH_CONTEXT_FEW = 15
+# Per-file ceiling for one emitted hit block (matches + context). A single
+# file must never be able to fill the conversation cap, or bound_tool_output
+# drops the middle of the block, which is where the match lines are.
+SEARCH_FILE_CHARS = 4_000
+# Ceiling for the WHOLE emitted search output, in characters of the joined
+# string. Sits below CONV_OUTPUT_CAP so bound_tool_output never fires and
+# never has to drop the middle (it would drop match lines).
+SEARCH_OUTPUT_CHARS = 14_000
+# file_search forwards any max_results; clamp it so a huge match set cannot
+# push the joined output over CONV_OUTPUT_CAP through headers alone.
+MAX_SEARCH_FILES = 20
+# Small reserve charged per planned content-hit file by the dynamic listing
+# cap (Phase 3b): a file with hits always emits at least one match line, so
+# the cap must leave room for it or the last listed file would lose it.
+SEARCH_MATCH_LINE_ALLOWANCE = 40
 MAX_LIST_ENTRIES = 400
 MAX_WRITE_SIZE = 2 * 1024 * 1024  # 2 MB
 MAX_EXEC_OUTPUT = 100 * 1024     # 100 KB
@@ -1309,12 +1324,15 @@ def _emit_search_hits(
     full_path: str,
     previewed: list[tuple[int, str]],
     radius: int,
+    budget: int = SEARCH_FILE_CHARS,
 ) -> list[str]:
     """Match lines, plus neighbors when ``radius`` is positive.
 
     A match line keeps grep's stripped text. A neighbor keeps the file's
     leading whitespace and is marked with a dash so it is not a ``Line`` hit.
-    If the file cannot be read, only the match lines are returned.
+    If the file cannot be read, only the match lines are returned. The
+    context radius shrinks to fit ``budget``; match lines are never dropped
+    to make room for context.
     """
     match_text = {
         lineno: _cut_search_line(content.strip())
@@ -1323,6 +1341,9 @@ def _emit_search_hits(
     plain = [f"  Line {n}: {match_text[n]}" for n in sorted(match_text)]
     if radius <= 0 or not match_text:
         return plain
+    # Read the file once at the largest radius. A smaller radius's windows
+    # are subsets of this one, so shrinking only trims this already-read
+    # slice down to fewer lines — no re-open, no re-seek.
     windows = _merged_line_windows(list(match_text), radius)
     sliced: dict[int, str] = {}
     for start, end in windows:
@@ -1330,14 +1351,31 @@ def _emit_search_hits(
         if got is None:
             return plain
         sliced.update(got)
-    out: list[str] = []
+    # Every merged window gets its own allowance so a wide window cannot
+    # starve a narrow one in the same file. Each window renders at its own
+    # radius and shrinks only that radius until it fits its allowance.
+    allowance = budget // len(windows) if windows else budget
+    parts: list[list[str]] = []
     for start, end in windows:
-        for n in range(start, end + 1):
-            if n in match_text:
-                out.append(f"  Line {n}: {match_text[n]}")
-            elif n in sliced:
-                out.append(f"  {rel}-{n}:{sliced[n]}")
-    return out
+        cluster = [n for n in sorted(match_text) if start <= n <= end]
+        r = radius
+        while r > 0:
+            sub_windows = _merged_line_windows(cluster, r)
+            out: list[str] = []
+            for s, e in sub_windows:
+                for n in range(s, e + 1):
+                    if n in match_text:
+                        out.append(f"  Line {n}: {match_text[n]}")
+                    elif n in sliced:
+                        out.append(f"  {rel}-{n}:{sliced[n]}")
+            if len("\n".join(out)) <= allowance:
+                break
+            r -= 1
+        if r == 0:
+            parts.append([f"  Line {n}: {match_text[n]}" for n in cluster])
+        else:
+            parts.append(out)
+    return [line for part in parts for line in part]
 
 
 def _search_files(
@@ -1356,9 +1394,10 @@ def _search_files(
     as that file; it is not used as the working directory. Each hit is path, size from
     ``stat``, a match count, and at most 40 preview lines taken from the grep hit.
     The count is the file's true number of matching LINES, reported in the header
-    even when the preview cap hides the rest. The file is opened only when
-    the search has one to three content matches, and only the lines around
-    those matches are read. ``count_only=True`` returns the headers without
+    even when the preview cap hides the rest. A file is opened only when
+    it has one to three content matches. Surrounding lines are shown when
+    the search-wide budget allows; match lines are always shown.
+    ``count_only=True`` returns the headers without
     any content lines and without the footer. ``file_search`` calls this function.
     Sandbox, timeout, and ``file_type`` stay on this path.
     """
@@ -1478,9 +1517,14 @@ def _search_files(
         seen.add(rel)
         ordered.append(rel)
     project_real = os.path.realpath(project_path)
+    # file_search forwards any max_results unchecked; cap the EMITTED file
+    # count (MAX_SEARCH_FILES) so a huge match set cannot push the joined
+    # output over CONV_OUTPUT_CAP through headers alone. Names are still
+    # gathered with the caller's max_results so a small explicit cap (e.g. 30
+    # over 26 candidates) is honoured for sorting before the emission cap.
     ordered = sorted(
         ordered, key=lambda rel: _search_mtime_key(project_real, rel)
-    )[:max_results]
+    )[:min(max_results, MAX_SEARCH_FILES)]
     if not ordered:
         return ToolResult(success=True, output="(no matches)")
 
@@ -1488,15 +1532,17 @@ def _search_files(
     total_matched = len(grep_hits) + name_only_count
     n_matches = sum(len(v) for v in grep_hits.values()) + name_only_count
     unlisted = total_matched - len(ordered)
-    content_hits = sum(len(v) for v in grep_hits.values())
-    if count_only or content_hits <= 0 or content_hits > 3:
-        auto_radius = 0
-    elif content_hits == 1:
-        auto_radius = SEARCH_CONTEXT_ONE
-    else:
-        auto_radius = SEARCH_CONTEXT_FEW
 
-    lines: list[str] = [_search_summary(n_matches, total_matched, unlisted)]
+    # Hold back room for the trailing blank line and footer so they never tip
+    # the joined output over SEARCH_OUTPUT_CHARS. The summary is short enough
+    # to sit inside the remaining headroom below CONV_OUTPUT_CAP.
+    tail_reserve = len("\n[Open with read_file line=N only to edit.]") + 1
+    # Precompute every header cost. Deep rel prefixes appear in headers and in
+    # every context-line prefix; reserving only what is spent so far lets the
+    # headers still to come push the joined output over SEARCH_OUTPUT_CHARS
+    # again. The block budget therefore reserves every header up front.
+    header_costs: list[int] = []
+    plan: list[tuple[str, str, str, list[tuple[int, str]], bool]] = []
     for rel in ordered:
         full_path = os.path.join(project_real, *rel.split("/"))
         try:
@@ -1512,13 +1558,69 @@ def _search_files(
         total = len(hits)
         shown = total if count_only else len(hits[:preview_lines])
         name_only = (not hits) and (rel in name_matches)
-        lines.append(_match_count_header(rel, size_str, shown, total, name_only=name_only))
+        header = _match_count_header(rel, size_str, shown, total, name_only=name_only)
+        header_costs.append(len(header) + 1)
+        plan.append((rel, full_path, header, hits, name_only))
+
+    # Dynamic file cap (Phase 3b): derive how many planned files fit inside
+    # the joined-output budget from the header costs already computed, instead
+    # of a fixed number. A static MAX_SEARCH_FILES is safe at depth 8 but
+    # throws away reportable files at depth 1 (56 fit there). Conservative:
+    # charge every file the largest per-file minimum (header + match line for
+    # content-hit entries, header alone for count_only / name-only entries).
+    if plan:
+        if count_only:
+            per_file_min = max(header_costs)
+        else:
+            per_file_min = max(
+                cost + (0 if entry[4] else SEARCH_MATCH_LINE_ALLOWANCE)
+                for cost, entry in zip(header_costs, plan)
+            )
+        if per_file_min > 0:
+            budget = (
+                SEARCH_OUTPUT_CHARS
+                - tail_reserve
+                - len(_search_summary(n_matches, total_matched, unlisted))
+                - 1
+            )
+            affordable = max(1, min(len(plan), budget // per_file_min))
+            if affordable < len(plan):
+                plan = plan[:affordable]
+                header_costs = header_costs[:affordable]
+
+    # RECOMPUTE the omission count and summary AFTER the dynamic slice so the
+    # (+N more files not listed) marker reflects the derived listing count.
+    unlisted = total_matched - len(plan)
+    lines: list[str] = [_search_summary(n_matches, total_matched, unlisted)]
+    spent = 0
+    for idx, (rel, full_path, header, hits, name_only) in enumerate(plan):
+        lines.append(header)
+        spent += len(header) + 1
+        previewed = hits[:preview_lines]
+        if count_only or not previewed or len(previewed) > 3:
+            radius = 0
+        elif len(previewed) == 1:
+            radius = SEARCH_CONTEXT_ONE
+        else:
+            radius = SEARCH_CONTEXT_FEW
         if count_only:
             continue
         if hits:
-            lines.extend(
-                _emit_search_hits(rel, full_path, hits[:preview_lines], auto_radius)
+            # Match lines are non-negotiable and always emit; only context is
+            # sacrificed once the whole joined output approaches
+            # SEARCH_OUTPUT_CHARS. The headers still to come are reserved too,
+            # so deep rel prefixes cannot push the emitted string over
+            # CONV_OUTPUT_CAP and make bound_tool_output drop match lines from
+            # the middle.
+            remaining = (
+                SEARCH_OUTPUT_CHARS - spent - sum(header_costs[idx + 1:]) - tail_reserve
             )
+            block_budget = min(SEARCH_FILE_CHARS, max(0, remaining))
+            if remaining <= 0:
+                radius = 0
+            block = _emit_search_hits(rel, full_path, previewed, radius, block_budget)
+            lines.extend(block)
+            spent += sum(len(s) + 1 for s in block)
         else:
             lines.append("  [name match only — use read_file for content]")
 
@@ -1860,7 +1962,7 @@ def _register_tools() -> None:
             name="search_files",
             description=(
                 "Find files by name or content. Skips ignored and hidden files. "
-                "One to three hits include surrounding lines. "
+                "Files with one to three hits include surrounding lines, budget permitting. "
                 "First line is the true total, "
                 "including files not listed. Per file: path, size, match count, "
                 "up to 40 matching lines. count_only: counts only, no lines. "
