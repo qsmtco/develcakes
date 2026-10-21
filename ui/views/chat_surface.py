@@ -1801,6 +1801,29 @@ class ChatSurface(Gtk.Box):
         # incremental path can only append; from zero we must rebuild).
         self._issue_load(_document(list(self._rows)))
 
+    def load_unsanitized_full_document(self, html: str) -> None:
+        """Load ``html`` as a full document via the RAW load path.
+
+        WebView.load_html EXECUTES inline <script> tags — bypassing the
+        sanitized row / markdown emitter entirely. Used by special tabs
+        (e.g. the one-shot Welcome splash) that ship their own full HTML
+        document. Resets stream/live state like clear(), then issues the
+        raw load through ``_issue_load`` (arms the in-flight load gate and
+        contains a raising ``_load_html``).
+        """
+        if self._destroyed:
+            return
+        self._rows.clear()
+        self._stream_buffers.clear()
+        self._stream_placeholders.clear()
+        self._live_sections.clear()
+        self._next_live_id = 1
+        self._injected_seq = 0
+        self._dom_row_count = 0
+        self._pending_scroll = None
+        self._dirty = False
+        self._issue_load(html)
+
     def destroy(self) -> None:
         """Drop the webview (idempotent — twice-safe).
 

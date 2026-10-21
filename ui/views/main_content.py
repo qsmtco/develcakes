@@ -44,6 +44,19 @@ _STOP_ALL_TIP = (
     "groups, abort pending review checkpoints."
 )
 
+# Built-in fallback shown when assets/splash.html is missing (BUG #3):
+# the Welcome tab must never stay permanently blank on a read error.
+_WELCOME_FALLBACK_HTML = (
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<style>html,body{height:100%;margin:0;background:#121417;color:#f2f2f2;"
+    "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;"
+    "align-items:center;justify-content:center;} .card{text-align:center;}"
+    "h1{font-size:2.2rem;letter-spacing:.5px;margin:0 0 .6rem;}"
+    "p{color:#a8adb8;font-size:1rem;margin:0;}</style></head>"
+    "<body><div class='card'><h1>DevelCakes</h1>"
+    "<p>Welcome — this workspace tab is ready.</p></div></body></html>"
+)
+
 
 class MainContent(Gtk.Box):
     """
@@ -104,6 +117,14 @@ class MainContent(Gtk.Box):
         self._bulk_closing = False
         # Unread tab tracking — session_keys with unseen messages
         self._unread_tabs: set[str] = set()
+        # One-shot Welcome splash tab — created on fresh launch; once closed
+        # it stays closed for the session (never respawns on project switch
+        # or new tabs).
+        self._welcome_closed = False
+        # One-load guard (BUG #5): the raw splash load is issued at most once
+        # per session — a duplicate create_welcome_tab call must not re-issue
+        # the load (which would re-render over the live splash).
+        self._welcome_loaded = False
 
         # Phase A — Context meter widget (Claude Code style).
         # These are instance attributes so set_context_meter() can find them.
@@ -618,6 +639,14 @@ class MainContent(Gtk.Box):
         Create a new chat tab for an agent.
         Returns the page index of the new tab, or existing tab index if already exists.
         """
+        # The Welcome splash is a one-shot special tab — once closed it never
+        # respawns for this session (project switches / new tabs don't revive it).
+        if (
+            isinstance(session_key, str)
+            and session_key.startswith("welcome:")
+            and self._welcome_closed
+        ):
+            return None
         # Check if tab already exists for this session_key
         for page_idx, sk in self._tab_sessions.items():
             if sk == session_key:
@@ -692,6 +721,10 @@ class MainContent(Gtk.Box):
         tab_session.set_valign(Gtk.Align.CENTER)
         tab_session.add_css_class("tab-label-session")
 
+        # Special tabs (e.g. the one-shot Welcome splash) carry no agent-name /
+        # session suffix — the label reads just the tab title.
+        bare_label = isinstance(session_key, str) and session_key.startswith("welcome:")
+
         close_btn = Gtk.Button(label="×")
         close_btn.set_valign(Gtk.Align.CENTER)
         close_btn.set_has_frame(False)
@@ -702,8 +735,9 @@ class MainContent(Gtk.Box):
         tab_label_box.append(tab_dot)
         tab_label_box._dot = tab_dot  # explicit reference avoids GTK4 get_first_child() ordering issue
         tab_label_box.append(tab_name)
-        tab_label_box.append(tab_sep)
-        tab_label_box.append(tab_session)
+        if not bare_label:
+            tab_label_box.append(tab_sep)
+            tab_label_box.append(tab_session)
         tab_label_box.append(close_btn)
 
         # Append the new tab FIRST to get page_idx, then wire handlers
@@ -758,10 +792,58 @@ class MainContent(Gtk.Box):
         if (
             handler is not None
             and hasattr(handler, "render_welcome")
-            and not (isinstance(session_key, str) and session_key.startswith("canvas:"))
+            and not (
+                isinstance(session_key, str)
+                and (
+                    session_key.startswith("canvas:")
+                    or session_key.startswith("welcome:")
+                )
+            )
         ):
             handler.render_welcome(session_key)
         return page_idx
+
+    def create_welcome_tab(self):
+        """Create the one-shot Welcome splash tab (fresh launch only).
+
+        A special ``welcome:`` session key (the ``canvas:`` prefix is the
+        precedent). Content is ``assets/splash.html`` loaded as a RAW full
+        HTML document through the surface's WebView load path (executes
+        inline <script>) — NOT the sanitized welcome/markdown emitter.
+        Returns the tab's page index, or None when already closed this
+        session (it never respawns).
+        """
+        key = "welcome:splash"
+        idx = self.create_chat_tab(key, "Welcome")
+        if idx is None:
+            return None
+        # One-load guard (BUG #5): the raw load was already issued once this
+        # session — a second call must not re-issue it (that would re-render
+        # over the live splash). The tab is still found/activated above.
+        if self._welcome_loaded:
+            return idx
+        surface = None
+        handler = self._chat_render_handler
+        if handler is not None:
+            mount = getattr(handler, "surface_for_mount", None)
+            if callable(mount):
+                surface = mount(key)
+        loader = getattr(surface, "load_unsanitized_full_document", None)
+        if not callable(loader):
+            _logger.warning("welcome: surface cannot raw-load a full document")
+            return idx
+        splash_path = os.path.join(get_project_root(), "assets", "splash.html")
+        try:
+            with open(splash_path, "r", encoding="utf-8") as fh:
+                html = fh.read()
+        except OSError:
+            # BUG #3: never leave the Welcome tab permanently blank — fall
+            # back to a tiny built-in inline document (centered heading + note).
+            _logger.exception("welcome: could not read %s; using built-in fallback", splash_path)
+            html = _WELCOME_FALLBACK_HTML
+        loader(html)
+        self._welcome_loaded = True
+        return idx
 
     def _on_notebook_switch_page(self, notebook, _page, page_num):
         """Handle tab switch: move overlays, scroll to bottom, clear unread."""
@@ -795,6 +877,8 @@ class MainContent(Gtk.Box):
         and return a human-readable channel name like 'Telegram'."""
         if isinstance(session_key, str) and session_key.startswith("canvas:"):
             return "Canvas"
+        if isinstance(session_key, str) and session_key.startswith("welcome:"):
+            return "Welcome"
         parts = session_key.split(":")
         if len(parts) >= 3:
             channel = parts[2].lower()
@@ -893,6 +977,10 @@ class MainContent(Gtk.Box):
     def _close_tab(self, page_idx):
         """Remove a tab by page index and clean up tracking dicts."""
         session_key = self._tab_sessions.get(page_idx)  # SP5a: capture BEFORE pop
+        # Once the one-shot Welcome tab is closed it stays closed for the
+        # session — flag it so a later create_chat_tab cannot respawn it.
+        if isinstance(session_key, str) and session_key.startswith("welcome:"):
+            self._welcome_closed = True
         # SP5a-audit FIX (BUG #2): capture the tab's BOX before the pops too.
         # close_session resolves the dying key's box via the injected getter
         # (get_chat_box_for_session iterates _tab_sessions), which returns None

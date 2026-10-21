@@ -185,6 +185,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Wire Send button
         self._main_content.send_button.connect("clicked", self._chat_handler.on_send_clicked)
 
+        # Fresh-launch Welcome splash tab — one-shot per session (see
+        # MainContent.create_welcome_tab). Ordinary chat tab, closable via
+        # the standard ×; once closed it stays closed for the session.
+        self._main_content.create_welcome_tab()
+
     def _wire_projects(self):
 
         # Left panel — FileTreeHandler must be
@@ -781,7 +786,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def _update_agent_display(sk: str):
             """Update context meter avatar/name and the status-bar agent label."""
-            if isinstance(sk, str) and sk.startswith("canvas:"):
+            # Canvas/Welcome tabs display a document, not a conversation; they
+            # have no agent identity, so skip the agent display for them.
+            if isinstance(sk, str) and sk.startswith(("canvas:", "welcome:")):
                 return
             agent_name, agent_color = _resolve_agent_info(sk)
             if agent_name:

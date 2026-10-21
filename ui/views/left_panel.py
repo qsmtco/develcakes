@@ -153,6 +153,10 @@ class LeftPanel(Gtk.Box):
         # Store references needed by window
         self._PAP_notebook = PAP_notebook  # outer notebook (Prompts/Agents/Projects/Settings)
 
+        # Startup default: open the Projects page (index 2). One-time set at
+        # launch; no persistence.
+        PAP_notebook.set_current_page(2)
+
         self.append(PAP_notebook)
 
         # CSS for agent rows is in ui/styles.py (applied globally at startup)

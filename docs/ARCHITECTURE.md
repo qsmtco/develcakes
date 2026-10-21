@@ -817,6 +817,10 @@ def set_on_autoaccept_cycle(cb) -> None   # auto label clicked -> cycle level (o
 
 **Review bar integration (Phase 7):** ReviewHandler calls `set_review_bar(bar)` to insert a `ReviewBar` widget above the notebook, and `get_review_bar()` to retrieve the current bar for state updates without accessing MainContent internal state.
 
+**Welcome session-key namespace (`welcome:`):** The Welcome tab is a one-shot special tab under the `welcome:` prefix (e.g. `welcome:splash`) — created once on fresh launch, never respawns after close for the session, and `create_welcome_tab` guards (via `_welcome_loaded`) against ever re-issuing the raw load.
+
+**Raw full-document load contract (`load_unsanitized_full_document`):** Bypasses the sanitizer/markdown emitter, routes through `_issue_load` (arms the in-flight gate, contains raising loads), executes inline `<script>`, and is for repo-controlled documents only (`assets/splash.html` or the built-in fallback when it is missing).
+
 ### 3.10 `utils/favorites.py` — Favorites Persistence
 
 **Responsibility:** Read/write the favorites set for the prompt library.
@@ -2458,6 +2462,8 @@ def get_default_si_config(can_write: bool) -> dict  # canonical SI defaults — 
 ```
 
 **Default seeding (SPEC-SUPERVISOR-ONBOARDING-REFINEMENTS §2.4):** `_seed_defaults()` copies each built-in YAML/JSON file from `prompts/default_agents/` individually — it checks each built-in file independently and copies only when the same destination filename is absent in the user agents directory. This is a per-file missing-copy, not the old all-or-nothing directory guard. Existing user files are never overwritten, even if the built-in changes. This ensures a new default like `supervisor.yaml` reaches existing installations that already have unrelated agent files.
+
+**Session keys:** `save_agent_def` preserves `session_key`, `auto_open`, and `auto_add_to_projects` when the Agent Builder form omits them. A new agent with no key gets `special:<role>` when no other file owns it. A file that omits `session_key` still owns that default. The next agent with the same role gets `special:<role>-2`, then `-3`. Role stays the prompt selector. A suffixed writer (`special:coder-2`) runs in `<project>/.worktrees/special-coder-2` on branch `agent/special-coder-2`. The unsuffixed writer stays on the project root unless it holds a work lease.
 
 **Validation:** Checks required fields (name, prompts, tools, provider), verifies tool names against `agent/tools.py`, prompt file existence, and provider availability.
 
