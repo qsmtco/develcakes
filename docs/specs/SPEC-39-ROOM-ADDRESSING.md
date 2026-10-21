@@ -1,6 +1,7 @@
 # SPEC-39: Room Addressing — everyone hears, JEV decides who answers
 
 **Date:** 2026-10-18
+**Revised:** 2026-10-20 — line citations re-read against the tree. The behavior is unchanged.
 **Author:** Supervisor (PM direction, 2026-10-18)
 **Status:** Draft — for implementation
 **Implements:** PM direction confirmed 2026-10-18. Related, not the source of the rules: `docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md` §1.3 (JEV as a Choice over the roster). SPEC-12 left this as post-MVP.
@@ -21,18 +22,18 @@
 ## DISCOVERY
 
 - Read `ui/handlers/chat_handler.py`: `on_send` (`:181`) returns immediately on an empty buffer (`:201`). Slash commands run first via `CommandHandler.process_input` (`:206-276`) and return when `result.handled`. Inline `@` mentions run next, only for `project:` tabs, via `resolve_inline_mention` (`:317-383`) and return on error, one target, or broadcast. The plain-text project send is `:402-433`. `get_solo_target(project_name)` (`project_handler.py:386`) returns `str | None`. A non-empty solo target calls `_send_local(solo_target, text, reply_target=f"project:{project_name}")` (`:417-418`). `None` fans out: one `_send_local(member, text, reply_target=f"project:{project_name}")` per member (`:427-433`). `_send_local` (`:153`) calls `AgentRuntimeHandler.send_to_special_agent(session_key, text, reply_target=reply_target)` and returns `None`. `_dispatch` (`:669`) is `GLib.idle_add` when `self._GLib` is set, otherwise a direct call. The You bubble is rendered inside `_show_and_send` before the send branch (`:388-401`). The input buffer is cleared after `_dispatch` (`:439`).
-- Read `ui/window.py`: `_on_agent_cycle_clicked` (`:1772`) cycles `None` (the bar label `ALL`) through `get_project_members` and back to `None`, and stores it with `set_solo_target`. `ChatHandler` is constructed at `:170` and receives the project handler at `:449`.
-- Read `ui/views/main_content.py`: `update_project_settings` (`:281`) sets the bar text to the member display name when `solo_target` is set, and to the literal `ALL` when it is not (`:324`).
+- Read `ui/window.py`: `_on_agent_cycle_clicked` (`:2022`) cycles `None` (the bar label `ALL`) through `get_project_members` and back to `None`, and stores it with `set_solo_target`. `ChatHandler` is constructed at `:175` and receives the project handler at `:463`.
+- Read `ui/views/main_content.py`: `update_project_settings` (`:386`) sets the bar text to the member display name when `solo_target` is set, and to the literal `ALL` when it is not (`:428`).
 - Read `ui/handlers/project_handler.py`: `get_project_members(project_name) -> list[str]` (`:305`) returns member session keys. `get_solo_target` (`:386`) returns `self._solo_targets.get(project_name)`, and a missing key is `None`.
-- Read `ui/agent_runtime/session.py`: `send_to_special_agent(session_key, text, reply_target=None) -> None` (`:226`). Unregistered key: log and return (`:244-250`). No active project: pop `_turn_reply_target[session_key]` and `_do_error` (`:254-266`). Otherwise it sets `_turn_reply_target[session_key]` (`:275-278`), discards ended flags, assigns `self._turn_tokens[session_key] = new_token` and `rt._turn_token` (`:316-324`), then `rt.send_message(session_key, text, prepare=_prepare_turn)` (`:342`). It does not return the token. The token is readable on the handler as `_turn_tokens[session_key]` after the call returns, because the assignment happens before `send_message`.
+- Read `ui/agent_runtime/session.py`: `send_to_special_agent(session_key, text, reply_target=None) -> None` (`:391`). Unregistered key: log and return (`:409-415`). No active project: pop `_turn_reply_target[session_key]` and `_do_error` (`:419-432`). Otherwise it sets `_turn_reply_target[session_key]` (`:440-443`), discards ended flags, assigns `self._turn_tokens[session_key] = new_token` and `rt._turn_token` (`:488-489`), then `rt.send_message(session_key, text, prepare=_prepare_turn)` (`:507`). It does not return the token. The token is readable on the handler as `_turn_tokens[session_key]` after the call returns, because the assignment happens before `send_message`.
 - Read `ui/handlers/agent_runtime_handler.py`: `_get_runtime(name, agent_def=None)` (`:849`) returns the per-display-name `AgentRuntime`, creating it. It raises `RuntimeError` when no provider is configured (`:881`) or the provider has no API key (`:884`). `_prep_lock(session_key)` (`:911`) returns a per-session `threading.Lock`. `_prepare_turn_conversation` (`:978`) holds that lock, loads via `rt.load_conversation` (`:1039`), and on a second miss calls `rt.create_conversation(...)` with `defer_prompt_build=True` (`:1052-1068`). It then sets `conv.step_count = 0` (`:1125`). A witness must not call this method: the step reset is for a real user turn. `get_agent_name_for_session(session_key) -> str` (`:749`) returns `display_name` or `""`. `_active_project` is `tuple[str, str] | None` (`:107`).
 - Read `ui/agent_runtime/provider.py`: `_resolve_agent_model(agent_def) -> str | None` (`:14`). It catches `Exception` internally and returns `None` or a model string. It does not raise.
 - Read `agent/special_agents.py`: `SpecialAgentDef.display_name` (`:37`), `role` (`:38`), `get_self_improvement_config() -> dict` (`:53`). Session keys are `special:<role>` unless the YAML sets `session_key` (`:90`).
-- Read `agent/runtime.py`: `send_message` (`:1271`) starts a daemon thread running `_run_loop` and returns `None`. `_run_loop` (`:1616`) adds `session_key` to `_active_loops` under `_lock` before `prepare` (`:1628-1629`). After prepare it calls `conv.add_user_message(text)` once (`:1741`). Each later LLM call re-reads `conv.messages` through `to_api_messages()` (`:3594`). `is_loop_active(session_key) -> bool` (`:2396`) takes `_lock`. The `finally` (`:2203-2208`) discards `_active_loops` under `_lock` and does nothing else. `get_conversation` (`:1267`) does not take the lock. `load_conversation(session_key) -> bool` (`:3999`) returns `False` when `load_conversation_from_disk` returns `None`; on success it stores the conv under `_lock`. `create_conversation(...) -> str` (`:1029`) replaces any existing conv for that key (it disconnects MCP first, `:1060-1063`) and stores under `_lock` (`:1112`). `save_conversation(session_key) -> str` (`:3990`) raises `ValueError` when the conv is missing, and holds `_lock` across `save_conversation_to_disk`. `_auto_save` (`:3980`) catches `Exception` from the save and does not raise. `_active_loops` is initialized at `:589`.
-- Read `models/conversation.py`: `MessageRole.USER = "user"`, `ASSISTANT = "assistant"` (`:77-82`). `add_user_message(content) -> Message` (`:302`) appends a user message and does not touch `step_count`. `add_assistant_message` (`:310`) increments `step_count`. A room line must use `add_user_message`. An assistant-role line would be spoken in that agent's own voice and would burn a step.
+- Read `agent/runtime.py`: `send_message` (`:1400`) starts a daemon thread running `_run_loop` and returns `None`. `_run_loop` (`:1745`) adds `session_key` to `_active_loops` under `_lock` before `prepare` (`:1757-1758`). After prepare it binds `conv` (`:1817`) and calls `conv.add_user_message(text)` once (`:1875`). Each later iteration rebuilds the request with `_messages_for_model` (`:1996`), which calls `conv.to_api_messages()` (`:3800`). `is_loop_active(session_key) -> bool` (`:2576`) takes `_lock`. The `finally` (`:2342-2347`) discards `_active_loops` under `_lock` and does nothing else. `get_conversation` (`:1396`) does not take the lock. `load_conversation(session_key) -> bool` (`:4458`) returns `False` when `load_conversation_from_disk` returns `None`; on success it stores the conv under `_lock`. `create_conversation(...) -> str` (`:1158`) replaces any existing conv for that key (it disconnects MCP first, `:1189-1192`) and stores under `_lock` (`:1241-1242`). `save_conversation(session_key) -> str` (`:4449`) raises `ValueError` when the conv is missing, and holds `_lock` across `save_conversation_to_disk`. `_auto_save` (`:4439`) catches `Exception` from the save and does not raise. `_active_loops` is initialized at `:709`.
+- Read `models/conversation.py`: `MessageRole.USER = "user"` (`:80`), `ASSISTANT = "assistant"` (`:81`). `add_user_message(content) -> Message` (`:308`) appends a user message and does not touch `step_count`. `add_assistant_message` (`:316`) increments `step_count` (`:328`). A room line must use `add_user_message`. An assistant-role line would be spoken in that agent's own voice and would burn a step.
 - Read `agent/persistence.py`: `save_conversation_to_disk(conv, session_key) -> str` (`:42`) writes `<conversations_dir>/<session_key>.json` via temp file plus `os.replace`. It can raise `OSError`. It does not take a lock. `load_conversation_from_disk` (`:222`) returns `None` on a missing file, `JSONDecodeError`, or `OSError`. Colons in `special:coder` are already legal in that filename.
 - Read `agent/llm/jev_client.py`: `post_decision(state: str, questions: dict) -> tuple[dict | None, str]` (`:111`). Never raises. `answers` is `None` whenever `error` is non-empty. Timeout is 2.0 s (`_DECISION_TIMEOUT_S`, `:51`). Confidence floor used by the classifiers is `_DECISION_MIN_CONFIDENCE = 0.6` (`:54`). `classify_mask_candidates` (`:224`) is the validation shape to copy: reject a non-dict answer, a non-`choice` type, a choice outside the allowed set, a `bool` confidence, a non-numeric confidence, and a confidence below 0.6. `classify_unknown` (`:165`) does not reject `bool` (`bool` is an `int` subclass). This spec rejects `bool`, matching the mask function. The wire question is `{"type": "choice", "instructions": str, "criteria": {option: description}}`. The answer object carries `choice`, `probabilities`, and `confidence`.
-- Read `ui/agent_runtime/turn_ui.py`: `_do_response_complete(session_key, text, complete_token=None)` (`:448`) runs on the main thread. A non-`None` `complete_token` that differs from `_turn_tokens[session_key]` returns immediately (`:469-473`). Duplicate completion returns at `:488-490`. Cancelled and failed turns go to `_do_error`, not here. The display name is `self._agents[session_key].display_name` (`:519-520`).
+- Read `ui/agent_runtime/turn_ui.py`: `_do_response_complete(session_key, text, complete_token=None)` (`:448`) runs on the main thread. A non-`None` `complete_token` that differs from `_turn_tokens[session_key]` returns immediately (`:463-467`). Duplicate completion returns at `:482-484`. Cancelled and failed turns go to `_do_error`, not here. The display name is `self._agents[session_key].display_name` (`:513-514`). The active project name is read at `:504`.
 - Read `ui/handlers/command_handler.py`: `resolve_inline_mention(text, session_key="") -> MentionResolution` (`:234`). No `@` token returns a resolution with empty target fields (`:256-258`). This path stays as it is. A plain `hi debugger` has no `@`, so it falls through to the project send.
 - Architecture owner: `ChatHandler` owns who a project send is delivered to. `AgentRuntime` owns `Conversation.messages` for one agent. `jev_client.post_decision` owns the decision HTTP call. `ProjectHandler._solo_targets` owns the ALL-versus-one-member switch.
 - Existing pattern to copy: the group branch already renders one You bubble and passes `reply_target=f"project:{project_name}"` so the reply paints on the project surface. The witness path copies `add_user_message` plus `save_conversation_to_disk`, not `send_message`.
@@ -117,7 +118,7 @@ Line count: about 70.
 
 ### 2.2 `agent/runtime.py` — queue or append a room line
 
-Next to `_active_loops` (`:589`):
+Next to `_active_loops` (`:709`):
 
 ```python
 self._pending_room_lines: dict[str, list[str]] = {}
@@ -144,7 +145,7 @@ def note_room_line(self, session_key: str, line: str) -> str:
 
 Inside the lock, the active-loop test and the append are one critical section. Do not call `is_loop_active` and then append: the `finally` can discard the marker between the two.
 
-`save_conversation_to_disk` raises `OSError`. Catch `OSError` inside the lock after the append, log it, and still return `"stored"` (the in-memory line is kept). Do not call `save_conversation`: it takes `_lock` again (`:3992`) and would deadlock, and it raises `ValueError` when the conv is missing.
+`save_conversation_to_disk` raises `OSError`. Catch `OSError` inside the lock after the append, log it, and still return `"stored"` (the in-memory line is kept). Do not call `save_conversation`: it takes `_lock` again (`:4451`) and would deadlock, and it raises `ValueError` when the conv is missing (`:4454`).
 
 Flush helper, called only from `_run_loop`:
 
@@ -160,8 +161,8 @@ def _flush_pending_room_lines(self, session_key: str) -> None:
 
 Call sites in `_run_loop`:
 
-1. After `prepare` returns and `conv` is known (`:1688` has assigned `conv`), and before `conv.add_user_message(text)` (`:1741`). This covers a queue that survived a turn whose `finally` ran before the conversation existed.
-2. In the `finally` (`:2207`), under the same `_lock` that discards `_active_loops`, after the discard. A `note_room_line` that arrives while the marker is still set queues. A `note_room_line` that arrives after the discard stores directly. Holding `_lock` across discard plus flush makes those two outcomes exclusive.
+1. After `prepare` returns and `conv` is known (`:1817` has assigned `conv`), and before `conv.add_user_message(text)` (`:1875`). This covers a queue that survived a turn whose `finally` ran before the conversation existed.
+2. In the `finally` (`:2346`), under the same `_lock` that discards `_active_loops`, after the discard. A `note_room_line` that arrives while the marker is still set queues. A `note_room_line` that arrives after the discard stores directly. Holding `_lock` across discard plus flush makes those two outcomes exclusive.
 
 The `finally` must look the conv up with `self._conversations.get(session_key)`. The local `conv` may not exist when prepare failed. Do not reference that local in `finally`.
 
@@ -188,7 +189,7 @@ def record_room_line(self, session_key: str, line: str) -> None:
     """
 ```
 
-`create_conversation` replaces an existing conv (`runtime.py:1060`). The `get_conversation is None` guard is what stops that. Do not call `create_conversation` on any other condition.
+`create_conversation` replaces an existing conv (`runtime.py:1189`). The `get_conversation is None` guard is what stops that. Do not call `create_conversation` on any other condition.
 
 Project path for the create call: `self._active_project[1]` when `self._active_project` is not `None`, else `None`. Do not call `_worktree_for_turn` here. A witness is not a writer turn. The next real `_prepare_turn_conversation` repoints `project_path` (`:1082-1099`).
 
@@ -211,7 +212,7 @@ def take_room_turn(self, session_key: str, token: object) -> bool:
 
 Initialize `self._room_turn_tokens: dict[str, object] = {}` beside `_turn_tokens` (`agent_runtime_handler.py:188`). `_turn_reply_target` at `:197` is a different dict. Do not store the room-turn mark there.
 
-`mark_room_turn` must run on the thread that just returned from `send_to_special_agent`, before any other send to that session key. `send_to_special_agent` assigns the token before it returns (`session.py:322-342`).
+`mark_room_turn` must run on the thread that just returned from `send_to_special_agent`, before any other send to that session key. `send_to_special_agent` assigns the token before it returns (`session.py:488-507`).
 
 Line count: about 90.
 
@@ -243,9 +244,9 @@ Line count: about 70.
 At the end of the successful path of `_do_response_complete`, after the reply has been handed to the chat surface (the method already renders before it returns), and only when `take_room_turn(session_key, complete_token)` returns `True`:
 
 - If `text` is not a `str` or `text.strip()` is empty, stop. A tool-only completion has nothing for the room to hear.
-- Speaker name: `resolved_name` from `:520`, or `session_key` when that is `None`.
+- Speaker name: `resolved_name` from `:514`, or `session_key` when that is `None`.
 - Line: `f"[room] {speaker}: {text}"`.
-- Other members: `self._active_project[0]` is the project name (`:510`). Members come from a callback, not from a new `ProjectHandler` import inside the runtime handler.
+- Other members: `self._active_project[0]` is the project name (`:504`). Members come from a callback, not from a new `ProjectHandler` import inside the runtime handler.
 
 Add on `AgentRuntimeHandler`:
 
@@ -254,7 +255,7 @@ def set_on_room_members(self, cb) -> None:
     """``cb(project_name: str) -> list[str]``. None clears it."""
 ```
 
-`window.py` assigns it next to the existing project-handler wire (`window.py:449`):
+`window.py` assigns it next to the existing project-handler wire (`window.py:463`):
 
 ```python
 self._agent_runtime_handler.set_on_room_members(
@@ -268,7 +269,7 @@ For each member other than `session_key`, call `record_room_line(member, line)` 
 
 `take_room_turn` is false for a solo send, an `/ask` private turn, and a completion whose token was never marked. Those replies are not copied into anyone else's conversation.
 
-A stale or duplicate completion returns before this point (`:469-490`). Do not witness those.
+A stale or duplicate completion returns before this point (`:463-484`). Do not witness those.
 
 Line count: about 40 in `turn_ui.py`, about 15 in `window.py`.
 
@@ -317,11 +318,11 @@ Reply witness: `take_room_turn` true, text `hey`, members the two keys. `record_
 
 ALL, sentence names one member:
 
-1. Bar label is `ALL` because `ProjectHandler.get_solo_target(name)` is `None` (`project_handler.py:396`, `main_content.py:324`).
+1. Bar label is `ALL` because `ProjectHandler.get_solo_target(name)` is `None` (`project_handler.py:396`, `main_content.py:428`).
 2. `ChatHandler.on_send` (`:181`) reads the buffer, misses the slash and `@` paths, renders one You bubble (`:395-401`).
 3. Worker calls `resolve_room_addressee("hi debugger", [("special:debugger", "Debugger"), ("special:coder", "Coder")])`.
 4. `post_decision` returns a choice. A confident `special:debugger` is the addressee. Anything else is `"all"`.
-5. Main thread: `send_to_special_agent("special:debugger", "hi debugger", reply_target="project:foo")` (`session.py:226`). That assigns `_turn_tokens["special:debugger"]` and starts `_run_loop`, which `add_user_message`s the raw text (`runtime.py:1741`) and calls the model. `mark_room_turn` stores that token.
+5. Main thread: `send_to_special_agent("special:debugger", "hi debugger", reply_target="project:foo")` (`session.py:391`). That assigns `_turn_tokens["special:debugger"]` and starts `_run_loop`, which `add_user_message`s the raw text (`runtime.py:1875`) and calls the model. `mark_room_turn` stores that token.
 6. Worker or the delivery callback: `record_room_line("special:coder", "[room] PM: hi debugger")`. Under `_prep_lock`, load or `create_conversation` (`defer_prompt_build=True`). `note_room_line` either `add_user_message`s and saves, or queues because `special:coder` is in `_active_loops`.
 7. Debugger's `_do_response_complete` renders the reply into `project:foo` via the existing reply key. `take_room_turn` matches the token. A daemon thread `record_room_line("special:coder", "[room] Debugger: hey")`.
 8. Later, Chat is still ALL and the human asks Coder something JEV routes to `special:coder`. Coder's `_run_loop` flushes any queue, then appends the new user message. `to_api_messages` includes `[room] PM: hi debugger` and `[room] Debugger: hey`. Coder can say they saw it. Coder did not run a turn on the greeting.
@@ -392,7 +393,7 @@ Solo:
 | Decision thread raises | Log, deliver as `all` |
 | `record_room_line` raises, or `_get_runtime` raises `RuntimeError` | Log, continue. The addressee's send still happens |
 | Listener has never been spoken to | `load_conversation` then `create_conversation(..., defer_prompt_build=True)`. The next real turn finds the conv and does not create a second one |
-| `create_conversation` called when a conv already exists | Forbidden. It replaces the conv and disconnects MCP (`runtime.py:1060`) |
+| `create_conversation` called when a conv already exists | Forbidden. It replaces the conv and disconnects MCP (`runtime.py:1189`) |
 | Listener is mid-turn | Queue. Flush in that loop's `finally` after `_active_loops.discard`, under the same `_lock` |
 | Save raises `OSError` | Log. Keep the in-memory line. Return `"stored"` |
 | Addressee's turn fails or is cancelled | `_do_error` runs, not `_do_response_complete`. No reply room line. The human room line on the listeners stays |
@@ -422,6 +423,6 @@ Solo:
 3. `create_conversation` replaces an existing conv. The spec forbids calling it unless `get_conversation` returned `None` under `_prep_lock`.
 4. `save_conversation` takes `_lock` and raises `ValueError`. The spec calls `save_conversation_to_disk` under the lock already held, and catches `OSError`.
 5. `send_to_special_agent` assigns `_turn_tokens[session_key]` before returning, so `mark_room_turn` can copy it. Early returns (unknown agent, no project) do not assign a token; `mark_room_turn` writes nothing when the token is missing.
-6. `_run_loop` re-reads `conv.messages` on later iterations. Queuing while the session is in `_active_loops` is what keeps a witness out of the in-flight turn.
+6. `_run_loop` re-reads `conv.messages` on later iterations via `_messages_for_model` (`runtime.py:1996`), which calls `to_api_messages` (`:3800`). Queuing while the session is in `_active_loops` is what keeps a witness out of the in-flight turn.
 7. Solo, `@`, and slash paths are listed as unchanged and are above the branch this spec edits.
 8. The ALL label is `solo_target is None`. The spec does not invent a second flag for the bar.
