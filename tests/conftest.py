@@ -6,17 +6,128 @@ import os
 import sys
 import pytest
 
-# Ensure headless rendering works for GTK tests
-# Use broadway backend for headless tests, unless another backend is already set
-# (e.g., xvfb-run provides X11)
-if 'WAYLAND_DISPLAY' in os.environ:
-    # Under Wayland+weston, set the backend for headless rendering
+# GTK4 widget construction requires a real display server. There is no true
+# headless GTK4 backend: GDK_BACKEND=broadway does NOT help — it segfaults on
+# the first widget construction (verified 2026-10-20, GTK 4.14.5 / PyGObject
+# 3.48.2), which aborts the entire pytest process with SIGSEGV rather than
+# reporting a test failure.
+#
+# This file used to set GDK_BACKEND=broadway when DISPLAY was unset. That
+# turned a missing-display situation into a battery-killing core dump and was
+# removed. The supported way to run the GTK suites is xvfb-run (see
+# knowledge/install.md and the per-file "runs under xvfb-run" notes).
+#
+# So: never invent a backend here. If a display is present, leave the
+# environment alone. If it is absent, pytest_collection_modifyitems below
+# skips the widget-constructing test modules with a clear reason instead of
+# letting the interpreter segfault.
+if 'WAYLAND_DISPLAY' in os.environ and not os.environ.get('GDK_BACKEND'):
+    # Under Wayland+weston, prefer X11 for the headless test battery.
     os.environ.setdefault('GDK_BACKEND', 'x11')
-elif not os.environ.get('DISPLAY') and not os.environ.get('GDK_BACKEND'):
-    os.environ.setdefault('GDK_BACKEND', 'broadway')
 
 # Ensure crabcakes package is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _has_display() -> bool:
+    """True when a display server is reachable for GTK4 widget construction."""
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _imports_widget_construction(path: str) -> bool:
+    """True if `path` can reach a Gtk widget constructor through imports.
+
+    A segfault, not a test failure, is what happens when GTK builds a widget
+    with no display — so the module has to be identified BEFORE it is imported.
+    That rules out trying to construct a probe widget here: the probe itself
+    would take the interpreter down.
+
+    Detection is textual and transitive: parse the test module, follow every
+    intra-project import (``ui.views.event_cards``, ``from ui.views import x``,
+    ``from ui.views.chat_surface import Y``) to a bounded depth, and look for a
+    ``Gtk.Something(`` constructor call anywhere in that closure. A static
+    hand-maintained list is not sufficient — it silently missed
+    tests/test_activity_bubbles.py, whose widget is reached through
+    ``ui.views.event_cards.build_role_bubble``.
+    """
+    seen: set[str] = set()
+
+    def resolve(module: str) -> str | None:
+        rel = module.replace(".", os.sep)
+        for candidate in (os.path.join(_PROJECT_ROOT, rel + ".py"),
+                          os.path.join(_PROJECT_ROOT, rel, "__init__.py")):
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def walk(filename: str, depth: int) -> bool:
+        if depth > 4:
+            return False
+        real = os.path.realpath(filename)
+        if real in seen or not real.endswith(".py"):
+            return False
+        seen.add(real)
+        try:
+            with open(real, encoding="utf-8", errors="replace") as fh:
+                tree = ast.parse(fh.read(), filename=real)
+        except (OSError, SyntaxError):
+            return False
+
+        for node in ast.walk(tree):
+            # A widget constructor is being invoked in this file.
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "Gtk"
+                    and node.func.attr[:1].isupper()):
+                return True
+            # Follow intra-project imports out of this file.
+            targets: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.split(".")[0] in ("ui", "agent", "models",
+                                                 "render", "utils", "transport"):
+                    targets.append(node.module)
+                    targets.extend(f"{node.module}.{a.name}" for a in node.names)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] in ("ui", "agent", "models",
+                                                    "render", "utils", "transport"):
+                        targets.append(alias.name)
+            for target in targets:
+                found = resolve(target)
+                if found and walk(found, depth + 1):
+                    return True
+        return False
+
+    return walk(path, 0)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip widget-constructing GTK suites when no display is available.
+
+    A missing display used to be 'handled' by setting GDK_BACKEND=broadway,
+    which does not provide real rendering and segfaults on the first widget.
+    One segfault kills the whole pytest process, so a single unguarded module
+    could abort a full battery. Skipping keeps the run honest: the GTK suites
+    are reported as skipped-with-reason instead of taking the interpreter down.
+
+    The check is per-ITEM rather than per-module because the skip must be
+    attached before the module is imported; pytest imports the module during
+    collection, so a segfault at import time would already have happened.
+    """
+    if _has_display():
+        return
+    reason = "GTK widget construction needs a display; run under xvfb-run -a"
+    for item in items:
+        try:
+            path = str(item.path)
+        except AttributeError:  # pragma: no cover — very old pytest
+            path = str(getattr(item, "fspath", ""))
+        if _imports_widget_construction(path):
+            item.add_marker(pytest.mark.skip(reason=reason))
 
 
 @pytest.fixture(autouse=True)
