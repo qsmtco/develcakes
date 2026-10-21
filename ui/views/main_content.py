@@ -801,6 +801,34 @@ class MainContent(Gtk.Box):
             )
         ):
             handler.render_welcome(session_key)
+        # Display-only project-chat placeholder: a project tab with no
+        # conversation content shows the minimal splash page instead of the
+        # welcome row — the same raw full-document load as the one-shot
+        # Welcome tab (create_welcome_tab). Fires only for project keys; the
+        # app-startup splash path (welcome:…) is untouched. The page's
+        # ready()/splash:done JS is left unwired — display only, no behavior.
+        if isinstance(session_key, str) and session_key.startswith("project:"):
+            surface = None
+            mount = getattr(handler, "surface_for_mount", None)
+            if callable(mount):
+                surface = mount(session_key)
+            loader = getattr(surface, "load_unsanitized_full_document", None)
+            rows = getattr(surface, "_rows", ())
+            has_conversation = any(
+                'class="welcome-row"' not in (row.get("html") or "")
+                for row in rows
+            )
+            if callable(loader) and not has_conversation:
+                splash_path = os.path.join(
+                    get_project_root(), "assets", "splash-min.html")
+                try:
+                    with open(splash_path, "r", encoding="utf-8") as fh:
+                        loader(fh.read())
+                except OSError:
+                    _logger.exception(
+                        "project chat: could not read %s; keeping welcome placeholder",
+                        splash_path,
+                    )
         return page_idx
 
     def create_welcome_tab(self):
