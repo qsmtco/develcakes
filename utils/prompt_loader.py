@@ -159,7 +159,8 @@ def compose_system_prompt(
     """Compose the full system prompt by loading and merging templates.
 
     Selection logic (grouped; within a group order matters):
-    - Identity (always): default.md, collab.md, crabcakes-context.md
+    - Identity (always): default.md, collab.md, jev-decision.md,
+      crabcakes-context.md
     - Project (when active): project-awareness.md, crabcakes-commands.md,
       project-onboarding.md (only when agent_role == "supervisor" and
       project not yet onboarded)
@@ -217,6 +218,16 @@ def compose_system_prompt(
     collab = load_prompt_template("collab")
     if collab:
         parts.append(collab)
+
+    # 1b2. JEV decision-oracle discipline (SPEC-46) — role-neutral, but only
+    # meaningful for agents that actually have the `jev_ask` tool. Appended
+    # when tools is None (legacy compose callers keep the current behaviour) or
+    # the tool list includes "jev_ask"; otherwise omitted so no agent is told
+    # about a tool it does not have. The coder harness (SPEC-43) returns above,
+    # so it never reaches here.
+    jev_decision = load_prompt_template("jev-decision")
+    if jev_decision and (tools is None or "jev_ask" in tools):
+        parts.append(jev_decision)
 
     # 1c. develcakes platform context (all agents — applies regardless of project/role)
     cc_ctx = load_prompt_template("crabcakes-context")

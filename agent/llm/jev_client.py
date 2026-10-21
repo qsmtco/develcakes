@@ -133,6 +133,7 @@ def post_decision(state: str, questions: dict) -> tuple[dict | None, str]:
         _outage("DecisionModel card present but keyless or without base_url")
         return None, "decision model unavailable"
 
+    import time
     import urllib.error
     import urllib.request
 
@@ -147,9 +148,25 @@ def post_decision(state: str, questions: dict) -> tuple[dict | None, str]:
         },
         method="POST",
     )
+    # SPEC-46 §3.3 (fix round): the 2.0 s budget is a hard WALL-CLOCK ceiling
+    # over the whole exchange, not a per-socket-op timeout. A body that drips
+    # (each recv under the socket timeout, total far over 2 s) previously
+    # slipped past. The deadline check around the chunked read aborts on the
+    # ceiling and fails open to None.
+    deadline = time.monotonic() + _DECISION_TIMEOUT_S
     try:
         with urllib.request.urlopen(req, timeout=_DECISION_TIMEOUT_S) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            chunks = []
+            while True:
+                if time.monotonic() > deadline:
+                    _outage("wall-clock deadline exceeded")
+                    return None, "decision model unavailable"
+                chunk = resp.read1(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            body_bytes = b"".join(chunks)
+            payload = json.loads(body_bytes.decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         _outage(f"HTTP {exc.code}")
         return None, f"HTTP {exc.code}"

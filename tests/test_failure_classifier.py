@@ -773,15 +773,20 @@ class TestDecisionModelLookup:
             def __exit__(self, *a):
                 return False
 
-            def read(self):
-                return json.dumps({
-                    "model": "jev-test",
-                    "answers": {"failure_class": {
-                        "type": "choice", "choice": "transient",
-                        "probabilities": {"transient": 0.9},
-                        "confidence": 0.9,
-                    }},
-                }).encode()
+            def read1(self, n=4096):
+                if not hasattr(self, "_buf"):
+                    self._buf = json.dumps({
+                        "model": "jev-test",
+                        "answers": {"failure_class": {
+                            "type": "choice", "choice": "transient",
+                            "probabilities": {"transient": 0.9},
+                            "confidence": 0.9,
+                        }},
+                    }).encode()
+                if not self._buf:
+                    return b""
+                chunk, self._buf = self._buf[:16], self._buf[16:]
+                return chunk
 
         def fake_urlopen(req, timeout=None):
             captured["url"] = req.full_url
@@ -818,13 +823,18 @@ class TestDecisionModelLookup:
             def __exit__(self, *a):
                 return False
 
-            def read(self):
-                return json.dumps({
-                    "answers": {"failure_class": {
-                        "type": "choice", "choice": "transient",
-                        "confidence": 0.3,
-                    }},
-                }).encode()
+            def read1(self, n=4096):
+                if not hasattr(self, "_buf"):
+                    self._buf = json.dumps({
+                        "answers": {"failure_class": {
+                            "type": "choice", "choice": "transient",
+                            "confidence": 0.3,
+                        }},
+                    }).encode()
+                if not self._buf:
+                    return b""
+                chunk, self._buf = self._buf[:16], self._buf[16:]
+                return chunk
 
         import urllib.request
         monkeypatch.setattr(urllib.request, "urlopen",
@@ -847,12 +857,18 @@ class TestDecisionModelLookup:
             def __exit__(self, *a):
                 return False
 
-            def read(self):
-                return json.dumps({
-                    "answers": {"failure_class": {
-                        "type": "choice", "choice": "purple", "confidence": 0.99,
-                    }},
-                }).encode()
+            def read1(self, n=4096):
+                if not hasattr(self, "_buf"):
+                    self._buf = json.dumps({
+                        "answers": {"failure_class": {
+                            "type": "choice", "choice": "purple",
+                            "confidence": 0.99,
+                        }},
+                    }).encode()
+                if not self._buf:
+                    return b""
+                chunk, self._buf = self._buf[:16], self._buf[16:]
+                return chunk
 
         import urllib.request
         monkeypatch.setattr(urllib.request, "urlopen",
@@ -892,10 +908,15 @@ class TestDecisionModelLookup:
             def __exit__(self, *a):
                 return False
 
-            def read(self):
-                return json.dumps({
-                    "answers": {"failure_class": {"type": "noul", "noul": 0.9}},
-                }).encode()
+            def read1(self, n=4096):
+                if not hasattr(self, "_buf"):
+                    self._buf = json.dumps({
+                        "answers": {"failure_class": {"type": "noul", "noul": 0.9}},
+                    }).encode()
+                if not self._buf:
+                    return b""
+                chunk, self._buf = self._buf[:16], self._buf[16:]
+                return chunk
 
         import urllib.request
         monkeypatch.setattr(urllib.request, "urlopen",

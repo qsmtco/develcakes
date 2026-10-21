@@ -1074,12 +1074,37 @@ class AgentRuntime:
             attempt=1,
             timestamp=time.time(),
         )
+        # SPEC-46: refine UNKNOWN → concrete class before the failure is seen
+        # by `decide()` / attached to the exception. Fail-open by contract.
+        self._jev_refine_unknown(failure)
         try:
             exc._failure = failure  # type: ignore[attr-defined]
         except Exception:
             logger.exception("could not attach provider failure for %s", session_key)
             return None
         return failure
+
+    def _jev_refine_unknown(self, failure) -> None:
+        """SPEC-46 §2.1: consult JEV when the deterministic class is UNKNOWN.
+
+        This is the single home for the whole refinement decision, called by
+        each ProviderFailure producer (`_classified_stream_error`,
+        `_stream_failure_exception`, `_attach_provider_failure`). Fail-open by
+        contract (SPEC-46 §3.1): any exception, a None answer, or a low-
+        confidence / malformed answer leaves `failure.failure_class` untouched —
+        byte-identical to pre-SPEC-46 behaviour. Only refines UNKNOWN → a
+        validated concrete class; never reclassifies downward to UNKNOWN
+        (invariant §3.2).
+        """
+        try:
+            from agent.llm.failure_classifier import FailureClass
+            from agent.llm.jev_client import classify_unknown
+            if failure.failure_class == FailureClass.UNKNOWN:
+                refined = classify_unknown(failure.detail[:400], failure.status_code)
+                if refined is not None and refined != FailureClass.UNKNOWN:
+                    failure.failure_class = refined
+        except Exception:
+            logger.exception("JEV refinement failed; keeping UNKNOWN")
 
     def _classified_stream_error(
         self,
@@ -1095,18 +1120,31 @@ class AgentRuntime:
         (see the fix-round brief JOB 1). `ClassifiedProviderError` remains for
         the raised-exception carrier used by `_stream_failure_exception`, which
         is a genuinely different path (a BaseException for the chat translator).
+
+        SPEC-46 §2.1: when the deterministic classifier marks the failure
+        UNKNOWN — and only then — consult the JEV decision model via
+        `classify_unknown`. A validated high-confidence (≥0.6) answer replaces
+        `failure.failure_class` before the failure enters
+        `metadata["provider_failure"]`. The whole JEV path is fail-open
+        (SPEC-46 §3.1): None, timeout, low confidence, malformed answers, or
+        any exception leave the class as UNKNOWN — behaviour byte-identical to
+        before this spec.
         """
         from agent.llm.failure_classifier import failure_for_stream
         conv = self._conversations.get(session_key)
         conv_model = getattr(conv, "model", "") or ""
         provider = conv_model.split("/", 1)[0] if "/" in conv_model else ""
-        return failure_for_stream(
+        failure = failure_for_stream(
             session_key=session_key,
             provider=provider,
             model=conv_model,
             stream_err=stream_err,
             stage=stage,
         )
+        # SPEC-46: JEV refinement via the shared helper (`_jev_refine_unknown`)
+        # — UNKNOWN-only, never downward, fail-open by contract.
+        self._jev_refine_unknown(failure)
+        return failure
 
     def _record_attached_failure(self, failure: object) -> None:
         """Record one ProviderFailure. Accepts a failure OR a carrier object.
@@ -3063,6 +3101,9 @@ class AgentRuntime:
             stream_err=err,
             stage="stream" if content else "empty_content",
         )
+        # SPEC-46: refine BEFORE wrapping, so the carrier's `_failure` carries
+        # the JEV-refined class into `decide()` (SPEC-46 §4.5).
+        self._jev_refine_unknown(failure)
         return ClassifiedProviderError(str(err), failure)
 
     def _release_session_lease(self, session_key: str) -> None:

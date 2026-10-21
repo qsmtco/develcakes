@@ -58,3 +58,8 @@ scratch/
 .audit/
 .crabcakes/feed-updates.jsonl
 .worktrees/
+
+# Generated artifacts (SPEC-46 cleanup 2026-10-21)
+jev_junit*.xml
+icons/*.b64.txt
+tests/test_dump_logo_b64.py
