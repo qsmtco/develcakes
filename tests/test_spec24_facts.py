@@ -163,9 +163,14 @@ def test_context_md_is_append_only(tmp_path):
 
 def test_no_new_tool_name():
     names = {item["function"]["name"] for item in get_tool_definitions_for_api()}
+    # Pin on the full 16-tool surface. Adding a new tool must update this set
+    # deliberately — otherwise the tripwire goes RED and forces an explicit
+    # review of the (API-exposed) tool surface.
     assert names == {
         "read_file", "write_file", "edit_file", "exec_command", "list_files",
         "search_files", "web_search", "web_fetch", "provider_events",
+        "agent_context", "canvas", "diary", "feed_card", "jev_ask",
+        "project_memory", "talk",
     }
 
 

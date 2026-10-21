@@ -1593,6 +1593,68 @@ class TestBatchAccept:
         assert mock_feed_tab._batch_bar_visible is True
         assert mock_feed_tab._batch_bar_count == 2
 
+    def test_add_card_defers_batch_bar_to_main_thread(self, feed_handler, mock_feed_tab):
+        """BUG #2: the batch-bar GTK update must run on the main thread only.
+
+        feed_card is the first off-main-thread add_card caller; driving
+        add_card from a worker thread must not touch Gtk.Button state on that
+        thread. A recording GLib captures the call site: nothing runs until
+        the main-loop flush (the audit's probe technique).
+        """
+        calls = []
+        original = mock_feed_tab.update_batch_bar
+
+        def tracking(count):
+            calls.append(threading.get_ident())
+            return original(count)
+
+        mock_feed_tab.update_batch_bar = tracking
+        feed_handler._active_project_name = "testproj"
+        main_ident = threading.get_ident()
+
+        ts = datetime.now(timezone.utc)
+        card = FeedCardData(
+            card_type="diff", source="agent", title="Card",
+            body="", author="x", timestamp=ts, project_name="testproj",
+        )
+
+        # Replace the fixture's immediate-dispatch MockGLib with one that only
+        # records, so we can prove the update was QUEUED, not executed, on
+        # the worker thread.
+        pending = []
+
+        class RecordingGLib:
+            def idle_add(self, fn, *args, **kwargs):
+                pending.append((fn, args, kwargs))
+                return 0
+
+        feed_handler._GLib = RecordingGLib()
+
+        worker_ident = []
+
+        def _worker():
+            worker_ident.append(threading.get_ident())
+            feed_handler.add_card(card)
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        t.join()
+
+        # The batch-bar update must NOT have run on the worker thread.
+        assert calls == [], (
+            "update_batch_bar ran on the calling thread; it must be deferred "
+            "via GLib.idle_add"
+        )
+
+        # Flush the recorded queue exactly as the main loop would.
+        while pending:
+            fn, args, kwargs = pending.pop(0)
+            fn(*args, **kwargs)
+
+        assert len(calls) == 1
+        assert calls[0] == main_ident
+        assert mock_feed_tab._batch_bar_count == 1
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  TestScheduleScrollToBottom — Phase 4D-1

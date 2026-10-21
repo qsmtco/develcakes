@@ -5926,60 +5926,14 @@ class TestDeltaCoalescing:
 
 
 
-class TestCrabcardTabStamping:
-    """SPEC-06 SP5b bug #5: crabcard metadata stamps the tab linkage at
-    CONSTRUCTION — cards must resolve to the emitting session's tab after
-    the window's old linkage callback died. Falsifier: remove the
-    metadata["session_key"]/["tab_key"] stamps → both pins fail."""
+class TestReplyKeyAndTurnSlot:
+    """SPEC-12 reply-key / turn-slot pins.
 
-    def test_streaming_crabcards_carry_tab_metadata(self):
-        handler, crh, mc = _make_handler()
-        _register_coder(handler)
-        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else unittest.mock.MagicMock()
-        handler._agent_to_project = unittest.mock.MagicMock()
-        handler._agent_to_project.get_project = lambda sk: "alpha"
-        handler._active_project = ["alpha"]
-        fh = unittest.mock.MagicMock()
-        handler.set_feed_handler(fh)
-        crh.is_streaming.return_value = True
-        crh.get_streaming_text.return_value = (
-            "before\n\n```crabcard\ntype: diff\n"
-            "title: Added auth middleware\nfile: src/main.py\n---\n"
-            "+from auth import middleware\n```\n"
-        )
-
-        handler._do_response_complete("special:coder", "unused when streaming")
-
-        fh.add_cards_batch.assert_called_once()
-        cards = fh.add_cards_batch.call_args.args[0]
-        assert len(cards) == 1
-        card = cards[0]
-        assert card.project_name == "alpha"          # pre-existing stamp, kept
-        assert card.metadata["session_key"] == "special:coder"
-        assert card.metadata["tab_key"] == "project:alpha"
-
-    def test_nonstreaming_crabcards_carry_tab_metadata(self):
-        handler, crh, mc = _make_handler()
-        _register_coder(handler)
-        mc.get_chat_box_for_session = lambda sk: None if sk == "special:sync" else unittest.mock.MagicMock()
-        handler._agent_to_project = unittest.mock.MagicMock()
-        handler._agent_to_project.get_project = lambda sk: "alpha"
-        handler._active_project = ["ActiveProject"]
-        fh = unittest.mock.MagicMock()
-        handler.set_feed_handler(fh)
-        crh.is_streaming.return_value = False
-        handler._resolve_chat_box = unittest.mock.MagicMock(return_value=MagicMock())
-
-        handler._do_response_complete(
-            "special:sync",
-            "before\n\n```crabcard\ntype: diff\n"
-            "title: Nonstream card\nfile: x.py\n---\n+body\n```\n",
-        )
-
-        fh.add_cards_batch.assert_called_once()
-        card = fh.add_cards_batch.call_args.args[0][0]
-        assert card.metadata["session_key"] == "special:sync"
-        assert card.metadata["tab_key"] == "project:alpha"
+    Formerly `TestCrabcardTabStamping`: the two crabcard metadata pins this
+    class originally carried were deleted with the crabcard text-extraction
+    path (SPEC-45). The session_key/tab_key stamps now happen in one place,
+    window._post_feed_card, and are pinned by tests/test_feed_card_tool.py.
+    """
 
     # ── SP5b retro-audit fix round: unwitnessed branches ─────────────────────
     # Debugger probe (.debug/audit-scratch/sp5b_probe.py): the two construction
@@ -5990,100 +5944,45 @@ class TestCrabcardTabStamping:
     def test_streaming_reply_key_uses_turn_target_over_routing(self):
         """SPEC-12 R5 REV 3: a turn's reply key is the PER-SEND slot when set
         (a private /ask), NOT the routing project. Here the slot = the agent
-        key (private), routing = project:alpha; the crabcard tab_key must be
-        the agent key. Falsifier: drop the slot read in _reply_key → tab_key
-        becomes project:alpha."""
-        handler, crh, _mc = _make_handler()
+        key (private), routing = project:alpha; the reply key must be the
+        agent key. Falsifier: drop the slot read in _reply_key → the reply
+        key becomes project:alpha.
+
+        SPEC-45 §2.9: re-pointed off the deleted crabcard extraction. The
+        tab_key stamp now lives in window._post_feed_card; this asserts the
+        _reply_key property it reads."""
+        handler, _crh, _mc = _make_handler()
         _register_coder(handler)
         handler._agent_to_project = unittest.mock.MagicMock()
         handler._agent_to_project.get_project = lambda sk: "alpha"
         handler._active_project = ["alpha"]
         handler._turn_reply_target["special:coder"] = "special:coder"  # private
-        fh = unittest.mock.MagicMock()
-        handler.set_feed_handler(fh)
-        crh.is_streaming.return_value = True
-        crh.get_streaming_text.return_value = (
-            "before\n\n```crabcard\ntype: diff\n"
-            "title: Private card\nfile: x.py\n---\n+body\n```\n"
-        )
 
-        handler._do_response_complete("special:coder", "unused when streaming")
-
-        fh.add_cards_batch.assert_called_once()
-        card = fh.add_cards_batch.call_args.args[0][0]
-        assert card.metadata["session_key"] == "special:coder"
-        assert card.metadata["tab_key"] == "special:coder", (
+        assert handler._reply_key("special:coder") == "special:coder", (
             "the turn-scoped slot (private) must win over routing"
         )
 
     def test_reply_key_falls_back_to_active_project(self):
         """SPEC-12 R7: with no per-agent routing, the reply key is the ACTIVE
         project (the unrouted-agent host — never dropped). Falsifier: drop
-        the active-project fallback → tab_key becomes the raw session key."""
-        handler, crh, mc = _make_handler()
+        the active-project fallback → the reply key becomes the raw session key.
+
+        SPEC-45 §2.9: re-pointed off the deleted crabcard extraction."""
+        handler, _crh, _mc = _make_handler()
         _register_coder(handler)
-        mc.get_chat_box_for_session = lambda sk: None
         handler._agent_to_project = None
         handler._active_project = ["alpha", "/p"]
         handler._turn_reply_target.clear()          # no per-send slot
-        fh = unittest.mock.MagicMock()
-        handler.set_feed_handler(fh)
-        crh.is_streaming.return_value = True
-        crh.get_streaming_text.return_value = (
-            "before\n\n```crabcard\ntype: diff\n"
-            "title: R7 card\nfile: x.py\n---\n+body\n```\n"
-        )
 
-        handler._do_response_complete("special:coder", "unused when streaming")
-
-        fh.add_cards_batch.assert_called_once()
-        card = fh.add_cards_batch.call_args.args[0][0]
-        assert card.metadata["tab_key"] == "project:alpha", (
+        assert handler._reply_key("special:coder") == "project:alpha", (
             "R7 active-project fallback: an unrouted agent with a project "
-            "open must stamp the project key, never the raw session key"
+            "open must resolve to the project key, never the raw session key"
         )
 
-    def test_multiproject_divergence_is_deliberate(self):
-        """DESIGN PIN — Supervisor OVERRIDE ruling (retro-audit loop §3.2):
-        project_name and tab_key come from DIFFERENT sources BY DESIGN.
-        project_name stamps the ACTIVE project (card feeds to the project the
-        PM is looking at); tab_key resolves the emitting agent's own mounted
-        tab (where the turn actually rendered). With the agent routed to
-        project A while project B is active, the divergence project_name="B"
-        and tab_key="project:A" is deliberate semantics — do NOT unify the
-        sources. Falsifier: unify either source (drive both from one lookup)
-        → the tab_key/project_name assertions here diverge-fail, and the
-        direct-tab precedence test above fails with them."""
-        handler, crh, mc = _make_handler()
-        _register_coder(handler)
-        # Agent routed to project A (its transcript renders in project A's box)
-        mc.get_chat_box_for_session = lambda sk: (
-            object() if sk == "project:A" else None)
-        handler._agent_to_project = unittest.mock.MagicMock()
-        handler._agent_to_project.get_project = lambda sk: "A"
-        # ...but project B is the active project the card feeds to
-        handler._active_project = ["B"]
-        fh = unittest.mock.MagicMock()
-        handler.set_feed_handler(fh)
-        crh.is_streaming.return_value = True
-        crh.get_streaming_text.return_value = (
-            "before\n\n```crabcard\ntype: diff\n"
-            "title: B sees it, A renders it\nfile: x.py\n---\n+body\n```\n"
-        )
-
-        handler._do_response_complete("special:coder", "unused when streaming")
-
-        fh.add_cards_batch.assert_called_once()
-        card = fh.add_cards_batch.call_args.args[0][0]
-        assert card.project_name == "B", (
-            "project_name must stay the ACTIVE project (card feeds where the "
-            "PM is looking)"
-        )
-        assert card.metadata["tab_key"] == "project:A", (
-            "tab_key must stay the agent's ROUTED tab (where the turn "
-            "rendered) — divergence is the pinned design, not a bug"
-        )
-        assert card.metadata["session_key"] == "special:coder"
+    # test_multiproject_divergence_is_deliberate MOVED to
+    # tests/test_feed_card_tool.py::test_divergence (SPEC-45 §2.9): the
+    # project_name/tab_key divergence pin now lives on window._post_feed_card,
+    # the single place both stamps are made.
     # ── SPEC-12 SP3c: R7 unrouted render + turn-scoped slot + terminal clear ─
 
     def test_unrouted_agent_renders_into_open_project(self):

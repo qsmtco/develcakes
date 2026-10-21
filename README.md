@@ -676,7 +676,6 @@ develcakes/
 │   ├── gtk_containers.py            # GTK4 container membership helper
 │   ├── gtk_safe_link.py             # Safe label with link-scheme guard
 │   ├── block_parser.py              # Code-block aware text chunking
-│   ├── crabcard_parser.py           # Feed-card block extraction
 │   ├── providers_store.py           # Provider config persistence
 │   ├── conversation_store.py        # Conversation persistence
 │   ├── favorites.py                 # Prompt favorites

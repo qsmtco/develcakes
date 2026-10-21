@@ -11,14 +11,10 @@
 # _build_image_block, _build_segment_widget, _build_table_segment,
 # _make_table_cell, _build_text_segment, _make_block_header,
 # _build_quote_segment, _build_terminal_segment, _build_heading_segment,
-# _build_task_segment, _build_crabcard_placeholder_segment, LOW-7 viewer
-# helpers, _copy_to_clipboard).
+# _build_task_segment, LOW-7 viewer helpers, _copy_to_clipboard).
 #
-# SP5c-2 B.0 (supervisor ruling): the _crabcards_registry machinery was
-# DELETED here rather than relocated — crabcard interception wiring died with
-# SP4, the registry had zero live consumers (grep-verified), and
-# _set/_clear_crabcards_registry died with the donor file. The placeholder
-# segment always renders its static fallback label (identical behavior).
+# SPEC-45: the crabcard placeholder path (segment pre-scan, chip builder,
+# dispatch branch) and the retired B.0 registry comment are DELETED here.
 #
 # Security: No secrets, no network calls.
 # Pure GTK widget construction; no GTK calls until after app activation.
@@ -40,10 +36,6 @@ from utils.markdown import format_markdown
 from utils.block_parser import extract_blocks
 from utils.gtk_safe_link import make_safe_label, on_activate_link  # HIGH-6: activate-link guard
 
-# SP5c-2 B.0 (supervisor ruling): the crabcard placeholder registry is GONE.
-# Crabcard interception wiring died with SP4; the placeholder segment below
-# always renders its static fallback label (the registry was never populated
-# in production — zero consumers, grep-verified; donor module deleted B.2).
 from utils.syntax_highlight import highlight
 
 import shutil
@@ -95,46 +87,12 @@ def process_segments(text: str) -> list[dict]:
     Each segment dict has a 'type' key and processed content:
       - text segments: 'markup' key with Pango-formatted string
       - code segments: 'code_markup' with highlighted Pango, 'raw_content' for copy
-      - crabcard_placeholder segments: 'index' key — rendered as feed reference chip
       - other segments (quote, terminal, heading, task): 'content' passthrough
 
     Groups consecutive text segments for unified rendering (same as build_role_bubble).
     """
-    # Phase 3: Pre-scan for crabcard placeholder markers (\x00CRABCARD_REF:N\x00)
-    # These are embedded in cleaned_text by extract_crabcards(). We split them
-    # out into dedicated segments so build_role_bubble can render feed chips.
-    parts = text.split("\x00CRABCARD_REF:")
-    processed = []
-
-    # text_parts[0] is before first placeholder (no prefix to strip)
-    # subsequent parts: "N\x00...rest" — strip N+trailing \x00, remainder is text
-
-    for i, part in enumerate(parts):
-        if i == 0:
-            # First part — before any placeholder. Process normally.
-            _process_text_chunk(part, processed)
-            continue
-
-        # Extract index from "N\x00..."
-        null_pos = part.find("\x00")
-        if null_pos < 0:
-            # Malformed (no closing null) — treat entire part as text
-            _process_text_chunk("\x00CRABCARD_REF:" + part, processed)
-            continue
-
-        try:
-            card_index = int(part[:null_pos])
-        except ValueError:
-            _process_text_chunk("\x00CRABCARD_REF:" + part, processed)
-            continue
-
-        # Emit placeholder segment
-        processed.append({"type": "crabcard_placeholder", "index": card_index})
-
-        # Rest of part (after \x00) is normal text — process it
-        rest = part[null_pos + 1:]
-        _process_text_chunk(rest, processed)
-
+    processed: list = []
+    _process_text_chunk(text, processed)
     return processed
 
 
@@ -459,26 +417,6 @@ def _add_action_buttons(bubble: Gtk.Box, raw_text: str, on_forward_click, sessio
 # Segment widget factories
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_crabcard_placeholder_segment(seg: dict) -> Gtk.Widget | None:
-    """
-    Render a crabcard placeholder as a small static feed-reference chip:
-    "📋 [card added to feed]" — non-interactive (no click handling).
-
-    SP5c-2 B.0 (supervisor ruling): this ALWAYS renders the static fallback
-    label. The crabcard interception wiring (module-level card registry +
-    ChatRenderHandler's render-time extraction) died with SP4; the registry
-    was never populated in production, so the static label is identical to
-    the pre-deletion behavior.
-    """
-    card_index = seg.get("index")  # kept for segment-shape compatibility
-    _ = card_index
-    # Static fallback — no card lookup (registry deleted, B.0 ruling).
-    label = Gtk.Label()
-    label.set_text("📋 [card added to feed]")
-    label.add_css_class("chat-msg-label")
-    return label
-
-
 def _build_segment_widget(seg: dict) -> Gtk.Widget | None:
     """Route a segment dict to the appropriate widget factory."""
     seg_type = seg.get("type", "text")
@@ -493,8 +431,6 @@ def _build_segment_widget(seg: dict) -> Gtk.Widget | None:
         return _build_heading_segment(seg)
     elif seg_type == "task":
         return _build_task_segment(seg)
-    elif seg_type == "crabcard_placeholder":
-        return _build_crabcard_placeholder_segment(seg)
     elif seg_type == "table":
         return _build_table_segment(seg)
     else:

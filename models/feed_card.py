@@ -6,9 +6,8 @@
 #
 # Files that import these:
 #   - ui/handlers/feed_handler.py (FeedHandler owns card lifecycle)
-#   - ui/handlers/chat_render_handler.py (crabcard extraction)
+#   - ui/window.py (_post_feed_card — the feed_card tool callback)
 #   - ui/views/feed_card.py (factory — reads FeedCardData to build widgets)
-#   - utils/crabcard_parser.py (parses raw text → FeedCardData)
 #   - tests/ (unit tests)
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ _logger = logging.getLogger(__name__)
 # (a 200k-char body per card, worst case), while the UI renders at most
 # `ui.views.feed_card.RENDERED_BODY_LIMIT` (2,000) characters per card with a
 # reveal control. Before T2 the only cap was 2,000 chars applied *before
-# storage* on tool results, so the stored text — copy, crabcard export, audits —
+# storage* on tool results, so the stored text — copy, feed export, audits —
 # was silently lossy. Measured live (Qrusher 2026-09-12): 4 approval cards at
 # 16–39 KB bodies dominated the main thread's pango measurement (60.1% of burn).
 MAX_STORED_BODY = 200_000
@@ -132,7 +131,7 @@ class FeedCardData:
         """Apply the storage-side body cap at construction (UIRESP2-T2 §1).
 
         Every `FeedCardData` producer (agent runtime tool results, approval
-        prompts, git-commit stdout, audit reports, crabcard parsing, crabwatch
+        prompts, git-commit stdout, audit reports, feed_card tool calls, crabwatch
         events, work units — plus `from_dict` on load) passes through here, so
         the cap cannot be bypassed by a new `body=` site. The RENDER cap is a
         separate, much smaller limit in `ui.views.feed_card`.
@@ -178,7 +177,7 @@ class FeedCardData:
         if card_type == "git_commit":
             return True
         # agent_action with status=running/complete/error: tool execution log.
-        # Also include status=None: a crabcard-parsed or manually-created
+        # Also include status=None: a tool-posted or manually-created
         # agent_action card with no status field is still informational (a
         # tool execution log), not actionable. Without this, the card would
         # show Accept/Reject buttons that do nothing.

@@ -79,9 +79,9 @@ The project feed is a visual timeline of events in a project tab. Feed cards are
 
 Feed cards are persisted to `.crabcakes/feed.json` per project. On project reopen, the feed is restored from disk.
 
-### CrabCard Blocks
+### Feed Cards from the `feed_card` tool
 
-Agents can emit structured feed cards by including ` ```crabcard ` code blocks in their responses. These are parsed by `utils/crabcard_parser.py:extract_crabcards()` into `FeedCardData` instances.
+Agents post structured feed cards by calling the `feed_card` tool (`type`, `title`, `body`, `file`, `additions`, `deletions`, `task_id`). The handler in `agent/group_tools.py:feed_card()` validates every field and hands a `FeedCardData` to `MainWindow._post_feed_card`, which stamps the project and tab metadata and calls `FeedHandler.add_card`. There is no in-text card syntax any more — SPEC-45 deleted the ` ```crabcard ` fence parser.
 
 ---
 

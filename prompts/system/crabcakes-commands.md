@@ -32,23 +32,18 @@ The legacy task-centric commands are still accepted and route to the Work Handle
 
 The legacy `/t` alias for `/task` is **gone** (SPEC-TASK-SYSTEM-FULL-REDESIGN §5.1) — use `/work`.
 
-## Crabcards
+## Feed cards
 
-Emit a crabcard when you modify a project file, so the PM can review it in the Project Feed.
+Post to the project Feed with the `feed_card` tool. Never write a `crabcard`
+block — that format is gone.
 
-    ```crabcard
-    type: diff
-    title: Short description
-    file: path/to/file.py
-    additions: 5
-    deletions: 2
-    ---
-    - old line
-    + new line
-    ```
-
-- **Required:** `type` (always `diff` when changing files) and `title`.
-- **Optional:** `file`, `additions`, `deletions`, `commit_sha`, `task_id`.
-- Emit `diff` for a write **or** a delete (show the removed lines). `agent_action` is optional for task start/complete, decisions, and findings.
-- Do **not** emit for `file_created/modified/deleted` (CrabWatch detects those), `git_commit` (auto), or `system` (internal).
-- Diff body: unified diff, `+`/`-` prefixes, context lines unprefixed.
+- `type` — `diff` when you change a file, `agent_action` for a decision or a
+  finding, `audit_report` for an audit result.
+- `title` — one line, max 200 characters. `body` — the card text, max 100,000.
+- `file` — project-relative path. `additions` / `deletions` — line counts.
+  `task_id` — optional work unit id.
+- The tool returns the new card id. A rejected call returns an error — read it
+  and fix the field; do not retry the same arguments unchanged.
+- Do **not** post for `file_created/modified/deleted` (CrabWatch detects those),
+  `git_commit` (automatic), or `system` (internal). Those types are not accepted.
+- `diff` body: unified diff, `+`/`-` prefixes, context lines unprefixed.

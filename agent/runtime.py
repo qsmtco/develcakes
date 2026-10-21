@@ -4595,7 +4595,13 @@ class AgentRuntime:
                     logger.info("Approval resolved for %s: %s", session_key, approved)
                     return
 
-    def force_compact(self, conv: "Conversation", token_budget: int) -> None:
+    def force_compact(
+        self,
+        conv: "Conversation",
+        token_budget: int,
+        *,
+        preserve_current_turn: bool = False,
+    ) -> None:
         """Public wrapper around self._context_strategy.compact().
 
         Spec: docs/specs/SPEC-CONTEXT-UI-COMPACT-LLM-2026-07-10.md §3.2.
@@ -4605,9 +4611,13 @@ class AgentRuntime:
 
         token_budget <= 0 is silently ignored (matches the strategy's
         own defensive behavior — see context_strategy.py:130).
+        ``preserve_current_turn`` keeps the last user message and everything
+        after it, which a self-compact needs while that turn is still running.
         """
         with self._compaction_lock:
-            self._context_strategy.compact(conv, token_budget)
+            self._context_strategy.compact(
+                conv, token_budget, preserve_current_turn=preserve_current_turn,
+            )
 
     def force_llm_compact(
         self,
@@ -4615,6 +4625,8 @@ class AgentRuntime:
         token_budget: int,
         focus_text: str = "",
         agent_def: Any = None,
+        *,
+        preserve_current_turn: bool = False,
     ) -> dict:
         """Force an LLM-summarization compact on ``conv``.
 
@@ -4662,7 +4674,9 @@ class AgentRuntime:
                     f"{original_sp}\n\n## Focus for compaction\n{focus_text}"
                 )
             try:
-                strat.compact(conv, token_budget)
+                strat.compact(
+                    conv, token_budget, preserve_current_turn=preserve_current_turn,
+                )
             finally:
                 self._context_strategy = original_strategy
                 conv.system_prompt = original_sp

@@ -172,9 +172,9 @@ class ChatRenderHandler:
     Feature parity (ruling R2 — dispositions):
       DROPPED for Phase A (documented): forward buttons, copy buttons,
         agent color tint, per-row timestamp header, tight grouping, and the
-        render-time crabcard registry (ARH's own extraction path is
-        untouched). FORWARD via the toolbar still works; the registry
-        retires with the bubble pipeline in SP5.
+        render-time feed-card registry. FORWARD via the toolbar still works;
+        the registry retires with the bubble pipeline in SP5. (The
+        text-extraction path that fed it was deleted by SPEC-45.)
       KEPT: reentrancy guard, error fallback (escaped raw text — still
         sanitized), buffered streaming with a final atomic row, Pango
         event/task/diff cards (render_event_card — not transcript sites).
@@ -199,7 +199,7 @@ class ChatRenderHandler:
         # SPEC-06 SP4: streaming pending buffers. Handler-side REPLACEMENT
         # buffer (not surface.stream_delta) because set_streaming_text — a
         # live agent_runtime_handler dependency, out of scope this round —
-        # must be able to OVERWRITE the pending text (crabcard cleaning),
+        # must be able to OVERWRITE the pending text (render-time cleaning),
         # and the surface's stream buffer is append-only by contract.
         self._streaming: set[str] = set()
         self._stream_text: dict[str, str] = {}
@@ -771,9 +771,9 @@ class ChatRenderHandler:
             except Exception:
                 _logger.debug("surface bridge resolve failed", exc_info=True)
 
-    # set_on_crabcard_extracted deleted (SP5c-3): storage-only setter, zero
-    # callers — lineage: extraction wiring died with SP5c-2 B.2's window
-    # callback removal; agent_runtime_handler owns extraction upstream.
+    # The render-time card-extraction callback setter was deleted (SP5c-3):
+    # storage-only, zero callers. The extraction path it fed was removed by
+    # SPEC-45 — feed cards are now posted by the feed_card tool.
 
     def set_project_name(self, name: str) -> None:
         """Set the active project name (kept for caller compat)."""
@@ -874,8 +874,8 @@ class ChatRenderHandler:
         """
         Get the current accumulated plain text for a streaming session.
 
-        Used by AgentRuntimeHandler to extract crabcards from the accumulated
-        streaming text before end_streaming() finalizes the row.
+        Used by AgentRuntimeHandler to read the buffered text before
+        end_streaming() finalizes the row.
         Returns None if no streaming session exists for this session.
         """
         if session_key not in self._streaming:
@@ -886,9 +886,9 @@ class ChatRenderHandler:
         """
         Overwrite the accumulated streaming text for a session.
 
-        Used by AgentRuntimeHandler after extracting crabcards — sets the
-        cleaned text so end_streaming() renders the row without crabcard
-        blocks. Returns True if successful, False if no streaming session.
+        Used by AgentRuntimeHandler to overwrite the buffered text before
+        end_streaming() renders the row. Returns True if successful, False if
+        no streaming session.
         """
         if session_key not in self._streaming:
             return False
@@ -926,7 +926,7 @@ class ChatRenderHandler:
         The buffered text is composed (markdown → sanitized HTML) and
         appended as ONE row. With render=False the buffer is dropped and
         nothing renders (caller renders the final text itself, e.g. via
-        render_sync after crabcard cleaning).
+        render_sync after render-time cleaning).
 
         Args:
             session_key: The conversation key whose streaming buffer to finalize.

@@ -244,7 +244,7 @@ Feed cards are the primary UI element for surfacing agent activity, tool results
 - **`agent_action`** — Agent tool calls (reading, writing, executing commands). Shows running → complete/error states.
 - **`pending_approval`** — When an agent requests `exec_command` approval. Has Approve/Deny buttons.
 - **`git_commit`** — Git commits made during review sessions (accept/reject).
-- **`crabcard`** — Structured data blocks embedded in agent responses (extracted from streaming text).
+- **`diff` / `audit_report`** — Posted by the `feed_card` tool (file changes and audit results).
 
 ### When Cards Appear
 
@@ -253,7 +253,7 @@ Cards are added to the feed whenever:
 - A tool call completes (`_on_tool_call_result`)
 - An agent requests exec approval (`_on_tool_call_approval_needed`)
 - A review session accepts or rejects changes
-- An agent response contains crabcard blocks
+- An agent calls the `feed_card` tool
 
 ### Approval Cards
 

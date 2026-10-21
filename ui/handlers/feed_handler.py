@@ -373,7 +373,8 @@ class FeedHandler(
         on the `_loading` gate. All existing callers are positional on
         `card_data` and keep the default.
 
-        Thread-safe: GTK operations via GLib.idle_add().
+        Thread-safe: ALL GTK work — including the batch-bar update — is
+        deferred to the main loop via GLib.idle_add().
         """
         card_id = str(uuid.uuid4())
         card_data.card_id = card_id
@@ -445,7 +446,10 @@ class FeedHandler(
                             )
                     if self._on_card_added:
                         self._on_card_added(card_id)
-            self._update_batch_bar_for_active_project(card_data.project_name)
+                    # BUG #2: the batch-bar update touches Gtk.Button state, so
+                    # it must run on the main thread — here, inside the
+                    # idle_add closure already dispatching the card's GTK work.
+                    self._update_batch_bar_for_active_project(card_data.project_name)
             self._GLib.idle_add(_append_html)
             if project_path and not self._loading and persist:
                 t = threading.Thread(target=_persist, daemon=True)
@@ -458,7 +462,11 @@ class FeedHandler(
             "add_card: feed document not attached; card %s stored without a view",
             card_id,
         )
-        self._update_batch_bar_for_active_project(card_data.project_name)
+        # BUG #2: the batch-bar update touches Gtk.Button state — hop to the
+        # main loop instead of running it on the calling thread.
+        self._GLib.idle_add(
+            lambda: self._update_batch_bar_for_active_project(card_data.project_name)
+        )
         if project_path and not self._loading and persist:
             t = threading.Thread(target=_persist, daemon=True)
             t.start()
@@ -474,14 +482,16 @@ class FeedHandler(
         difference: all widgets are appended in ONE GLib.idle_add callback
         and the smart scroll fires ONCE at the end.
 
-        Why this matters: a single LLM response can contain N crabcards.
-        Without batching, add_card() called N times enqueues N idle
-        callbacks, each connecting its own one-shot vadjustment 'changed'
-        handler and 150ms timeout. If cards arrive faster than GTK can
-        lay them out, the proximity check reads stale values and the
-        vadjustment 'changed' signal may already have fired before later
-        handlers attach — leaving the feed scrolled mid-batch instead of
-        at the newest card.
+        Why this matters: historically a batch producer handed over N cards at
+        once. Since SPEC-45 removed the crabcard extraction path there is no
+        product caller — the method is retained for API compatibility and
+        batch inserts from tests. Without batching, add_card() called N times
+        enqueues N idle callbacks, each connecting its own one-shot
+        vadjustment 'changed' handler and 150ms timeout. If cards arrive
+        faster than GTK can lay them out, the proximity check reads stale
+        values and the vadjustment 'changed' signal may already have fired
+        before later handlers attach — leaving the feed scrolled mid-batch
+        instead of at the newest card.
 
         Returns: list of card_ids in input order.
         """

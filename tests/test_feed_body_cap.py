@@ -6,7 +6,7 @@
 # offenders. The fix separates STORAGE from RENDER:
 #
 #   * storage: full text up to MAX_STORED_BODY (200_000) — feed.json keeps the
-#     text, so copy / crabcard export / audit are lossless within that bound;
+#     text, so copy / feed export / audit are lossless within that bound;
 #   * render: at most RENDERED_BODY_LIMIT (2_000) chars per card, with an
 #     additive `… N more characters` reveal control.
 #
@@ -246,7 +246,7 @@ class TestStorageCap:
 
     def test_model_storage_cap_applies_to_every_construction_site(self, caplog):
         """The sweep is enforced at the model, so a new `body=` site cannot
-        bypass the cap (audit-report / git-stdout / crabcard paths all funnel here)."""
+        bypass the cap (audit-report / git-stdout / feed_card paths all funnel here)."""
         with caplog.at_level(logging.WARNING):
             card = FeedCardData(
                 card_type="audit_report", source="agent", title="Report",

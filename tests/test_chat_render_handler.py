@@ -369,20 +369,19 @@ class TestStreamingSurfaceLifecycle:
 
 
 class TestStreamingReplaceContract:
-    """set_streaming_text (ARH crabcard-cleaning dependency) must REPLACE
-    the pending buffer — why the handler buffers instead of using
-    surface.stream_delta (append-only by contract)."""
+    """set_streaming_text must REPLACE the pending buffer — why the handler
+    buffers instead of using surface.stream_delta (append-only by contract)."""
 
     def setup_method(self):
         self.handler, self.spy = _spy_handler()
 
     def test_set_streaming_text_overwrites_pending_buffer(self):
         self.handler.start_streaming("sk")
-        self.handler.update_streaming("sk", "with crabcard blocks")
+        self.handler.update_streaming("sk", "original text")
         assert self.handler.set_streaming_text("sk", "cleaned") is True
         self.handler.end_streaming("sk")
         assert self.spy.appended[0]["html"].count("cleaned") == 1
-        assert "crabcard" not in self.spy.appended[0]["html"]
+        assert "original" not in self.spy.appended[0]["html"]
 
     def test_set_and_get_streaming_text_offline_keys(self):
         assert self.handler.set_streaming_text("nope", "x") is False

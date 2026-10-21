@@ -22,6 +22,7 @@ tools:
   - jev_ask
   - canvas
   - talk
+  - feed_card
   - agent_context
 auto_open: false
 auto_add_to_projects: false  # deliberately manual — user clicks + in the Agents tab

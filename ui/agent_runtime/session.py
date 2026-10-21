@@ -4,6 +4,13 @@ from __future__ import annotations
 from ui.agent_runtime._facade import _mod
 
 
+def _estimate(conv) -> int:
+    try:
+        return int(conv.get_token_estimate())
+    except Exception:
+        return 0
+
+
 class RuntimeSessionMixin:
     def clear_conversation(self, session_key: str) -> bool:
         """Reset a special agent's conversation in place.
@@ -124,7 +131,7 @@ class RuntimeSessionMixin:
         return True
 
     def compact_conversation(
-        self, session_key: str, focus_text: str = ""
+        self, session_key: str, focus_text: str = "", *, protect_open_turn: bool = False,
     ) -> dict:
         """Force compaction of a special agent's conversation.
 
@@ -189,38 +196,196 @@ class RuntimeSessionMixin:
             # Phase C path — fires when force_llm_compact exists and
             # agent_def.compaction_strategy == "llm".
             try:
-                return rt.force_llm_compact(conv, target_budget, focus_text, agent_def=agent_def)
+                result = rt.force_llm_compact(
+                    conv,
+                    target_budget,
+                    focus_text,
+                    agent_def=agent_def,
+                    preserve_current_turn=protect_open_turn,
+                )
             except Exception:
                 _mod().logger.exception(
                     "compact_conversation: LLM strategy failed; "
                     "falling back to textual"
                 )
                 # Fall through to textual default.
+            else:
+                result["persisted"] = self._persist_context(conv, session_key)
+                return result
 
-        rt.force_compact(conv, target_budget)
-
-        try:
-            from agent.persistence import save_conversation_to_disk
-            save_conversation_to_disk(conv, session_key)
-        except Exception:
-            _mod().logger.exception(
-                "compact_conversation: persist failed; in-memory compact succeeded"
-            )
+        rt.force_compact(
+            conv, target_budget, preserve_current_turn=protect_open_turn,
+        )
 
         ev = rt._context_strategy.last_result
         tokens_after = conv.get_token_estimate()
         if ev is None:
-            return {
+            result = {
                 "messages_removed": 0,
                 "tokens_freed": max(0, tokens_before - tokens_after),
                 "summary_chars": 0,
                 "layer": 0,
             }
+        else:
+            result = {
+                "messages_removed": ev.messages_removed,
+                "tokens_freed": ev.tokens_freed,
+                "summary_chars": ev.summary_tokens_injected,
+                "layer": ev.layer,
+            }
+        result["persisted"] = self._persist_context(conv, session_key)
+        return result
+
+    def _persist_context(self, conv, session_key: str) -> bool:
+        """Write the live conversation back to its file. Returns False on failure."""
+        try:
+            from agent.context_edit import persist_conversation
+            persist_conversation(conv, session_key)
+            return True
+        except Exception:
+            _mod().logger.exception(
+                "context persist failed for %s; in-memory edit stands",
+                session_key,
+            )
+            return False
+
+    def _owned_conversation(self, session_key: str):
+        """Return (conversation, runtime, error). error is a string or None."""
+        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+            return None, None, "not a special agent"
+        agent_def = self._agents.get(session_key)
+        if agent_def is None:
+            return None, None, "no registered agent"
+        try:
+            rt = self._get_runtime(agent_def.display_name, agent_def=agent_def)
+        except Exception as exc:
+            _mod().logger.error(
+                "context edit: failed to acquire runtime for %s: %s",
+                session_key, exc,
+            )
+            return None, None, "could not reach the conversation"
+        conv = rt.get_conversation(session_key)
+        if conv is None:
+            return None, None, "no conversation yet"
+        return conv, rt, None
+
+    def inspect_conversation(
+        self, session_key: str, *, protect_open_turn: bool = False,
+    ) -> dict:
+        """Numbered outline of a conversation. Does not mutate or stop the loop."""
+        conv, _rt, err = self._owned_conversation(session_key)
+        if err is not None:
+            return {"ok": False, "error": err}
+        from agent.context_edit import outline_messages
         return {
-            "messages_removed": ev.messages_removed,
-            "tokens_freed": ev.tokens_freed,
-            "summary_chars": ev.summary_tokens_injected,
-            "layer": ev.layer,
+            "ok": True,
+            "output": outline_messages(conv.messages, protect_open_turn=protect_open_turn),
+        }
+
+    def plan_conversation_edit(
+        self,
+        session_key: str,
+        spec: dict | None,
+        *,
+        protect_open_turn: bool = False,
+    ) -> dict:
+        """Check an edit against the current messages. Does not mutate."""
+        conv, _rt, err = self._owned_conversation(session_key)
+        if err is not None:
+            return {"ok": False, "error": err}
+        remove, plan_err = self._plan_spec(conv, spec, protect_open_turn)
+        if plan_err is not None:
+            return {"ok": False, "error": plan_err}
+        return {"ok": True, "remove": sorted(remove)}
+
+    def edit_conversation(
+        self,
+        session_key: str,
+        spec: dict | None,
+        *,
+        protect_open_turn: bool = False,
+    ) -> dict:
+        """Drop or keep messages, then write the conversation file.
+
+        A self-edit runs inside the caller's tool loop, so it does not
+        wait for that loop to go idle. ``protect_open_turn`` keeps the
+        tool call that is still running. A peer edit refuses while that
+        peer's loop is still active.
+        """
+        conv, rt, err = self._owned_conversation(session_key)
+        if err is not None:
+            return {"ok": False, "error": err, "messages_removed": 0}
+        if not protect_open_turn and rt.is_loop_active(session_key):
+            return {"ok": False, "error": "peer loop still active", "messages_removed": 0}
+        remove, plan_err = self._plan_spec(conv, spec, protect_open_turn)
+        if plan_err is not None:
+            return {"ok": False, "error": plan_err, "messages_removed": 0}
+        return self._commit_context_edit(rt, conv, session_key, remove)
+
+    def trim_own_conversation(self, session_key: str) -> dict:
+        """Drop finished messages and write the conversation file.
+
+        Used when an agent clears itself from inside its own tool loop.
+        The current request and the running tool call stay, so the loop
+        can finish.
+        """
+        conv, rt, err = self._owned_conversation(session_key)
+        if err is not None:
+            return {"ok": False, "error": err, "messages_removed": 0}
+        from agent.context_edit import plan_clear_before_open_turn
+        return self._commit_context_edit(
+            rt, conv, session_key, plan_clear_before_open_turn(conv.messages),
+        )
+
+    def _plan_spec(self, conv, spec: dict | None, protect_open_turn: bool):
+        from agent.context_edit import plan_context_edit
+        drop = None if not isinstance(spec, dict) else spec.get("drop")
+        keep = None if not isinstance(spec, dict) else spec.get("keep")
+        return plan_context_edit(
+            conv.messages,
+            drop=drop,
+            keep=keep,
+            protect_open_turn=protect_open_turn,
+        )
+
+    def _commit_context_edit(self, rt, conv, session_key: str, remove: set[int]) -> dict:
+        lock = getattr(rt, "_compaction_lock", None)
+        if lock is None:
+            return self._commit_context_edit_unlocked(conv, session_key, remove)
+        with lock:
+            return self._commit_context_edit_unlocked(conv, session_key, remove)
+
+    def _commit_context_edit_unlocked(self, conv, session_key: str, remove: set[int]) -> dict:
+        from agent.context_edit import format_indexes, kept_messages
+        kept_n = len(conv.messages) - len(remove)
+        removed = sorted(remove)
+        if not remove:
+            return {
+                "ok": True,
+                "messages_removed": 0,
+                "messages_kept": len(conv.messages),
+                "removed": [],
+                "removed_text": "none",
+                "tokens_freed": 0,
+                "persisted": False,
+                "error": "",
+            }
+        before = _estimate(conv)
+        conv.messages[:] = kept_messages(conv.messages, remove)
+        conv._token_estimate_cache = None
+        after = _estimate(conv)
+        persisted = self._persist_context(conv, session_key)
+        conv._token_estimate_cache = None
+        error = "" if persisted else "in-memory edit applied; the conversation file was not written"
+        return {
+            "ok": persisted,
+            "messages_removed": len(remove),
+            "messages_kept": kept_n,
+            "removed": removed,
+            "removed_text": format_indexes(removed),
+            "tokens_freed": max(0, before - after),
+            "persisted": persisted,
+            "error": error,
         }
 
     def send_to_special_agent(self, session_key: str, text: str,

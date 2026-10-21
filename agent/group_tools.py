@@ -14,14 +14,17 @@ _logger = logging.getLogger(__name__)
 _agent_context_cb = None
 _canvas_cb = None
 _talk_cb = None
+_feed_card_cb = None
 
 
 def set_agent_context_callback(cb) -> None:
-    """Install the peer clear/compact callback.
+    """Install the context edit callback.
 
-    Invoked from the agent_context handler after the supervisor role check
-    and peer resolution. Signature: (caller_session_key, peer_session_key,
-    action, focus) -> ToolResult. None means the tool returns "not wired".
+    Invoked after the target is resolved. A peer clear/compact/edit still
+    requires the supervisor. Editing the caller does not. Signature:
+    (caller_session_key, target_session_key, action, focus, spec) -> ToolResult.
+    ``spec`` is ``{"drop": [...], "keep": [...]}`` for edit, else None.
+    None callback means the tool returns "not wired".
     """
     global _agent_context_cb
     _agent_context_cb = cb
@@ -43,6 +46,18 @@ def set_talk_callback(cb) -> None:
     _talk_cb = cb
 
 
+def set_feed_card_callback(cb) -> None:
+    """Install the project-feed card callback.
+
+    Invoked from the feed_card handler after every field is validated.
+    Signature: (session_key, fields) -> ToolResult, where fields is a dict
+    holding card_type, title, body, file_path, additions, deletions, task_id.
+    None means the tool returns "feed_card is not wired".
+    """
+    global _feed_card_cb
+    _feed_card_cb = cb
+
+
 def _caller_role(session_key: str):
     from agent.special_agents import get_special_agent
     if not isinstance(session_key, str):
@@ -58,8 +73,14 @@ def _require_supervisor(session_key: str, what: str) -> ToolResult | None:
 
 
 def _resolve_peer(agent_name: str, caller_key: str) -> tuple[object | None, str | None]:
-    """Return (SpecialAgentDef, error)."""
-    from agent.special_agents import get_special_agents
+    """Return (SpecialAgentDef, error). The caller is a valid target."""
+    from agent.special_agents import get_special_agent, get_special_agents
+    if isinstance(agent_name, str) and agent_name.strip().casefold() == "self":
+        caller = get_special_agent(caller_key) if isinstance(caller_key, str) else None
+        key = getattr(caller, "conv_id_prefix", "") if caller is not None else ""
+        if caller is None or not isinstance(key, str) or not key.startswith("special:"):
+            return None, "agent_context self needs a special agent"
+        return caller, None
     if not isinstance(agent_name, str) or not agent_name.strip():
         return None, "no agent named "
     needle = agent_name.strip()
@@ -83,26 +104,54 @@ def _resolve_peer(agent_name: str, caller_key: str) -> tuple[object | None, str 
     key = peer.conv_id_prefix
     if not isinstance(key, str) or not key.startswith("special:"):
         return None, f"no agent named {needle}"
-    if key == caller_key:
-        return None, "agent_context cannot target the caller"
     return peer, None
+
+
+def _edit_spec(action: str, drop_raw, keep_raw) -> tuple[dict | None, ToolResult | None]:
+    """Validate drop/keep. Returns (spec, error result)."""
+    absent = (None, "")
+    passed_drop = drop_raw not in absent
+    passed_keep = keep_raw not in absent
+    if action != "edit":
+        if passed_drop or passed_keep:
+            return None, ToolResult(success=False, error="drop and keep are only for edit")
+        return None, None
+    if not passed_drop and not passed_keep:
+        return None, ToolResult(success=False, error="edit needs drop or keep indexes")
+    if passed_drop and passed_keep:
+        return None, ToolResult(success=False, error="pass drop or keep, not both")
+    from agent.context_edit import parse_selectors
+    which = "drop" if passed_drop else "keep"
+    raw = drop_raw if passed_drop else keep_raw
+    indexes, error = parse_selectors(raw)
+    if error is not None:
+        return None, ToolResult(success=False, error=error)
+    if not indexes:
+        return None, ToolResult(success=False, error=f"{which} is empty")
+    if which == "drop":
+        return {"drop": indexes, "keep": None}, None
+    return {"drop": None, "keep": indexes}, None
 
 
 def agent_context(agent: str, action: str, focus: str = "", **kwargs) -> ToolResult:
     session_key = kwargs.get("session_key", "")
-    denied = _require_supervisor(session_key, "agent_context")
-    if denied is not None:
-        return denied
-    if action not in ("clear", "compact"):
-        return ToolResult(success=False, error="action must be clear or compact")
+    if action not in ("clear", "compact", "inspect", "edit"):
+        return ToolResult(success=False, error="action must be clear, compact, inspect, or edit")
+    spec, spec_error = _edit_spec(action, kwargs.get("drop"), kwargs.get("keep"))
+    if spec_error is not None:
+        return spec_error
     peer, error = _resolve_peer(agent, session_key)
     if error is not None:
         return ToolResult(success=False, error=error)
+    if peer.conv_id_prefix != session_key:
+        denied = _require_supervisor(session_key, "agent_context")
+        if denied is not None:
+            return denied
     if _agent_context_cb is None:
         return ToolResult(success=False, error="agent_context is not wired")
     try:
         result = _agent_context_cb(
-            session_key, peer.conv_id_prefix, action, focus or "",
+            session_key, peer.conv_id_prefix, action, focus or "", spec,
         )
     except Exception as exc:
         _logger.exception("agent_context callback failed")
@@ -311,4 +360,97 @@ def talk(text: str, **kwargs) -> ToolResult:
         return ToolResult(success=False, error=f"talk failed: {type(exc).__name__}")
     if not isinstance(result, ToolResult):
         return ToolResult(success=False, error="talk callback returned nothing")
+    return result
+
+
+FEED_CARD_TYPES = ("diff", "agent_action", "audit_report")
+FEED_CARD_TITLE_MAX = 200
+FEED_CARD_BODY_MAX = 100_000
+
+
+def feed_card(
+    type: str,
+    title: str,
+    body: str = "",
+    file: str = "",
+    additions: int | None = None,
+    deletions: int | None = None,
+    task_id: str = "",
+    **kwargs,
+) -> ToolResult:
+    session_key = kwargs.get("session_key", "")
+    if not isinstance(type, str) or type not in FEED_CARD_TYPES:
+        return ToolResult(
+            success=False,
+            error=f"feed_card type must be one of {', '.join(FEED_CARD_TYPES)}",
+        )
+    if not isinstance(title, str) or not title.strip():
+        return ToolResult(success=False, error="feed_card title is empty")
+    title = title.strip()
+    if len(title) > FEED_CARD_TITLE_MAX:
+        return ToolResult(
+            success=False,
+            error=f"feed_card title exceeds {FEED_CARD_TITLE_MAX} characters",
+        )
+    if not isinstance(body, str):
+        return ToolResult(success=False, error="feed_card body must be a string")
+    body = body.strip()
+    if len(body) > FEED_CARD_BODY_MAX:
+        return ToolResult(
+            success=False,
+            error=f"feed_card body exceeds {FEED_CARD_BODY_MAX} characters",
+        )
+    file_path = ""
+    if file:
+        if not isinstance(file, str):
+            return ToolResult(success=False, error="feed_card file must be a string")
+        candidate = file.strip().replace("\\", "/")
+        if (
+            candidate.startswith(("/", "~"))
+            # BUG #5: any colon is rejected — the first-segment-only check
+            # missed drive-letter colons in later segments (`a/C:/x.py`).
+            or ":" in candidate
+            or ".." in candidate.split("/")
+        ):
+            return ToolResult(
+                success=False,
+                error="feed_card file must be a project-relative path",
+            )
+        file_path = candidate
+    counts = {}
+    for label, value in (("additions", additions), ("deletions", deletions)):
+        if value is None:
+            counts[label] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            return ToolResult(
+                success=False, error=f"feed_card {label} must be an integer",
+            )
+        if value < 0:
+            return ToolResult(
+                success=False, error=f"feed_card {label} must not be negative",
+            )
+        counts[label] = value
+    if not isinstance(task_id, str):
+        return ToolResult(success=False, error="feed_card task_id must be a string")
+    if _feed_card_cb is None:
+        return ToolResult(success=False, error="feed_card is not wired")
+    fields = {
+        "card_type": type,
+        "title": title,
+        "body": body,
+        "file_path": file_path,
+        "additions": counts["additions"],
+        "deletions": counts["deletions"],
+        "task_id": task_id.strip(),
+    }
+    try:
+        result = _feed_card_cb(session_key, fields)
+    except Exception as exc:
+        _logger.exception("feed_card callback failed")
+        return ToolResult(
+            success=False, error=f"feed_card failed: {exc.__class__.__name__}"
+        )
+    if not isinstance(result, ToolResult):
+        return ToolResult(success=False, error="feed_card callback returned nothing")
     return result

@@ -22,7 +22,10 @@
 # Responses from agents are routed back to the project tab via _agent_to_project lookup.
 
 import logging
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from agent.tools import ToolResult
 
 import gi
 
@@ -481,8 +484,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self._agent_runtime_handler.send_to_special_agent(session_key, text)
 
         # NOTE: the former _on_show_feed_subtab closure was deleted with the
-        # B.2 crabcard-interception block — feeding the registry's tab-switch
-        # callback was its only consumer (dead since SP4).
+        # B.2 feed-interception block — feeding the registry's tab-switch
+        # callback was its only consumer (dead since SP4). SPEC-45: cards are
+        # posted by the feed_card tool, so no interception exists at all.
+        # (The text-extraction mechanism it belonged to is deleted.)
 
         # FeedHandler created before FeedTab — set_feed_tab() called after FeedTab exists
         self._feed_handler = FeedHandler(
@@ -583,9 +588,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Inject FeedTab into LeftPanel's Projects notebook "Feed" sub-tab
         self._left_panel.set_feed_tab(self._feed_tab)
 
-        # SPEC-06 SP5c-2 B.2: the ChatRenderHandler → FeedHandler crabcard
+        # SPEC-06 SP5c-2 B.2: the ChatRenderHandler → FeedHandler
         # interception wiring was deleted here (dead since SP4 — CRH stored
-        # the callback but never invoked it; ARH owns extraction upstream).
+        # the callback but never invoked it). SPEC-45 removed the text
+        # extraction that remained: cards come from the feed_card tool.
         self._chat_render_handler.set_project_name("")  # set per-project when project opens
 
         # ── Wire project lifecycle → FeedHandler + CrabWatch ──────────────────────────
@@ -593,7 +599,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # When project OPENS:
         #   1. FeedHandler loads feed.json for the project
         #   2. CrabWatch starts watching the project directory
-        #   3. ChatRenderHandler gets the project name for crabcard context
+        #   3. ChatRenderHandler gets the project name for render context
         #   4. Feed bar is updated
         #
         # When project CLOSES:
@@ -1045,11 +1051,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self._main_content.show_diff_viewer(viewer)
 
     def _wire_group_tool_callbacks(self) -> None:
-        """Install agent_context, canvas, and talk callbacks.
+        """Install agent_context, canvas, talk, and feed_card callbacks.
 
-        agent_context runs on the caller's tool-loop thread. It must use
+        agent_context runs on the caller's tool-loop thread. A peer edit uses
         cancel_peer (not cancel) so the global _cancel_requested flag stays
-        down. Canvas hops to the GTK thread and waits. Talk does not touch GTK.
+        down, then waits until that loop is idle. A self-edit does not cancel:
+        the caller is the loop, and waiting for idle would deadlock. It edits
+        the in-memory conversation and writes that back to the conversation file.
+        Canvas hops to the GTK thread and waits. Talk does not touch GTK.
         """
         import threading
         import time
@@ -1060,6 +1069,7 @@ class MainWindow(Gtk.ApplicationWindow):
             cancel_all_processes,
             set_agent_context_callback,
             set_canvas_callback,
+            set_feed_card_callback,
             set_talk_callback,
         )
 
@@ -1069,10 +1079,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 return agent.display_name
             return session_key.split(":", 1)[-1]
 
-        def _agent_context(_caller, peer, action, focus):
+        def _stop_peer(peer, missing_error):
             rt = self._agent_runtime_handler.runtime_for(peer)
             if rt is None:
-                return ToolResult(success=False, error="could not clear" if action == "clear" else "could not compact")
+                return ToolResult(success=False, error=missing_error)
             was_active = rt.is_loop_active(peer)
             # An idle peer must not be added to _cancelled: that set is only
             # cleared when a running loop notices it, so a leftover mark
@@ -1089,11 +1099,156 @@ class MainWindow(Gtk.ApplicationWindow):
                         break
             if not idle:
                 return ToolResult(success=False, error="peer loop still active")
+            return {"was_active": was_active, "killed": killed}
+
+        def _note(peer, text):
+            def _ui(payload=text):
+                try:
+                    self._show_context_note(peer, payload)
+                except Exception:
+                    logger.exception("agent_context note failed for %s", peer)
+                return False
+
+            GLib.idle_add(_ui)
+
+        def _edit_output(peer, label, result, verb):
+            if not result.get("ok") and int(result.get("messages_removed", 0)) == 0:
+                return ToolResult(
+                    success=False,
+                    error=result.get("error") or "could not edit",
+                )
+            removed = int(result.get("messages_removed", 0))
+            kept = int(result.get("messages_kept", 0))
+            indexes = result.get("removed_text") or "none"
+            freed = int(result.get("tokens_freed", 0))
+            if result.get("persisted"):
+                file_bit = "Wrote the conversation file."
+            elif removed:
+                file_bit = "The conversation file was not written."
+            else:
+                file_bit = "Nothing changed."
+            text = (
+                f"{verb} {label}. Removed {removed} messages ({indexes}), "
+                f"kept {kept}. Freed ~{freed} tokens. {file_bit}"
+            )
+            if removed:
+                _note(
+                    peer,
+                    f"Edited context. Removed {removed} messages, "
+                    f"freed ~{freed} tokens. {file_bit}",
+                )
+            if not result.get("ok"):
+                return ToolResult(
+                    success=False,
+                    error=(
+                        text
+                        + " Do not repeat these indexes; the in-memory conversation already changed."
+                    ),
+                )
+            return ToolResult(success=True, output=text)
+
+        def _agent_context(_caller, peer, action, focus, spec=None):
+            own = _caller == peer
+            handler = self._agent_runtime_handler
             label = _peer_label(peer)
-            state = "Stopped an active loop." if was_active else "Agent was idle."
-            killed_bit = f" killed={killed}." if killed else ""
+
+            if action == "inspect":
+                result = handler.inspect_conversation(peer, protect_open_turn=own)
+                if not result.get("ok"):
+                    return ToolResult(
+                        success=False,
+                        error=result.get("error") or "could not inspect",
+                    )
+                return ToolResult(success=True, output=result.get("output") or "")
+
+            if own:
+                # This call is on the loop thread. Do not cancel or wait.
+                if action == "clear":
+                    result = handler.trim_own_conversation(peer)
+                    out = _edit_output(
+                        peer, label, result, "cleared finished context on",
+                    )
+                elif action == "compact":
+                    result = handler.compact_conversation(
+                        peer, focus or "", protect_open_turn=True,
+                    )
+                    if not isinstance(result, dict):
+                        return ToolResult(success=False, error="could not compact")
+                    removed = int(result.get("messages_removed", 0))
+                    freed = int(result.get("tokens_freed", 0))
+                    persisted = bool(result.get("persisted"))
+                    file_bit = (
+                        "Wrote the conversation file."
+                        if persisted
+                        else "The conversation file was not written."
+                    )
+                    if removed or freed:
+                        _note(
+                            peer,
+                            f"Compacted own context. Removed {removed} messages, "
+                            f"freed ~{freed} tokens. {file_bit}",
+                        )
+                    text = (
+                        f"compacted {label}. Removed {removed} messages, "
+                        f"freed ~{freed} tokens. {file_bit} "
+                        "The open turn was kept."
+                    )
+                    out = (
+                        ToolResult(success=True, output=text)
+                        if persisted
+                        else ToolResult(success=False, error=text)
+                    )
+                elif action == "edit":
+                    out = _edit_output(
+                        peer,
+                        label,
+                        handler.edit_conversation(peer, spec, protect_open_turn=True),
+                        "edited",
+                    )
+                else:
+                    return ToolResult(
+                        success=False,
+                        error="action must be clear, compact, inspect, or edit",
+                    )
+                return out
+
+            if action == "edit":
+                preview = handler.plan_conversation_edit(
+                    peer, spec, protect_open_turn=False,
+                )
+                if not preview.get("ok"):
+                    return ToolResult(
+                        success=False,
+                        error=preview.get("error") or "could not edit",
+                    )
+                stopped = _stop_peer(peer, "could not edit")
+                if isinstance(stopped, ToolResult):
+                    return stopped
+                result = handler.edit_conversation(peer, spec, protect_open_turn=False)
+                if not result.get("ok") and int(result.get("messages_removed", 0)) == 0:
+                    err = result.get("error") or "could not edit"
+                    return ToolResult(
+                        success=False,
+                        error=f"{err}. The peer was stopped; messages were not changed.",
+                    )
+                state = "Stopped an active loop." if stopped["was_active"] else "Agent was idle."
+                killed_bit = f" killed={stopped['killed']}." if stopped["killed"] else ""
+                edited = _edit_output(peer, label, result, "edited")
+                if edited.success:
+                    edited = ToolResult(
+                        success=True,
+                        output=f"{edited.output} {state}{killed_bit}",
+                    )
+                return edited
+
+            missing = "could not clear" if action == "clear" else "could not compact"
+            stopped = _stop_peer(peer, missing)
+            if isinstance(stopped, ToolResult):
+                return stopped
+            state = "Stopped an active loop." if stopped["was_active"] else "Agent was idle."
+            killed_bit = f" killed={stopped['killed']}." if stopped["killed"] else ""
             if action == "clear":
-                ok = self._agent_runtime_handler.clear_conversation(peer)
+                ok = handler.clear_conversation(peer)
                 if not ok:
                     return ToolResult(success=False, error="could not clear")
 
@@ -1112,7 +1267,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         "The next delegation is the whole brief."
                     ),
                 )
-            result = self._agent_runtime_handler.compact_conversation(peer, focus or "")
+            result = handler.compact_conversation(peer, focus or "")
             if not isinstance(result, dict):
                 return ToolResult(success=False, error="could not compact")
 
@@ -1184,6 +1339,68 @@ class MainWindow(Gtk.ApplicationWindow):
         set_agent_context_callback(_agent_context)
         set_canvas_callback(_canvas)
         set_talk_callback(_talk)
+        set_feed_card_callback(self._post_feed_card)
+
+    def _post_feed_card(self, session_key: str, fields: dict) -> "ToolResult":
+        """feed_card tool callback — build a FeedCardData and add it to the feed.
+
+        Runs on the caller's tool-loop thread. FeedHandler.add_card assigns
+        the id synchronously but defers ALL GTK work — the card widget build
+        AND the batch-bar update — to the main loop via GLib.idle_add, so no
+        idle hop and no event wait are needed here — unlike _canvas, which
+        must wait for a surface to mount.
+
+        project_name and tab_key come from DIFFERENT sources BY DESIGN
+        (SPEC-12 R7 + the SP5b divergence pin): project_name is the ACTIVE
+        project (the card feeds where the PM is looking); tab_key is the
+        emitting agent's own mounted tab (where the turn rendered). Do not
+        unify them.
+        """
+        from datetime import UTC, datetime
+
+        from agent.special_agents import get_special_agent
+        from agent.tools import ToolResult
+        from models.feed_card import FeedCardData
+
+        project_name = self._project_handler.get_active_project_name()
+        if not project_name:
+            # BUG #3: the turn guard (turn_ui.py) reads the agent runtime's
+            # `_active_project`; when it is set but the project handler
+            # reports none, fall back to the runtime's project so the card is
+            # not silently dropped (agent_action card already suppressed).
+            arh = self._agent_runtime_handler  # however window holds it
+            if arh is not None and getattr(arh, "_active_project", None):
+                project_name = arh._active_project[0]
+        if not project_name:
+            return ToolResult(success=False, error="feed_card needs an open project")
+        agent_def = get_special_agent(session_key)
+        author = (
+            agent_def.display_name
+            if agent_def is not None and getattr(agent_def, "display_name", "")
+            else session_key.split(":", 1)[-1]
+        )
+        card = FeedCardData(
+            card_type=fields["card_type"],
+            source="agent",
+            title=fields["title"],
+            body=fields["body"],
+            author=author,
+            timestamp=datetime.now(UTC),
+            project_name=project_name,
+            file_path=fields["file_path"] or None,
+            additions=fields["additions"],
+            deletions=fields["deletions"],
+            task_id=fields["task_id"] or None,
+            metadata={
+                "session_key": session_key,
+                "tab_key": self._agent_runtime_handler._reply_key(session_key),
+            },
+        )
+        card_id = self._feed_handler.add_card(card)
+        return ToolResult(
+            success=True,
+            output=f"posted {card.card_type} card {card_id}",
+        )
 
     def _clear_chat_box(self, session_key: str) -> None:
         """Empty the chat surface for a session. /clear UI side effect.
@@ -1227,6 +1444,22 @@ class MainWindow(Gtk.ApplicationWindow):
             f"🧹 Compacted. Removed {removed} message"
             f"{'s' if removed != 1 else ''}, freed ~{freed:,} tokens."
         )
+        bubble = self._chat_render_handler.render_sync(
+            "Agent", text, session_key, agent_name=None
+        )
+        if bubble is not None:
+            chat_box.append(bubble)
+
+    def _show_context_note(self, session_key: str, text: str) -> None:
+        """One line in the chat after a surgical context edit.
+
+        The old bubbles stay. The note says the model's context and the
+        conversation file changed. Runs on the main thread.
+        """
+        chat_box = self._main_content.get_chat_box_for_session(session_key)
+        if chat_box is None:
+            logger.debug("_show_context_note: no chat box for %s", session_key)
+            return
         bubble = self._chat_render_handler.render_sync(
             "Agent", text, session_key, agent_name=None
         )

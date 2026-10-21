@@ -33,8 +33,8 @@ def _make_handler(fake_glib):
     handler._fh = MagicMock()
     # The crh double must be typed for the non-streaming path: a MagicMock
     # return from is_streaming() is truthy, which would send
-    # _do_response_complete down the streaming/crabcard branch with a
-    # MagicMock text (same setup the existing drawer-emission tests use).
+    # _do_response_complete down the streaming branch with a MagicMock text
+    # (same setup the existing drawer-emission tests use).
     handler._crh.is_streaming.return_value = False
     handler._active_project = ("test", "/tmp/test")
     handler._agents = {

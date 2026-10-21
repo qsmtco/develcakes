@@ -21,6 +21,8 @@ tools:
   - jev_ask
   - canvas
   - talk
+  - agent_context
+  - feed_card
 self_improvement:
   bug_journal: true
   project_rules: true

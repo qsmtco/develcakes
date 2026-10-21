@@ -208,7 +208,7 @@ class RuntimeTurnUiMixin:
         # BUG #4: Only the feed-card logic needs _active_project; bubble emissions
         # and _pending_tool_args are moved outside this guard so they fire even
         # when no project is open (the drawer works offline).
-        if self._fh is not None and self._active_project is not None:
+        if self._fh is not None and self._active_project is not None and name != "feed_card":
             project_name, _ = self._active_project
 
             # Build human-readable title from tool name and args
@@ -322,7 +322,7 @@ class RuntimeTurnUiMixin:
 
                 # UIRESP2-T2 Edit C: store the FULL tool output. The 2,000-char
                 # limit is a RENDER concern (ui/views/feed_card.py); truncating
-                # here made the stored text lossy, so copy/crabcard/audit saw a
+                # here made the stored text lossy, so copy/feed/audit saw a
                 # silent 2,000-char prefix. Only the large storage cap applies,
                 # and it warns when it fires.
                 display = output_text or ""
@@ -449,13 +449,7 @@ class RuntimeTurnUiMixin:
         """Main-thread portion of _on_response_complete.
 
         Phase B: Prevent duplicate bubbles.
-        Phase C: Extract crabcard blocks from streaming text and route to the feed.
-
-        When streaming was active: extract crabcards from sb.plain_text BEFORE
-        end_streaming(), then overwrite sb.plain_text with cleaned text so
-        _finalize() renders the bubble without crabcard blocks.
-
-        When streaming was not active: extract from the text arg (non-streaming path).
+        Feed cards are posted by the `feed_card` tool, not extracted from text.
 
         Header fix: local special agents are NOT in AgentManager (only gateway
         agents are — see gateway_handler.on_connected). Their display name
@@ -522,32 +516,10 @@ class RuntimeTurnUiMixin:
             # RACE-FIX: The authoritative full text is the `text` argument from the
             # runtime (the complete LLM response). sb.plain_text may be stale if the
             # handler's throttle skipped update_streaming calls for later chunks.
-            # Overwrite sb.plain_text with the full text BEFORE crabcard extraction
-            # so _finalize always renders the complete message.
+            # Overwrite sb.plain_text with the full text BEFORE _finalize
+            # so it always renders the complete message.
             if was_streaming and text:
                 self._crh.set_streaming_text(session_key, text)
-
-            # Phase C: Extract crabcards from the authoritative text before end_streaming
-            if was_streaming and project_name and self._fh is not None:
-                from utils.crabcard_parser import extract_crabcards
-                full_text = self._crh.get_streaming_text(session_key) or ""
-                if full_text:
-                    cleaned, cards = extract_crabcards(full_text, project_name, "Special Agent")
-                    if cards:
-                        # Batch all cards from one response into a single main-thread
-                        # pass — avoids N idle callbacks racing the vadjustment.
-                        for card_data in cards:
-                            card_data.project_name = project_name
-                            card_data.metadata["session_key"] = session_key
-                            card_data.metadata["tab_key"] = (
-                                reply_key)
-                            # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
-                            # crabcards must resolve to the emitting session's tab
-                            # after the window's old linkage callback died.
-                        self._fh.add_cards_batch(cards)
-                        # Overwrite streaming text with cleaned version so
-                        # end_streaming._finalize renders the bubble without crabcard blocks
-                        self._crh.set_streaming_text(session_key, cleaned)
 
             # Phase B: end_streaming() finalizes the bubble (uses current sb.plain_text).
             # Pass resolved_name so local special agents get their header.
@@ -567,7 +539,7 @@ class RuntimeTurnUiMixin:
                 mount_key=reply_key,
             )
 
-            # Non-streaming fallback: render from text argument with crabcard extraction
+            # Non-streaming fallback: render from the text argument
             # Defensive: if response completed with empty text and no streaming bubble,
             # render a fallback message so the user sees feedback instead of silence.
             if not was_streaming and not text:
@@ -582,27 +554,10 @@ class RuntimeTurnUiMixin:
                         chat_box.append(bubble)
 
             if not was_streaming and text:
-                if project_name and self._fh is not None:
-                    from utils.crabcard_parser import extract_crabcards
-                    cleaned, cards = extract_crabcards(text, project_name, "Special Agent")
-                    if cards:
-                        # Batch: single idle callback, single smart scroll
-                        for card_data in cards:
-                            card_data.project_name = project_name
-                            card_data.metadata["session_key"] = session_key
-                            card_data.metadata["tab_key"] = (
-                                reply_key)
-                            # SP5b bug #5: stamp tab linkage at CONSTRUCTION —
-                            # same contract as the streaming block above.
-                        self._fh.add_cards_batch(cards)
-                    text_for_bubble = cleaned if cards else text
-                else:
-                    text_for_bubble = text
-
                 chat_box = self._resolve_chat_box(session_key)
                 if chat_box is not None:
                     bubble = self._crh.render_sync(
-                        "Agent", text_for_bubble, session_key, agent_name=resolved_name or "Agent",
+                        "Agent", text, session_key, agent_name=resolved_name or "Agent",
                         mount_key=reply_key,
                     )
                     if bubble is not None:

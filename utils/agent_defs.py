@@ -166,10 +166,17 @@ def _seed_defaults() -> None:
                 except OSError as e:
                     logger.warning("Failed to seed default agent %s: %s", fname, e)
 
-    for tool in ("diary", "project_memory", "jev_ask", "canvas", "talk"):
+    for tool in (
+        "diary",
+        "project_memory",
+        "jev_ask",
+        "canvas",
+        "talk",
+        "agent_context",
+        "feed_card",
+    ):
         for agent_name in ("Coder", "Debugger", "Supervisor"):
             ensure_builtin_tool(agent_name, tool)
-    ensure_builtin_tool("Supervisor", "agent_context")
 
 
 _BUILTIN_AGENT_FILES = {

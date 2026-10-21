@@ -89,10 +89,11 @@ def set_approval_callback(cb: Callable[[str, str, dict], bool] | None) -> None:
 
 
 def set_agent_context_callback(cb) -> None:
-    """Install the supervisor peer clear/compact callback.
+    """Install the context edit callback.
 
-    Trigger: the ``agent_context`` tool handler, after the role check.
-    Signature ``(caller_session_key, peer_session_key, action, focus) -> ToolResult``.
+    Trigger: the ``agent_context`` tool handler, after target resolution.
+    Signature ``(caller_session_key, target_session_key, action, focus, spec) -> ToolResult``.
+    ``spec`` is the drop/keep selection for ``edit``, otherwise None.
     """
     from agent.group_tools import set_agent_context_callback as _set
     _set(cb)
@@ -114,6 +115,16 @@ def set_talk_callback(cb) -> None:
     Trigger: the ``talk`` tool handler. Signature ``(text,) -> ToolResult``.
     """
     from agent.group_tools import set_talk_callback as _set
+    _set(cb)
+
+
+def set_feed_card_callback(cb) -> None:
+    """Install the project-feed card callback.
+
+    Trigger: the ``feed_card`` tool handler, after every field is validated.
+    Signature ``(session_key, fields) -> ToolResult``.
+    """
+    from agent.group_tools import set_feed_card_callback as _set
     _set(cb)
 
 
@@ -2087,15 +2098,41 @@ def _register_tools() -> None:
         ToolDefinition(
             name="agent_context",
             description=(
-                "Supervisor only. clear or compact a peer agent's working "
-                "context. clear means the next brief is the whole task."
+                "Edit this agent's own working context, or a peer's when the "
+                "caller is the supervisor. inspect lists message indexes and "
+                "sizes. edit drops or keeps those indexes. A tool call and its "
+                "results move together. On yourself the running tool call stays, "
+                "and the edited conversation is written back to the conversation file. "
+                "clear and compact still reset or summarize a peer."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "agent": {"type": "string", "description": "Peer display name or role"},
-                    "action": {"type": "string", "enum": ["clear", "compact"]},
+                    "agent": {
+                        "type": "string",
+                        "description": "self, or a peer display name or role",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["clear", "compact", "inspect", "edit"],
+                    },
                     "focus": {"type": "string", "description": "What compact should keep"},
+                    "drop": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "edit only. Indexes to remove. Integers or inclusive "
+                            "ranges like \"4-12\". Do not pass with keep."
+                        ),
+                    },
+                    "keep": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "edit only. Indexes to keep. Other unlocked messages "
+                            "are removed. Do not pass with drop."
+                        ),
+                    },
                 },
                 "required": ["agent", "action"],
             },
@@ -2226,6 +2263,37 @@ def _register_tools() -> None:
             requires_approval=False,
         ),
         lambda text, **kwargs: _group.talk(text, **kwargs),  # type: ignore
+    )
+
+    _TOOLS["feed_card"] = (
+        ToolDefinition(
+            name="feed_card",
+            description=(
+                "Post a card to the project Feed. type is diff, agent_action, "
+                "or audit_report. Returns the new card id."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["diff", "agent_action", "audit_report"],
+                    },
+                    "title": {"type": "string", "description": "One line, max 200 chars"},
+                    "body": {"type": "string", "description": "Card text, max 100,000 chars"},
+                    "file": {"type": "string", "description": "Project-relative path"},
+                    "additions": {"type": "integer", "description": "Lines added"},
+                    "deletions": {"type": "integer", "description": "Lines removed"},
+                    "task_id": {"type": "string", "description": "Optional work unit id"},
+                },
+                "required": ["type", "title"],
+            },
+            requires_approval=False,
+        ),
+        lambda type, title, body="", file="", additions=None, deletions=None,  # type: ignore
+               task_id="", **kwargs: _group.feed_card(
+            type, title, body, file, additions, deletions, task_id, **kwargs
+        ),
     )
 
 

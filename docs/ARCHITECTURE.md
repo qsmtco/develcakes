@@ -221,7 +221,6 @@ develcakes/
     ├── block_parser.py          # extract_blocks() — split message text into typed segments (code, quote, terminal, heading, task)
     ├── config.py                # config path helpers — get_config_dir(), get_projects_dir(), get_gateway_url(), COMMAND_PREFIX
     ├── conversation_store.py    # Snapshot creation — build ConversationSnapshot from message lists and git diffs
-    ├── crabcard_parser.py       # extract_crabcards() — parse ```crabcard blocks from agent chat into FeedCardData (Phase 5)
     ├── diff_parser.py           # parse_diff() — unified diff → FileDiff/ParsedDiff data (Phase 7)
     ├── env_security.py          # get_scrubbed_env() — allowlisted env dict for subprocesses (MED-2 / CRIT-2)
     ├── escaping.py              # escape_for_pango(), xml_escape_text() — Pango-aware XML escape
@@ -2057,7 +2056,7 @@ The API-schema filter in `get_tool_definitions_for_api(allowed_tools)`
 remains as a *prompt-level* optimization. It is no longer the sole
 authorization mechanism.
 
-**Group tools (SPEC-GROUP-AGENT-TOOLS).** `diary`, `project_memory`, `jev_ask`, `canvas`, and `talk` are registered beside the file tools. Handlers live in `agent/group_tools.py`. `agent_context`, and `project_memory` actions `promote` and `supersede`, succeed only when `SpecialAgentDef.role == "supervisor"`. `ui/window.py` installs the three callbacks. `AgentRuntime.cancel_peer` marks one session in `_cancelled` and does not set `_cancel_requested`. A canvas tab's session key is `canvas:<slug>`: `create_chat_tab` skips `render_welcome`, and `ChatHandler.on_send` returns before it reads the input buffer. `talk` reads `<config_dir>/speech.yaml`. `{{MEMORY_INDEX}}` is filled from `.crabcakes/memory/INDEX.md` by `prompts/system/agent-tools.md`.
+**Group tools (SPEC-GROUP-AGENT-TOOLS).** `diary`, `project_memory`, `jev_ask`, `canvas`, and `talk` are registered beside the file tools. Handlers live in `agent/group_tools.py`. `agent_context` lets any special agent inspect or surgically edit its own conversation: the running tool call stays, and the in-memory messages are written back to the conversation file. `clear` and `compact` on a peer, and `project_memory` actions `promote` and `supersede`, succeed only when `SpecialAgentDef.role == "supervisor"`. `ui/window.py` installs the three callbacks. `AgentRuntime.cancel_peer` marks one session in `_cancelled` and does not set `_cancel_requested`. A canvas tab's session key is `canvas:<slug>`: `create_chat_tab` skips `render_welcome`, and `ChatHandler.on_send` returns before it reads the input buffer. `talk` reads `<config_dir>/speech.yaml`. `{{MEMORY_INDEX}}` is filled from `.crabcakes/memory/INDEX.md` by `prompts/system/agent-tools.md`.
 
 ### 3.21o `agent/config.py` — LLM Provider Config (Phase 1.1)
 
@@ -2937,7 +2936,7 @@ update_card_badge(card_widget: Gtk.Widget, accepted: bool | None) -> None
     # Post-construction badge update — called by FeedHandler after accept/reject
 ```
 
-**card_type key determines card variant and icon** (see `models/feed_card.py` for the authoritative `css_class_for_type()` mapping; `utils/crabcard_parser.py` for the wire format):
+**card_type key determines card variant and icon** (see `models/feed_card.py` for the authoritative `css_class_for_type()` mapping; `agent/tools.py` `_TOOLS["feed_card"]` for the wire format):
 - `file_created` — green dot icon, CSS: `feed-card-file-new`
 - `file_modified` — amber dot icon, CSS: `feed-card-file-mod`
 - `file_deleted` — red dot icon, CSS: `feed-card-file-del`
@@ -3002,7 +3001,7 @@ def format_feed_timestamp(ts) -> str:
 
 ### 3.22c `ui/handlers/feed_handler.py` — Project Feed Handler (Phase 5)
 
-**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and `ChatRenderHandler` (crabcard extraction). Delegates rendering to `feed_card.py` (GTK fallback) or the WebKit document, persistence to `feed_store.py`, git ops to `git_ops.py`.
+**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and the `feed_card` tool callback (`MainWindow._post_feed_card`). Delegates rendering to `feed_card.py` (GTK fallback) or the WebKit document, persistence to `feed_store.py`, git ops to `git_ops.py`.
 
 `on_feed_action(card_id, action)` is the document click entry. In HTML mode `_card_widgets` stays empty. The 120 / 40 cap (`MAX_LIVE_CARD_WIDGETS` / `KEEP_NEWEST_CARDS`) applies to document rows when the reader is near the bottom, and is unchanged for GTK widgets otherwise.
 
@@ -3020,9 +3019,9 @@ def format_feed_timestamp(ts) -> str:
 
 **Bounded live-widget window (`MAX_LIVE_CARD_WIDGETS` = 120, `KEEP_NEWEST_CARDS` = 40; SPEC-MEMORY-WIDGET-RATCHET §2.1):** the invariant is **card data is unbounded; card widgets are bounded**. `_cards` retains every card this process has seen; `_card_widgets` (and `FeedTab._cards_by_id`) retain at most `MAX_LIVE_CARD_WIDGETS` `Gtk.Widget`s — freed widget memory is **never returned** to the OS by GTK/glibc (measured: 0 MB returned; 897 MB → 2,177 MB over ~7 h), which is why the bound exists at all: an unbounded widget map ratchets monotonically for the life of the session. `_evict_surplus_card_widgets` runs after every widget-append path (`add_card`, `add_cards_batch`, the project-open render loop, `_load_more`) and releases only victims that lie **entirely above the viewport** (`FeedTab.is_above_viewport`), chosen by `seq_num` across **all** projects — `_card_widgets` is one flat dict while widget creation is keyed on the *card's* project, which need not be the active one. The newest `KEEP_NEWEST_CARDS` by `seq_num` are never candidates, and `_load_more` passes its own page as `exclude` so a click can never re-evict what it just built. Eviction never drops data: the released `FeedCardData` is pushed back onto `_backlog` newest-first (`insert(0, …)`) under `_lock`, so Load More re-renders it (rebuilding the Load More widget if the backlog had been fully drained), and the loader **merges** its rebuilt list with any push that landed during its parse window — survivors first — rather than rebinding. The cap is a bound *when the geometry guard permits*, not an unconditional invariant: an unmeasurable widget or a scrolled-up viewport legitimately leaves the map above the cap. Detail: `SPEC-MEMORY-WIDGET-RATCHET.md` §2.1 / §7.
 
-**`_project_cards` ordering:** `_project_cards[project]` is **newest-first by `seq_num` at every insertion point** — `add_card` and `add_cards_batch` `insert(0, …)`, and the load path sorts the deduped `prev + new_ids` candidates by `seq_num` descending. The order is load-bearing: `get_cards_for_project` drives the batch-bar count and Accept All, both of which `break` at the first non-actionable card, so a card placed at the tail is invisible to both until the project is reopened. Ordering is by `seq_num`, never by provenance — a live arrival during the load's parse window lands at index 0, while ids the feed pruned at compaction sort to the tail and are never promoted to "newest" (a pruned card must not become the first entry Accept All commits).
+**`_project_cards` ordering:** `_project_cards[project]` is **newest-first by `seq_num` at every insertion point** — `add_card` and `add_cards_batch` `insert(0, …)`, and the load path sorts the deduped `prev + new_ids` candidates by `seq_num` descending. The order is load-bearing: `get_cards_for_project` drives the batch-bar count and Accept All, both of which `break` at the first non-actionable card, so a card placed at the tail is invisible to both until the project is reopened. Ordering is by `seq_num`, never by provenance — a live arrival during the load's parse window lands at index 0, while ids the feed pruned at compaction sort to the tail and are never promoted to "newest" (a pruned card must not become the first entry Accept All commits). (Note: `add_cards_batch` shares this insertion path but has had no product callers since SPEC-45 — retained for API compatibility and batch inserts from tests.)
 
-**`_project_seq` concurrency:** `_project_seq[project]` is a per-project counter; the `add_card` increment and the loader's rebuild both run under `_lock`, and the rebuild is a `max()` against the LIVE counter so a card that arrived during the parse window cannot have its `seq_num` reused. Because the counter is per-project, two cards from different projects can share a `seq_num`; when such a tie reaches the eviction victim ordering the tie is broken arbitrarily — documented accepted behaviour (spec erratum #4).
+**`_project_seq` concurrency:** `_project_seq[project]` is a per-project counter; the `add_card` increment and the loader's rebuild both run under `_lock`, and the rebuild is a `max()` against the LIVE counter so a card that arrived during the parse window cannot have its `seq_num` reused. Because the counter is per-project, two cards from different projects can share a `seq_num`; when such a tie reaches the eviction victim ordering the tie is broken arbitrarily — documented accepted behaviour (spec erratum #4). (`add_cards_batch` uses the same counter under `_lock`; it too has no product callers post-SPEC-45.)
 
 **Constructor:**
 ```python
@@ -3217,43 +3216,34 @@ def _maybe_compact(project_path: str) -> None
 - **Documented deviation from the "pure functions — no state" contract:** `_compact_last` / `_compact_rl_lock` keep per-project compaction timestamps for the rate limit. File-I/O orchestration state only (no GTK, no handler state), guarded by its own lock, never evicted (≈100 B per project).
 - **Documented pre-existing limitation:** `_ensure_gitignore_entry`'s read-modify-write is not under the feed flock (audit-accepted, not fixed — locking per-project `.gitignore` writes would be scope creep).
 
-### 3.22e `utils/crabcard_parser.py` — Crabcard Block Parser (Phase 5)
+### 3.22e `feed_card` tool — agent → Project Feed (SPEC-45)
 
-**Responsibility:** Parse `` ```crabcard `` blocks from agent chat messages into `FeedCardData`. Pure function — no GTK, no state. Returns cleaned text with placeholder markers for downstream rendering.
+**Responsibility:** Post a feed card from an agent turn. Replaced the Phase-5
+`utils/crabcard_parser.py` fenced-block mechanism, which SPEC-45 deleted along
+with its two extraction sites and the chat placeholder segment path. There is
+no in-text card syntax any more: the model calls a tool.
 
-**Public API:**
-```python
-def extract_crabcards(text: str, project_name: str, agent_name: str = "agent") -> tuple[str, list[FeedCardData]]
-    # Parse ```crabcard blocks. Returns (cleaned_text, cards).
-    # Cleaned text contains \x00CRABCARD_REF:N\x00 placeholders.
+**Chain:** `agent/tools.py` `_TOOLS["feed_card"]` → `agent/group_tools.py:feed_card()`
+(validates type / title / body / file / counts / task_id, never raises) →
+`MainWindow._post_feed_card(session_key, fields)` (builds `FeedCardData`,
+stamps `project_name` = active project and `metadata["tab_key"]` =
+`_reply_key(session_key)`, calls `FeedHandler.add_card`) → FeedHandler.
 
-def is_crabcards_placeholder(text: str) -> bool
-    # True if text contains a crabcard placeholder marker.
-
-def get_placeholder_index(placeholder: str) -> int | None
-    # Extract card index from placeholder string.
-```
-
-**Crabcard format:**
-```
-```crabcard
-type: <card_type>
-title: <title text>
-file: <optional file path>
-additions: <optional int>
-deletions: <optional int>
-commit_sha: <optional str>
-task_id: <optional str>
----
-<body content — diff text, description, etc.>
-```
-```
+**Tool schema:** `type` (enum: `diff`, `agent_action`, `audit_report`), `title`
+(≤200 chars), `body` (≤100,000 chars), `file` (project-relative, rejection
+filter not a sandbox), `additions`, `deletions`, `task_id`. Required: `type`,
+`title`.
 
 **Architecture rules:**
-- Lives in `utils/` — pure Python, no GTK, no network
-- Imports `models.feed_card.FeedCardData` only
-- No imports from `ui/` or `gateway/`
-- Called from `ui/handlers/chat_render_handler.py` during `render_sync()`
+- The handler lives in `agent/group_tools.py` beside `canvas` / `talk` /
+  `agent_context` — same setter-injection seam, same thread contract.
+- `ui/window.py` installs the callback; no GTK work happens in it
+  (`FeedHandler.add_card` assigns the id synchronously and defers ALL GTK
+  work — the card widget build AND the batch-bar update — to the main loop
+  via `GLib.idle_add`, then returns the id). No idle hop, no event wait.
+- `project_name` (active project) and `tab_key` (the emitting agent's routed
+  tab) come from DIFFERENT sources BY DESIGN — do not unify them.
+- `_post_feed_card` runs on the tool-loop thread, not the main thread.
 
 ---
 
@@ -4039,7 +4029,7 @@ Compaction pruned >0 → feed_handler._surface_prune_card [writer thread]
       → tiny daemon thread: append_feed_card(copy) → rate-limited _maybe_compact
 ```
 
-Accept/reject clicks follow the same update queue. `add_card` / `add_cards_batch` persist via their own per-card threads → `append_feed_card`, and a new card arriving during a project load persists through the writer. **Multiple threads call `append_feed_card` (per-card persist threads, batch thread, prune persist thread) — the feed flock serializes them; that is the concurrency contract, not "a single writer thread."**
+Accept/reject clicks follow the same update queue. `add_card` persists via its own per-card thread → `append_feed_card`, and a new card arriving during a project load persists through the writer. `add_cards_batch` shares that persist path but has had no product callers since SPEC-45 (retained for API compatibility and batch inserts from tests). **Multiple threads call `append_feed_card` (per-card persist threads, batch thread, prune persist thread) — the feed flock serializes them; that is the concurrency contract, not "a single writer thread."**
 
 ## 5. Callback Pattern
 
@@ -4239,7 +4229,7 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_config.py` — agent config loading, provider resolution
 - `tests/test_context.py` — system prompt builder, file context, .gitignore parsing
 - `tests/test_conversation.py` — Conversation, Message, ToolCall data models + token estimation
-- `tests/test_crabcard_parser.py` — crabcard block extraction from agent messages
+- `tests/test_feed_card_tool.py` — the `feed_card` tool callback + project_name/tab_key divergence pin (SPEC-45)
 - `tests/test_crabwatch_handler.py` — CrabWatchHandler: filesystem event debouncing
 - `tests/test_create_project.py` — project creation workflow
 - `tests/test_diff_parser.py` — unified diff parsing → FileDiff/ParsedDiff
@@ -4623,7 +4613,6 @@ develcakes/
     ├── block_parser.py           # ~251 lines — extract_blocks() (Phase 2)
     ├── config.py                 # ~72 lines — config path helpers + COMMAND_PREFIX
     ├── conversation_store.py     # ~139 lines — ConversationSnapshot creation
-    ├── crabcard_parser.py        # ~170 lines — parse crabcard blocks (Phase 5)
     ├── diff_parser.py            # ~321 lines — parse_diff() (Phase 7)
     ├── env_security.py           # ~44 lines — get_scrubbed_env() (MED-2 / CRIT-2)
     ├── escaping.py               # ~187 lines — escape_for_pango(), xml_escape_text()
@@ -4714,7 +4703,6 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── test_context_strategy.py     # Context compaction strategy (41 tests)
     ├── test_connection_sync_handler.py
     ├── test_conversation.py
-    ├── test_crabcard_parser.py
     ├── test_crabwatch_handler.py
     ├── test_create_project.py
     ├── test_diff_parser.py
