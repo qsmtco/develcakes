@@ -6221,7 +6221,7 @@ def test_non_writer_no_worktree(tmp_path):
 
 
 def test_no_lease_no_worktree(tmp_path):
-    """Writer WITHOUT any live lease -> None (project root cwd)."""
+    """The role-default writer WITHOUT a live lease -> None (project root)."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
     project.mkdir()
@@ -6229,6 +6229,45 @@ def test_no_lease_no_worktree(tmp_path):
 
     assert handler._worktree_for_turn(
         "special:coder", _sp2_writer_def(), str(project)
+    ) is None
+
+
+def test_suffixed_writer_gets_worktree_without_lease(tmp_path):
+    """special:coder-2 writes branch agent/special-coder-2, lease or not."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+
+    got = handler._worktree_for_turn(
+        "special:coder-2", _sp2_writer_def(), str(project)
+    )
+    assert got is not None
+    assert os.path.basename(got) == "special-coder-2"
+    assert os.path.isdir(got)
+
+
+def test_first_of_other_role_stays_on_project_root(tmp_path):
+    """special:coder-2 is the default key when the role itself is coder-2."""
+    handler = _sp2_make_handler()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _sp2_git_repo(project)
+    agent = _sp2_writer_def()
+    agent.role = "coder-2"
+
+    assert handler._worktree_for_turn(
+        "special:coder-2", agent, str(project)
+    ) is None
+
+
+def test_suffixed_writer_on_non_git_stays_on_project_root(tmp_path):
+    handler = _sp2_make_handler()
+    project = tmp_path / "plain"
+    project.mkdir()
+
+    assert handler._worktree_for_turn(
+        "special:coder-2", _sp2_writer_def(), str(project)
     ) is None
 
 

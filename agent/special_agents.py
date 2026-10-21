@@ -8,12 +8,12 @@
 # System prompts are loaded from prompts/system/{role}.md via prompt_loader.
 #
 # Adding a new special agent: create a YAML file in the agents config dir,
-# or use the Agent Builder UI. No code changes needed — EXCEPT when the new
-# agent shares a `role` with an existing one. The session key defaults to
-# "special:<role>", so same-role agents collide here and one replaces the
-# other. `role` also selects the prompt template (agent/context.py
-# build_system_prompt), so it cannot be changed to dodge the collision —
-# declare an explicit `session_key:` in that agent's YAML instead.
+# or use the Agent Builder UI. No code changes needed. The registry key
+# defaults to "special:<role>" when the file omits session_key. The Agent
+# Builder save path writes a unique session_key (special:<role>-2, -3, …)
+# when that default is already owned, and keeps role as the prompt
+# selector. A hand-edited file that shares a role and omits session_key
+# still collides here and the later file replaces the earlier one.
 
 from __future__ import annotations
 
@@ -82,11 +82,10 @@ def _load_registry() -> dict[str, SpecialAgentDef]:
         name = agent_def.get("name", "Agent")
         # Session key resolution. Default is derived from the role (legacy
         # behaviour, preserved so existing keys and conversations are stable).
-        # Because the key is role-derived, two agents that share a role collide
-        # and the later one silently replaces the earlier one. The `role` cannot
-        # simply be changed to fix that — it selects the prompt template in
-        # agent/context.py build_system_prompt(). Such an agent needs an
-        # explicit `session_key:` in its YAML instead.
+        # save_agent_def writes a unique session_key for a second agent of
+        # the same role. A hand-edited file that omits session_key still
+        # collides here, and the later one replaces the earlier one. role
+        # stays the prompt selector in agent/context.py build_system_prompt.
         session_key = str(agent_def.get("session_key") or "").strip() or f"special:{role}"
         tools = agent_def.get("tools", [])
 

@@ -416,11 +416,94 @@ def load_agent_def_by_role(role: str) -> dict | None:
     return None
 
 
+# Fields the Agent Builder form does not send. Editing through the UI
+# must not strip them. session_key is the registry identity; role stays
+# the prompt selector, so a second coder keeps role "coder" and gets
+# special:coder-2 rather than replacing special:coder.
+_PRESERVED_ON_EDIT = ("auto_open", "auto_add_to_projects", "session_key")
+
+
+def _implicit_session_key(agent_def: dict) -> str:
+    """Session key a file owns in the registry.
+
+    An explicit session_key wins. Otherwise the key is special:<role>,
+    matching agent/special_agents.py. A file with no session_key still
+    owns that default, so a later same-role save does not take it.
+    """
+    explicit = str(agent_def.get("session_key") or "").strip()
+    if explicit:
+        return explicit
+    role = _derive_role(agent_def).strip()
+    if not role:
+        return ""
+    return f"special:{role}"
+
+
+def _session_keys_owned_by_others(filepath: str, name: str) -> set[str]:
+    """Keys claimed by other agent files. Skips this path and same-name files."""
+    dest = os.path.normcase(os.path.abspath(filepath))
+    owned: set[str] = set()
+    agents_dir = _get_agents_dir()
+    if not os.path.isdir(agents_dir):
+        return owned
+    for fname in os.listdir(agents_dir):
+        if not fname.endswith((".yaml", ".yml", ".json")):
+            continue
+        path = os.path.join(agents_dir, fname)
+        if os.path.normcase(os.path.abspath(path)) == dest:
+            continue
+        data = _parse_agent_file(path)
+        if not isinstance(data, dict):
+            continue
+        if name and data.get("name") == name:
+            continue
+        key = _implicit_session_key(data)
+        if key:
+            owned.add(key)
+    return owned
+
+
+def _assign_session_key(export: dict, filepath: str) -> str:
+    """Keep an explicit key. Otherwise special:<role>, or special:<role>-N."""
+    explicit = str(export.get("session_key") or "").strip()
+    if explicit:
+        return explicit
+    role = _derive_role(export).strip() or "agent"
+    default = f"special:{role}"
+    taken = _session_keys_owned_by_others(filepath, str(export.get("name") or ""))
+    if default not in taken:
+        return default
+    n = 2
+    while n <= 10000:
+        candidate = f"special:{role}-{n}"
+        if candidate not in taken:
+            return candidate
+        n += 1
+    return f"special:{role}-{n}"
+
+
+def _prepare_persisted_def(agent_def: dict, filepath: str) -> dict:
+    """Copy a definition for disk: drop internal keys, preserve, assign key."""
+    export = {k: v for k, v in agent_def.items() if not str(k).startswith("_")}
+    if os.path.isfile(filepath):
+        existing = _parse_agent_file(filepath)
+        if isinstance(existing, dict):
+            for key in _PRESERVED_ON_EDIT:
+                if key not in export and key in existing:
+                    export[key] = existing[key]
+    export["session_key"] = _assign_session_key(export, filepath)
+    return export
+
+
 def save_agent_def(agent_def: dict) -> str:
     """Write an agent definition to ~/.config/develcakes/agents/<name>.yaml.
 
     Creates directory if needed. Returns file path.
     Uses YAML if pyyaml is available, otherwise JSON.
+
+    Writes session_key. The first agent of a role gets special:<role>.
+    Another agent with that role gets special:<role>-2, then -3. An edit
+    that omits session_key keeps the key already in the file.
     """
     agents_dir = _get_agents_dir()
     os.makedirs(agents_dir, exist_ok=True)
@@ -436,24 +519,7 @@ def save_agent_def(agent_def: dict) -> str:
     # Try YAML first
     try:
         import yaml
-        # Build a clean copy without internal keys
-        export = {k: v for k, v in agent_def.items() if not k.startswith("_")}
-
-        # Preserve fields not controlled by the Agent Builder UI.
-        # The form doesn't send auto_open or auto_add_to_projects,
-        # so editing an agent through the UI would strip them. Merge from existing file.
-        _PRESERVED_KEYS = {"auto_open", "auto_add_to_projects"}
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, "r", encoding="utf-8") as ef:
-                    from utils.yaml_load import safe_load_yaml
-                    existing = safe_load_yaml(ef) or {}
-                for key in _PRESERVED_KEYS:
-                    if key not in export and key in existing:
-                        export[key] = existing[key]
-            except Exception:
-                pass  # If we can't read existing, just write what we have
-
+        export = _prepare_persisted_def(agent_def, filepath)
         with open(filepath, "w", encoding="utf-8") as f:
             yaml.dump(export, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         return filepath
@@ -462,7 +528,7 @@ def save_agent_def(agent_def: dict) -> str:
 
     # Fallback to JSON
     filepath = os.path.join(agents_dir, f"{safe_name}.json")
-    export = {k: v for k, v in agent_def.items() if not k.startswith("_")}
+    export = _prepare_persisted_def(agent_def, filepath)
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(export, f, indent=2, ensure_ascii=False)
     return filepath

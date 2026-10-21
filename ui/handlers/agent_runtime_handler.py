@@ -46,6 +46,19 @@ def _null_lock():
     return contextlib.nullcontext()
 
 
+def _suffixed_writer(session_key: str, agent_def: Any) -> bool:
+    """True when this writer is not the role's default session.
+
+    special:coder stays on the project root. special:coder-2 (same role,
+    key assigned by save_agent_def) gets its own worktree. An empty role
+    is not a suffixed writer.
+    """
+    role = str(getattr(agent_def, "role", "") or "").strip().lower()
+    if not role or not isinstance(session_key, str):
+        return False
+    return session_key.casefold() != f"special:{role}"
+
+
 class AgentRuntimeHandler(
     RuntimeSessionMixin,
     RuntimeTurnUiMixin,
@@ -928,15 +941,22 @@ class AgentRuntimeHandler(
     ) -> str | None:
         """SPEC-09 SP2: the worktree cwd for this turn, or None.
 
-        Writer (agent_def.can_write) + a LIVE SP1 lease held by this session
-        -> ensure + return the worktree path under the active project.
-        Non-writer, no lease, expired lease, non-git project, or ANY worktree
-        failure -> None (the turn runs in the project root; the worktree is
-        an optimization with safety rails, never a hard dependency).
+        A writer enters its worktree in two cases:
+        - it holds a LIVE lease (the original special:<role> path), or
+        - its session key is not the role default special:<role>
+          (special:coder-2, special:debugger-3, …).
 
-        Lease-expiry reset (v3 MED): a writer WITHOUT a live lease whose
-        current conv.project_path is a worktree is handled by the caller
-        (this method only decides the NEW path).
+        The first coder and the first debugger stay on the project root
+        unless they hold a lease. Extra same-role writers always get
+        branch agent/<session-id> under <project>/.worktrees/.
+
+        Non-writer, primary writer with no lease, non-git project, or ANY
+        worktree failure -> None (the turn runs in the project root).
+
+        Lease-expiry reset (v3 MED): a primary writer WITHOUT a live lease
+        whose current conv.project_path is a worktree is handled by the
+        caller (this method only decides the NEW path). A suffixed writer
+        stays in its worktree after the lease expires.
         """
         if not getattr(agent_def, "can_write", False):
             return None
@@ -947,7 +967,8 @@ class AgentRuntimeHandler(
             # this helper is the ui-side consumer.
             from utils.work_persistence import find_live_lease
 
-            if find_live_lease(project_path, session_key) is None:
+            leased = find_live_lease(project_path, session_key) is not None
+            if not leased and not _suffixed_writer(session_key, agent_def):
                 return None
             from utils.worktree_manager import WorktreeManager
 
