@@ -2,7 +2,7 @@
 
 **Author:** Qaster (supervisor)
 **Date:** 2026-06-25 (original); §10 addendum 2026-06-26
-**Status:** ⏳ DEFERRED — this proposal is forward-looking research for patterns beyond P1–P7 parity. No implementation has been attempted. The addendum (§10) was accepted (commit `3b3220b`) alongside the P1–P7 spec. Phase 2 remains available as a research reference for future work.
+**Status:** Superseded 2026-10-21 by `PROPOSAL-META.md` Program 2, which takes T1.2 and T1.3 only. T1.4 shipped as JIT context discovery. T1.1 and T1.5 are not scheduled.
 **Severity:** MEDIUM — Phase 1 (P1–P7, shipped via SPEC-CONTEXT-MANAGEMENT-ROADMAP) brings crabcakes to parity with the best open-source agents. This phase goes beyond parity to adopt 2026 frontier patterns from academic papers and production platforms.
 
 **Source research:**

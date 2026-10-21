@@ -3540,9 +3540,11 @@ class AgentRuntime:
                 return (
                     f"[stuck-detection] You've called {tool_name} with the same arguments "
                     f"{same_count} times in recent iterations. You appear to be stuck. "
-                    f"Consider: re-reading the file, checking the error message carefully, "
-                    f"or trying a completely different approach. "
-                    f"If you've tried 3+ approaches without progress, report as blocked."
+                    f"Repeating the same call — or the same call with small argument "
+                    f"changes — will not make progress. Try a different approach: a "
+                    f"different tool, a different target, or step back and report "
+                    f"blocked. If you've tried 3+ approaches without progress, "
+                    f"report as blocked."
                 )
 
             # Check 2: 8+ write operations with no verification commands

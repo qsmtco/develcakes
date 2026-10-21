@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-26
 **Author:** Qaster
-**Status:** ❌ NOT IMPLEMENTED
+**Status:** Superseded 2026-10-21 by `PROPOSAL-META.md` Program 4. The PICK→BUILD→TEST→REVIEW→RECORD cycle is scheduled against work units. This file's `tasks.md` layout and `` `task `` command set are not.
 **Affects:** `models/`, `utils/`, `ui/handlers/`, `ui/window.py`
 
 > **Status (verified 2026-07-12):** ❌ **NOT IMPLEMENTED** — No `utils/implementation_engine.py` or equivalent found in the codebase. The proposal remains an unimplemented design., `prompts/`

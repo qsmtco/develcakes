@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-09
 **Author:** Hermes (external audit session; read-only investigation over 2026-10-08/09)
-**Status:** Draft — for PM review
+**Status:** Adopted whole as Program 1 of `PROPOSAL-META.md` (2026-10-21). That file is the priority. This file is the design.
 **Trigger:** PM question 2026-10-09 ("if you could fix one thing about develcakes, what would it be?") following the `/clear`, smart-scroll-follow and stale-delta investigations of 2026-10-08.
 **Depends on:** nothing to land first — SP1 is self-contained and additive.
 **Related:** `docs/proposals/PROPOSAL-post-responsiveness-priorities.md` (2026-09-11 — the diagnosis this operationalizes for behavioural claims); `docs/specs/SPEC-TEST-DEBT-1.md` (fail-baseline burn-down); `docs/audits/2026-10-08-CLEAR-STORE-RESURRECTION-READ-ONLY.md`; `docs/audits/2026-10-08-STALE-DELTA-SUPERSEDE-FLOOD-READ-ONLY.md`; post-mortem `2026-09-07-SPEC-AUDIT-CLEANUP-2` (`tautological-assertion` pattern).

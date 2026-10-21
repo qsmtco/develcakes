@@ -2,7 +2,7 @@
 
 **Author:** Qaster
 **Date:** 2026-06-12
-**Status:** Active working document
+**Status:** SUPERSEDED 2026-10-21 by `PROPOSAL-META.md`. Do not pick work from this roadmap.
 **Source data:** 28 proposals audited + status banners added in commits `0de3a25` and `d1903d3`
 **Companion files:** All `docs/proposals/*.md` files with sortable `status:` field
 

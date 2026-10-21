@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-17
 **Author:** Lt. Qrusher (per PM direction)
-**Status:** Planning — nothing implemented; read-only investigation only
+**Status:** Superseded 2026-10-21 by `PROPOSAL-META.md` Program 5. Only §1.3 and §1.4 remain scheduled. The rest of this list has shipped or was dropped. Do not treat the status line below the revisions as current.
 **Revisions:** 2026-09-17 (Supervisor) — additions and corrections marked **[SUP-REV]** inline:
 R1 blast-radius fix (local send path already exists; 11 rewiring sites enumerated); decision #1 gated
 ahead of R1; R2 staged to chat-surface-first; removals folded into §2 ordering; stop-all + per-coder
