@@ -318,7 +318,10 @@ CONV_OUTPUT_HEAD = 2 * 1024
 CONV_OUTPUT_TAIL = 8 * 1024
 # read_file already returns a byte/line window whose continuation offset
 # must survive. Head/tail bounding would hide offset=.
-_ALREADY_WINDOWED = frozenset({"read_file"})
+# read_tool_output returns a line-windowed body too (the store reads the
+# whole file and the tool windows by lines), so its continuation notice
+# must survive the same way.
+_ALREADY_WINDOWED = frozenset({"read_file", "read_tool_output"})
 
 # Hardcoded blocklist — always denied even with approval.
 # Commands matching these patterns (substring match) are rejected before
@@ -564,6 +567,43 @@ def _read_file(
         return ToolResult(success=False, error=f"File is not valid UTF-8: {path}")
     except OSError as e:
         return ToolResult(success=False, error=f"Cannot read {path}: {e}")
+
+
+def _read_tool_output(
+    path: str,
+    project_path: str,
+    line: int | None = None,
+    max_lines: int | None = None,
+) -> ToolResult:
+    """Read an offloaded tool output, windowed exactly like read_file.
+
+    Only paths under .crabcakes/tool-outputs/ are readable. The body is
+    windowed exactly like read_file: a read cannot paste a whole blob back
+    into the conversation. A start line past the end ERRORS, the same way
+    read_file does — it does not return an empty success.
+    """
+    from utils.tool_output_store import read_tool_output
+
+    if not project_path:
+        return ToolResult(success=False, error="No active project for this conversation")
+    start = 1 if line is None else line
+    if isinstance(start, bool) or not isinstance(start, int) or start < 1:
+        return ToolResult(success=False, error="line must be an integer >= 1")
+    window = LINE_WINDOW
+    if max_lines is not None:
+        if isinstance(max_lines, bool) or not isinstance(max_lines, int) or max_lines < 1:
+            return ToolResult(success=False, error="max_lines must be an integer >= 1")
+        window = min(max_lines, LINE_WINDOW)
+    result = read_tool_output(project_path, path, line=start, max_lines=window)
+    if not result.get("found"):
+        return ToolResult(success=False, error=result.get("error") or f"Not an offloaded output: {path}")
+    if result.get("total_lines") == 0:
+        return ToolResult(success=True, output=f"[line {start} of {path}]\n(empty)")
+    numbered = _numbered_line_block(result["output"].splitlines(), start)
+    out = f"[line {start} of {path}]\n" + numbered
+    if result.get("truncated"):
+        out += f"\n[... truncated; continue with line={start + result['lines']} ...]"
+    return ToolResult(success=True, output=out)
 
 
 def _is_context_md(path: str, project_path: str) -> bool:
@@ -1868,6 +1908,32 @@ def _register_tools() -> None:
         ),
         lambda path, project_path, limit=None, line=None, max_lines=None, **kwargs:  # type: ignore
             _read_file(path, project_path, None, limit, line, max_lines),
+    )
+
+    # read_tool_output — SPEC-48. Reads back a tool result that compaction
+    # offloaded to disk. The body is windowed exactly like read_file, so a
+    # read cannot paste a whole blob back into the conversation.
+    _TOOLS["read_tool_output"] = (
+        ToolDefinition(
+            name="read_tool_output",
+            description=(
+                "Read back a tool output that was offloaded to disk by "
+                "compaction. path is the .crabcakes/tool-outputs/... path "
+                "from the stub. The body is windowed like read_file."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Store-relative path from the stub"},
+                    "line": {"type": "integer", "description": "1-based start line (default 1)"},
+                    "max_lines": {"type": "integer", "description": "Line count, 1-200 (default 200)"},
+                },
+                "required": ["path"],
+            },
+            requires_approval=False,
+        ),
+        lambda path, project_path, line=None, max_lines=None, **kwargs:  # type: ignore
+            _read_tool_output(path, project_path, line, max_lines),
     )
 
     # write_file

@@ -141,6 +141,12 @@ class RuntimeProviderMixin:
                 }
                 providers.clear()
                 providers.update(cloned)
+                # SPEC-48 Edit 4: the global offload threshold must reach a
+                # running runtime too. refresh_provider_config otherwise swaps
+                # only cfg.providers, so a hand-edited global in agent.json
+                # would never reach this runtime without an app restart. The
+                # per-provider value already rides inside cfg.providers.
+                cfg.tool_output_offload_chars = fresh.tool_output_offload_chars
                 updated += 1
             except Exception:
                 _mod().logger.exception(

@@ -788,7 +788,7 @@ class AgentRuntime:
         # removed in SPEC-AUDIT-CLEANUP-2 Phase 4). Future: configurable
         # via AgentConfig.context_strategy.
         from agent.context_strategy import DefaultContextStrategy
-        self._context_strategy = DefaultContextStrategy()
+        self._context_strategy = DefaultContextStrategy(offload=self._offload_tool_output)
 
     # ── Dispatch helpers ───────────────────────────────────────────────────────
 
@@ -4090,6 +4090,70 @@ class AgentRuntime:
             return
         self._context_strategy.compact(conv, soft_ceiling)
 
+    def _resolve_offload_threshold(self, conv: "Conversation") -> int:
+        """Resolve the offload size threshold for this conversation.
+
+        Order:
+          1. the conversation's provider's tool_output_offload_chars
+             (when > 0)
+          2. the global AgentConfig.tool_output_offload_chars
+          3. 0 (offloading disabled)
+
+        Mirrors _compute_compaction_threshold's resolution order: a
+        per-provider value wins, the global is the fallback, and 0 means
+        "off". The compaction TRIGGER threshold is a different knob and
+        is not consulted here.
+        """
+        threshold = int(getattr(self._config, "tool_output_offload_chars", 0) or 0)
+        try:
+            provider_name = (
+                conv.model.split("/")[0]
+                if conv.model and "/" in conv.model
+                else self._config.default_provider
+            )
+            if provider_name:
+                provider_cfg = self._config.providers.get(provider_name)
+                if provider_cfg is not None:
+                    per_provider = int(
+                        getattr(provider_cfg, "tool_output_offload_chars", 0) or 0
+                    )
+                    if per_provider > 0:
+                        threshold = per_provider
+        except Exception:
+            logger.debug(
+                "_resolve_offload_threshold: per-provider lookup failed; "
+                "using global value", exc_info=True,
+            )
+        return threshold
+
+    def _offload_tool_output(self, conv, request) -> dict | None:
+        """Offload one tool result to the project store.
+
+        Called by the context strategy through the offload callback. The
+        strategy stays free of file I/O (ContextStrategy may only mutate
+        conv.messages and conv._token_estimate_cache).
+
+        Returns the store metadata dict, or None when the body is under
+        the threshold, the conversation has no project, or the write
+        failed. The strategy then falls back to the plain lossy stub.
+        """
+        project_path = getattr(conv, "project_path", None)
+        if not project_path:
+            return None
+        threshold = self._resolve_offload_threshold(conv)
+        if threshold <= 0 or len(request.content) <= threshold:
+            return None
+        from utils.tool_output_store import offload_tool_output
+        try:
+            return offload_tool_output(
+                project_path,
+                request.tool_name,
+                request.content,
+            )
+        except Exception:
+            logger.exception("offload_tool_output failed")
+            return None
+
     def _task_line(self, tool_name: str, args: dict, result) -> str:
         """One progress line for the session task card, or "" to skip."""
         if not isinstance(args, dict):
@@ -4701,6 +4765,7 @@ class AgentRuntime:
                 resolved_model = conv.model
 
             strat = LLMSummarizeStrategy(
+                offload=self._offload_tool_output,
                 llm_provider=lambda sys_p, user_p, model_id=None:
                     self._call_for_summary(
                         system_prompt=sys_p,

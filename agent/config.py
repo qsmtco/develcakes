@@ -47,6 +47,10 @@ class LLMProviderConfig:
     reasoning_effort: str = "off"       # "off" | "low" | "medium" | "high"
     supports_reasoning: bool = False    # send-side guard; card checkbox
 
+    # SPEC-48: per-provider override of the offload size threshold.
+    # 0 = "use the global value". Not exposed in the UI in this phase.
+    tool_output_offload_chars: int = 0
+
 
 @dataclass
 class EnforcementConfig:
@@ -98,6 +102,10 @@ class AgentConfig:
     # instead of sitting on tool_timeout_seconds. A live stream may run longer
     # than this as long as bytes keep arriving.
     provider_failover_attempt_timeout_s: float = 8.0
+    # SPEC-48: size threshold (chars) above which a tool result is offloaded
+    # to <project>/.crabcakes/tool-outputs/ instead of being lossily stubbed.
+    # 0 disables offloading (the pre-SPEC-48 lossy behavior).
+    tool_output_offload_chars: int = 8192
 
 
 def _check_permissions(path: str) -> None:
@@ -164,6 +172,7 @@ def _to_llm_provider(p) -> LLMProviderConfig:
         context_mode=coerce_provider_context_mode(getattr(p, "context_mode", "auto")),
         reasoning_effort=getattr(p, "reasoning_effort", "off") or "off",
         supports_reasoning=bool(getattr(p, "supports_reasoning", False)),
+        tool_output_offload_chars=getattr(p, "tool_output_offload_chars", 0) or 0,
     )
 
 
@@ -274,6 +283,7 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
         provider_failover_attempt_timeout_s=float(
             raw.get("provider_failover_attempt_timeout_s", 8.0) or 8.0
         ),
+        tool_output_offload_chars=int(raw.get("tool_output_offload_chars", 8192) or 0),
     )
 
 

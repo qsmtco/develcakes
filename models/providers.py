@@ -57,6 +57,10 @@ class ProviderConfig:
     reasoning_effort: str = "off"       # "off" | "low" | "medium" | "high"
     supports_reasoning: bool = False    # send-side guard; card checkbox
 
+    # SPEC-48: per-provider override of the offload size threshold.
+    # 0 = "use the global value from agent.json".
+    tool_output_offload_chars: int = 0
+
 
 # ── Context mode validation ───────────────────────────────────────────────────
 

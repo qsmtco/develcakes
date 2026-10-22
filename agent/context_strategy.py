@@ -67,6 +67,18 @@ class CompactionEvent:
     session_key: str = ""
 
 
+@dataclass
+class OffloadRequest:
+    """One tool result the strategy wants offloaded to disk.
+
+    Deliberately minimal: neither stubbing site (prune_tool_outputs,
+    panic_prune) has a session key in scope, and the store's filename is
+    content-derived, not session-derived.
+    """
+    tool_name: str
+    content: str
+
+
 # ── Pluggable strategy protocol ────────────────────────────────────────────────
 
 
@@ -109,8 +121,12 @@ class DefaultContextStrategy:
         protect_is_summary: Defer is_summary messages during trimming (default True).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        offload: Callable[[Conversation, OffloadRequest], dict | None] | None = None,
+    ) -> None:
         self._last_result: CompactionEvent | None = None
+        self._offload = offload
 
     @property
     def last_result(self) -> CompactionEvent | None:
@@ -452,8 +468,7 @@ class DefaultContextStrategy:
                                 break
                         if parent is not None:
                             break  # Found the parent; stop searching.
-            original_len = len(msg.content)
-            stub = self._compacted_stub(tool_name, original_len)
+            stub = self._stub_tool_result(conv, msg, tool_name)
             msg.content = stub
             # The tool message is the copy the meter counts. Drop the
             # duplicate string kept on the parent call.
@@ -482,6 +497,49 @@ class DefaultContextStrategy:
         """
         return f"[compacted \u2014 {tool_name} {n_chars}]"
 
+    def _stub_tool_result(
+        self,
+        conv: Conversation,
+        msg,
+        tool_name: str,
+    ) -> str:
+        """Return the stub that replaces one tool result's body.
+
+        The body is offloaded to disk when the runtime's callback accepts
+        it; otherwise the plain lossy stub is returned. The caller writes
+        the returned text to ``msg.content`` and updates the parent call
+        and the token cache exactly as it does today.
+        """
+        content = msg.content or ""
+        n_chars = len(content)
+        stub = self._compacted_stub(tool_name, n_chars)
+        if self._offload is not None:
+            meta = self._offload(
+                conv,
+                OffloadRequest(
+                    tool_name=tool_name,
+                    content=content,
+                ),
+            )
+            if meta and meta.get("path"):
+                stub = self._offloaded_stub(tool_name, n_chars, meta["path"])
+        return stub
+
+    @staticmethod
+    def _offloaded_stub(tool_name: str, n_chars: int, rel_path: str) -> str:
+        """The stub written when a tool result was offloaded to disk.
+
+        The ``[compacted —`` prefix is matched with ``startswith`` in
+        agent/runtime.py (_body_live_in_transcript, _last_transcript_body_index)
+        and in agent/context_strategy.py (prune_tool_outputs, panic_prune),
+        so the prefix MUST NOT change. The path after the marker is what the
+        agent reads back with the read_tool_output tool.
+        """
+        return (
+            f"[compacted \u2014 {tool_name} {n_chars} → offloaded to "
+            f"{rel_path} (read it back with read_tool_output)]"
+        )
+
     def panic_prune(
         self,
         conv: Conversation,
@@ -508,8 +566,7 @@ class DefaultContextStrategy:
             tool_name, path, _offset, parent = self._tool_result_meta(conv, i)
             if path and path in protected:
                 continue
-            n_chars = len(content)
-            stub = self._compacted_stub(tool_name, n_chars)
+            stub = self._stub_tool_result(conv, msg, tool_name)
             msg.content = stub
             if parent is not None:
                 for tc in parent.tool_calls:
@@ -973,8 +1030,9 @@ Transcript:
         self,
         llm_provider: Callable[[str, str], str] | None = None,
         llm_model_override: str | None = None,
+        offload: Callable[[Conversation, OffloadRequest], dict | None] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(offload=offload)
         self._llm_provider = llm_provider
         self._llm_model_override = llm_model_override
 
