@@ -158,35 +158,19 @@ Ask an agent a question. The question is forwarded to the target agent. If the a
 /ask @Coder "What does the auth module do?"
 ```
 
-### `/delegate @agent "task"`
-
-Delegate a task to an agent. The task text is forwarded — the agent is expected to act on it (e.g. write code, run tests). Same routing as `/ask` but semantically indicates a work assignment.
-
-```
-/delegate @Debugger "Find out why tests are failing"
-```
-
-### `/tell @agent "information"`
-
-Share information with an agent without expecting action. The agent receives the text as context. Useful for giving agents background they should remember.
-
-```
-/tell @Coder "The API rate limit is 100 req/min"
-```
-
 ### `/stop @agent`
 
 Send a stop signal to an agent. Used when an agent is running a long task and you want it to halt.
 
 ### Broadcast Variants
 
-All four commands (`/ask`, `/delegate`, `/tell`, `/stop`) support broadcast by using `@` instead of `@agent_name`:
+Both commands (`/ask`, `/stop`) support broadcast by using `@` instead of `@agent_name`:
 
 ```
-/delegate @ "Review the codebase for security issues"
+/ask @ "What does the auth module do?"
 ```
 
-This forwards the task to all team members.
+This forwards the question to all team members.
 
 ### Other Project Commands
 

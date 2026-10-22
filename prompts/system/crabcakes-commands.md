@@ -5,8 +5,6 @@ Slash commands typed in the project feed chat input — **not** shell commands; 
 | Cmd | Args | What |
 |-----|------|------|
 | `/ask` | `@agent "q"` | Ask an agent a question. Alias `/a`. |
-| `/delegate` | `@agent "task"` | Assign work. Alias `/d`. |
-| `/tell` | `@agent "info"` | Share info; no response expected. |
 | `/stop` | (none) | Stop the current agent. |
 | `/review` | (none) | Git checkpoint. |
 | `/check` | (none) | Show diff since checkpoint. |

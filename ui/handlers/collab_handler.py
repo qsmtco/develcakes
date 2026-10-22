@@ -7,7 +7,7 @@
 #   network: nothing
 #   GTK:     nothing
 #
-# Owns: 4 collaboration commands — ask, delegate, stop, tell
+# Owns: 2 collaboration commands — ask, stop
 # Does NOT own: GTK widgets, gateway client, agent manager
 #
 # Architecture: pure Python. No imports from ui/, gateway/, or agent/.
@@ -20,7 +20,7 @@ class CollabHandler:
     """
     Handles collaboration command execution.
 
-    All 4 commands (ask, delegate, stop, tell) are pure pass-through
+    Both commands (ask, stop) are pure pass-through
     returning CommandResult with routing decisions. The actual routing
     (sending messages to agents) is done by ChatHandler after it receives
     the CommandResult.
@@ -42,24 +42,8 @@ class CollabHandler:
             return CommandResult(handled=True, response_text="No target agent. Usage: /ask @agent — question")
         return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text=cmd.body)
 
-    def cmd_delegate(self, cmd: Command) -> CommandResult:
-        """/delegate @agent — task → forward task to agent (or all if `@`)"""
-        if cmd.is_broadcast:
-            return CommandResult(handled=True, broadcast_targets=cmd.broadcast_targets, forward_text=cmd.body)
-        if not cmd.target_session_key:
-            return CommandResult(handled=True, response_text="No target agent. Usage: /delegate @agent — task")
-        return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text=cmd.body)
-
     def cmd_stop(self, cmd: Command) -> CommandResult:
         """/stop @agent → send stop signal to agent."""
         if not cmd.target_session_key:
             return CommandResult(handled=True, response_text="No target agent. Usage: /stop @agent")
         return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text="stop")
-
-    def cmd_tell(self, cmd: Command) -> CommandResult:
-        """/tell @agent — info → forward info to agent (or all if `@`)"""
-        if cmd.is_broadcast:
-            return CommandResult(handled=True, broadcast_targets=cmd.broadcast_targets, forward_text=cmd.body)
-        if not cmd.target_session_key:
-            return CommandResult(handled=True, response_text="No target agent. Usage: /tell @agent — info")
-        return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text=cmd.body)

@@ -401,7 +401,7 @@ class RuntimeSessionMixin:
             session_key: the agent session key.
             text: the message text.
             reply_target: SPEC-12 (R5 REV 3) — the DISPLAY key this turn's
-                reply renders under. `/ask`+`/delegate`/bubble-forward pass
+                reply renders under. `/ask`/bubble-forward pass
                 the agent's own key (private view); group fan-out passes
                 "project:<name>"; None → the routing key (the project).
                 Never a persistent mark — cleared at turn end (SP3b).

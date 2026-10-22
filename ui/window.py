@@ -701,7 +701,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._command_handler.set_prefix(COMMAND_PREFIX)   # BUG #9 fix: read prefix from config
         # Inject CommandHandler into ChatHandler (ChatHandler calls process_input before send)
         self._chat_handler.set_command_handler(self._command_handler)
-        # Populate CommandHandler with special agent names for @mention resolution in ask/delegate/stop/tell commands
+        # Populate CommandHandler with special agent names for @mention resolution in ask/stop commands
         self._command_handler.set_special_agents(self._agent_runtime_handler.get_special_agents())
         # Wire ReviewHandler into AgentRuntimeHandler (deferred to avoid circular dep in _build order)
         self._agent_runtime_handler.set_review_handler(self._review_handler)

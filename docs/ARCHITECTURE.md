@@ -149,7 +149,7 @@ develcakes/
 │   │   ├── activity_wiring_handler.py  # ActivityDrawer event wiring — gateway + local, online + offline (SPEC-activity-drawer)
 │   │   ├── command_handler.py   # CommandHandler — slash-prefix command parser (Phase 7)
 │   │   ├── review_handler.py    # ReviewHandler — review session lifecycle (Phase 7)
-│   │   ├── collab_handler.py   # CollabHandler — collaboration commands: ask/delegate/stop/tell (Phase 7)
+│   │   ├── collab_handler.py   # CollabHandler — collaboration commands: ask/stop (Phase 7)
 │   │   ├── agent_runtime_handler.py  # AgentRuntimeHandler — local agent UI bridge (Phase 1.4)
 │   │   ├── project_list_handler.py  # ProjectListHandler — project card data + color round-robin
 │   │   ├── crabwatch_handler.py  # ~364 lines — CrabWatchHandler — Gio.FileMonitor filesystem watcher (Phase 5)
@@ -1543,9 +1543,7 @@ The legacy task handler and the work-unit handler were removed in SPEC-49
 ```python
 class CollabHandler:
     def cmd_ask(cmd) -> CommandResult
-    def cmd_delegate(cmd) -> CommandResult
     def cmd_stop(cmd) -> CommandResult
-    def cmd_tell(cmd) -> CommandResult
 ```
 
 ### 3.21f `ui/handlers/agent_command_handler.py` — Agent Response Command Parser (Phase 6.2)
@@ -1587,7 +1585,7 @@ class AgentCommandHandler:
 - `_MAX_COMMANDS_PER_RESPONSE = 3` — max commands parsed per response
 - `_extract_quoted_commands()` function — extracts A2A commands in quoted-payload format (`/cmd @Agent "payload"`) from agent response text. Uses `_parse_quoted_payload()` from `utils/quoting.py` for escape-aware payload extraction. Fenced code blocks (```` ```...``` ````) stripped first. Returns `ParsedCommand` namedtuples. Maximum 3 commands per response.
 
-**Relay mechanism:** `/ask @B "question"` from A → `_pending_asks[B] = A`. When B responds → `_relay_response(A, B, text)` delivers B's answer wrapped as `"[{B} responded]: {text}"`. Only `/ask` and `/delegate` create pending asks — `/tell` is one-way.
+**Relay mechanism:** `/ask @B "question"` from A → `_pending_asks[B] = A`. When B responds → `_relay_response(A, B, text)` delivers B's answer wrapped as `"[{B} responded]: {text}"`. Only `/ask` creates pending asks.
 
 **Sender identity:** Outbound messages to target agents are prefixed with `"[{sender_name} asks]: {question}"` so the target knows who's consulting them — not the human.
 
@@ -3717,9 +3715,7 @@ by an agent in its response text.
 | Command | Effect |
 |---------|--------|
 | `/ask @Agent "question"` | Forward question to target agent; response appears in same tab |
-| `` `delegate @Agent "task"` `` | Assign a task to an agent |
 | `` `stop @Agent` `` | Send stop signal to a collaboration |
-| `` `tell @Agent "info"` `` | Share information with an agent |
 
 **Data flow — `` `ask @Coder "is this edge case valid?"` `` in a project tab:**
 ```

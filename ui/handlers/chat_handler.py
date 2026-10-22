@@ -228,7 +228,7 @@ class ChatHandler:
                                     agent_name="You",
                                     mount_key=result.forward_to,
                                 )
-                        # SPEC-12 §2f (BUG#2/#11/#14): /ask + /delegate open a
+                        # SPEC-12 §2f (BUG#2/#11/#14): /ask opens a
                         # PRIVATE (agent-keyed) tab and route THIS send's reply
                         # there. Idempotent: an existing tab is focused, not
                         # recreated.

@@ -138,24 +138,6 @@ Consult an agent for their expertise. The question is forwarded to the target ag
 
 Aliases: `/a`
 
-### `/delegate @Agent "task"`
-
-Delegate a task to an agent. The task text is forwarded to the target agent.
-
-```
-/delegate @Debugger "Investigate the memory leak in parser.py"
-```
-
-Aliases: `/d`
-
-### `/tell @Agent "information"`
-
-Share information with an agent without expecting a response. The info is forwarded but no response is required.
-
-```
-/tell @Coder "The API endpoint changed to /v2/users"
-```
-
 ### `/stop @Agent`
 
 Send a stop signal to an agent. This tells the agent to stop the current collaboration.

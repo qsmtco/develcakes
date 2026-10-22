@@ -54,7 +54,7 @@ class CommandHandler:
         GLib_module=None,         # gi.repository.GLib or None
         on_display_card=None,     # callback(card_dict) — render a card in chat
         on_display_text=None,     # callback(session_key, text) — display text in chat
-        collab_handler=None,     # CollabHandler — for ask/delegate/stop/tell
+        collab_handler=None,     # CollabHandler — for ask/stop
         review_handler=None,     # ReviewHandler — for review/check/accept/reject
         session_handler=None,    # SessionHandler — for session
     ):
@@ -84,13 +84,9 @@ class CommandHandler:
         if collab_handler is not None:
             self.register_command("ask", collab_handler.cmd_ask, aliases=["a"],
                 help_text="Ask an agent a question: /ask @agent — question")
-            self.register_command("delegate", collab_handler.cmd_delegate, aliases=["d"],
-                help_text="PM delegates to agent: /delegate @agent — task")
             self.register_command("stop", collab_handler.cmd_stop,
                 help_text="PM stops the current collaboration: /stop @agent",
                 payload_free=True)
-            self.register_command("tell", collab_handler.cmd_tell,
-                help_text="One agent shares information with another: /tell @agent — info")
 
         # Review — requires ReviewHandler
         if review_handler is not None:
