@@ -19,7 +19,7 @@ CrabCakes supports slash commands typed directly in the chat input. Commands are
 
 ### Payload-Free Commands
 
-Some commands do not require a quoted payload. These are: `stop`, `tasks`, `review`, `check`, `accept`, `reject`, `status`, `agents`, `cost`, `help`, `done`, `start`, `blocked`, `cancel`.
+Some commands do not require a quoted payload. These are: `stop`, `review`, `check`, `accept`, `reject`, `status`, `agents`, `cost`, `help`.
 
 ### Implicit Ask Shorthand
 
@@ -73,7 +73,7 @@ These commands work inside project tabs (session keys starting with `project:`).
 
 ### `/status`
 
-Shows a project status summary including member count, task counts (pending/in-progress/blocked/done), review state, and solo DM target.
+Shows a project status summary including member count, review state, and solo DM target.
 
 ```
 /status
@@ -83,7 +83,6 @@ Shows a project status summary including member count, task counts (pending/in-p
 ```
 Project: my-app
 Members: 3
-Tasks: 2 pending, 1 in progress, 0 blocked, 4 done
 Review: active
 Solo DM: none
 ```
@@ -171,88 +170,9 @@ Send a stop signal to an agent. This tells the agent to stop the current collabo
 
 ## Task Commands
 
-Task commands are handled by `TaskHandler` (in `ui/handlers/task_handler.py`). Tasks are tracked in an in-memory `TaskStore` singleton (from `models/task.py`). Task IDs are sequential 8-character zero-padded strings (e.g. `00000001`).
-
-### `/task @Agent "title"`
-
-Create a new task assigned to the specified agent. The task appears as a card in the project tab and in the project feed.
-
-```
-/task @Coder "Implement user authentication"
-```
-
-Aliases: `/t`
-
-### `/done <task_id>`
-
-Mark a task as complete (status → `done`).
-
-```
-/done 00000001
-```
-
-Task IDs can be specified with or without a leading `#` (e.g. `#1` or `00000001`).
-
-### `/start <task_id>`
-
-Start working on a task (status → `in_progress`).
-
-```
-/start 00000002
-```
-
-### `/blocked <task_id> — "reason"`
-
-Report a blocker on a task (status → `blocked`). The blocked reason is stored in the task's `blocked_reason` field.
-
-```
-/blocked 00000003 "Waiting on API documentation from backend team"
-```
-
-### `/cancel <task_id>`
-
-Cancel a task (status → `cancelled`).
-
-```
-/cancel 00000004
-```
-
-### `/tasks`
-
-List all tasks in the current session.
-
-```
-/tasks
-```
-
-**Example output:**
-```
-📋 Tasks
-
-[00000001] Implement user authentication
-    ✅ Done | ▬ Medium
-
-[00000002] Fix navigation bug
-    🔄 In Progress | ▬ High
-```
-
-### `/assign <task_id> @Agent`
-
-Reassign a task to a different agent.
-
-```
-/assign 00000001 @Debugger
-```
-
-### `/priority <task_id> <level>`
-
-Set a task's priority. Valid levels: `low`, `medium`, `high`, `critical`.
-
-```
-/priority 00000002 high
-```
-
-**Invalid priority values produce an error** listing the valid options.
+The legacy task/work-unit command set (`/task`, `/done`, `/start`, `/blocked`,
+`/cancel`, `/tasks`, `/assign`, `/priority`) was removed in SPEC-49. Those
+tokens now fall through to normal chat send like any unregistered command.
 
 ---
 

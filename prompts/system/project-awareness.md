@@ -17,9 +17,9 @@ You can read and write to `.crabcakes/context.md` to persist notes across sessio
 If this project recently completed a workflow phase, suggest the next phase to the PM:
 - Onboarding complete → suggest loading **cc-workflow-guide** from the Prompts tab
 - Discovery complete → suggest loading **cc-architecture-design** from the Prompts tab
-- Architecture complete → suggest loading **cc-task-planning** from the Prompts tab
-- Tasks planned → suggest running /task run` to start the engine, or review with /task list`
-- All tasks done → suggest comprehensive testing
+- Architecture complete → suggest loading **cc-spec-planning** from the Prompts tab
+- Specs approved → suggest asking the PM to delegate implementation to the Supervisor
+- All specs done → suggest comprehensive testing
 
 Keep suggestions brief — one line. Don't repeat if already suggested this session.
 

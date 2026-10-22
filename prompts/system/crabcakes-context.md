@@ -58,7 +58,7 @@ do not format these. Activity bubbles (tool calls, plans, patches) are generated
 the event stream automatically.
 
 ### Slash Commands
-Use slash commands to query state: `/status`, `/agents`, `/tasks`, `/review`, `/cost`
+Use slash commands to query state: `/status`, `/agents`, `/review`, `/cost`
 
 ### Review Layer
 When agents write files through the project, changes go through a checkpoint →

@@ -44,14 +44,11 @@ from ui.handlers.file_tree_handler import FileTreeHandler
 from ui.handlers.media_handler import MediaHandler
 from ui.handlers.project_handler import ProjectHandler
 from ui.handlers.activity_handler import ActivityHandler
-from ui.handlers.work_handler import WorkHandler
 from ui.handlers.collab_handler import CollabHandler
 from ui.handlers.session_handler import SessionHandler
 
 from ui.wiring import set_active_project_path, clear_active_project_path
 from utils.project_awareness import seed_project_prompts
-
-from models import work_store
 
 from utils.config import COMMAND_PREFIX
 
@@ -88,8 +85,6 @@ class MainWindow(Gtk.ApplicationWindow):
         from models import AgentRoutingTable
         self._agent_to_project = AgentRoutingTable()
 
-        # Task handler — owns task command logic (Phase 7)
-        self._work_handler = None
         # Collab handler — owns collaboration command logic (Phase 7)
         self._collab_handler = None
         # Session handler — owns session switching logic (Phase 7)
@@ -665,19 +660,6 @@ class MainWindow(Gtk.ApplicationWindow):
             lambda n, m: self._on_feed_bar_update(n, len(m))
         )
         # ── End Feed handler ──────────────────────────────────────────────
-        # Work handler — work unit commands (SPEC-TASK-SYSTEM-FULL-REDESIGN)
-        # Replaces the former flat-task command handler (retired in
-        # SPEC-AUDIT-CLEANUP-2 Phase 2). Receives project_handler (for active
-        # project path/name + member lookup), the global work_store, and the
-        # agent_runtime_handler (for /work start → send_to_special_agent).
-        self._work_handler = WorkHandler(
-            project_handler=self._project_handler,
-            work_store=work_store,
-            agent_runtime_handler=self._agent_runtime_handler,
-            on_display_card=self._on_command_card,
-            on_display_text=self._on_command_text,
-            on_feed_card=self._feed_handler.add_card,
-        )
         # Collab handler — collaboration commands (Phase 7)
         self._collab_handler = CollabHandler()
         # Session handler — session switching (Phase 7)
@@ -713,7 +695,6 @@ class MainWindow(Gtk.ApplicationWindow):
             on_display_card=self._on_command_card,
             on_display_text=self._on_command_text,
             collab_handler=self._collab_handler,
-            work_handler=self._work_handler,
             review_handler=self._review_handler,
             session_handler=self._session_handler,
         )
@@ -862,18 +843,6 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self._project_handler.set_on_project_closed(
             lambda name: (self._review_handler.on_project_closed(name))
-        )
-
-        # Work handler lifecycle: load/migrate Work Units on open, release on
-        # close (SPEC-TASK-SYSTEM-FULL-REDESIGN §3.3, §11). Must bind the store
-        # BEFORE any /work command or awareness snapshot can read it.
-        # set_on_project_opened/closed APPEND callbacks, so existing wiring
-        # (feed, review, etc.) is preserved.
-        self._project_handler.set_on_project_opened(
-            lambda n, p: self._work_handler.load_for_project(p)
-        )
-        self._project_handler.set_on_project_closed(
-            lambda name: self._work_handler.close_project()
         )
 
 
@@ -1577,9 +1546,9 @@ class MainWindow(Gtk.ApplicationWindow):
     def _remote_status_summary(self) -> str:
         """SPEC-15 SP4: compact /status text for the phone.
 
-        Built from the SAME project/work-unit data the in-app /status reads
-        (single status model — no second source of truth). Honest when no
-        project is open.
+        Built from the SAME project data the in-app /status reads (single
+        status model — no second source of truth). Honest when no project
+        is open.
         """
         ph = getattr(self, "_project_handler", None)
         if ph is None:
@@ -1588,23 +1557,19 @@ class MainWindow(Gtk.ApplicationWindow):
         if not name:
             return "No active project."
         try:
-            from models import work_store
-
             members = ph.get_project_members(name)
-            units = [u for u in work_store.list_all() if u.assigned_builder in members]
-            pending = sum(1 for u in units
-                          if u.status in ("draft", "spec-pending", "spec-ready"))
-            active = sum(1 for u in units if u.status in ("in-progress", "auditing"))
-            blocked = sum(1 for u in units
-                          if u.status != "cancelled" and u.blocked_reason)
-            done = sum(1 for u in units if u.status == "done")
+            review_status = "not started"
+            rh = getattr(self, "_review_handler", None)
+            if rh is not None:
+                state = rh.get_state(name)
+                if state is not None and state.is_active():
+                    review_status = "active"
         except Exception:
             logger.exception("remote status summary failed")
             return f"Project: {name} (status unavailable)"
         return (f"Project: {name}\n"
                 f"Members: {len(members)}\n"
-                f"Work units: {pending} pending, {active} active, "
-                f"{blocked} blocked, {done} done")
+                f"Review: {review_status}")
 
     def _on_bridge_state_change(self, state: str) -> None:
         """Drive the toolbar + honesty feed card from bridge state.

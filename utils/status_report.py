@@ -927,23 +927,6 @@ def _newest_spec(project_path):
     return newest
 
 
-def _parse_tasks_summary(project_path):
-    """First work-unit heading + status from the generated `.crabcakes/tasks.md`."""
-    text = _read_text_head(
-        os.path.join(str(project_path), ".crabcakes", "tasks.md"), 256 * 1024)
-    if not text:
-        return None, None
-    unit = status = None
-    for line in text.splitlines():
-        if unit is None and line.startswith("## "):
-            unit = line[3:].strip()
-            continue
-        if unit is not None and "- **Status:**" in line:
-            status = line.split("- **Status:**", 1)[1].strip()
-            break
-    return unit, status
-
-
 def _find_sendback(project_path):
     """Newest `*SENDBACK*.md` in docs/specs (any case) → (relpath, mtime)."""
     specs_dir = os.path.join(str(project_path), "docs", "specs")
@@ -1018,8 +1001,8 @@ def _unpushed_count(project_path):
 
 
 def _collect_work(project_path):
-    """§2.1 `work` section: spec, work unit, git posture, write-scan evidence."""
-    section = {"spec": None, "spec_path": None, "unit": None, "unit_status": None,
+    """§2.1 `work` section: spec, git posture, write-scan evidence."""
+    section = {"spec": None, "spec_path": None,
                "is_repo": False, "branch": None, "head_sha": None,
                "head_subject": None, "newest_commit_ts": None,
                "dirty_count": None, "unpushed_count": None,
@@ -1032,7 +1015,6 @@ def _collect_work(project_path):
 
     name, rel, _ = _newest_spec(project_path)
     section["spec"], section["spec_path"] = name, rel
-    section["unit"], section["unit_status"] = _parse_tasks_summary(project_path)
 
     newest_write, files, truncated = _scan_repo_writes(project_path)
     section["newest_write_ts"] = newest_write

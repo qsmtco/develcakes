@@ -255,40 +255,10 @@ def _make_status_cmd(session_key: str = "project:myproj"):
 class TestCmdStatus:
     """Spec: docs/specs/SPEC-AUDIT-CLEANUP-2-DEAD-CODE-SWEEP.md §Phase 2a.
 
-    cmd_status reads the global work_store (models.work_store singleton) and
-    counts Work Units whose assigned_builder is a project member. Tests seed
-    the real singleton then restore it — mirroring the production wiring
-    (window.py passes the same singleton to WorkHandler).
+    After SPEC-49 (work-system removal) /status reports Project / Members /
+    Review / Solo DM (plus provider-failure lines when present) — it no
+    longer counts work units.
     """
-
-    STATUS_LINE_PREFIX = "Work units: "
-
-    def _seed(self, **statuses):
-        """Create Work Units in the global work_store; return cleanup list."""
-        from models import work_store as ws
-        from models.work_unit import WorkUnit
-        created = []
-        for i, (title, status) in enumerate(statuses.items(), start=1):
-            w = ws.create(WorkUnit(
-                id=f"990000{i:02d}",
-                title=f"status-test {title}",
-                status=status,
-                assigned_builder="special:coder",
-            ))
-            created.append(w)
-        return created
-
-    def _teardown(self, created):
-        from models import work_store as ws
-        for w in created:
-            ws.delete(w.id)
-
-    def _status_line(self, result) -> str:
-        line = next(
-            ln for ln in result.response_text.splitlines()
-            if ln.startswith(self.STATUS_LINE_PREFIX)
-        )
-        return line
 
     def test_non_project_session_returns_hint(self, handler, fake_projects):
         """Guard: /status outside a project tab returns the hint message."""
@@ -296,113 +266,18 @@ class TestCmdStatus:
         assert result.handled is True
         assert "Open a project tab" in result.response_text
 
-    def test_buckets_full_mapping(self, handler, fake_projects):
-        """One unit per status lands in exactly the right bucket.
-
-        7 statuses: draft/spec-pending/spec-ready → pending;
-        in-progress/auditing → active; done → done;
-        cancelled → excluded from all counts.
-        """
-        from models import work_store as ws
-        created = self._seed(
-            draft="draft",
-            spec_pending="spec-pending",
-            spec_ready="spec-ready",
-            in_progress="in-progress",
-            auditing="auditing",
-            done="done",
-            cancelled="cancelled",
-        )
-        try:
-            fake_projects.save_members("myproj", ["special:coder"])
-            handler.open_project("myproj", "/p")
-            result = handler.cmd_status(_make_status_cmd())
-            line = self._status_line(result)
-            assert line == "Work units: 3 pending, 2 active, 0 blocked, 1 done"
-        finally:
-            self._teardown(created)
-        assert ws.get("99000001") is None  # teardown deleted the seeded draft unit
-
-    def test_non_member_units_excluded(self, handler, fake_projects):
-        """Units assigned to a non-member builder are not counted."""
-        from models import work_store as ws
-        from models.work_unit import WorkUnit
-        w = ws.create(WorkUnit(id="99000200", title="not mine",
-                               status="in-progress", assigned_builder="special:debugger"))
-        try:
-            fake_projects.save_members("myproj", ["special:coder"])
-            handler.open_project("myproj", "/p")
-            line = self._status_line(handler.cmd_status(_make_status_cmd()))
-            assert line == "Work units: 0 pending, 0 active, 0 blocked, 0 done"
-        finally:
-            ws.delete(w.id)
-
-    def test_blocked_reason_counts_any_status(self, handler, fake_projects):
-        """blocked bucket = blocked_reason non-empty, any (non-cancelled) status.
-
-        draft + in-progress units with a blocked_reason both count; a done
-        unit with a reason (stale edge) also counts; cancelled is excluded.
-        """
-        from models import work_store as ws
-        from models.work_unit import WorkUnit
-        created = [
-            ws.create(WorkUnit(id="99000301", title="blk-draft", status="draft",
-                               assigned_builder="special:coder",
-                               blocked_reason="waiting on API keys")),
-            ws.create(WorkUnit(id="99000302", title="blk-active", status="in-progress",
-                               assigned_builder="special:coder",
-                               blocked_reason="flaky tests")),
-            ws.create(WorkUnit(id="99000303", title="blk-done", status="done",
-                               assigned_builder="special:coder",
-                               blocked_reason="historical")),
-            ws.create(WorkUnit(id="99000304", title="blk-cancelled", status="cancelled",
-                               assigned_builder="special:coder",
-                               blocked_reason="stale reason")),
-        ]
-        try:
-            fake_projects.save_members("myproj", ["special:coder"])
-            handler.open_project("myproj", "/p")
-            line = self._status_line(handler.cmd_status(_make_status_cmd()))
-            # draft/in-progress: blocked. done: blocked too (any non-cancelled
-            # status with a reason). cancelled: excluded from every count.
-            assert line == "Work units: 1 pending, 1 active, 3 blocked, 1 done"
-        finally:
-            for w in created:
-                ws.delete(w.id)
-
-    def test_no_reason_means_not_blocked(self, handler, fake_projects):
-        """A unit with empty blocked_reason never lands in the blocked bucket."""
-        from models import work_store as ws
-        from models.work_unit import WorkUnit
-        w = ws.create(WorkUnit(id="99000401", title="clean", status="in-progress",
-                               assigned_builder="special:coder"))
-        try:
-            fake_projects.save_members("myproj", ["special:coder"])
-            handler.open_project("myproj", "/p")
-            line = self._status_line(handler.cmd_status(_make_status_cmd()))
-            assert line == "Work units: 0 pending, 1 active, 0 blocked, 0 done"
-        finally:
-            ws.delete(w.id)
-
     def test_other_lines_byte_identical(self, handler, fake_projects):
-        """The 4 non-count lines keep their exact pre-migration format."""
-        from models import work_store as ws
-        from models.work_unit import WorkUnit
-        w = ws.create(WorkUnit(id="99000501", title="fmt", status="done",
-                               assigned_builder="special:coder"))
-        try:
-            fake_projects.save_members("myproj", ["special:coder"])
-            handler.open_project("myproj", "/p")
-            handler.set_solo_target("myproj", "special:coder")
-            result = handler.cmd_status(_make_status_cmd())
-            lines = result.response_text.splitlines()
-            assert lines[0] == "Project: myproj"
-            assert lines[1] == "Members: 1"
-            assert lines[2] == "Work units: 0 pending, 0 active, 0 blocked, 1 done"
-            assert lines[3] == "Review: not started"
-            assert lines[4] == "Solo DM: @coder"
-        finally:
-            ws.delete(w.id)
+        """The non-count lines keep their exact pre-removal format."""
+        fake_projects.save_members("myproj", ["special:coder"])
+        handler.open_project("myproj", "/p")
+        handler.set_solo_target("myproj", "special:coder")
+        result = handler.cmd_status(_make_status_cmd())
+        lines = result.response_text.splitlines()
+        assert lines[0] == "Project: myproj"
+        assert lines[1] == "Members: 1"
+        assert lines[2] == "Review: not started"
+        assert lines[3] == "Solo DM: @coder"
+        assert not any(ln.startswith("Work units:") for ln in lines)
 
 
 # ── /cost command (Phase 2 — token tracking) ────────────────────────────────

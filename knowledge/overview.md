@@ -31,7 +31,7 @@ CrabCakes is built for developers who want AI agents that participate in real pr
 | **Agent collaboration** | One assistant | Multiple agents (Coder, Debugger, gateway agents) work in the same project |
 | **Feed cards** | Linear chat | Structured feed cards for audit reports, file diffs, tool calls, and task assignments |
 | **Multi-agent teams** | Not supported | Add/remove agents to project teams; fan-out messages to all members |
-| **Slash commands** | Limited or none | Full command system: `/task`, `/done`, `/ask`, `/delegate`, `/review`, and more |
+| **Slash commands** | Limited or none | Full command system: `/ask`, `/delegate`, `/review`, `/status`, and more |
 | **Offline help** | Requires API | Auxilium answers from local knowledge base without any external LLM call |
 
 ---
@@ -169,8 +169,6 @@ Here's a quick tour of major features:
 - Accept or reject changes individually or in batch
 
 ### Slash commands
-- `/task <title>` — create a task and assign it
-- `/done` — mark your current task complete
 - `/ask @agent question` — ask a specific agent something
 - `/delegate @agent task` — hand off work to another agent
 - `/review` — start a review session

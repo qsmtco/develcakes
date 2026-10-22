@@ -242,8 +242,9 @@ def test_report_runs_with_app_closed_returns_exit3(tmp_path):
     assert "app" not in report["degraded_sections"]
     # the filesystem side still emits
     assert report["work"]["spec"] == "SPEC-DEMO.md"
-    assert report["work"]["unit"] == "00000007 - Demo unit"
-    assert report["work"]["unit_status"] == "Done"
+    # SPEC-49: the work section no longer carries unit/unit_status fields
+    assert "unit" not in report["work"]
+    assert "unit_status" not in report["work"]
     assert "AGENTS" in status_report.render_text(report)
     summary, code = status_report.assess(report)
     assert code == 3

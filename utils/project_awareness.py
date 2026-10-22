@@ -19,10 +19,10 @@
 #   save_team(project_path, team) -> None
 #   load_project_context(project_path) -> str
 #   save_project_context(project_path, content) -> None
-#   build_awareness_snapshot(project_path, work_store=None) -> dict
+#   build_awareness_snapshot(project_path) -> dict
 #   save_awareness_snapshot(project_path, snapshot) -> None
 #   is_project_onboarded(project_path) -> bool
-#   build_awareness_block(project_path, work_store=None) -> str
+#   build_awareness_block(project_path) -> str
 #   detect_tech_stack(project_path) -> list[str]
 #   generate_project_skeleton(project_path, project_name) -> None
 
@@ -34,12 +34,8 @@ import re
 import shutil
 import threading
 import time
-from typing import TYPE_CHECKING
 
 from utils.prompt_loader import _untrusted_fence
-
-if TYPE_CHECKING:
-    from models.work_unit import WorkUnitStore
 
 from models.team import ProjectTeam, TeamMember
 from utils.config import get_projects_config_dir
@@ -889,17 +885,13 @@ def get_current_task(project_path: str) -> str:
 
 def build_awareness_snapshot(
     project_path: str,
-    work_store: "WorkUnitStore | None" = None,
 ) -> dict:
     """
     Build the awareness.json dict from live state.
-    Gathers: git state, work unit summary, team size, tech stack, review mode.
+    Gathers: git state, team size, tech stack, review mode.
     """
     # Git state
     git_info = _get_git_info(project_path)
-
-    # Work unit summary (spec §6.1: Work Units, not TaskStore)
-    task_info = _get_task_info(work_store)
 
     # Team info
     team = load_team(project_path)
@@ -912,7 +904,6 @@ def build_awareness_snapshot(
         "project_path": project_path,
         "opened_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "git": git_info,
-        "tasks": task_info,
         "team_size": len(team.members),
         "review_mode": "off",  # updated by ReviewHandler when review starts
         "tech_stack": tech_stack,
@@ -967,70 +958,11 @@ def _get_git_info(project_path: str) -> dict:
         return {"available": False}
 
 
-def _get_task_info(work_store: "WorkUnitStore | None") -> dict:
-    """Extract Work Unit counts for awareness snapshot (spec §6.1).
-
-    Mapping (explicit and tested):
-      - total        = all units (including cancelled — reflects all work).
-      - spec_pending = status 'draft' OR 'spec-pending'.
-      - spec_ready   = status 'spec-ready'.
-      - in_progress  = status 'in-progress' OR 'auditing'.
-      - done         = status 'done'.
-      - cancelled units count ONLY in total, never in a bucket.
-
-    Draft is folded into spec_pending for awareness purposes (spec §6.1).
-    """
-    if work_store is None:
-        return {
-            "total": 0,
-            "spec_pending": 0,
-            "spec_ready": 0,
-            "in_progress": 0,
-            "done": 0,
-        }
-
-    all_units = work_store.list_all()
-    return {
-        "total": len(all_units),
-        "spec_pending": sum(
-            1 for u in all_units if u.status in ("draft", "spec-pending")
-        ),
-        "spec_ready": sum(
-            1 for u in all_units if u.status == "spec-ready"
-        ),
-        "in_progress": sum(
-            1 for u in all_units if u.status in ("in-progress", "auditing")
-        ),
-        "done": sum(1 for u in all_units if u.status == "done"),
-    }
-
-
-def _work_units_for_awareness(project_path: str) -> "WorkUnitStore | None":
-    """Load this project's Work Units into a throwaway store for awareness.
-
-    Spec §6.1 'project-bound loader': build_awareness_dict is a read path that
-    never threads a work_store through its callers, so the project's Work
-    Units are loaded here on demand. Returns None on ANY error — awareness is
-    best-effort and must never crash the system-prompt build (a corrupt
-    work.json yields None, i.e. zero-count awareness, not a crash).
-    """
-    try:
-        from utils.work_persistence import load_or_migrate_work_units
-        from models.work_unit import WorkUnitStore
-        units = load_or_migrate_work_units(project_path)
-    except Exception:
-        return None
-    store = WorkUnitStore()
-    store.replace_all(units)
-    return store
-
-
 # ── Awareness block builder (for injection) ──────────────────────────────────
 
 
 def build_awareness_block(
     project_path: str,
-    work_store: "WorkUnitStore | None" = None,
 ) -> str:
     """
     Assemble the full awareness text block for agent injection.
@@ -1038,7 +970,7 @@ def build_awareness_block(
     Combines:
       1. Project manifest header (purpose, stack)
       2. Team roster (who's working on this project)
-      3. Dynamic state summary (git, tasks, review mode)
+      3. Dynamic state summary (git, review mode)
       4. Persistent context memory (cross-session notes)
 
     Returns formatted string suitable for system prompt injection or gateway message.
@@ -1071,7 +1003,7 @@ def build_awareness_block(
         parts.append(f"## Team\nPM: {team.pm_name}\nNo other members yet.")
 
     # 3. Dynamic state
-    snapshot = build_awareness_snapshot(project_path, work_store)
+    snapshot = build_awareness_snapshot(project_path)
     state_lines = ["## Current State"]
     state_lines.append(f"Project: {snapshot.get('project_name', 'unknown')}")
     state_lines.append(f"Path: {snapshot.get('project_path', '')}")
@@ -1085,15 +1017,6 @@ def build_awareness_block(
                 state_lines.append(f"  {c.get('sha', '?')[:7]} {c.get('message', '')}")
     else:
         state_lines.append("Git: not available")
-
-    tasks = snapshot.get("tasks", {})
-    if tasks.get("total", 0) > 0:
-        state_lines.append(
-            f"Work: {tasks.get('in_progress', 0)} in progress, "
-            f"{tasks.get('spec_ready', 0)} spec-ready, "
-            f"{tasks.get('spec_pending', 0)} spec-pending, "
-            f"{tasks.get('done', 0)} done"
-        )
 
     state_lines.append(f"Review mode: {snapshot.get('review_mode', 'off')}")
     parts.append("\n".join(state_lines))
@@ -1245,9 +1168,7 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         parts["TEAM_ROSTER"] = "No team members yet."
 
     # Current state
-    snapshot = build_awareness_snapshot(
-        project_path, _work_units_for_awareness(project_path)
-    )
+    snapshot = build_awareness_snapshot(project_path)
     state_lines = [f"Project: {snapshot.get('project_name', 'unknown')}"]
     state_lines.append(f"Path: {snapshot.get('project_path', '')}")
     git = snapshot.get("git", {})
@@ -1255,14 +1176,6 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         state_lines.append(f"Git: {git.get('head_sha', '?')[:7]} ({'dirty' if git.get('dirty') else 'clean'})")
     else:
         state_lines.append("Git: not available")
-    tasks = snapshot.get("tasks", {})
-    if tasks.get("total", 0) > 0:
-        state_lines.append(
-            f"Work: {tasks.get('in_progress', 0)} in progress, "
-            f"{tasks.get('spec_ready', 0)} spec-ready, "
-            f"{tasks.get('spec_pending', 0)} spec-pending, "
-            f"{tasks.get('done', 0)} done"
-        )
     state_lines.append(f"Review mode: {snapshot.get('review_mode', 'off')}")
     state = "\n".join(state_lines)
     # Phase CB-3: cap CURRENT_STATE at CURRENT_STATE_MAX_CHARS (BUG #6 fix).

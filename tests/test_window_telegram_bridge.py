@@ -367,12 +367,12 @@ class TestRemoteStatusSummary:
         win._project_handler = None
         assert "no project data" in win._remote_status_summary().lower()
 
-    def test_summary_includes_project_and_buckets(self, win, monkeypatch):
+    def test_summary_includes_project_and_review(self, win):
         win._project_handler.get_project_members.return_value = ["special:coder"]
-        monkeypatch.setattr("models.work_store.list_all", list)
         out = win._remote_status_summary()
         assert "Proj" in out
-        assert "Work units:" in out
+        assert "Members: 1" in out
+        assert "Review:" in out
 
 
 # ── SP4 B5: documentation presence (source-shape guards) ─────────────────

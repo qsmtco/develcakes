@@ -7,10 +7,8 @@
 import os
 
 from models.team import ProjectTeam, TeamMember
-from models.work_unit import WorkUnit, WorkUnitStore
 from utils.project_awareness import (
     _ensure_crabcakes_dir,
-    _get_task_info,
     append_project_context,
     build_awareness_block,
     build_awareness_dict,
@@ -173,102 +171,6 @@ class TestBuildAwarenessSnapshot:
         snap = build_awareness_snapshot(str(tmp_path))
         assert snap["team_size"] == 2
 
-    def test_default_tasks_zero(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        snap = build_awareness_snapshot(str(tmp_path))
-        assert snap["tasks"]["total"] == 0
-
-
-class TestWorkUnitAwarenessInfo:
-    """SPEC §6.1: _get_task_info consumes a WorkUnitStore and reports the new
-    schema {total, spec_pending, spec_ready, in_progress, done}."""
-
-    def _store(self, statuses):
-        store = WorkUnitStore()
-        for i, status in enumerate(statuses):
-            unit = WorkUnit(title=f"u{i}", status=status)
-            store.create(unit)
-        return store
-
-    def test_all_zones_counted(self):
-        info = _get_task_info(self._store([
-            "draft", "spec-pending", "spec-ready", "in-progress",
-            "auditing", "done",
-        ]))
-        assert info == {
-            "total": 6,
-            "spec_pending": 2,   # draft + spec-pending
-            "spec_ready": 1,
-            "in_progress": 2,    # in-progress + auditing
-            "done": 1,
-        }
-
-    def test_cancelled_counts_only_in_total(self):
-        info = _get_task_info(self._store([
-            "cancelled", "done", "spec-ready",
-        ]))
-        # cancelled → total only, NOT in any bucket
-        assert info["total"] == 3
-        assert info["spec_pending"] == 0
-        assert info["spec_ready"] == 1
-        assert info["in_progress"] == 0
-        assert info["done"] == 1
-
-    def test_none_store_returns_all_zeros(self):
-        assert _get_task_info(None) == {
-            "total": 0,
-            "spec_pending": 0,
-            "spec_ready": 0,
-            "in_progress": 0,
-            "done": 0,
-        }
-
-    def test_empty_store_returns_all_zeros(self):
-        assert _get_task_info(WorkUnitStore()) == {
-            "total": 0,
-            "spec_pending": 0,
-            "spec_ready": 0,
-            "in_progress": 0,
-            "done": 0,
-        }
-
-    def test_snapshot_exposes_new_schema(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        store = self._store(["spec-ready", "in-progress", "cancelled"])
-        snap = build_awareness_snapshot(str(tmp_path), work_store=store)
-        assert snap["tasks"] == {
-            "total": 3,
-            "spec_pending": 0,
-            "spec_ready": 1,
-            "in_progress": 1,
-            "done": 0,
-        }
-        # No stale authoritative task fields
-        assert "blocked" not in snap["tasks"]
-        assert "pending" not in snap["tasks"]
-
-    def test_block_shows_work_line_with_new_fields(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        save_team(str(tmp_path), ProjectTeam(members=[TeamMember("sk1", "A")]))
-        store = self._store(["spec-pending", "spec-ready", "in-progress", "done"])
-        block = build_awareness_block(str(tmp_path), work_store=store)
-        assert "Work:" in block
-        assert "1 in progress" in block
-        assert "1 spec-ready" in block
-        assert "1 spec-pending" in block
-        assert "1 done" in block
-        # No stale "blocked"/"pending" field labels from the old schema
-        assert " blocked," not in block
-        assert " pending," not in block
-        assert "Tasks:" not in block
-
-    def test_block_no_work_line_when_zero_total(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        save_team(str(tmp_path), ProjectTeam(members=[TeamMember("sk1", "A")]))
-        block = build_awareness_block(str(tmp_path))  # no store → all zeros
-        assert "Work:" not in block
-        assert "Tasks:" not in block
-
 
 class TestDetectTechStack:
     def test_python_project(self, tmp_path):
@@ -367,8 +269,8 @@ class TestAwarenessCaps:
         # so that CURRENT_STATE exceeds 1000 chars
         import utils.project_awareness as pa
         orig_snapshot = pa.build_awareness_snapshot
-        def long_snapshot(project_path, work_store=None):
-            snap = orig_snapshot(project_path, work_store)
+        def long_snapshot(project_path):
+            snap = orig_snapshot(project_path)
             snap["project_name"] = "X" * 1200
             return snap
         pa.build_awareness_snapshot = long_snapshot
@@ -793,35 +695,3 @@ class TestBuildAwarenessDictReadOnly:
         assert not awareness_path.exists(), (
             "build_awareness_dict must not create awareness.json (read-only)"
         )
-
-
-class TestBuildAwarenessDictWorkLine:
-    """BUG #25 (HIGH, partial-caller-update): build_awareness_dict must
-    surface live Work Unit counts in CURRENT_STATE, not all-zeros."""
-
-    def _seed_work(self, tmp_path, statuses):
-        from utils.work_persistence import save_work_units
-        units = [WorkUnit(title=f"u{i}", status=st) for i, st in enumerate(statuses)]
-        save_work_units(str(tmp_path), units)
-
-    def test_build_awareness_dict_includes_work_line(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        save_team(str(tmp_path), ProjectTeam(members=[TeamMember("sk1", "A")]))
-        self._seed_work(tmp_path, ["spec-ready", "in-progress"])
-
-        d = build_awareness_dict(str(tmp_path))
-        state = d["CURRENT_STATE"]
-        assert "Work:" in state
-        assert "1 spec-ready" in state
-        assert "1 in progress" in state
-
-    def test_build_awareness_dict_no_work_line_when_zero(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        d = build_awareness_dict(str(tmp_path))
-        assert "Work:" not in d["CURRENT_STATE"]
-
-    def test_corrupt_work_json_does_not_crash(self, tmp_path):
-        init_project_config(str(tmp_path), "testproj")
-        (tmp_path / ".crabcakes" / "work.json").write_text("{not valid json", encoding="utf-8")
-        d = build_awareness_dict(str(tmp_path))
-        assert "Work:" not in d["CURRENT_STATE"]

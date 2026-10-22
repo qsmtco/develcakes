@@ -16,7 +16,6 @@ import os
 import logging
 
 from models.command import Command, CommandResult
-from models import work_store
 from utils.git_ops import init_repo, stage_all, commit
 from utils.workflow_state import init_workflow
 from utils.project_awareness import seed_project_prompts
@@ -627,13 +626,9 @@ class ProjectHandler:
     def cmd_status(self, cmd: Command, session_key: str | None = None) -> CommandResult:
         """/status → project status summary
 
-        Counts Work Units assigned to project members (SPEC-AUDIT-CLEANUP-2
-        Phase 2a — migrated from the retired TaskStore). Buckets:
-          pending  = status in {draft, spec-pending, spec-ready}
-          active   = status in {in-progress, auditing}
-          blocked  = blocked_reason non-empty (any non-cancelled status)
-          done     = status == done
-        Cancelled units are excluded from all counts.
+        Reports Project / Members / Review / Solo DM and provider-failure
+        lines. Work-unit counts were removed with the work system
+        (SPEC-49).
         """
         sk = cmd.source_session_key
         if not sk.startswith("project:"):
@@ -641,21 +636,12 @@ class ProjectHandler:
         project_name = sk.split(":", 1)[1]
         members = self.get_project_members(project_name)
         solo_target = self.get_solo_target(project_name)
-        all_units = work_store.list_all()
-        project_units = [u for u in all_units if u.assigned_builder in members]
-        pending = sum(1 for u in project_units if u.status in ("draft", "spec-pending", "spec-ready"))
-        active = sum(1 for u in project_units if u.status in ("in-progress", "auditing"))
-        # Cancelled units are excluded from ALL counts, blocked included —
-        # a cancelled unit may carry a stale blocked_reason.
-        blocked = sum(1 for u in project_units if u.status != "cancelled" and u.blocked_reason)
-        done = sum(1 for u in project_units if u.status == "done")
         review_state = self._review_handler.get_state(project_name) if hasattr(self, '_review_handler') and self._review_handler else None
         review_status = "active" if (review_state and review_state.is_active()) else "not started"
         solo_str = f"@{((self._agent_mgr.get_name(solo_target) if self._agent_mgr else "") or self._extract_display_name(solo_target))}" if solo_target else "none"
         lines = [
             f"Project: {project_name}",
             f"Members: {len(members)}",
-            f"Work units: {pending} pending, {active} active, {blocked} blocked, {done} done",
             f"Review: {review_status}",
             f"Solo DM: {solo_str}",
         ]

@@ -172,8 +172,8 @@ class ReviewHandler:
     def _emit_feed_card(self, card_dict: dict, metadata: dict | None = None) -> None:
         """Convert git_commit card dict to FeedCardData and fire feed callback.
 
-        Only fires if _on_feed_card is set. Mirrors work_handler._emit_feed_card.
-        SP3 (D5): optional metadata dict rides the card — queue emissions
+        Only fires if _on_feed_card is set. Mirrors the legacy card-emission
+        shape. SP3 (D5): optional metadata dict rides the card — queue emissions
         carry metadata["agent"] = agent_key (feed filter-by-agent surface).
         """
         if not self._on_feed_card:

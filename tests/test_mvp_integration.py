@@ -1,7 +1,7 @@
 """SPEC-42: cross-seam integration module — N1 (writer turn end-to-end) and
 N2 (compiled wire adjacency).
 
-Mock policy: fakes sit ONLY at the provider seam. Lease, worktree, checkpoint,
+Mock policy: fakes sit ONLY at the provider seam. Worktree, checkpoint,
 queue, persistence, ``_maybe_compile``, ``_compiled_messages``,
 ``serialize_messages`` and ``normalize_tool_history`` are all REAL.
 
@@ -12,8 +12,8 @@ Reuse disclosure (copied / imported from the existing suites):
     the ``_finish`` helper are COPIED from
     ``TestSpec10AgentCheckpoints`` (``_spec10_rh`` / ``_wired`` / ``_finish``,
     tests/test_agent_runtime.py:6472+) because N1 needs the same real
-    ARH + ReviewHandler + git wiring but with the project created BEFORE the
-    lease is claimed.
+    ARH + ReviewHandler + git wiring, with the suffixed writer session
+    registered before the turn.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from tests.test_agent_runtime import (
 )
 from tests.test_stop_all import _CapturingFeed, _marker_procs
 
-_SK = "special:coder"
+_SK = "special:coder-2"
 _PROJECT_NAME = "proj"
 
 
@@ -78,15 +78,15 @@ def _review_handler():
 
 
 class TestN1WriterTurnEndToEnd:
-    """ONE writer turn must name itself identically at every stage: lease,
-    worktree, enforced write, checkpoint commit, queue attribution,
-    persistence file — and accept must not create a duplicate commit."""
+    """ONE writer turn must name itself identically at every stage: worktree,
+    enforced write, checkpoint commit, queue attribution, persistence file —
+    and accept must not create a duplicate commit."""
 
     def _wired(self, tmp_path):
         """ARH + real ReviewHandler + real git repo + active review session.
 
-        Same shape as TestSpec10AgentCheckpoints._wired, except the project is
-        created here so N1 can claim the lease against it first."""
+        Same shape as TestSpec10AgentCheckpoints._wired, except the suffixed
+        writer session is registered here so N1 can resolve its worktree."""
         from models.review_state import ReviewState
 
         handler = _sp2_make_handler()
@@ -113,26 +113,14 @@ class TestN1WriterTurnEndToEnd:
             load_conversation_from_disk,
             save_conversation_to_disk,
         )
-        from models.work_unit import WorkUnit
-        from utils.work_persistence import claim_work, release_work, save_work_units
 
         handler, rh, pstr, token = self._wired(tmp_path)
 
-        # ── Step 1: real lease, recorded in .crabcakes/work.json ────────────
-        save_work_units(pstr, [WorkUnit(id="00000001", title="t",
-                                        status="in-progress")])
-        lease = claim_work(pstr, "00000001", _SK)
-        assert lease is not None
-        assert lease.holder == _SK, "lease holder is not the session identity"
-        assert lease.unit_id == "00000001"
-        work_json = Path(pstr) / ".crabcakes" / "work.json"
-        assert work_json.is_file(), "lease was not persisted to work.json"
-        persisted = work_json.read_text(encoding="utf-8")
-        assert '"holder": "special:coder"' in persisted, persisted[:400]
-
-        # ── Step 2: real worktree, a git worktree OF the project ────────────
+        # ── Step 1: the suffixed writer resolves its worktree ───────────────
+        # No lease exists in SPEC-49: session-key suffix alone drives worktree
+        # entry.
         wt = handler._worktree_for_turn(_SK, _sp2_writer_def(), pstr)
-        assert wt is not None, "no worktree despite a live lease + writer"
+        assert wt is not None, "no worktree for a suffixed writer"
         assert wt == os.path.realpath(wt)
         assert wt != os.path.realpath(pstr), "worktree resolved to project root"
         assert os.path.realpath(os.path.dirname(wt)) == os.path.realpath(
@@ -142,7 +130,7 @@ class TestN1WriterTurnEndToEnd:
                       listing.splitlines() if line.strip()], (
             f"worktree not registered with the project: {listing!r}")
 
-        # ── Step 3: the turn's write lands INSIDE the worktree ──────────────
+        # ── Step 2: the turn's write lands INSIDE the worktree ──────────────
         written = Path(wt) / "agent_work.txt"
         written.write_text("ENFORCED-WRITE-MARKER\n", encoding="utf-8")
         assert written.is_file()
@@ -150,7 +138,7 @@ class TestN1WriterTurnEndToEnd:
         assert not project_copy.exists(), (
             "write landed in the project root instead of the worktree")
 
-        # ── Step 4: completion → checkpoint in the WORKTREE + queue entry ───
+        # ── Step 3: completion → checkpoint in the WORKTREE + queue entry ───
         handler._turn_attr[_SK] = (_PROJECT_NAME, pstr, wt)
         project_head_before = gitpython.Repo(pstr).head.commit.hexsha
         handler._do_response_complete(_SK, "done", token)
@@ -164,12 +152,12 @@ class TestN1WriterTurnEndToEnd:
         assert entry.sha == wt_repo.head.commit.hexsha, (
             "queue sha is not the worktree checkpoint commit")
         body = wt_repo.git.log("--format=%B", "-1")
-        assert "Agent: special:coder" in body.splitlines(), (
+        assert "Agent: special:coder-2" in body.splitlines(), (
             f"worktree checkpoint missing the Agent: trailer: {body!r}")
         assert gitpython.Repo(pstr).head.commit.hexsha == project_head_before, (
             "checkpoint committed in the project root, not the worktree")
 
-        # ── Step 5: per-session persistence round-trip ──────────────────────
+        # ── Step 4: per-session persistence round-trip ──────────────────────
         monkeypatch.setattr("utils.config.get_config_dir",
                             lambda: str(tmp_path / "cfg"))
         conv = Conversation(agent_name="Coder", project_path=wt)
@@ -196,7 +184,7 @@ class TestN1WriterTurnEndToEnd:
         assert loaded_conv.messages[2].content == "OK — wrote agent_work.txt", (
             "the enforced write is missing from the persisted transcript")
 
-        # ── Step 6: accept → reviewed, NO duplicate commit ──────────────────
+        # ── Step 5: accept → reviewed, NO duplicate commit ──────────────────
         wt_commits_before = len(list(wt_repo.iter_commits()))
         proj_commits_before = len(list(gitpython.Repo(pstr).iter_commits()))
         wt_head_before = wt_repo.head.commit.hexsha
@@ -208,11 +196,6 @@ class TestN1WriterTurnEndToEnd:
         assert len(list(gitpython.Repo(wt).iter_commits())) == wt_commits_before
         assert len(list(gitpython.Repo(pstr).iter_commits())) == proj_commits_before, (
             "accept fabricated a duplicate commit in the project root")
-
-        # ── Secondary: lease expiry falls back to the project root ──────────
-        assert release_work(pstr, "00000001", _SK) is True
-        assert handler._worktree_for_turn(_SK, _sp2_writer_def(), pstr) is None, (
-            "lease-less writer still got a worktree (no root fallback)")
 
 
 # ── N2: compiled wire ↔ normalization ↔ provider adjacency ──────────────────

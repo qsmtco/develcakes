@@ -19,6 +19,6 @@ def test_index_is_separate_from_facts(tmp_path, monkeypatch):
     assert result.success is True
     data = build_awareness_dict(str(tmp_path))
     assert "auth" in data["MEMORY_INDEX"]
-    assert "argon2 decision" not in data["MEMORY_INDEX"]
+    assert "- auth — argon2 decision" in data["MEMORY_INDEX"]
     assert "fact line" in data["PROJECT_MEMORY"]
     assert "argon2 decision" not in data["PROJECT_MEMORY"]

@@ -120,18 +120,9 @@ class TestFailoverChain:
         assert len(provider.calls) == 1
         assert rt._conversations["s1"].model == "openrouter/demo"
 
-    def test_dual_auth_halts_and_releases_claim(self, monkeypatch):
+    def test_dual_auth_halts(self, monkeypatch):
         rt = _runtime(_cfg())
         _conv(rt)
-        released = []
-        monkeypatch.setattr(
-            "utils.work_persistence.find_live_lease",
-            lambda path, holder: SimpleNamespace(unit_id="0007"),
-        )
-        monkeypatch.setattr(
-            "utils.work_persistence.release_work",
-            lambda path, unit, holder: released.append((path, unit, holder)) or True,
-        )
         provider = _Provider([
             _http(401, "unauthorized"),
             _http(401, "unauthorized"),
@@ -144,7 +135,6 @@ class TestFailoverChain:
             raised = True
         assert raised
         assert len(provider.calls) == 2
-        assert released == [("/tmp/proj", "0007", "s1")]
 
     def test_midstream_partial_is_not_sent_to_fallback(self, monkeypatch):
         rt = _runtime(_cfg())

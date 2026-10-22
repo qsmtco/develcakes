@@ -82,6 +82,8 @@ Group chat is the biggest product idea in the folder. It is last on purpose. The
 
 ## 4. Program 3 — Dream consolidation
 
+**Status (2026-10-21): DEFERRED by PM.** Dream consolidation will be built on top of a native timer/scheduler substrate that does not exist yet (timers, cron, reminders). That substrate is to be built first, as one program with dream consolidation on top of it. The old SPEC-4 execution model (OpenClaw cron) is dead — the OpenClaw gateway client is gone — so the scheduling half must be rebuilt natively (GLib-driven, persistent, restart-safe) before the dream cycle has anything to trigger it. Design questions open: catch-up semantics for missed fires, whether timers are agent-facing (a tool) or config-driven, store location (`.crabcakes/` vs global), and whether `transport/openclaw.py` gets removed. When work resumes, this program splits into (a) timers/cron substrate, (b) dream consolidation on the dispatcher. PM to revisit later.
+
 **Source:** `CODER_SELF_IMPROVEMENT_PROPOSAL.md`, Layer 5 only.
 
 **Already shipped, do not rebuild.** Layers 1–4 are in the app under different file names than the 2026-05 proposal expected:

@@ -89,11 +89,7 @@ develcakes/
 │   ├── __init__.py           # Exports: AgentManager, AgentRoutingTable, Command, CommandResult, CommandRegistry,
 │   │                          # StreamingBubble, FeedCardData, ActivityBubble, ToolStatus, Conversation, Message,
 │   │                          # MessageRole, ToolCall, ToolCallStatus, ConversationSnapshot, SnapshotMessage,
-│   │                          # ReviewState, TeamMember, ProjectTeam, Task, TaskStore, TASK_STATUS_LABELS,
-│   │                          # PRIORITY_LABELS, WorkUnit, WorkUnitStore, WORK_STATUS_LABELS,
-│   │                          # WORK_PRIORITY_LABELS, next_agent_color, reset_color_indices
-│   │                          # Also creates: work_store = WorkUnitStore() singleton (primary);
-│   │                          # task_store = TaskStore() singleton (kept for backward compat)
+│   │                          # ReviewState, TeamMember, ProjectTeam, next_agent_color, reset_color_indices
 │   ├── agents.py              # AgentManager — session_key → name, colors, sessions
 │   ├── activity.py            # ActivityBubble dataclass — activity bubble state for ActivityHandler
 │   ├── colors.py              # Color palettes + round-robin assignment
@@ -105,8 +101,6 @@ develcakes/
 │   ├── providers.py           # ProviderConfig dataclass + caller_default_max_tokens() (per-provider context window resolution)
 │   ├── review_state.py        # ReviewState dataclass — per-project review session data (Phase 7)
 │   ├── streaming.py           # StreamingBubble dataclass — streaming bubble state (Phase 5)
-│   ├── task.py                # Task + TaskStore + status/priority labels (Phase 3) — DEPRECATED, superseded by work_unit.py
-│   ├── work_unit.py           # WorkUnit + WorkUnitStore + status/priority labels (replaces task.py as primary)
 │   └── team.py                # TeamMember + ProjectTeam — project team membership data
 │
 ├── agent/                     # Local agent runtime — no UI dependencies
@@ -155,8 +149,6 @@ develcakes/
 │   │   ├── activity_wiring_handler.py  # ActivityDrawer event wiring — gateway + local, online + offline (SPEC-activity-drawer)
 │   │   ├── command_handler.py   # CommandHandler — slash-prefix command parser (Phase 7)
 │   │   ├── review_handler.py    # ReviewHandler — review session lifecycle (Phase 7)
-│   │   ├── task_handler.py      # TaskHandler — task commands (Phase 7) — DEPRECATED, superseded by work_handler.py
-│   │   ├── work_handler.py      # WorkHandler — /work commands + Supervisor handoff (replaces task_handler.py)
 │   │   ├── collab_handler.py   # CollabHandler — collaboration commands: ask/delegate/stop/tell (Phase 7)
 │   │   ├── agent_runtime_handler.py  # AgentRuntimeHandler — local agent UI bridge (Phase 1.4)
 │   │   ├── project_list_handler.py  # ProjectListHandler — project card data + color round-robin
@@ -255,7 +247,6 @@ develcakes/
     ├── stt.py                   # STTEngine — OpenRouter cloud STT (model from stt_config, SPEC-37); arecord 16kHz mono capture + STT_PHRASES keyword biasing
     ├── stt_config.py            # STT model setting store — stt.yaml, env STT_MODEL override, per-model bias gating (SPEC-37)
     ├── syntax_highlight.py      # highlight() — Pygments → Pango markup (Tokyo Night color scheme)
-    ├── work_persistence.py      # .develcakes/work.json source of truth + generated tasks.md + legacy migration
     └── workflow_state.py        # Workflow state tracker — manages .develcakes/workflow.md per project
 ```
 
@@ -394,8 +385,6 @@ calls both the agent-command handler and `bridge.on_supervisor_reply`).
 | `StreamingBubble` | `streaming.py` | Dataclass for streaming bubble state (Phase 5) |
 | `FeedCardData` | `feed_card.py` | Dataclass for Project Feed cards (Phase 5) |
 | `ActivityBubble` | `activity.py` | Dataclass for activity event state; `to_drawer_row()` builds the dict the ActivityDrawer consumes (SPEC-activity-drawer) |
-| `Task`, `TaskStore` | `task.py` | Task data model + in-memory store (Phase 3) — **DEPRECATED**, superseded by `WorkUnit`, `WorkUnitStore`; kept for import compatibility |
-| `WorkUnit`, `WorkUnitStore` | `work_unit.py` | Work Unit data model + in-memory store (primary); `spec_path`, supervisor/builder/auditor assignments, dependency graph, lifecycle statuses |
 | `ReviewState` | `review_state.py` | Per-project review session data (Phase 7) |
 
 ### 3.3a `models/routing.py` — Agent Routing Table
@@ -459,67 +448,13 @@ class CommandRegistry:
     def get_help(name) -> str | None
 ```
 
-### 3.3d `models/task.py` — Task Data Model
+### 3.3d (removed) `models/task.py` — Task Data Model
 
-> **DEPRECATED (SPEC-TASK-SYSTEM-FULL-REDESIGN §14):** `Task`/`TaskStore` are superseded by
-> `WorkUnit`/`WorkUnitStore` (`models/work_unit.py`) and `models/task.py` is kept solely for import
-> compatibility. New code must use Work Units.
-
-**Public API:**
-```python
-@dataclass Task: id, title, description, assigned_to, created_by, status, priority,
-                created_at, updated_at, blocked_reason
-
-class TaskStore:
-    def generate_id() -> str          # sequential 8-char zero-padded ID
-    def create(task) -> Task
-    def get(task_id) -> Task | None
-    def update(task) -> Task
-    def list_all() -> list[Task]
-    def list_by_agent(session_key) -> list[Task]
-    def delete(task_id) -> bool
-```
-
-### 3.3d1 `models/work_unit.py` — Work Unit Data Model
-
-**Responsibility:** The primary task model. A Work Unit bundles a title, a required `spec_path`
-(the atomic implementation contract), a status, a priority, dependency IDs, and
-supervisor/builder/auditor assignments. Supersedes `models/task.py` (SPEC-TASK-SYSTEM-FULL-REDESIGN §3, §14).
-
-**Statuses (`WORK_STATUSES`):** `draft`, `spec-pending`, `spec-ready`, `in-progress`, `auditing`,
-`done`, `cancelled`.
-
-**Priorities (`WORK_PRIORITIES`):** `low`, `medium`, `high`, `critical`.
-
-**Public API:**
-```python
-@dataclass WorkUnit:
-    id, title, spec_path, status, assigned_supervisor, assigned_builder, assigned_auditor,
-    priority, depends_on: list[str], created_at, updated_at, completed_at,
-    post_mortem_path, blocked_reason
-
-    def to_dict() -> dict
-    @classmethod from_dict(cls, data: dict) -> "WorkUnit"
-
-class WorkUnitStore:
-    def create(work) -> WorkUnit                 # assigns id/dates, validates dependency graph
-    def get(work_id) -> WorkUnit | None
-    def update(work) -> WorkUnit                 # re-validates dependencies
-    def list_all() -> list[WorkUnit]             # sorted by (created_at, id)
-    def list_by_status(status) -> list[WorkUnit]
-    def delete(work_id) -> bool
-    def replace_all(work_units) -> None          # load path (does NOT reset id counter)
-```
-
-**Helpers:**
-- `_work_next_id()` — sequential zero-padded id generator.
-- `WORK_STATUS_LABELS` / `WORK_PRIORITY_LABELS` — emoji display labels.
-- `_work_init_counter(work_units)` — advance the module id counter past loaded ids (restart collision safety).
-- `_validate_dependencies(work, existing_ids)` — rejects a Work Unit whose `depends_on` references an unknown id.
-
-**Serialization:** `to_dict()` / `from_dict()` with type validation — `depends_on` is stored as a list
-and `from_dict` coerces/validates field types. `WorkUnitStore` is a pure in-memory store; persistence is
-owned by `utils/work_persistence.py`.
+The legacy task data model (`Task`, `TaskStore`, `task_store` singleton) and its
+successor the work-unit system (`models/work_unit.py`) were both removed — the
+work-unit system in SPEC-49. No task model exists in `models/`; task/work-unit
+commands fall through to chat send. See
+`docs/specs/SPEC-49-WORK-SYSTEM-REMOVAL.md`.
 
 ### 3.3e `models/review_state.py` — Review State
 
@@ -1596,90 +1531,11 @@ def set_accept_callback(cb)
 def set_reject_callback(cb)
 ```
 
-### 3.21d `ui/handlers/task_handler.py` — Task Commands (Phase 7)
+### 3.21d (removed) `ui/handlers/task_handler.py` / `work_handler.py`
 
-> **DEPRECATED (SPEC-TASK-SYSTEM-FULL-REDESIGN §14):** `TaskHandler` is superseded by `WorkHandler`
-> (`ui/handlers/work_handler.py`) in production wiring; `TaskHandler` is kept for import compatibility.
-
-**Public API:**
-```python
-class TaskHandler:
-    def __init__(self, on_display_card, on_display_text, GLib_module)
-    def cmd_task(cmd) -> CommandResult
-    def cmd_done(cmd) -> CommandResult
-    def cmd_start(cmd) -> CommandResult
-    def cmd_blocked(cmd) -> CommandResult
-    def cmd_cancel(cmd) -> CommandResult
-    def cmd_tasks(cmd) -> CommandResult
-    def cmd_assign(cmd) -> CommandResult
-    def cmd_priority(cmd) -> CommandResult
-```
-
-### 3.21d1 `ui/handlers/work_handler.py` — Work Handler
-
-**Responsibility:** Owns the `/work` command semantics (and legacy aliases) for Work Unit lifecycle.
-Replaces `TaskHandler` in production wiring. Follows the §8.6 handler pattern — receives all
-dependencies via constructor, never imports other handlers, never raises out of `process_input()`.
-
-**Constructor (injected deps):**
-```python
-class WorkHandler:
-    def __init__(
-        self,
-        project_handler,            # resolve active project (name/path/members)
-        work_store,                 # shared WorkUnitStore (injected by window.py)
-        agent_runtime_handler=None, # /work start → send_to_special_agent() Supervisor handoff
-        on_display_card=None,
-        on_display_text=None,
-        on_feed_card=None,
-        GLib_module=None,
-    )
-```
-
-**Lifecycle:** `load_for_project(project_path)` loads (or migrates) Work Units and binds the store
-(called by `window.py` on project open); `close_project()` releases the binding (persisted data retained).
-
-**`/work` command grammar (legacy aliases route here via CommandHandler):**
-- `/work "Title"` (or `/work <unquoted args>`) → create a `draft` Work Unit (`spec_path=""`).
-- `/work list`
-- `/work start #N`
-- `/work done #N [notes]`
-- `/work blocked #N [reason]`
-- `/work unblock #N`
-- `/work cancel #N`
-- `/work assign #N @agent`
-- `/work priority #N level`
-- `/work spec-ready #N <spec_path>`
-- `/work status #N` (also carries the status-transition table + authorization)
-
-Legacy aliases registered by `CommandHandler` route to the same `cmd_work_*` methods: `/task`, `/tasks`,
-`/start`, `/done`, `/blocked`, `/cancel`, `/assign`, `/priority`. (The old `/t` alias is gone per spec §5.1.)
-
-**`/work start #N` validation + Supervisor handoff (`cmd_work_start`):**
-1. Resolves the Work Unit id (`#N`).
-2. Authorizes the caller — only the PM or the unit's assigned Supervisor may start (spec §4.6).
-3. Validates `spec_path` is set, resolves within the project (path containment), and the spec file exists.
-4. Runs the dependency check — a Work Unit whose dependencies are not `done` cannot start.
-5. Verifies the assigned Supervisor is a team member (`add the Supervisor agent to begin implementation`).
-6. Hands off via `AgentRuntimeHandler.send_to_special_agent(session_key, text)` — **it does NOT call
-   runtime internals** (spec §14 runtime boundary). This triggers the implementation loop; the Supervisor
-   loads `prompts/implementationLoop.md`.
-
-**Status transition table (enforced in `cmd_work_status`):**
-- `draft` → `spec-pending` (only from `draft`)
-- `spec-pending` → `spec-ready` (via `/work spec-ready`, PM/Supervisor only; spec file must exist)
-- `spec-ready` → `in-progress` (via `/work start`)
-- `in-progress` → `auditing` (assigned Supervisor only)
-- `in-progress`|`auditing` → `done` (via `/work done`)
-- `-> cancelled` (PM only; cannot cancel a `done` unit)
-- `-> draft` revert paths guarded; `done` units cannot revert to `draft`
-
-**Authorization (spec §4.6):** lifecycle triggers require the PM or the unit's assigned Supervisor.
-`_is_supervisor_or_pm` / `_is_supervisor_only` / `_is_pm` gate cancel, auditing, and spec-ready transitions.
-
-**Persistence:** every mutation calls `_persist()` → `utils/work_persistence.save_work_units()`; writes are
-atomic and immediate. `on_feed_card` emits a `FeedCardData` card per action (created/started/done/blocked/
-unblocked/cancelled/spec-ready/status).
+The legacy task handler and the work-unit handler were removed in SPEC-49
+(`/work` and the `/task` aliases now fall through to chat send). See
+`docs/specs/SPEC-49-WORK-SYSTEM-REMOVAL.md`.
 
 ### 3.21e `ui/handlers/collab_handler.py` — Collaboration Commands (Phase 7)
 
@@ -2464,7 +2320,7 @@ def get_default_si_config(can_write: bool) -> dict  # canonical SI defaults — 
 
 **Default seeding (SPEC-SUPERVISOR-ONBOARDING-REFINEMENTS §2.4):** `_seed_defaults()` copies each built-in YAML/JSON file from `prompts/default_agents/` individually — it checks each built-in file independently and copies only when the same destination filename is absent in the user agents directory. This is a per-file missing-copy, not the old all-or-nothing directory guard. Existing user files are never overwritten, even if the built-in changes. This ensures a new default like `supervisor.yaml` reaches existing installations that already have unrelated agent files.
 
-**Session keys:** `save_agent_def` preserves `session_key`, `auto_open`, and `auto_add_to_projects` when the Agent Builder form omits them. A new agent with no key gets `special:<role>` when no other file owns it. A file that omits `session_key` still owns that default. The next agent with the same role gets `special:<role>-2`, then `-3`. Role stays the prompt selector. A suffixed writer (`special:coder-2`) runs in `<project>/.worktrees/special-coder-2` on branch `agent/special-coder-2`. The unsuffixed writer stays on the project root unless it holds a work lease.
+**Session keys:** `save_agent_def` preserves `session_key`, `auto_open`, and `auto_add_to_projects` when the Agent Builder form omits them. A new agent with no key gets `special:<role>` when no other file owns it. A file that omits `session_key` still owns that default. The next agent with the same role gets `special:<role>-2`, then `-3`. Role stays the prompt selector. A suffixed writer (`special:coder-2`) runs in `<project>/.worktrees/special-coder-2` on branch `agent/special-coder-2`. The unsuffixed primary writer runs in the project root.
 
 **Validation:** Checks required fields (name, prompts, tools, provider), verifies tool names against `agent/tools.py`, prompt file existence, and provider availability.
 
@@ -3372,22 +3228,13 @@ def clean_manifest_skeleton(project_path: str) -> bool    # SPEC-SUPERVISOR-ONBO
 ```
 
 **Architecture rules:**
-- Lives in `utils/` — may import `models/` only (TeamMember, ProjectTeam, WorkUnitStore)
+- Lives in `utils/` — may import `models/` only (TeamMember, ProjectTeam)
 - Imports `utils/config.py`, `utils/git_ops.py`, `utils/workflow_state.py`
 - No imports from `ui/` or `gateway/`
 
-**Work Unit awareness counts (SPEC-TASK-SYSTEM-FULL-REDESIGN §14).** `_get_task_info(work_store)` reports
-**Work Unit** status counts — the schema is `{total, spec_pending, spec_ready, in_progress, done}`
-(replacing the old Task counts `{total, in_progress, blocked, pending, done}`):
-- `total` = all units (including cancelled — reflects all work).
-- `spec_pending` = `draft` OR `spec-pending`.
-- `spec_ready` = `spec-ready`. `in_progress` = `in-progress` OR `auditing`. `done` = `done`.
-- `cancelled` counts only in `total`, never in a bucket. `draft` folds into `spec_pending`.
-
-`build_awareness_dict()` uses the **project-bound loader** `_work_units_for_awareness(project_path)` to load
-the project's Work Units on demand into a throwaway `WorkUnitStore` (returns `None` on any error — awareness
-is best-effort and never crashes the system-prompt build). It does NOT thread a `work_store` through its
-callers and remains read-only (no snapshot writes; the `.develcakes/` mtime cache governs invalidation).
+**Work Unit awareness counts — REMOVED (SPEC-49).** `_get_task_info(work_store)` and the
+`_work_units_for_awareness(project_path)` loader were removed with the work-unit system. `build_awareness_dict()`
+no longer reports Work Unit status counts. See `docs/specs/SPEC-49-WORK-SYSTEM-REMOVAL.md`.
 
 **Phase CB-3 — Awareness variable caps (BUG #6 fix).** `build_awareness_dict()` caps
 `TEAM_ROSTER` at 500 chars and `CURRENT_STATE` at 1,000 chars, matching the existing
@@ -3431,39 +3278,11 @@ layer supplies the `prompt_fn` callback (e.g., a dialog).
 
 ---
 
-### 3.27b `utils/work_persistence.py` — Work Unit Persistence
+### 3.27b (removed) `utils/work_persistence.py`
 
-**Responsibility:** Owns `.develcakes/work.json` as the **source of truth** for Work Units and the
-generated `.develcakes/tasks.md` summary. Handles legacy `tasks.md` → `work.json` migration.
-Pure file I/O — no GTK, no network (SPEC-TASK-SYSTEM-FULL-REDESIGN §3.2, §14).
-
-**Source-of-truth rule:** `.develcakes/work.json` is authoritative. `.develcakes/tasks.md` is a
-**generated** summary (for humans only) and is never hand-edited — it is regenerated from
-`work.json` on every save/load.
-
-**Public API:**
-```python
-def work_json_path(project_path: str) -> str
-def tasks_summary_path(project_path: str) -> str
-def load_work_units(project_path: str) -> list[WorkUnit]      # missing/invalid → [] with logged warning
-def save_work_units(project_path: str, work_units) -> None    # atomic JSON write, then regen tasks.md
-def render_tasks_summary(work_units) -> str
-def write_tasks_summary(project_path: str, work_units) -> None
-def load_or_migrate_work_units(project_path: str) -> list[WorkUnit]  # authoritative load + one-shot legacy migrate
-```
-
-**Legacy migration (`load_or_migrate_work_units`):**
-1. A valid, versioned `work.json` is authoritative — load it, regenerate `tasks.md`, return units.
-2. No `work.json` → best-effort parse of a legacy `tasks.md` and persist once (migration).
-3. No recognizable content → `[]`, nothing written.
-
-**Atomicity / error handling (spec §3.1):** writes are atomic (temp file + `os.replace`); the JSON is
-persisted before `tasks.md` is regenerated, so a failed summary write never corrupts or rolls back
-`work.json`. A corrupt project state (`.develcakes` is a regular file) raises `RuntimeError` that is
-caught and logged — never crashes project open. All load paths are best-effort and never raise.
-
-**Used by:** `ui/handlers/work_handler.py` (all `/work` mutations), `models/work_unit.py` consumers,
-and `utils/project_awareness.py` (via the project-bound loader `_work_units_for_awareness` for awareness).
+The work persistence layer (`work.json` source of truth + generated `tasks.md`) was
+removed in SPEC-49 with the work-unit system. See
+`docs/specs/SPEC-49-WORK-SYSTEM-REMOVAL.md`.
 
 ---
 
@@ -3894,7 +3713,7 @@ detectors, no relay threads, no convergence loops, and no capture_response cycle
 **The only mechanism:** `/ask @AgentName "question"` — typed by a human or emitted
 by an agent in its response text.
 
-**Commands** (see §3.21d for CollabHandler):
+**Commands** (see §3.21e for CollabHandler):
 | Command | Effect |
 |---------|--------|
 | `/ask @Agent "question"` | Forward question to target agent; response appears in same tab |
@@ -4269,12 +4088,7 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_special_agents.py` — SpecialAgentDef loading, auto-open, auto-add
 - `tests/test_streaming.py` — StreamingBubble dataclass
 - `tests/test_syntax_highlight.py` — Pygments → Pango highlighter
-- `tests/test_task_redesign_prompts.py` — static-content checks for cc-spec-planning/redirect/workflow-guide/commands (SPEC-TASK-SYSTEM-FULL-REDESIGN §10)
-- `tests/test_tasks.py` — TaskStore CRUD + status transitions (tests the deprecated TaskStore; still passes)
 - `tests/test_tools.py` — tool execution: sandbox, blocklist, file ops
-- `tests/test_work_handler.py` — WorkHandler: /work commands, lifecycle, authorization, persistence
-- `tests/test_work_persistence.py` — work.json source of truth + generated tasks.md + legacy migration
-- `tests/test_work_unit.py` — WorkUnitStore CRUD + status/priority + dependency validation
 
 **Writing new tests:** aim to break the code, not confirm it works. Test:
 - Unknown/missing inputs → what does the code do?
@@ -4538,8 +4352,6 @@ develcakes/
 │   ├── review_state.py           # 26 lines — ReviewState dataclass (Phase 7)
 │   ├── routing.py                # 41 lines — AgentRoutingTable (session_key → project_name)
 │   ├── streaming.py              # 30 lines — StreamingBubble dataclass (Phase 5)
-│   ├── task.py                   # 105 lines — Task + TaskStore + labels (Phase 3) — DEPRECATED, superseded by work_unit.py
-│   ├── work_unit.py              # 233 lines — WorkUnit + WorkUnitStore + status/priority labels (replaces task.py as primary)
 │   └── team.py                   # 103 lines — TeamMember, ProjectTeam
 │
 ├── agent/
@@ -4599,7 +4411,6 @@ develcakes/
 │   │   ├── review_handler.py     # ~523 lines — review session lifecycle (Phase 7)
 │   │   ├── session_handler.py    # ~164 lines — session switching (Phase 7)
 │   │   ├── settings_handler.py   # ~231 lines — settings dialog logic (provider CRUD, test connection)
-│   │   ├── work_handler.py       # ~1046 lines — WorkHandler /work commands + Supervisor handoff (replaces task_handler.py)
 │   │   ├── auxilium_wizard_handler.py # ~449 lines — Auxilium wizard handler (Tier 1, D7)
 │   │   └── file_tree_handler.py  # ~93 lines — FileTree sort prefs + git status cache (no GTK)
 │   └── views/
@@ -4658,8 +4469,7 @@ develcakes/
     ├── stt.py                    # ~286 lines — STTEngine (OpenRouter cloud STT; GTK carve-out: lazy GLib import)
     ├── stt_config.py             # STT model setting store — stt.yaml + env override (SPEC-37; pure Python)
     ├── syntax_highlight.py       # ~164 lines — Pygments → Pango (Tokyo Night)
-    ├── work_persistence.py       # ~435 lines — work.json source of truth + generated tasks.md + legacy migration
-    └── workflow_state.py         # ~226 lines — workflow state tracker
+    ├── workflow_state.py         # ~226 lines — workflow state tracker
 
 prompts/                         # System prompt templates for agent runtime
     └── system/
@@ -4753,12 +4563,8 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── test_special_agents.py
     ├── test_streaming.py
     ├── test_syntax_highlight.py
-    ├── test_tasks.py
-    ├── test_task_redesign_prompts.py
     ├── test_tools.py
-    ├── test_work_handler.py
-    ├── test_work_persistence.py
-    └── test_work_unit.py
+    └── test_window.py
 ```
 
 **Test count:** 100 test files (as of 2026-06-27). For the current count and pass/fail status, run `pytest --co -q` and `pytest -q`. The explicit test-file enumeration in §13 is illustrative, not exhaustive — new tests are added with the features they cover and may not be retroactively enumerated.

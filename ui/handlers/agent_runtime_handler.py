@@ -941,34 +941,23 @@ class AgentRuntimeHandler(
     ) -> str | None:
         """SPEC-09 SP2: the worktree cwd for this turn, or None.
 
-        A writer enters its worktree in two cases:
-        - it holds a LIVE lease (the original special:<role> path), or
-        - its session key is not the role default special:<role>
-          (special:coder-2, special:debugger-3, …).
+        A writer enters its worktree when its session key is NOT the role
+        default special:<role> (special:coder-2, special:debugger-3, …).
+        A primary special:<role> writer runs in the project root. Extra
+        same-role writers get branch agent/<session-id> under
+        <project>/.worktrees/.
 
-        The first coder and the first debugger stay on the project root
-        unless they hold a lease. Extra same-role writers always get
-        branch agent/<session-id> under <project>/.worktrees/.
-
-        Non-writer, primary writer with no lease, non-git project, or ANY
-        worktree failure -> None (the turn runs in the project root).
-
-        Lease-expiry reset (v3 MED): a primary writer WITHOUT a live lease
-        whose current conv.project_path is a worktree is handled by the
-        caller (this method only decides the NEW path). A suffixed writer
-        stays in its worktree after the lease expires.
+        Non-writer, primary writer, non-git project, or ANY worktree
+        failure -> None (the turn runs in the project root).
         """
         if not getattr(agent_def, "can_write", False):
             return None
         if not project_path:
             return None
         try:
-            # Deferred import: utils must not import ui (architecture rule);
-            # this helper is the ui-side consumer.
-            from utils.work_persistence import find_live_lease
-
-            leased = find_live_lease(project_path, session_key) is not None
-            if not leased and not _suffixed_writer(session_key, agent_def):
+            # A suffixed writer always gets its own worktree; a primary
+            # special:<role> writer runs in the project root.
+            if not _suffixed_writer(session_key, agent_def):
                 return None
             from utils.worktree_manager import WorktreeManager
 

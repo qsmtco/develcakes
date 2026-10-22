@@ -2830,11 +2830,10 @@ class AgentRuntime:
                     budget_started = None
                     pending = None
                     continue
-                # Halt and a failed advance already released the lease.
+                # Halt: a failed advance ends the turn.
                 # A retry with no time left would spin, so stop the turn.
                 if outcome == "retry":
-                    self._release_session_lease(session_key)
-                raise exc
+                    raise exc
             try:
                 with ssl_retry_budget(0):
                     response = self._call_llm_once(
@@ -2913,11 +2912,9 @@ class AgentRuntime:
         if action == "advance":
             fallback_name = self._switch_to_fallback(session_key)
             if not fallback_name:
-                self._release_session_lease(session_key)
                 return "raise"
             self._note_failover(session_key, failure, fallback_name, turn_token)
             return "advance"
-        self._release_session_lease(session_key)
         return "raise"
 
     def _failover_action(
@@ -3105,19 +3102,6 @@ class AgentRuntime:
         # the JEV-refined class into `decide()` (SPEC-46 §4.5).
         self._jev_refine_unknown(failure)
         return ClassifiedProviderError(str(err), failure)
-
-    def _release_session_lease(self, session_key: str) -> None:
-        conv = self._conversations.get(session_key)
-        project_path = getattr(conv, "project_path", None) or ""
-        if not project_path:
-            return
-        try:
-            from utils.work_persistence import find_live_lease, release_work
-            lease = find_live_lease(project_path, session_key)
-            if lease is not None:
-                release_work(project_path, lease.unit_id, session_key)
-        except Exception:
-            logger.exception("work-claim release failed for %s", session_key)
 
     def _call_llm_once(
         self,

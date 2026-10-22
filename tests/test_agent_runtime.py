@@ -6178,30 +6178,6 @@ def _sp2_reader_def():
     )
 
 
-def test_writer_with_lease_gets_worktree_cwd(tmp_path):
-    """The SP2 core path: writer + live lease -> _worktree_for_turn returns
-    the REAL worktree path under the ACTIVE PROJECT (project-parameterized)."""
-    handler = _sp2_make_handler()
-    project = tmp_path / "proj"
-    project.mkdir()
-    _sp2_git_repo(project)
-
-    from models.work_unit import WorkUnit
-    from utils.work_persistence import claim_work, save_work_units
-    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
-                                            status="in-progress")])
-    assert claim_work(str(project), "00000001", "special:coder") is not None
-
-    got = handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
-    )
-    assert got is not None
-    assert got == os.path.realpath(got)
-    assert os.path.dirname(got) == os.path.realpath(
-        os.path.join(str(project), ".worktrees")
-    )
-
-
 def test_non_writer_no_worktree(tmp_path):
     """A reader (can_write False) NEVER gets a worktree, lease or not."""
     handler = _sp2_make_handler()
@@ -6209,19 +6185,13 @@ def test_non_writer_no_worktree(tmp_path):
     project.mkdir()
     _sp2_git_repo(project)
 
-    from models.work_unit import WorkUnit
-    from utils.work_persistence import claim_work, save_work_units
-    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
-                                            status="in-progress")])
-    claim_work(str(project), "00000001", "special:coder")
-
     assert handler._worktree_for_turn(
         "special:coder", _sp2_reader_def(), str(project)
     ) is None
 
 
-def test_no_lease_no_worktree(tmp_path):
-    """The role-default writer WITHOUT a live lease -> None (project root)."""
+def test_primary_writer_gets_no_worktree(tmp_path):
+    """The role-default writer WITHOUT a session-key suffix -> None (root)."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
     project.mkdir()
@@ -6271,73 +6241,23 @@ def test_suffixed_writer_on_non_git_stays_on_project_root(tmp_path):
     ) is None
 
 
-def test_expired_lease_no_worktree(tmp_path, monkeypatch):
-    """An EXPIRED lease is not a live lease (read-time TTL, SP1 semantics)."""
+def test_is_worktree_of_recognizes_worktree(tmp_path):
+    """A suffixed writer's worktree is classified by is_worktree_of and
+    survives the turn (no deletion on any reset path)."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
     project.mkdir()
     _sp2_git_repo(project)
 
-    from models.work_unit import WorkUnit
-    from utils.work_persistence import claim_work, save_work_units
-    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
-                                            status="in-progress")])
-    clock = {"now": 1000.0}
-    monkeypatch.setattr("utils.work_persistence._now", lambda: clock["now"])
-    claim_work(str(project), "00000001", "special:coder", ttl=60)
-    clock["now"] += 61.0
-
-    assert handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
-    ) is None
-
-
-def test_non_git_project_degrades_to_project_root(tmp_path):
-    """B3/v3 end-to-end at the seam: a writer+lease on a NON-GIT project
-    must not raise — the disabled manager yields None -> project root."""
-    handler = _sp2_make_handler()
-    project = tmp_path / "plain"
-    project.mkdir()  # deliberately NOT a git repo
-
-    from models.work_unit import WorkUnit
-    from utils.work_persistence import claim_work, save_work_units
-    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
-                                            status="in-progress")])
-    claim_work(str(project), "00000001", "special:coder")
-
-    assert handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
-    ) is None
-
-
-def test_lease_expiry_reset_via_is_worktree_of(tmp_path):
-    """The v3 reset rule: is_worktree_of recognizes a stale worktree cwd so
-    the caller can repoint it at the project (LOW-8: the worktree itself is
-    NOT deleted — recoverable uncommitted work)."""
-    handler = _sp2_make_handler()
-    project = tmp_path / "proj"
-    project.mkdir()
-    _sp2_git_repo(project)
-
-    from models.work_unit import WorkUnit
-    from utils.work_persistence import claim_work, save_work_units
     from utils.worktree_manager import is_worktree_of
-    save_work_units(str(project), [WorkUnit(id="00000001", title="t",
-                                            status="in-progress")])
-    assert claim_work(str(project), "00000001", "special:coder") is not None
+
     wt = handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
+        "special:coder-2", _sp2_writer_def(), str(project)
     )
     assert wt is not None
-    # the lease expires; the cwd still points at the worktree
-    from utils.work_persistence import release_work
-    release_work(str(project), "00000001", "special:coder")
-    assert handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
-    ) is None                      # next turn gets None -> project root
-    # the reset recognizer still classifies the old cwd as a worktree
+    # the reset recognizer classifies the worktree cwd as a worktree
     assert is_worktree_of(str(project), wt) is True
-    # and the worktree survives (no deletion on the reset path)
+    # and the worktree survives
     assert os.path.isdir(wt)
 
 
@@ -6718,39 +6638,39 @@ class TestSpec10AgentCheckpoints:
             f"checkpoint error surfaced to the chat: {card_calls}")
 
     def test_worktree_turn_checkpoints_in_worktree(self, tmp_path):
-        """D2/D5b/D3 REV 4b: a leased writer's checkpoint commits in its
+        """D2/D5b/D3 REV 4b: a suffixed writer's checkpoint commits in its
         WORKTREE (agent-private tree — no project lock held) while the PM
         holds the root project lock: no deadlock, entry path_used ==
         worktree, trailer on the worktree-branch commit."""
         import git as gitpython
 
         handler, rh, pstr, token = self._wired(tmp_path)
+        sk = "special:coder-2"
 
-        from models.work_unit import WorkUnit
-        from utils.work_persistence import claim_work, save_work_units
-        save_work_units(pstr, [WorkUnit(id="00000042", title="t",
-                                        status="in-progress")])
-        assert claim_work(pstr, "00000042", "special:coder") is not None
-        wt = handler._worktree_for_turn("special:coder", _sp2_writer_def(), pstr)
+        # Register the suffixed writer session and bump its turn token.
+        handler._agents[sk] = _sp2_writer_def()
+        token = object()
+        handler._turn_tokens[sk] = token
+        wt = handler._worktree_for_turn(sk, _sp2_writer_def(), pstr)
         assert wt is not None, "fixture precondition: no worktree resolved"
-        handler._turn_attr["special:coder"] = ("proj", pstr, wt)
+        handler._turn_attr[sk] = ("proj", pstr, wt)
 
         # Dirty the WORKTREE so the checkpoint has something to sweep.
         (Path(wt) / "agent_work.txt").write_text("work\n")
 
         lock = rh._project_lock_for("proj")
         with lock:  # PM-side root lock HELD during the whole checkpoint
-            self._finish(handler, token=token)
+            self._finish(handler, sk=sk, token=token)
             done = self._wait(
-                lambda: rh.pending_count("proj", "special:coder") == 1,
+                lambda: rh.pending_count("proj", sk) == 1,
                 timeout=10.0)
 
         assert done, "worktree checkpoint never completed — project-lock " \
             "deadlock (D3 REV 4b: agent-private trees take NO project lock)"
-        entry = rh._queues["proj"]["special:coder"][0]
+        entry = rh._queues["proj"][sk][0]
         assert entry.path_used == wt
         body = gitpython.Repo(wt).git.log("--format=%B", "-1")
-        assert "Agent: special:coder" in body.splitlines()
+        assert "Agent: special:coder-2" in body.splitlines()
 
 
 # ═══════════════════════════════════════════════════════════════════

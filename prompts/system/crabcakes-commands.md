@@ -8,7 +8,6 @@ Slash commands typed in the project feed chat input — **not** shell commands; 
 | `/delegate` | `@agent "task"` | Assign work. Alias `/d`. |
 | `/tell` | `@agent "info"` | Share info; no response expected. |
 | `/stop` | (none) | Stop the current agent. |
-| `/work` | `subcommand …` | Work Unit commands (below). |
 | `/review` | (none) | Git checkpoint. |
 | `/check` | (none) | Show diff since checkpoint. |
 | `/accept` | `[--file path]` | Accept changes. |
@@ -18,16 +17,8 @@ Slash commands typed in the project feed chat input — **not** shell commands; 
 | `/cost` | (none) | Spending summary. |
 | `/help` | `[command]` | Help. Alias `/?`. |
 
-## Work Units (`/work`)
-
-State lives in `.crabcakes/work.json`; `.crabcakes/tasks.md` is a generated summary, not a source of truth.
-
-Subcommands: `/work "Title"` (create, status `draft`) · `/work list` · `/work start #N` (validate the spec file + deps, then hand off to the Supervisor) · `/work done #N — notes` · `/work blocked #N — reason` · `/work unblock #N` (clear a blocker, restore to spec-ready; PM/Supervisor only) · `/work cancel #N` · `/work assign #N @agent` (supervisor/builder/auditor) · `/work priority #N level` (low/med/high/critical) · `/work spec-ready #N <path>` (validate the spec path; PM/Supervisor only) · `/work status #N`
-
-**There is no `/task add` — that command does not exist.** `@mentions` in a command route to a specific agent; they do **not** trigger @mention notifications.
-
-### Legacy aliases
-
-The legacy task-centric commands are still accepted and route to the Work Handler: `/task` → `/work` (create), `/tasks` → `/work list`, `/start` → `/work start`, `/done` → `/work done`, `/blocked` → `/work blocked`, `/cancel` → `/work cancel`, `/assign` → `/work assign`, `/priority` → `/work priority`.
-
-The legacy `/t` alias for `/task` is **gone** (SPEC-TASK-SYSTEM-FULL-REDESIGN §5.1) — use `/work`.
+> The work-unit command set (`/work`, and the legacy `/task` `/tasks` `/start`
+> `/done` `/blocked` `/cancel` `/assign` `/priority` aliases) was removed in
+> SPEC-49. Those tokens now fall through to normal chat send like any
+> unregistered command. Track work through specs, phases, and
+> `.crabcakes/workflow.md` instead.

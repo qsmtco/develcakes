@@ -17,15 +17,12 @@ from .colors import (
 from .command import Command, CommandResult, CommandRegistry
 from .routing import AgentRoutingTable
 from .streaming import StreamingBubble
-from .work_unit import WorkUnit, WorkUnitStore, WORK_STATUS_LABELS, WORK_PRIORITY_LABELS
 from .feed_card import FeedCardData
 from .activity import ActivityBubble, ToolStatus
 from .conversation import Conversation, Message, MessageRole, ToolCall, ToolCallStatus
 from .conversation_snapshot import ConversationSnapshot, SnapshotMessage
 from .review_state import ReviewState
 from .team import TeamMember, ProjectTeam
-
-work_store = WorkUnitStore()
 
 __all__ = [
     # agents
@@ -57,12 +54,6 @@ __all__ = [
     # team
     "TeamMember",
     "ProjectTeam",
-    # work unit
-    "WorkUnit",
-    "WorkUnitStore",
-    "work_store",
-    "WORK_STATUS_LABELS",
-    "WORK_PRIORITY_LABELS",
     # colors
     "next_agent_color",
     "reset_color_indices",
