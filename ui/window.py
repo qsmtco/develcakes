@@ -457,6 +457,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Wire MainContent → ProjectHandler (for right-click project tab menu)
         self._main_content.set_project_handler(self._project_handler)
+        # SPEC-39 §2.5: reply witness needs project members without a
+        # ProjectHandler import inside the runtime handler.
+        if self._agent_runtime_handler is not None and hasattr(
+            self._agent_runtime_handler, "set_on_room_members"
+        ):
+            self._agent_runtime_handler.set_on_room_members(
+                self._project_handler.get_project_members
+            )
         self._main_content.set_on_project_tab_closed(
             lambda name: self._close_project_tab(name)
         )

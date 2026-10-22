@@ -356,3 +356,76 @@ def probe_decision_model(provider: object, timeout: float = 4.0):
             error=f"decision model unavailable: {exc}",
             model_used=label,
         )
+
+
+_ROOM_INSTRUCTIONS = (
+    "The human just spoke in a group chat. Decide who should answer. "
+    "Choose all when the message names nobody, greets the room, or addresses "
+    "more than one participant. Choose one participant when the message "
+    "addresses that participant by name or role. For example, \"hi debugger\" "
+    "addresses the participant named Debugger. Choose exactly one option."
+)
+
+
+def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> str:
+    """Return ``"all"`` or one ``session_key`` from ``roster``.
+
+    ``roster`` entries are ``(session_key, display_name)``. An empty roster,
+    a non-string ``text``, any ``post_decision`` failure, a choice outside
+    the roster, a bool confidence, or confidence below
+    ``_DECISION_MIN_CONFIDENCE`` returns ``"all"``. Never raises.
+    The return is the session key to wake, or ``"all"`` to wake every
+    member. The human text is not modified.
+    """
+    if not isinstance(roster, list) or not roster or not isinstance(text, str):
+        return "all"
+    criteria: dict[str, str] = {
+        "all": "The message addresses the whole room, or names nobody, or "
+               "names more than one participant."
+    }
+    kept: list[tuple[str, str]] = []
+    for session_key, display_name in roster:
+        if (
+            isinstance(session_key, str) and session_key
+            and isinstance(display_name, str) and display_name
+        ):
+            criteria[session_key] = (
+                f"{display_name} ({session_key}) — choose this when the "
+                f"message addresses {display_name}."
+            )
+            kept.append((session_key, display_name))
+    if not kept:
+        return "all"
+    state = (
+        "message:\n" + text[:4000]
+        + "\n\nparticipants:\n"
+        + "\n".join(f"- {display_name} ({session_key})"
+                    for session_key, display_name in kept)
+    )
+    answers, _error = post_decision(
+        state,
+        {
+            "addressee": {
+                "type": "choice",
+                "instructions": _ROOM_INSTRUCTIONS,
+                "criteria": criteria,
+            }
+        },
+    )
+    if answers is None:
+        return "all"
+    try:
+        answer = answers["addressee"]
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
+            return "all"
+        choice = answer.get("choice")
+        confidence = answer.get("confidence", 0.0)
+        if not isinstance(choice, str) or choice not in criteria:
+            return "all"
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return "all"
+        if confidence < _DECISION_MIN_CONFIDENCE:
+            return "all"
+    except (KeyError, TypeError, AttributeError):
+        return "all"
+    return choice

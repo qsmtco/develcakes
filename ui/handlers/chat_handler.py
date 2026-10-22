@@ -15,6 +15,7 @@
 from typing import Callable
 
 import logging
+import threading
 
 _logger = logging.getLogger(__name__)
 
@@ -417,20 +418,73 @@ class ChatHandler:
                     self._send_local(
                         solo_target, text, reply_target=f"project:{project_name}")
                 else:
-                    # Group broadcast — fan out to all members
+                    # Group broadcast — fan out to all members, routed by
+                    # resolve_room_addressee (SPEC-39 §2.4).
                     if self._project_handler:
                         members = self._project_handler.get_project_members(project_name)
                     elif self._projects:
                         members = list(self._projects.load_members(project_name))
                     else:
                         members = []
-                    for member in members:
-                        # Local path only (SPEC-05 R1); receiver no-ops for
-                        # unregistered/remote keys.
-                        # SPEC-12 BUG#11: member replies land in the PROJECT
-                        # surface (one group chat), not per-agent surfaces.
-                        self._send_local(
-                            member, text, reply_target=f"project:{project_name}")
+                    # Roster: display names via the runtime handler. A member
+                    # with an empty name stays in `members` but is dropped from
+                    # the roster only (SPEC-39 §2.4 step 2).
+                    roster = []
+                    _get_name = (
+                        getattr(self._agent_runtime_handler, "get_agent_name_for_session", None)
+                        if self._agent_runtime_handler is not None else None
+                    )
+                    if _get_name is not None:
+                        roster = [
+                            (member, name)
+                            for member in members
+                            if (name := _get_name(member))
+                        ]
+
+                    def _deliver(choice):
+                        arh = self._agent_runtime_handler
+                        if choice == "all" or choice not in members:
+                            for member in members:
+                                self._send_local(
+                                    member, text, reply_target=f"project:{project_name}")
+                                if arh is not None and hasattr(arh, "mark_room_turn"):
+                                    arh.mark_room_turn(member)
+                        else:
+                            # One addressee: the raw text is their user message;
+                            # every other member gets the human line as a room PM.
+                            self._send_local(
+                                choice, text, reply_target=f"project:{project_name}")
+                            if arh is not None and hasattr(arh, "mark_room_turn"):
+                                arh.mark_room_turn(choice)
+                            if arh is not None and hasattr(arh, "record_room_line"):
+                                for member in members:
+                                    if member != choice:
+                                        arh.record_room_line(
+                                            member, f"[room] PM: {text}")
+
+                    def _resolve_and_deliver():
+                        # Import inside the worker so a module import never loads
+                        # the JEV provider config (SPEC-39 §2.4).
+                        from agent.llm.jev_client import resolve_room_addressee
+                        try:
+                            choice = resolve_room_addressee(text, roster)
+                        except Exception as exc:
+                            _logger.exception(
+                                "[chat] resolve_room_addressee failed for %r "
+                                "(falling back to 'all'): %r",
+                                project_name, exc,
+                            )
+                            choice = "all"
+                        if self._GLib is not None:
+                            self._GLib.idle_add(
+                                lambda choice=choice: (_deliver(choice), False)[1])
+                        else:
+                            _deliver(choice)
+
+                    if self._GLib is not None:
+                        threading.Thread(target=_resolve_and_deliver, daemon=True).start()
+                    else:
+                        _resolve_and_deliver()
             else:
                 # Local path only (SPEC-05 R1); receiver no-ops for
                 # unregistered/remote keys.

@@ -707,6 +707,10 @@ class AgentRuntime:
         # FIX-CLEAR-ASK-RACE: sessions with an in-flight _run_loop. Used by
         # is_loop_active() and maintained by _run_loop's try/finally.
         self._active_loops: set[str] = set()
+        # SPEC-39 §2.2: overheard room lines queued while a loop is active for
+        # the session. Flushed by _run_loop before the turn's own user message
+        # and in its finally. Guarded by self._lock.
+        self._pending_room_lines: dict[str, list[str]] = {}
         # SPEC-WIRE-CONTEXT-PRESSURE §2.1: one loop per session. _inbox is
         # text queued for the running loop; _stranded is text that missed the
         # loop and waits for the next turn. Both guarded by self._lock.
@@ -1523,6 +1527,63 @@ class AgentRuntime:
             if pending:
                 self._stranded[session_key] = pending
 
+    def note_room_line(self, session_key: str, line: str) -> str:
+        """Store one overheard room line on this session.
+
+        Returns ``"queued"``, ``"stored"``, or ``"skipped"``.
+        ``"queued"``: a ``_run_loop`` for this session holds ``_active_loops``.
+        The line is appended to ``_pending_room_lines[session_key]`` and is not
+        visible to the in-flight loop's ``to_api_messages()`` calls.
+        ``"stored"``: no loop is active and a conversation exists. The line is
+        ``add_user_message``'d and ``save_conversation_to_disk`` runs, both under
+        ``_lock``.
+        ``"skipped"``: blank line, blank session key, or no conversation.
+        Never raises. Does not call ``send_message``. Does not change
+        ``step_count`` (``add_user_message`` does not).
+        """
+        if not isinstance(line, str) or not line.strip():
+            return "skipped"
+        if not isinstance(session_key, str) or not session_key.strip():
+            return "skipped"
+        with self._lock:
+            if session_key in self._active_loops:
+                self._pending_room_lines.setdefault(session_key, []).append(line)
+                return "queued"
+            conv = self._conversations.get(session_key)
+            if conv is None:
+                return "skipped"
+            conv.add_user_message(line)
+            try:
+                save_conversation_to_disk(conv, session_key)
+            except OSError:
+                logger.warning(
+                    "could not save room line for %s", session_key, exc_info=True
+                )
+            return "stored"
+
+    def _flush_pending_room_lines(self, session_key: str) -> None:
+        """Move queued room lines onto the conversation, under ``_lock``.
+
+        The caller holds ``_lock``. No conversation: leave the queue.
+        Otherwise append each queued line with ``add_user_message``, clear the
+        queue entry, and ``save_conversation_to_disk``. ``OSError`` is logged
+        and swallowed.
+        """
+        conv = self._conversations.get(session_key)
+        if conv is None:
+            return
+        pending = self._pending_room_lines.pop(session_key, [])
+        if not pending:
+            return
+        for line in pending:
+            conv.add_user_message(line)
+        try:
+            save_conversation_to_disk(conv, session_key)
+        except OSError:
+            logger.warning(
+                "could not save flushed room lines for %s", session_key, exc_info=True
+            )
+
     def cancel(self, session_key: str) -> None:
         """Cancel an in-progress conversation.
 
@@ -1968,6 +2029,10 @@ class AgentRuntime:
                 # turn first — they are older than `text` (SPEC-WIRE-CONTEXT-
                 # PRESSURE §2.1). begin_send parked them for this new turn.
                 self._drain_inbox(session_key, conv)
+                # SPEC-39 §2.2: flush queued room lines before this turn's own
+                # user message so they land first.
+                with self._lock:
+                    self._flush_pending_room_lines(session_key)
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
                              session_key, len(text), conv.model or self._config.default_model)
@@ -2471,8 +2536,16 @@ class AgentRuntime:
             # FIX-CLEAR-ASK-RACE: always release the active-loop marker, even
             # on exception or early return, so a crashed loop doesn't block
             # /clear for this session permanently. Texts still in the inbox
-            # become stranded (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
-            self._finish_loop(session_key)
+            # become stranded (SPEC-WIRE-CONTEXT-PRESSURE §2.1). Queued room
+            # lines flush here under the same lock hold (SPEC-39 §2.2); the
+            # conv is looked up via _conversations, never the local `conv`
+            # (which may not exist when prepare failed).
+            with self._lock:
+                pending = self._inbox.pop(session_key, [])
+                self._active_loops.discard(session_key)
+                if pending:
+                    self._stranded[session_key] = pending
+                self._flush_pending_room_lines(session_key)
 
     def _execute_tool_batch(
         self,
