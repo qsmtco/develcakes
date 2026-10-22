@@ -28,6 +28,14 @@ class StubHandler:
         return []
     def get_mcp_options(self):
         return []
+    def get_role_options(self):
+        return [
+            ("Supervisor", "supervisor"),
+            ("Coder", "coder"),
+            ("Debugger", "debugger"),
+        ]
+    def save_role(self, name, prompt):
+        return None, "stub save_role not implemented"
 
 
 def _make_dlg(agent_def=None):

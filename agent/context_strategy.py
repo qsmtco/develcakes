@@ -298,7 +298,7 @@ class DefaultContextStrategy:
                 conv.messages.pop(idx)
             else:
                 conv.messages.pop(idx)
-            conv._token_estimate_cache = None
+            conv.invalidate_token_estimate()
 
         # ── Post-trim orphan sweep (defense in depth) ─────────────────────────
         # If anything slipped past Changes 1 and 2 — e.g., a TR whose parent
@@ -317,7 +317,7 @@ class DefaultContextStrategy:
             if m.role != MessageRole.TOOL_RESULT or m.tool_call_id in valid_call_ids
         ]
         if len(conv.messages) != before_sweep:
-            conv._token_estimate_cache = None
+            conv.invalidate_token_estimate()
 
         # ── Summary injection ─────────────────────────────────────────────────
         # Phase 4.10: fire when any messages were removed AND at least 4
@@ -504,7 +504,7 @@ class DefaultContextStrategy:
             # CRITICAL: invalidate cache after each mutation. The cache key
             # (len, hash(system_prompt), hash(task_card)) is unchanged by
             # content mutation, so a stale cache would return pre-stub tokens.
-            conv._token_estimate_cache = None
+            conv.invalidate_token_estimate()
 
         # Cache is invalidated inside the loop after each stub.
         tokens_after = conv.get_token_estimate()
@@ -595,7 +595,7 @@ class DefaultContextStrategy:
                     if tc.call_id == msg.tool_call_id:
                         tc.result = None
             msg.tokens_used = len(stub) // 4
-            conv._token_estimate_cache = None
+            conv.invalidate_token_estimate()
             replaced += 1
         return replaced
 

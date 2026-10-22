@@ -362,4 +362,4 @@ def persist_conversation(conv, session_key: str) -> None:
     finally:
         if swapped:
             conv.messages = original
-            conv._token_estimate_cache = None
+            conv.invalidate_token_estimate()

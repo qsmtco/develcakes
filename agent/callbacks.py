@@ -44,7 +44,7 @@ class OnTextDelta(Protocol):
     turn-start signal is the separate ``OnTurnStart`` callback.
 
     Args:
-        session_key: Conversation session key (e.g. "special:coder").
+        session_key: Conversation session key (e.g. "agent:coder").
         text: The chunk text (may be empty).
         _turn_token: Identity object set by the runtime at ``send_message``
             time. Used by the handler to reject stale cross-turn events.
@@ -75,7 +75,7 @@ class OnTurnStart(Protocol):
     fired first, so the regression tests shipped failing).
 
     Args:
-        session_key: Conversation session key (e.g. "special:coder").
+        session_key: Conversation session key (e.g. "agent:coder").
         _turn_token: See ``OnTextDelta``.
     """
 

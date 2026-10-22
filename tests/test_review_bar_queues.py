@@ -63,13 +63,13 @@ class TestQueueViewRegion:
             on_accept_agent=lambda ak: None,
             on_accept_all=lambda: None,
         )
-        bar.set_queue_view([("special:coder", 3), ("special:debugger", 1)])
+        bar.set_queue_view([("agent:coder", 3), ("agent:debugger", 1)])
         assert bar._queue_box.get_visible()
         assert bar._queue_sep.get_visible()
         children = _visible_children(bar._queue_box)
         texts = _chip_labels(children)
-        assert "special:coder (3)" in texts
-        assert "special:debugger (1)" in texts
+        assert "agent:coder (3)" in texts
+        assert "agent:debugger (1)" in texts
         # batch buttons present and labeled
         btn_labels = [w.get_child().get_text() for w in children
                       if isinstance(w, Gtk.Button)
@@ -84,7 +84,7 @@ class TestQueueViewRegion:
             on_accept_agent=lambda ak: None,
             on_accept_all=lambda: None,
         )
-        bar.set_queue_view([("special:coder", 1)])
+        bar.set_queue_view([("agent:coder", 1)])
         assert bar._queue_box.get_visible()
         bar.set_queue_view([])
         assert not bar._queue_box.get_visible()
@@ -99,7 +99,7 @@ class TestQueueViewRegion:
             on_accept_agent=lambda ak: got_agent.append(ak),
             on_accept_all=lambda: got_all.append(True),
         )
-        bar.set_queue_view([("special:coder", 2), ("special:debugger", 1)])
+        bar.set_queue_view([("agent:coder", 2), ("agent:debugger", 1)])
         buttons = [w for w in _visible_children(bar._queue_box)
                    if isinstance(w, Gtk.Button)]
         batch = [b for b in buttons
@@ -110,13 +110,13 @@ class TestQueueViewRegion:
                      and "Accept All (agent)" in (b.get_child().get_text() or "")]
         # selection defaults to the first chip; per-agent accept targets it
         _click(per_agent[0])
-        assert got_agent == ["special:coder"]
+        assert got_agent == ["agent:coder"]
         # select the second chip explicitly, then per-agent accept targets it
-        chips = [b for b in buttons if "special:debugger" in
+        chips = [b for b in buttons if "agent:debugger" in
                  (b.get_child().get_text() or "")]
         _click(chips[0])
         _click(per_agent[0])
-        assert got_agent == ["special:coder", "special:debugger"]
+        assert got_agent == ["agent:coder", "agent:debugger"]
         _click(batch[0])
         assert got_all == [True]
 
@@ -128,7 +128,7 @@ class TestQueueViewRegion:
             on_accept_agent=lambda ak: got_agent.append(ak),
             on_accept_all=lambda: None,
         )
-        bar.set_queue_view([("pm", 2), ("special:coder", 1)])
+        bar.set_queue_view([("pm", 2), ("agent:coder", 1)])
         buttons = [w for w in _visible_children(bar._queue_box)
                    if isinstance(w, Gtk.Button)]
         per_agent = [b for b in buttons
@@ -140,7 +140,7 @@ class TestQueueViewRegion:
         _click(pm_chip[0])
         _click(per_agent[0])
         assert "pm" not in got_agent
-        assert got_agent == ["special:coder"]  # selection fell back to an agent
+        assert got_agent == ["agent:coder"]  # selection fell back to an agent
 
     def test_existing_states_unregressed(self, bar):
         """D4b pin: idle/reviewing/has_changes visibility semantics unchanged;
@@ -156,7 +156,7 @@ class TestQueueViewRegion:
             on_accept_agent=lambda ak: None,
             on_accept_all=lambda: None,
         )
-        bar.set_queue_view([("special:coder", 1)])
+        bar.set_queue_view([("agent:coder", 1)])
         assert bar._queue_box.get_visible()
         bar.set_state_idle()
         assert bar._btn_start.get_visible()
@@ -247,11 +247,11 @@ class TestPmOnlyButtonSensitivity:
         assert not self._agent_batch_button(bar).get_sensitive(), (
             "pm-only: per-agent button enabled = silent no-op")
         # one agent arrives → sensitive again
-        bar.set_queue_view([("pm", 2), ("special:coder", 1)])
+        bar.set_queue_view([("pm", 2), ("agent:coder", 1)])
         assert self._agent_batch_button(bar).get_sensitive()
 
     def test_agents_only_keeps_button_sensitive(self, bar):
         bar.set_queue_callbacks(on_accept_agent=lambda ak: None,
                                 on_accept_all=lambda: None)
-        bar.set_queue_view([("special:coder", 1)])
+        bar.set_queue_view([("agent:coder", 1)])
         assert self._agent_batch_button(bar).get_sensitive()

@@ -193,8 +193,8 @@ def _make_runtime_handler(feed_handler):
     rt._fh = feed_handler
     rt._active_project = ("proj", "/tmp/proj")
     rt._agents = {
-        "special:coder": SpecialAgentDef(
-            conv_id_prefix="special:coder", display_name="Coder", role="coder",
+        "agent:coder": SpecialAgentDef(
+            conv_id_prefix="agent:coder", display_name="Coder", role="coder",
             emoji="🛠️", tools=["read_file"], can_write=True,
         )
     }
@@ -213,10 +213,10 @@ class TestStorageCap:
         card_id = h.add_card(_card("⏳ Running...",
                                    metadata={"status": "running",
                                              "tool_name": "read_file"}))
-        rt._tool_card_ids["special:coder"] = card_id
+        rt._tool_card_ids["agent:coder"] = card_id
 
         output = "O" * 5_000
-        rt._do_tool_call_result("special:coder", "read_file", output, success=True)
+        rt._do_tool_call_result("agent:coder", "read_file", output, success=True)
 
         stored = h.get_card(card_id)
         assert len(stored.body) == 5_000, (
@@ -231,10 +231,10 @@ class TestStorageCap:
         card_id = h.add_card(_card("⏳ Running...",
                                    metadata={"status": "running",
                                              "tool_name": "read_file"}))
-        rt._tool_card_ids["special:coder"] = card_id
+        rt._tool_card_ids["agent:coder"] = card_id
 
         with caplog.at_level(logging.WARNING):
-            rt._do_tool_call_result("special:coder", "read_file", "Z" * 250_000,
+            rt._do_tool_call_result("agent:coder", "read_file", "Z" * 250_000,
                                     success=True)
 
         stored = h.get_card(card_id)

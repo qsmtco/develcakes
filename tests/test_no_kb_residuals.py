@@ -104,7 +104,7 @@ def test_source_tree_free_of_kb_strings() -> None:
 
 
 def test_special_auxilium_session_unknown() -> None:
-    """The special-agents registry cannot contain special:auxilium.
+    """The special-agents registry cannot contain agent:auxilium.
 
     Checked by construction: no built-in default-agent YAML seeds an auxilium
     definition (the machine state on a dev box may still hold a stale seeded
@@ -124,7 +124,7 @@ def test_special_auxilium_session_unknown() -> None:
             data = yaml.safe_load(f) or {}
         role = str(data.get("role", "")).lower()
         assert role != "helper", (
-            f"{fname} still declares role: helper — re-seeds special:helper"
+            f"{fname} still declares role: helper — re-seeds agent:helper"
         )
 
 

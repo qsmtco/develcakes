@@ -56,11 +56,11 @@ class FakeTransport:
 
 
 class FakeARH:
-    def __init__(self, special_agents=("special:supervisor",)):
+    def __init__(self, special_agents=("agent:supervisor",)):
         self.calls = []
         # Default: the Supervisor IS registered, so the existing state-machine
         # tests exercise the normal path. Pass an explicit list WITHOUT
-        # "special:supervisor" to test the BUG#1 refusal.
+        # "agent:supervisor" to test the BUG#1 refusal.
         self._special_agents = special_agents
 
     def get_special_agents(self):
@@ -149,7 +149,7 @@ def test_start_bridge_refuses_when_supervisor_not_registered():
 
 def test_start_bridge_proceeds_when_supervisor_registered():
     """The guard must not block the normal path (supervisor present)."""
-    h, t, _a = _handler(arh=FakeARH(special_agents=("special:supervisor",)))
+    h, t, _a = _handler(arh=FakeARH(special_agents=("agent:supervisor",)))
     h.start_bridge()
     assert "t" in t
     assert h.state == BridgeState.CONNECTING
@@ -216,7 +216,7 @@ def test_paired_chat_text_routes_to_supervisor():
     update = {"update_id": 1, "message": {"chat": {"id": 42}, "text": "status?"}}
     t["t"].kw["on_update"](update)
     assert len(arh.calls) == 1
-    assert arh.calls[0]["session_key"] == "special:supervisor"
+    assert arh.calls[0]["session_key"] == "agent:supervisor"
     assert arh.calls[0]["text"] == "status?"
 
 
@@ -250,7 +250,7 @@ def test_callback_query_approve_resolves_and_edits():
     class RecordingARH:
         def __init__(self):
             self.approve_calls = []
-            self._special_agents = ("special:supervisor",)
+            self._special_agents = ("agent:supervisor",)
         def get_special_agents(self):
             return {sk: sk for sk in self._special_agents}
         def approve_exec(self, cid, approved):
@@ -340,24 +340,24 @@ def test_feed_card_is_not_sent_to_phone():
 
 def test_supervisor_reply_forwards_to_phone():
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:supervisor", "done — 3 files changed")
+    h.on_supervisor_reply("agent:supervisor", "done — 3 files changed")
     assert [s["text"] for s in t["t"].sent] == ["done — 3 files changed"]
 
 
 def test_non_supervisor_reply_is_not_forwarded():
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:coder", "coding…")
+    h.on_supervisor_reply("agent:coder", "coding…")
     assert t["t"].sent == []  # thin client: only the Supervisor mirrors
 
 
 def test_supervisor_reply_when_disconnected_noop():
     h, _t, _a = _handler()  # never started → no transport
-    h.on_supervisor_reply("special:supervisor", "hi")  # must not raise
+    h.on_supervisor_reply("agent:supervisor", "hi")  # must not raise
 
 
 def test_reply_over_4096_hard_split():
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:supervisor", "x" * 9000)
+    h.on_supervisor_reply("agent:supervisor", "x" * 9000)
     chunks = [s["text"] for s in t["t"].sent]
     assert len(chunks) >= 3
     assert all(len(c) <= 4096 for c in chunks)
@@ -368,7 +368,7 @@ def test_reply_splits_on_paragraph_boundary():
     h, t, _a = _connected()
     para_a = "a" * 2000
     para_b = "b" * 3000
-    h.on_supervisor_reply("special:supervisor", f"{para_a}\n\n{para_b}")
+    h.on_supervisor_reply("agent:supervisor", f"{para_a}\n\n{para_b}")
     chunks = [s["text"] for s in t["t"].sent]
     assert len(chunks) == 2
     assert chunks[0] == para_a
@@ -377,8 +377,8 @@ def test_reply_splits_on_paragraph_boundary():
 
 def test_reply_empty_and_nonstr_no_send():
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:supervisor", "")
-    h.on_supervisor_reply("special:supervisor", None)
+    h.on_supervisor_reply("agent:supervisor", "")
+    h.on_supervisor_reply("agent:supervisor", None)
     assert t["t"].sent == []
 
 
@@ -387,7 +387,7 @@ def test_html_card_reply_flattened_to_text():
     card's TEXT, never markup."""
     h, t, _a = _connected()
     card = '```html\n<div><b>Build OK</b><br>line two</div>\n```'
-    h.on_supervisor_reply("special:supervisor", card)
+    h.on_supervisor_reply("agent:supervisor", card)
     sent = t["t"].sent[-1]["text"]
     assert "Build OK" in sent
     assert "line two" in sent
@@ -396,7 +396,7 @@ def test_html_card_reply_flattened_to_text():
 
 def test_plain_text_reply_passes_through_unchanged():
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:supervisor", "just **markdown**, no fence")
+    h.on_supervisor_reply("agent:supervisor", "just **markdown**, no fence")
     assert t["t"].sent[-1]["text"] == "just **markdown**, no fence"
 
 
@@ -404,7 +404,7 @@ def test_mixed_html_reply_flattens_fence_keeps_prose():
     """SPEC-CHAT-MIXED-HTML: prose around an html fence is text, not source."""
     h, t, _a = _connected()
     reply = "  Here:\n```html\n<div><b>Build OK</b></div>\n```\nDone."
-    h.on_supervisor_reply("special:supervisor", reply)
+    h.on_supervisor_reply("agent:supervisor", reply)
     sent = t["t"].sent[-1]["text"]
     assert sent.startswith("  Here:")
     assert "Build OK" in sent
@@ -415,7 +415,7 @@ def test_mixed_html_reply_flattens_fence_keeps_prose():
 def test_mixed_html_reply_crlf_and_angle_prose():
     h, t, _a = _connected()
     reply = "5 < 6\r\n```html\r\n<div>ok</div>\r\n```\r\n"
-    h.on_supervisor_reply("special:supervisor", reply)
+    h.on_supervisor_reply("agent:supervisor", reply)
     sent = t["t"].sent[-1]["text"]
     assert "5 < 6" in sent
     assert "ok" in sent
@@ -606,7 +606,7 @@ def test_restart_leaves_exactly_one_live_transport_delivering():
     # The single live transport routes one message to the Supervisor once.
     live[0].kw["on_update"]({"update_id": 1, "message": {
         "chat": {"id": 42}, "text": "hi"}})
-    assert h._arh.calls.count({"session_key": "special:supervisor",
+    assert h._arh.calls.count({"session_key": "agent:supervisor",
                                "text": "hi", "reply_target": None}) == 1
     assert first.disconnected is True
 
@@ -707,8 +707,8 @@ def test_flatten_is_linear_on_angle_bracket_dense_input():
 def test_forward_whitespace_only_sends_nothing():
     """F6: a whitespace-only / all-newline reply must produce ZERO sends."""
     h, t, _a = _connected()
-    h.on_supervisor_reply("special:supervisor", " " * 5000)
-    h.on_supervisor_reply("special:supervisor", "\n" * 5000)
+    h.on_supervisor_reply("agent:supervisor", " " * 5000)
+    h.on_supervisor_reply("agent:supervisor", "\n" * 5000)
     assert t["t"].sent == []
 
 
@@ -758,7 +758,7 @@ def _deferred_handler(*, fail_connect=False):
             self.calls = []
 
         def get_special_agents(self):
-            return {"special:supervisor": "special:supervisor"}
+            return {"agent:supervisor": "agent:supervisor"}
 
         def send_to_special_agent(self, session_key, text, reply_target=None):
             self.calls.append({"session_key": session_key, "text": text,
@@ -854,7 +854,7 @@ def test_deferred_stale_update_not_routed_after_reconnect():
     disp.drain()
 
     routed = [c for c in h._arh.calls
-              if c["session_key"] == "special:supervisor"]
+              if c["session_key"] == "agent:supervisor"]
     assert len(routed) == 1, (
         f"the same update must reach the Supervisor exactly once, got {routed}"
     )

@@ -43,7 +43,7 @@ def _hermetic_audit_flush():
     AuditLog.flush_audit_log = original
 
 
-def _uniq(prefix: str = "special:prep") -> str:
+def _uniq(prefix: str = "agent:prep") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
@@ -189,14 +189,14 @@ def _make_handler(fake_rt, *, agent_role="coder", project=("proj", "/tmp/proj"))
 
     handler = AgentRuntimeHandler(unittest.mock.MagicMock(), unittest.mock.MagicMock())
     agent_def = SpecialAgentDef(
-        conv_id_prefix="special:coder",
+        conv_id_prefix="agent:coder",
         display_name="Coder",
         role=agent_role,
         emoji="🛠️",
         tools=["read_file"],
         can_write=True,
     )
-    handler._agents["special:coder"] = agent_def
+    handler._agents["agent:coder"] = agent_def
     handler._runtimes["Coder"] = fake_rt
     handler._active_project = project
     return handler, agent_def
@@ -218,7 +218,7 @@ class TestSendIsNonBlocking:
         handler, _ = _make_handler(fake_rt)
 
         t0 = time.perf_counter()
-        handler.send_to_special_agent("special:coder", "hello")
+        handler.send_to_special_agent("agent:coder", "hello")
         elapsed = time.perf_counter() - t0
 
         assert elapsed < 0.5, (
@@ -238,13 +238,13 @@ class TestSendIsNonBlocking:
         fake_rt = _FakeRuntime(conv_exists=False)
         handler, _ = _make_handler(fake_rt)
 
-        handler.send_to_special_agent("special:coder", "hello")
+        handler.send_to_special_agent("agent:coder", "hello")
         deadline = time.monotonic() + 2.0
         while not fake_rt.prep_completed and time.monotonic() < deadline:
             time.sleep(0.01)
 
         assert fake_rt.prep_completed == [0], f"prep errors: {fake_rt.prep_errors!r}"
-        assert fake_rt.load_calls == ["special:coder"]
+        assert fake_rt.load_calls == ["agent:coder"]
         assert len(fake_rt.create_calls) == 1
         kwargs = fake_rt.create_calls[0]
         assert kwargs["agent_role"] == "coder"
@@ -259,9 +259,9 @@ class TestSendIsNonBlocking:
         fake_rt = _FakeRuntime()
         handler, _ = _make_handler(fake_rt)
 
-        handler.send_to_special_agent("special:coder", "hello")
+        handler.send_to_special_agent("agent:coder", "hello")
 
-        token = handler._turn_tokens["special:coder"]
+        token = handler._turn_tokens["agent:coder"]
         assert token is not None
         assert fake_rt._turn_token is token, (
             "RACE-FIX v4b: the runtime must carry the new turn token BEFORE "
@@ -285,11 +285,11 @@ class TestPrepTConcurrency:
         fake_rt.load_gate = threading.Event()
         handler, _ = _make_handler(fake_rt)
 
-        handler.send_to_special_agent("special:coder", "hello")
+        handler.send_to_special_agent("agent:coder", "hello")
         assert fake_rt.load_started.wait(timeout=2)
 
         # Cancel while the prep is mid-load (the UI cancel path).
-        fake_rt.cancel("special:coder")
+        fake_rt.cancel("agent:coder")
 
         fake_rt.load_gate.set()
         assert fake_rt.load_finished.wait(timeout=2)
@@ -313,12 +313,12 @@ class TestPrepTConcurrency:
         fake_rt.get_gate = threading.Event()  # parks the FIRST get_conversation
         handler, agent_def = _make_handler(fake_rt)
 
-        handler.send_to_special_agent("special:coder", "first")
+        handler.send_to_special_agent("agent:coder", "first")
         assert fake_rt.get_gate_entered.wait(timeout=2), "stale prep should be parked"
 
         # The agent is edited between the two sends.
         agent_def.role = "debugger"
-        handler.send_to_special_agent("special:coder", "second")
+        handler.send_to_special_agent("agent:coder", "second")
 
         fake_rt.get_gate.set()
         deadline = time.monotonic() + 3.0
@@ -339,10 +339,10 @@ class TestPrepTConcurrency:
         handler, _ = _make_handler(fake_rt)
 
         # Send #1 — its prep is stored, not run (simulates a late-starting thread).
-        handler.send_to_special_agent("special:coder", "first")
+        handler.send_to_special_agent("agent:coder", "first")
         # Send #2 rotates the token and runs its prep.
         fake_rt.auto_run_prepare = True
-        handler.send_to_special_agent("special:coder", "second")
+        handler.send_to_special_agent("agent:coder", "second")
         deadline = time.monotonic() + 2.0
         while not fake_rt.prep_completed and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -363,7 +363,7 @@ class TestPrepTConcurrency:
         fake_rt.conv.project_path = "/tmp/old-proj"
         handler, _ = _make_handler(fake_rt)
 
-        lock = handler._prep_lock("special:coder")
+        lock = handler._prep_lock("agent:coder")
         lock.acquire()  # stand in for an in-flight prep
         try:
             t0 = time.perf_counter()

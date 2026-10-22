@@ -142,7 +142,7 @@ def test_argv_parse_nudge_forms():
     app, handler = make_app()
     code, msg = handle_cli_args(app, ["--nudge", "@Supervisor", "hello there world"])
     assert code == 0, f"multi-word payload must parse as a single text arg; got {code}: {msg}"
-    assert handler.sent == [("special:supervisor", "hello there world")]
+    assert handler.sent == [("agent:supervisor", "hello there world")]
 
     # Missing agent → exit 3, no dispatch
     app, handler = make_app()
@@ -184,7 +184,7 @@ def test_nudge_refused_for_non_supervisor_agent():
     app, handler = make_app()
     code, _ = handle_cli_args(app, ["--nudge", "@supervisor", "ping"])
     assert code == 0
-    assert handler.sent == [("special:supervisor", "ping")]
+    assert handler.sent == [("agent:supervisor", "ping")]
 
 
 # ── 3. Turn in flight → exit 2, no dispatch ──────────────────────────────────
@@ -219,7 +219,7 @@ def test_nudge_logs_feed_card_and_audit_record(tmp_path, monkeypatch):
     assert audit_path.exists(), "nudge must append an audit-log.jsonl record"
     record = json.loads(audit_path.read_text().strip().splitlines()[-1])
     assert record["origin"] == "cli-nudge"
-    assert record["target"] == "special:supervisor"
+    assert record["target"] == "agent:supervisor"
     assert record["chars"] == len("secret payload text")
     assert len(record["text_sha256"]) == 16
     # Content policy §11.3: the raw text must NEVER reach the audit record
@@ -251,7 +251,7 @@ def test_nudge_card_is_marked_as_cli_origin():
     rt_handler = AgentRuntimeHandler(main_content=None, chat_render_handler=None)
     rt_handler.set_feed_handler(CapturingFeedHandler())
 
-    card_id = rt_handler.publish_cli_nudge_card("special:supervisor", "visible marker check")
+    card_id = rt_handler.publish_cli_nudge_card("agent:supervisor", "visible marker check")
     assert card_id == "card-1"
     assert len(captured) == 1
     card = captured[0]
@@ -306,7 +306,7 @@ def test_on_command_line_sets_exit_status():
     stub = StubCommandLine(["--nudge", "@Supervisor", "adapter check"])
     app.on_command_line(app, stub)
     assert stub.exit_status == 0
-    assert handler.sent == [("special:supervisor", "adapter check")]
+    assert handler.sent == [("agent:supervisor", "adapter check")]
 
     # Refusal path propagates the exit code too
     stub = StubCommandLine(["--nudge", "@Coder", "nope"])

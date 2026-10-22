@@ -788,14 +788,14 @@ class TestCommitAgentTrailer:
         with open(fpath, "w") as f:
             f.write("content\n")
         stage_all(temp_repo)
-        result = commit(temp_repo, "checkpoint", agent_trailer="special:coder")
+        result = commit(temp_repo, "checkpoint", agent_trailer="agent:coder")
         assert result.success is True, f"commit failed: {result.error}"
         head = get_head_sha(temp_repo)
         assert head.sha == result.sha
         log_result = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
-        assert "Agent: special:coder" in log_result
+        assert "Agent: agent:coder" in log_result
         trailer_line = [l for l in log_result.splitlines() if l.startswith("Agent: ")]
-        assert trailer_line == ["Agent: special:coder"], f"unexpected trailer lines: {trailer_line}"
+        assert trailer_line == ["Agent: agent:coder"], f"unexpected trailer lines: {trailer_line}"
 
     def test_commit_agent_trailer_rejects_newline(self, repo_with_commit):
         r"""Newline in trailer value → fail-closed rejection, NO commit created."""
@@ -866,17 +866,17 @@ class TestCommitAgentTrailer:
         assert get_head_sha(path).sha == before.sha
 
     def test_commit_agent_trailer_strips_surrounding_whitespace(self, temp_repo):
-        """Trailer value is stripped; committed line is exactly 'Agent: special:coder'."""
+        """Trailer value is stripped; committed line is exactly 'Agent: agent:coder'."""
         fpath = os.path.join(temp_repo, "file.txt")
         with open(fpath, "w") as f:
             f.write("content\n")
         stage_all(temp_repo)
-        result = commit(temp_repo, "checkpoint", agent_trailer="  special:coder  ")
+        result = commit(temp_repo, "checkpoint", agent_trailer="  agent:coder  ")
         assert result.success is True
         log_result = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
         lines = log_result.splitlines()
-        assert lines[-1] == "Agent: special:coder", f"last line: {lines[-1]!r}"
-        assert "Agent:   special:coder" not in log_result
+        assert lines[-1] == "Agent: agent:coder", f"last line: {lines[-1]!r}"
+        assert "Agent:   agent:coder" not in log_result
 
 
 _SEPS = ["\u2028", "\u2029", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85"]
@@ -896,7 +896,7 @@ class TestCommitAgentTrailerHardening:
             for i, s in enumerate(_SEPS)
         ]
         + [
-            (f"sep{i}-embedded", f"special:coder{s}Agent: evil")
+            (f"sep{i}-embedded", f"agent:coder{s}Agent: evil")
             for i, s in enumerate(_SEPS)
         ],
     )

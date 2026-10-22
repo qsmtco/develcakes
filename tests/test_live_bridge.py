@@ -284,11 +284,11 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
 
     conv_dir = tmp_path / "conversations"
     conv_dir.mkdir()
-    json_path = conv_dir / "special:sk.json"
+    json_path = conv_dir / "agent:sk.json"
     json_path.write_text("{}", encoding="utf-8")
 
     arh = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
-    arh._agents = {"special:sk": types.SimpleNamespace(display_name="T")}
+    arh._agents = {"agent:sk": types.SimpleNamespace(display_name="T")}
     arh._turn_attr = {}
     arh._fh = None
 
@@ -311,18 +311,18 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
     arh._runtimes = {"T": rt}
     monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
 
-    assert arh.clear_conversation("special:sk") is True
+    assert arh.clear_conversation("agent:sk") is True
     assert conv.messages == [] and conv.step_count == 0
     assert conv.task_card == ""
     assert not json_path.exists()
-    assert dropped == ["special:sk", "compile:special:sk", "map:special:sk"]
+    assert dropped == ["agent:sk", "compile:agent:sk", "map:agent:sk"]
 
     json_path.write_text("{}", encoding="utf-8")
     rt.is_loop_active = lambda sk: True
     conv.messages = [1]
     conv.task_card = "stay"
     dropped.clear()
-    assert arh.clear_conversation("special:sk") is False
+    assert arh.clear_conversation("agent:sk") is False
     assert conv.messages == [1]
     assert conv.task_card == "stay"
     assert dropped == []

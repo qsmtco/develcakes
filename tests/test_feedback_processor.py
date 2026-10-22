@@ -88,7 +88,7 @@ class TestGetTargetSiConfig:
 
 class TestResolveRoleFromSession:
     def test_special_agent_resolved(self):
-        """special: prefix → resolved via runtime_handler.get_special_agent_def()."""
+        """agent: prefix → resolved via runtime_handler.get_special_agent_def()."""
         # Create a mock runtime handler that returns a known role
         class MockSAD:
             role = "qaster"
@@ -97,16 +97,16 @@ class TestResolveRoleFromSession:
             def get_special_agent_def(self, sk):
                 return MockSAD()
 
-        result = resolve_role_from_session("special:qaster", MockRuntime())
+        result = resolve_role_from_session("agent:qaster", MockRuntime())
         assert result == "qaster"
 
     def test_gateway_agent_returns_unknown(self):
-        """Non-special: session keys → 'unknown'."""
+        """Non-agent: session keys → 'unknown'."""
         result = resolve_role_from_session("agent:some:id:123", None)
         assert result == "unknown"
 
     def test_no_runtime_handler_returns_unknown(self):
-        result = resolve_role_from_session("special:coder", None)
+        result = resolve_role_from_session("agent:coder", None)
         assert result == "unknown"
 
 

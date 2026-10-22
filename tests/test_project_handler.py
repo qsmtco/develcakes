@@ -262,15 +262,15 @@ class TestCmdStatus:
 
     def test_non_project_session_returns_hint(self, handler, fake_projects):
         """Guard: /status outside a project tab returns the hint message."""
-        result = handler.cmd_status(_make_status_cmd("special:coder"))
+        result = handler.cmd_status(_make_status_cmd("agent:coder"))
         assert result.handled is True
         assert "Open a project tab" in result.response_text
 
     def test_other_lines_byte_identical(self, handler, fake_projects):
         """The non-count lines keep their exact pre-removal format."""
-        fake_projects.save_members("myproj", ["special:coder"])
+        fake_projects.save_members("myproj", ["agent:coder"])
         handler.open_project("myproj", "/p")
-        handler.set_solo_target("myproj", "special:coder")
+        handler.set_solo_target("myproj", "agent:coder")
         result = handler.cmd_status(_make_status_cmd())
         lines = result.response_text.splitlines()
         assert lines[0] == "Project: myproj"
@@ -286,7 +286,7 @@ class TestCmdCost:
     """Spec: docs/specs/SPEC-token-tracking-fix.md AC-1/2/3/5.
 
     cmd_cost reads each member's (tokens, cost) from a persisted
-    conversation file (special:*) or the injected in-memory cache
+    conversation file (agent:*) or the injected in-memory cache
     (agent:*) and formats a table. Falls back to (0, 0.0) when neither
     source is available.
     """
@@ -318,7 +318,7 @@ class TestCmdCost:
 
         # Write a realistic conversation file
         conv_data = {
-            "session_key": "special:coder",
+            "session_key": "agent:coder",
             "agent_name": "coder",
             "total_tokens": 5000,
             "total_cost": 0.15,
@@ -326,12 +326,12 @@ class TestCmdCost:
             "messages": [],
             "system_prompt": "",
         }
-        (config_dir / "conversations" / "special:coder.json").write_text(
+        (config_dir / "conversations" / "agent:coder.json").write_text(
             json.dumps(conv_data)
         )
 
         # Project has one special member
-        fake_projects.save_members("myproj", ["special:coder"])
+        fake_projects.save_members("myproj", ["agent:coder"])
         handler.open_project("myproj", "/p")
 
         # Act
@@ -362,7 +362,7 @@ class TestCmdCost:
         )
 
         # No conversation file written. _runtime_usage_fn is None (default).
-        fake_projects.save_members("myproj", ["special:coder"])
+        fake_projects.save_members("myproj", ["agent:coder"])
         handler.open_project("myproj", "/p")
 
         result = handler.cmd_cost(self._make_cmd("myproj"))
@@ -389,11 +389,11 @@ class TestCmdCost:
         )
 
         # Write a corrupted conversation file
-        (config_dir / "conversations" / "special:coder.json").write_text(
+        (config_dir / "conversations" / "agent:coder.json").write_text(
             "{this is not valid json"
         )
 
-        fake_projects.save_members("myproj", ["special:coder"])
+        fake_projects.save_members("myproj", ["agent:coder"])
         handler.open_project("myproj", "/p")
 
         # Must not raise
@@ -445,11 +445,11 @@ class TestCmdCost:
     def test_non_project_session_returns_hint(self, handler, fake_projects):
         """Guard: /cost outside a project tab returns the hint message."""
         from models.command import Command
-        fake_projects.save_members("myproj", ["special:coder"])
+        fake_projects.save_members("myproj", ["agent:coder"])
         handler.open_project("myproj", "/p")
 
         # Simulate /cost in an agent tab (not a project tab)
-        cmd = Command(name="cost", source_session_key="special:coder")
+        cmd = Command(name="cost", source_session_key="agent:coder")
         result = handler.cmd_cost(cmd)
         assert result.handled is True
         assert "Open a project tab" in result.response_text
@@ -474,13 +474,13 @@ def _make_clear_cmd(session_key: str) -> Command:
 
 class TestCmdClearChatSideEffect:
     """Tests A and B: /clear invokes the clear_chat callback exactly once
-    for special: session_keys, AFTER the data-plane clear succeeds. If
+    for agent: session_keys, AFTER the data-plane clear succeeds. If
     the clear_chat callback raises, the data-plane clear is not rolled
     back (the user still gets the success response_text).
     """
 
     def test_cmd_clear_invokes_clear_chat_callback(self, handler, lp, fake_projects, fake_glib):
-        """Test A: after cmd_clear runs for a special: session, the
+        """Test A: after cmd_clear runs for a agent: session, the
         clear_chat callback was invoked once with the session key.
         """
         from models.command import CommandResult
@@ -491,13 +491,13 @@ class TestCmdClearChatSideEffect:
         clear_chat_spy = MagicMock()
         handler.set_clear_chat_callback(clear_chat_spy)
 
-        result = handler.cmd_clear(_make_clear_cmd("special:coder"))
+        result = handler.cmd_clear(_make_clear_cmd("agent:coder"))
 
         # Data-plane clear returned True → cmd_clear returned success
         assert result.handled is True
         assert "Cleared coder's conversation" in result.response_text
         # UI side effect ran exactly once with the session key
-        clear_chat_spy.assert_called_once_with("special:coder")
+        clear_chat_spy.assert_called_once_with("agent:coder")
 
     def test_cmd_clear_does_not_invoke_clear_chat_on_data_plane_failure(self, handler, fake_projects, fake_glib):
         """If the data-plane clear returns False, the UI side effect
@@ -509,7 +509,7 @@ class TestCmdClearChatSideEffect:
         clear_chat_spy = MagicMock()
         handler.set_clear_chat_callback(clear_chat_spy)
 
-        result = handler.cmd_clear(_make_clear_cmd("special:coder"))
+        result = handler.cmd_clear(_make_clear_cmd("agent:coder"))
 
         assert result.handled is True
         assert "Could not clear" in result.response_text
@@ -526,7 +526,7 @@ class TestCmdClearChatSideEffect:
         clear_chat_spy = MagicMock()
         handler.set_clear_chat_callback(clear_chat_spy)
 
-        result = handler.cmd_clear(_make_clear_cmd("special:coder"))
+        result = handler.cmd_clear(_make_clear_cmd("agent:coder"))
 
         assert result.handled is True
         assert "Clear failed for coder" in result.response_text
@@ -542,7 +542,7 @@ class TestCmdClearChatSideEffect:
         handler.set_clear_callback(lambda sk: True)
         handler.set_clear_chat_callback(clear_chat_boom)
 
-        result = handler.cmd_clear(_make_clear_cmd("special:coder"))
+        result = handler.cmd_clear(_make_clear_cmd("agent:coder"))
 
         # The user still gets the success message — the data-plane clear
         # already happened, and a UI failure must not block the response.
@@ -631,7 +631,7 @@ class TestAutoAddOnboardingAgentsMetadata:
 
         def _fake_onboarding():
             return [SpecialAgentDef(
-                conv_id_prefix="special:supervisor",
+                conv_id_prefix="agent:supervisor",
                 display_name="Supervisor",
                 role="supervisor",
                 emoji="🧭",
@@ -650,7 +650,7 @@ class TestAutoAddOnboardingAgentsMetadata:
         ph._auto_add_onboarding_agents(project_path)
 
         team = pa.load_team(project_path)
-        member = team.get_member("special:supervisor")
+        member = team.get_member("agent:supervisor")
         assert member is not None
         assert member.name == "Supervisor"
         assert member.role == "supervisor"
@@ -663,7 +663,7 @@ class TestSaveMembersBackfill:
         ph._active_project_path = path
 
     def test_backfills_special_metadata(self, tmp_path, monkeypatch):
-        """_save_members resolves special:* metadata via get_special_agent."""
+        """_save_members resolves agent:* metadata via get_special_agent."""
         from agent.special_agents import SpecialAgentDef
         import utils.project_awareness as pa
 
@@ -671,9 +671,9 @@ class TestSaveMembersBackfill:
         pa.init_project_config(project_path, "proj")
 
         def _fake_get(prefix):
-            if prefix == "special:supervisor":
+            if prefix == "agent:supervisor":
                 return SpecialAgentDef(
-                    conv_id_prefix="special:supervisor",
+                    conv_id_prefix="agent:supervisor",
                     display_name="Supervisor",
                     role="supervisor",
                     emoji="🧭",
@@ -688,10 +688,10 @@ class TestSaveMembersBackfill:
         ph = _pa_handler(projects_mod, FakeGLib())
         self._open_active(ph, "proj", project_path)
 
-        ph._save_members("proj", ["special:supervisor"])
+        ph._save_members("proj", ["agent:supervisor"])
 
         team = pa.load_team(project_path)
-        member = team.get_member("special:supervisor")
+        member = team.get_member("agent:supervisor")
         assert member is not None
         assert member.name == "Supervisor"
         assert member.role == "supervisor"
@@ -728,7 +728,7 @@ class TestSaveMembersBackfill:
         project_path = str(tmp_path)
         pa.init_project_config(project_path, "proj")
         pa.save_team(project_path, ProjectTeam(members=[
-            TeamMember(session_key="special:supervisor", name="OldName", role="custom", can_write=False),
+            TeamMember(session_key="agent:supervisor", name="OldName", role="custom", can_write=False),
         ]))
 
         projects_mod = MagicMock()
@@ -736,10 +736,10 @@ class TestSaveMembersBackfill:
         ph = _pa_handler(projects_mod, FakeGLib())
         self._open_active(ph, "proj", project_path)
 
-        ph._save_members("proj", ["special:supervisor"])
+        ph._save_members("proj", ["agent:supervisor"])
 
         team = pa.load_team(project_path)
-        member = team.get_member("special:supervisor")
+        member = team.get_member("agent:supervisor")
         assert member is not None
         assert member.name == "OldName"
         assert member.role == "custom"
@@ -791,13 +791,13 @@ class TestSaveMembersBackfill:
         project_path = str(tmp_path)
         pa.init_project_config(project_path, "proj")
         pa.save_team(project_path, ProjectTeam(members=[
-            TeamMember(session_key="special:coder", name="Coder", role="coder", can_write=True),
+            TeamMember(session_key="agent:coder", name="Coder", role="coder", can_write=True),
         ]))
 
         def _fake_get(prefix):
-            if prefix == "special:supervisor":
+            if prefix == "agent:supervisor":
                 return SpecialAgentDef(
-                    conv_id_prefix="special:supervisor",
+                    conv_id_prefix="agent:supervisor",
                     display_name="Supervisor",
                     role="supervisor",
                     emoji="🧭",
@@ -812,7 +812,7 @@ class TestSaveMembersBackfill:
         ph = _pa_handler(projects_mod, FakeGLib())
         self._open_active(ph, "proj", project_path)
 
-        members = ["special:coder", "agent:qtr:telegram:1", "special:supervisor"]
+        members = ["agent:coder", "agent:qtr:telegram:1", "agent:supervisor"]
         ph._save_members("proj", members)
 
         team = pa.load_team(project_path)

@@ -251,7 +251,7 @@ def _quiet_loop(tmp_path, llm):
     cfg = _cfg()
     cfg.auto_save_conversations = False
     rt = _runtime(cfg)
-    sk = "special:coder"
+    sk = "agent:coder"
     token = object()
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True

@@ -348,6 +348,12 @@ class Conversation:
     # Invalidated by any message add/remove/trim operation. Keyed on
     # (len(messages), hash(system_prompt), hash(task_card)). See get_token_estimate().
     _token_estimate_cache: tuple | None = field(default=None, repr=False, compare=False)
+    # SPEC-WIRE-CONTEXT-PRESSURE: estimate generation. Bumped by
+    # invalidate_token_estimate(). get_token_estimate writes the cache only
+    # when the generation is unchanged from the start of the count, so a
+    # stub that lands during the count cannot store the pre-stub total
+    # under the post-stub key.
+    _token_gen: int = field(default=0, repr=False, compare=False)
     # SPEC-21 SP0: per-string token counts. Survives _token_estimate_cache
     # wipes so a stub/pop recount is lookups plus the new strings only.
     _token_count_memo: dict = field(default_factory=dict, repr=False, compare=False)
@@ -357,12 +363,22 @@ class Conversation:
 
     # ── Message helpers ───────────────────────────────────────────────────────
 
+    def invalidate_token_estimate(self) -> None:
+        """Drop the cached estimate and bump the generation.
+
+        get_token_estimate writes the cache only when the generation is unchanged
+        from the start of the count. A stub that lands during the count cannot
+        store the pre-stub total under the post-stub key.
+        """
+        self._token_estimate_cache = None
+        self._token_gen += 1
+
     def add_user_message(self, content: str) -> Message:
         """Add a user (PM) message and return it."""
         msg = Message(role=MessageRole.USER, content=content)
         self.messages.append(msg)
         # Phase CB-5: invalidate token cache on any message addition
-        self._token_estimate_cache = None
+        self.invalidate_token_estimate()
         return msg
 
     def add_assistant_message(
@@ -378,7 +394,7 @@ class Conversation:
         )
         self.messages.append(msg)
         self.step_count += 1
-        self._token_estimate_cache = None
+        self.invalidate_token_estimate()
         return msg
 
     def add_tool_result(self, call_id: str, result: str) -> Message:
@@ -389,7 +405,7 @@ class Conversation:
             tool_call_id=call_id,
         )
         self.messages.append(msg)
-        self._token_estimate_cache = None
+        self.invalidate_token_estimate()
         return msg
 
     # ── Serialization ─────────────────────────────────────────────────────────
@@ -493,8 +509,10 @@ class Conversation:
             if cached_key == cache_key:
                 return cached_value
 
+        gen = self._token_gen
         result = self._count_tokens_accurate(encoding)
-        self._token_estimate_cache = (cache_key, result)
+        if gen == self._token_gen:
+            self._token_estimate_cache = (cache_key, result)
         return result
 
     def _count_tokens_accurate(self, encoding) -> int:

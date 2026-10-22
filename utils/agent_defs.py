@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from typing import Any
 
@@ -127,6 +128,27 @@ def _derive_role(agent_def: dict) -> str:
         return agent_def["role"].lower().strip()
     name = agent_def.get("name", "agent")
     return name.lower().replace(" ", "-")
+
+
+def agent_slug(text: str) -> str:
+    """Agent-id slug: lowercase, spaces→hyphens, ASCII alphanumeric + ._-
+    only, collapse separator runs, strip edge separators. '' when nothing
+    remains. This is the one key format for local agents: ``agent:<slug>``.
+    """
+    s = str(text).lower()
+    s = re.sub(r"\s+", "-", s)
+    s = "".join(c for c in s if c.isascii() and (c.isalnum() or c in "._-"))
+    s = re.sub(r"[._-]{2,}", "-", s)
+    return s.strip("._-")
+
+
+# Session keys of the built-in agents. These stay on the project root and
+# are never minted for a new agent.
+BUILTIN_SESSION_KEYS: tuple[str, ...] = (
+    "agent:supervisor",
+    "agent:coder",
+    "agent:debugger",
+)
 
 
 # ── Default seeding ──────────────────────────────────────────────────────────
@@ -418,15 +440,15 @@ def load_agent_def_by_role(role: str) -> dict | None:
 
 # Fields the Agent Builder form does not send. Editing through the UI
 # must not strip them. session_key is the registry identity; role stays
-# the prompt selector, so a second coder keeps role "coder" and gets
-# special:coder-2 rather than replacing special:coder.
+# the prompt selector, and a new agent mints agent:<name-slug> (a name
+# whose slug collides with a built-in or a taken key is refused).
 _PRESERVED_ON_EDIT = ("auto_open", "auto_add_to_projects", "session_key")
 
 
 def _implicit_session_key(agent_def: dict) -> str:
     """Session key a file owns in the registry.
 
-    An explicit session_key wins. Otherwise the key is special:<role>,
+    An explicit session_key wins. Otherwise the key is agent:<role-slug>,
     matching agent/special_agents.py. A file with no session_key still
     owns that default, so a later same-role save does not take it.
     """
@@ -436,7 +458,7 @@ def _implicit_session_key(agent_def: dict) -> str:
     role = _derive_role(agent_def).strip()
     if not role:
         return ""
-    return f"special:{role}"
+    return f"agent:{agent_slug(role)}"
 
 
 def _session_keys_owned_by_others(filepath: str, name: str) -> set[str]:
@@ -464,22 +486,21 @@ def _session_keys_owned_by_others(filepath: str, name: str) -> set[str]:
 
 
 def _assign_session_key(export: dict, filepath: str) -> str:
-    """Keep an explicit key. Otherwise special:<role>, or special:<role>-N."""
+    """Keep an explicit key. Otherwise mint agent:<name-slug>. A built-in
+    key or a key another agent file owns is refused (validation reports)."""
     explicit = str(export.get("session_key") or "").strip()
     if explicit:
         return explicit
-    role = _derive_role(export).strip() or "agent"
-    default = f"special:{role}"
+    slug = agent_slug(str(export.get("name") or ""))
+    if not slug:
+        return ""
+    candidate = f"agent:{slug}"
+    if candidate in BUILTIN_SESSION_KEYS:
+        return ""
     taken = _session_keys_owned_by_others(filepath, str(export.get("name") or ""))
-    if default not in taken:
-        return default
-    n = 2
-    while n <= 10000:
-        candidate = f"special:{role}-{n}"
-        if candidate not in taken:
-            return candidate
-        n += 1
-    return f"special:{role}-{n}"
+    if candidate in taken:
+        return ""
+    return candidate
 
 
 def _prepare_persisted_def(agent_def: dict, filepath: str) -> dict:
@@ -501,9 +522,9 @@ def save_agent_def(agent_def: dict) -> str:
     Creates directory if needed. Returns file path.
     Uses YAML if pyyaml is available, otherwise JSON.
 
-    Writes session_key. The first agent of a role gets special:<role>.
-    Another agent with that role gets special:<role>-2, then -3. An edit
-    that omits session_key keeps the key already in the file.
+    Writes session_key. The first agent of a role gets agent:<name-slug>.
+    A second agent with the same name slug is refused (empty session_key).
+    An edit that omits session_key keeps the key already in the file.
     """
     agents_dir = _get_agents_dir()
     os.makedirs(agents_dir, exist_ok=True)

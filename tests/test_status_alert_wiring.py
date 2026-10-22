@@ -184,7 +184,7 @@ def test_stall_run_sets_alert_true_and_persists_state(tmp_path, capsys):
     config = _config_dir(tmp_path / "home")
     now = time.time()
     _backdate(project, now - 7200)  # no repo writes after the message
-    _write_conversation(config, project, "special:coder", "done", mtime=now - 3600)
+    _write_conversation(config, project, "agent:coder", "done", mtime=now - 3600)
     code, report = _run_json_captured(project, capsys)
     assert code == 2, "a 1h-stale assistant turn must be a stall (exit 2)"
     assert report["alert"] is True, "first sighting of an episode must alert"
@@ -205,7 +205,7 @@ def test_same_episode_within_floor_is_deduped(tmp_path, capsys):
     config = _config_dir(tmp_path / "home")
     now = time.time()
     _backdate(project, now - 7200)
-    _write_conversation(config, project, "special:coder", "done", mtime=now - 3600)
+    _write_conversation(config, project, "agent:coder", "done", mtime=now - 3600)
     code1, report1 = _run_json_captured(project, capsys)
     assert report1["alert"] is True
     code2, report2 = _run_json_captured(project, capsys)
@@ -225,15 +225,15 @@ def test_new_episode_alerts_again(tmp_path, capsys):
     config = _config_dir(tmp_path / "home")
     now = time.time()
     _backdate(project, now - 7200)
-    _write_conversation(config, project, "special:coder", "done v1", mtime=now - 3600)
+    _write_conversation(config, project, "agent:coder", "done v1", mtime=now - 3600)
     _, report1 = _run_json_captured(project, capsys)
     assert report1["alert"] is True
     _, report2 = _run_json_captured(project, capsys)
     assert report2["alert"] is False
     # New agent activity → new episode id → must alert again.
-    _write_conversation(config, project, "special:coder",
+    _write_conversation(config, project, "agent:coder",
                         "done v2 — new activity", mtime=now - 3500)
-    _write_conversation(config, project, "special:coder", "done v2 — new activity",
+    _write_conversation(config, project, "agent:coder", "done v2 — new activity",
                         mtime=now - 3500)
     _, report3 = _run_json_captured(project, capsys)
     assert report3["alert"] is True, (
@@ -252,7 +252,7 @@ def test_re_alert_after_floor_elapses(tmp_path, capsys, monkeypatch):
     clock = {"now": base}
     monkeypatch.setattr(time, "time", lambda: clock["now"])
     _backdate(project, base - 7200)
-    _write_conversation(config, project, "special:coder", "stalled work",
+    _write_conversation(config, project, "agent:coder", "stalled work",
                         mtime=base - 3600)
     _, report1 = _run_json_captured(project, capsys)
     assert report1["alert"] is True, "first sighting alerts"
@@ -271,7 +271,7 @@ def test_re_alert_after_floor_elapses(tmp_path, capsys, monkeypatch):
 
 def test_episode_id_stable_across_invocations_and_changes_on_new_activity():
     now = 1_700_000_000.0
-    turn = {"class": "turn_stalled", "session": "special:coder",
+    turn = {"class": "turn_stalled", "session": "agent:coder",
             "last_message_ts": now - 3600, "last_message_sha": "abc123",
             "mtime": now - 3600}
     sendback = {"class": "blocked_on_sendback",
@@ -326,7 +326,7 @@ def test_stall_episode_id_tolerates_missing_keys():
 
     turn_bare = status_report.stall_episode_id({"class": "turn_stalled"})
     turn_full = status_report.stall_episode_id(
-        {"class": "turn_stalled", "session": "special:coder",
+        {"class": "turn_stalled", "session": "agent:coder",
          "last_message_ts": 1.0, "last_message_sha": "x"})
     assert turn_bare != turn_full, "class-only fallback differs from full id"
 

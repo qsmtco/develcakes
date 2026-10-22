@@ -103,7 +103,7 @@ def test_first_read_pins_a_file_and_a_change_drops_it(tmp_path):
     target = tmp_path / "a.py"
     target.write_text("hello\n")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     args = {"path": "a.py"}
@@ -119,7 +119,7 @@ def test_first_read_pins_a_file_and_a_change_drops_it(tmp_path):
 
 def test_failed_stat_does_not_count(tmp_path):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     rt._note_tool_path(sk, conv, "read_file", {"path": "missing.py"})
@@ -131,7 +131,7 @@ def test_failed_stat_does_not_count(tmp_path):
 
 def test_empty_project_does_not_pin(tmp_path):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     conv.project_path = ""
@@ -143,7 +143,7 @@ def test_edit_survives_pin_drop_and_clear_drops_both(tmp_path):
     target = tmp_path / "a.py"
     target.write_text("v1\n")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     for _ in range(3):
@@ -159,12 +159,12 @@ def test_edit_survives_pin_drop_and_clear_drops_both(tmp_path):
 
 def test_drop_read_cache_missing_session_is_noop():
     rt = AgentRuntime(_make_cfg())
-    rt.drop_read_cache("special:missing")
+    rt.drop_read_cache("agent:missing")
 
 
 def test_compact_under_threshold_uses_soft_ceiling(tmp_path, monkeypatch):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     seen = {}

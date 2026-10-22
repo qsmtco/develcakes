@@ -40,7 +40,7 @@ def test_compile_keeps_the_current_turn_read_on_the_wire():
     """
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
-    sk = "special:compile"
+    sk = "agent:compile"
     rt._conversations[sk] = conv
     before = len(conv.messages)
     result = ToolResult(success=True, output="OK — edited a.py", enforcement_checks=[_check()])
@@ -75,7 +75,7 @@ def test_compile_keeps_the_current_turn_read_on_the_wire():
 def test_hunk_is_capped_at_4000_chars():
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
-    sk = "special:hunk"
+    sk = "agent:hunk"
     rt._conversations[sk] = conv
     old = "O" * 5000
     new = "N" * 5000
@@ -94,7 +94,7 @@ def test_hunk_is_capped_at_4000_chars():
 def test_write_file_hunk_is_a_byte_count_not_the_content():
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
-    sk = "special:write"
+    sk = "agent:write"
     rt._conversations[sk] = conv
     content = "h" * 100
     rt._maybe_compile(
@@ -119,7 +119,7 @@ def test_plain_budget_counts_repo_map_and_tool_schemas(monkeypatch):
         agent_name="Coder", system_prompt="S" * 40, model="", project_path="/tmp/proj",
     )
     conv.add_user_message("goal")
-    sk = "special:addons"
+    sk = "agent:addons"
     rt._conversations[sk] = conv
     estimate = conv.get_token_estimate()
     reserve = rt._RESPONSE_RESERVE_TOKENS
@@ -161,7 +161,7 @@ def test_compiled_call_skips_transcript_budget_when_packet_fits(monkeypatch):
     conv.add_user_message("old")
     conv.add_tool_result("r", "Z" * 40_000)
     conv.add_user_message("goal")
-    sk = "special:budget"
+    sk = "agent:budget"
     rt._conversations[sk] = conv
     model_max = 8_000
     # Transcript is over the ceiling. Without a packet this raises.
@@ -190,7 +190,7 @@ def test_compiled_packet_carries_the_repo_map_label():
     and in test_repo_map.py, so the two cannot drift apart."""
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
-    sk = "special:compiledmap"
+    sk = "agent:compiledmap"
     rt._conversations[sk] = conv
     rt._maybe_compile(
         sk, conv, "edit_file",
@@ -215,9 +215,9 @@ def test_compiled_packet_carries_the_repo_map_label():
 
     # Same label on the non-compiled attachment point, for the same block.
     plain = _conv()
-    rt._conversations["special:plainmap"] = plain
+    rt._conversations["agent:plainmap"] = plain
     with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
-        wired_plain = rt._messages_for_model("special:plainmap", plain, 128_000)
+        wired_plain = rt._messages_for_model("agent:plainmap", plain, 128_000)
     plain_user = next(m for m in wired_plain if m["role"] == "user")["content"]
     assert plain_user == REPO_MAP_HEADER + "\n\nMAPBLOCK\n\nfix the parser"
     assert user[len("fix the parser\n\n"):].startswith(plain_user[: plain_user.rindex("\n\n") + 2])
@@ -225,7 +225,7 @@ def test_compiled_packet_carries_the_repo_map_label():
 
     # Negative control: no map block, no label on the packet.
     conv2 = _conv()
-    sk2 = "special:compilednomap"
+    sk2 = "agent:compilednomap"
     rt._conversations[sk2] = conv2
     rt._maybe_compile(
         sk2, conv2, "edit_file",
@@ -243,7 +243,7 @@ def test_compiled_packet_carries_the_repo_map_label():
 
 def test_markdown_write_and_failed_edit_do_not_start_compile(tmp_path):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:skip"
+    sk = "agent:skip"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True
     conv = rt.get_conversation(sk)
@@ -265,7 +265,7 @@ def test_markdown_write_and_failed_edit_do_not_start_compile(tmp_path):
 def test_no_user_message_does_not_compile():
     rt = AgentRuntime(_make_cfg())
     conv = Conversation(agent_name="Coder", system_prompt="SYS")
-    sk = "special:nouser"
+    sk = "agent:nouser"
     rt._maybe_compile(
         sk, conv, "edit_file",
         {"path": "a.py", "old_text": "a", "new_text": "b"},
@@ -277,7 +277,7 @@ def test_no_user_message_does_not_compile():
 def test_clear_drops_compile_and_the_next_send_uses_the_transcript():
     rt = AgentRuntime(_make_cfg())
     conv = _conv()
-    sk = "special:clear"
+    sk = "agent:clear"
     rt._conversations[sk] = conv
     rt._compile[sk] = {
         "goal": "fix the parser",
@@ -324,7 +324,7 @@ def test_compiled_budget_counts_the_task_card_once_with_one_estimator(monkeypatc
     )
     conv.task_card = "CARD " * 200
     conv.add_user_message("goal")
-    sk = "special:cardbudget"
+    sk = "agent:cardbudget"
     rt._conversations[sk] = conv
     rt._maybe_compile(
         sk, conv, "edit_file",

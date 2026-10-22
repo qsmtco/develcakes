@@ -167,7 +167,7 @@ class TestSandbox:
                 "exec_command",
                 {"command": f"python3 -c \"print('x' * {MAX_EXEC_OUTPUT + 5000})\""},
                 proj,
-                "special:coder",
+                "agent:coder",
                 approval_callback=lambda sk, tn, args: True,
             )
             assert r.success is True
@@ -641,21 +641,21 @@ class TestExecCommand:
     def test_exec_without_callback_denied(self):
         set_approval_callback(None)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "echo hi"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "echo hi"}, proj, "agent:coder")
             assert r.success is False
             assert "approval" in r.error.lower()
 
     def test_exec_with_callback_allow(self):
         set_approval_callback(lambda sk, tn, args: True)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "echo hello"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "echo hello"}, proj, "agent:coder")
             assert r.success is True
             assert "hello" in r.output
 
     def test_exec_with_callback_deny(self):
         set_approval_callback(lambda sk, tn, args: False)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "echo hi"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "echo hi"}, proj, "agent:coder")
             assert r.success is False
             assert "approval" in r.error.lower()
 
@@ -664,7 +664,7 @@ class TestExecCommand:
         with tempfile.TemporaryDirectory() as proj:
             # These MUST be blocked regardless of approval
             for cmd in ["rm -rf /", "rm -rf /*", "mkfs", "wipefs"]:
-                r = execute_tool("exec_command", {"command": cmd}, proj, "special:coder")
+                r = execute_tool("exec_command", {"command": cmd}, proj, "agent:coder")
                 assert r.success is False, f"{cmd!r} should be blocked"
                 assert "blocked" in r.error.lower()
 
@@ -672,13 +672,13 @@ class TestExecCommand:
         """Commands that touch /dev/null or /tmp are not blocked."""
         set_approval_callback(lambda sk, tn, args: True)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "dd if=/dev/zero of=/dev/null count=1"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "dd if=/dev/zero of=/dev/null count=1"}, proj, "agent:coder")
             assert r.success is True, f"Safe dd should succeed, got: {r.error}"
 
     def test_exec_timeout(self):
         set_approval_callback(lambda sk, tn, args: True)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "sleep 10", "timeout": 1}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "sleep 10", "timeout": 1}, proj, "agent:coder")
             assert r.success is False
             assert "timed out" in r.error.lower()
 
@@ -694,7 +694,7 @@ class TestExecCommand:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-secret-DO-NOT-LEAK-12345")
         monkeypatch.setenv("CRABCAKES_GATEWAY_TOKEN", "fake-gateway-token-67890")
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "env"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "env"}, proj, "agent:coder")
         assert r.success is True
         assert "sk-fake-secret-DO-NOT-LEAK-12345" not in r.output, (
             f"MED-2: secret leaked into subprocess env! Output: {r.output[:500]}"
@@ -711,7 +711,7 @@ class TestExecCommand:
         monkeypatch.setenv("PATH", "/usr/bin:/bin")
         monkeypatch.setenv("HOME", "/home/test")
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "env"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "env"}, proj, "agent:coder")
         assert r.success is True
         # At least PATH should be in the output
         assert "/usr/bin:/bin" in r.output or "PATH" in r.output
@@ -2000,8 +2000,8 @@ class TestApprovalCallback:
             return True
         set_approval_callback(tracker)
         with tempfile.TemporaryDirectory() as proj:
-            execute_tool("exec_command", {"command": "echo test"}, proj, "special:coder")
-        assert received["session_key"] == "special:coder"
+            execute_tool("exec_command", {"command": "echo test"}, proj, "agent:coder")
+        assert received["session_key"] == "agent:coder"
         assert received["tool_name"] == "exec_command"
         assert received["args"]["command"] == "echo test"
         assert received["args"]["cwd"] == proj
@@ -2010,7 +2010,7 @@ class TestApprovalCallback:
     def test_callback_exception_returns_false(self):
         set_approval_callback(lambda sk, tn, args: 1 / 0)
         with tempfile.TemporaryDirectory() as proj:
-            r = execute_tool("exec_command", {"command": "echo test"}, proj, "special:coder")
+            r = execute_tool("exec_command", {"command": "echo test"}, proj, "agent:coder")
         assert r.success is False
         assert "approval" in r.error.lower()
         set_approval_callback(None)
@@ -2111,7 +2111,7 @@ class TestAllowedToolsGate:
         assert "not in the agent's allowed_tools" in r.error
 
     def test_realistic_special_agent_config(self):
-        """Mirror the actual failing scenario: special:coder-style tools
+        """Mirror the actual failing scenario: agent:coder-style tools
         without write/edit should deny those tools."""
         # Approximates a 'read-only investigator' agent.
         readonly_tools = ["read_file", "list_files", "search_files", "file_search"]

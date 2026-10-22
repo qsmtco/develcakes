@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 @dataclass
 class TeamMember:
     """A single agent or user on a project team."""
-    session_key: str           # unique session identifier (gateway key or special: prefix)
+    session_key: str           # unique session identifier (gateway key or agent: prefix)
     name: str                  # display name
     role: str = ""             # free-form: "implementation", "diagnostics", "assistant"
     can_write: bool = False    # whether this member can write to project files

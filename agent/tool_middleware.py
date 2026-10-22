@@ -49,7 +49,7 @@ class ToolContext:
     """Per-tool-call context shared across the middleware chain.
 
     Fields:
-        session_key: Conversation session key (e.g. ``"special:coder"``).
+        session_key: Conversation session key (e.g. ``"agent:coder"``).
         project_path: Absolute path to the project root (sandbox base).
         iteration: Current tool-loop iteration (0-indexed).
         bypass_approval: When True, the approval middleware skips PM

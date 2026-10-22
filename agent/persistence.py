@@ -256,7 +256,7 @@ def resolve_session_workspace(project_path: str | None, session_key: str) -> str
         project_path: The project directory (must not be empty).
         session_key: Must be non-empty, whitespace-free, and contain only
             [a-zA-Z0-9._:-]. Path separators and ".." are rejected.
-            Colons (e.g. "special:coder") are allowed and sanitized for
+            Colons (e.g. "agent:coder") are allowed and sanitized for
             filesystem safety.
 
     Returns:

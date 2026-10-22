@@ -39,7 +39,7 @@ from tests.test_agent_runtime import (
 )
 from tests.test_stop_all import _CapturingFeed, _marker_procs
 
-_SK = "special:coder-2"
+_SK = "agent:coder-2"
 _PROJECT_NAME = "proj"
 
 
@@ -152,7 +152,7 @@ class TestN1WriterTurnEndToEnd:
         assert entry.sha == wt_repo.head.commit.hexsha, (
             "queue sha is not the worktree checkpoint commit")
         body = wt_repo.git.log("--format=%B", "-1")
-        assert "Agent: special:coder-2" in body.splitlines(), (
+        assert "Agent: agent:coder-2" in body.splitlines(), (
             f"worktree checkpoint missing the Agent: trailer: {body!r}")
         assert gitpython.Repo(pstr).head.commit.hexsha == project_head_before, (
             "checkpoint committed in the project root, not the worktree")

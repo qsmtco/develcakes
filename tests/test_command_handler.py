@@ -251,7 +251,7 @@ class TestSetters:
         assert empty_handler._agent_mgr is am
 
     def test_set_special_agents(self, empty_handler):
-        agents = {"special:coder": "Coder", "special:debugger": "Debugger"}
+        agents = {"agent:coder": "Coder", "agent:debugger": "Debugger"}
         empty_handler.set_special_agents(agents)
         assert empty_handler._special_agents == agents
 
@@ -397,34 +397,34 @@ class TestSpecialAgentMentionResolution:
     set_special_agents() registry in CommandHandler."""
 
     def test_exact_special_agent_resolves(self):
-        """@Coder → special:coder via special agents registry."""
+        """@Coder → agent:coder via special agents registry."""
         agnt = FakeAgentManager({"QTR": "agent:qtr:telegram:direct:7478874934"})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
         resolved = h._resolve_mention("@Coder")
-        assert resolved == "special:coder"
+        assert resolved == "agent:coder"
 
     def test_exact_debugger_resolves(self):
-        """@Debugger → special:debugger via special agents registry."""
+        """@Debugger → agent:debugger via special agents registry."""
         agnt = FakeAgentManager({})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
         resolved = h._resolve_mention("@Debugger")
-        assert resolved == "special:debugger"
+        assert resolved == "agent:debugger"
 
     def test_prefix_match_special_agent(self):
-        """@Co → special:coder via prefix match (min 2 chars)."""
+        """@Co → agent:coder via prefix match (min 2 chars)."""
         agnt = FakeAgentManager({})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
         resolved = h._resolve_mention("@Co")
-        assert resolved == "special:coder"
+        assert resolved == "agent:coder"
 
     def test_single_char_no_partial_match(self):
         """@C (single char) → no prefix match, falls through to unknown."""
         agnt = FakeAgentManager({})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
         resolved = h._resolve_mention("@C")
         assert isinstance(resolved, CommandResult)
         assert "Unknown" in resolved.response_text
@@ -433,7 +433,7 @@ class TestSpecialAgentMentionResolution:
         """@NotAnAgent → error via special agents registry."""
         agnt = FakeAgentManager({})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
         resolved = h._resolve_mention("@NotAnAgent")
         assert isinstance(resolved, CommandResult)
         assert "Unknown" in resolved.response_text
@@ -447,7 +447,7 @@ class TestSpecialAgentMentionResolution:
         agnt = FakeAgentManager({"Coder": "agent:coder:gateway:1"})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
         # Special agent registry also has Coder
-        h.set_special_agents({"special:coder": "Coder"})
+        h.set_special_agents({"agent:coder": "Coder"})
         # _resolve_mention checks agent-manager names BEFORE the special registry
         # This test documents current behavior: agent-mgr wins (checked first)
         resolved = h._resolve_mention("@Coder")
@@ -458,7 +458,7 @@ class TestSpecialAgentMentionResolution:
         """resolve_inline_mention works for both agent-manager-registered and special agents."""
         agnt = FakeAgentManager({"QTR": "agent:qtr:telegram:direct:7478874934"})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:coder": "Coder", "special:debugger": "Debugger"})
+        h.set_special_agents({"agent:coder": "Coder", "agent:debugger": "Debugger"})
 
         # Agent-manager-registered agent
         r1 = h.resolve_inline_mention("@QTR hello", "project:testproj")
@@ -466,15 +466,15 @@ class TestSpecialAgentMentionResolution:
 
         # Special agent
         r2 = h.resolve_inline_mention("@Coder hello", "project:testproj")
-        assert r2.target_session_key == "special:coder"
+        assert r2.target_session_key == "agent:coder"
 
     def test_resolve_inline_mention_debugger(self):
-        """resolve_inline_mention for @Debugger → special:debugger."""
+        """resolve_inline_mention for @Debugger → agent:debugger."""
         agnt = FakeAgentManager({})
         h = CommandHandler(agent_manager=agnt, project_handler=None)
-        h.set_special_agents({"special:debugger": "Debugger"})
+        h.set_special_agents({"agent:debugger": "Debugger"})
         r = h.resolve_inline_mention("@Debugger fix this", "project:testproj")
-        assert r.target_session_key == "special:debugger"
+        assert r.target_session_key == "agent:debugger"
         assert r.clean_text == "fix this"
 
 class TestBugFixes:
@@ -609,7 +609,7 @@ class TestQuotedPayloadIntegration:
         parameter checked via registry, not a hardcoded set."""
         configured_handler.register_command("clear", lambda c: CommandResult(handled=True, response_text="Cleared."),
             payload_free=True)
-        result = configured_handler.process_input("special:supervisor", "/clear")
+        result = configured_handler.process_input("agent:supervisor", "/clear")
         assert result.handled is True
         assert result.response_text == "Cleared."
         assert "Malformed" not in result.response_text
@@ -619,7 +619,7 @@ class TestQuotedPayloadIntegration:
         for clear, the command must fail with Malformed — proving the test above
         exercises the real payload_free mechanism, not a pass-through."""
         configured_handler.register_command("clear", lambda c: CommandResult(handled=True, response_text="Cleared."))
-        result = configured_handler.process_input("special:supervisor", "/clear")
+        result = configured_handler.process_input("agent:supervisor", "/clear")
         assert result.handled is True
         assert "Malformed" in result.response_text
 

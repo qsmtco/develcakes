@@ -62,7 +62,7 @@ class AgentBuilderHandler:
         return {
             "name": "",
             "emoji": "🤖",
-            "role": "",
+            "role": "coder",
             "prompts": [],
             "tools": ["read_file", "list_files", "search_files"],
             "provider": "",
@@ -188,6 +188,21 @@ class AgentBuilderHandler:
     def get_provider_options(self) -> list[dict]:
         """Available providers from providers.yaml. For UI dropdown."""
         return get_available_providers()
+
+    def get_role_options(self) -> list[tuple[str, str]]:
+        """(label, value) pairs for the Role dropdown: the three built-in
+        roles (Supervisor, Coder, Debugger) plus user-defined roles from
+        utils.roles.load_roles()."""
+        from utils.roles import BUILTIN_ROLES, load_roles
+        options = [(r.capitalize(), r) for r in BUILTIN_ROLES]
+        options.extend((role["name"], role["slug"]) for role in load_roles())
+        return options
+
+    def save_role(self, name: str, prompt: str) -> tuple[str | None, str | None]:
+        """Persist a user-defined role. Passthrough to utils.roles.save_role;
+        returns its (slug, error) tuple unchanged."""
+        from utils.roles import save_role as _save_role
+        return _save_role(name, prompt)
 
     def save_provider(self, name: str, config: dict) -> bool:
         """Add or update a provider in providers.yaml.

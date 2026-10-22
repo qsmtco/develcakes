@@ -302,7 +302,7 @@ class TestAgentRowSourceTag:
         panel = LeftPanel()
         panel._agent_list_handler = None  # exercise the built-in initials path
 
-        row = panel._build_agent_row("special:coder", "Coder", in_project=False,
+        row = panel._build_agent_row("agent:coder", "Coder", in_project=False,
                                      session_count=1)
 
         from gi.repository import Gtk as _Gtk

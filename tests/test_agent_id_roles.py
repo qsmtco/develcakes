@@ -6,7 +6,7 @@
 #   - SpecialAgentDef.prompts default + registry loading from a YAML with
 #     non-string entries filtered in _load_registry
 #   - AgentRuntimeHandler._worktree_for_turn _ROOT_KEYS behavior
-#     (special:coder -> None, special:coder-2 -> worktree, agent:alphacoder
+#     (agent:coder -> None, agent:coder-2 -> worktree, agent:alphacoder
 #     -> worktree), following the SP2 patterns in test_agent_runtime.py.
 
 import os
@@ -54,7 +54,7 @@ def fresh_registry(tmp_path, monkeypatch):
 
 class TestIsLocalAgentKey:
     @pytest.mark.parametrize("key,expected", [
-        ("special:coder", True),
+        ("agent:coder", True),
         ("agent:alphacoder", True),
         ("", False),
         (None, False),
@@ -67,7 +67,7 @@ class TestIsLocalAgentKey:
 class TestSpecialAgentDefPrompts:
     def test_prompts_defaults_to_empty_list(self):
         agent = SpecialAgentDef(
-            conv_id_prefix="special:p",
+            conv_id_prefix="agent:p",
             display_name="P",
             role="p",
             emoji="🤖",
@@ -101,7 +101,7 @@ class TestRegistryPromptsLoading:
         data = {
             "name": "BetaCoder",
             "role": "coder",
-            "session_key": "special:coder-beta",
+            "session_key": "agent:coder-beta",
             "emoji": "🤖",
             "llm_name": "local-kb",
             "fallback_provider": "openrouter",
@@ -113,7 +113,7 @@ class TestRegistryPromptsLoading:
 
         reload_registry()
 
-        agent = get_special_agent("special:coder-beta")
+        agent = get_special_agent("agent:coder-beta")
         assert agent is not None
         assert agent.prompts == ["system/coder.md"]
 
@@ -127,14 +127,14 @@ class TestRegistryPromptsLoading:
         coder_def = {
             "role": "coder",
             "name": "MixedPrompts",
-            "session_key": "special:mixed-prompts",
+            "session_key": "agent:mixed-prompts",
             "emoji": "🤖",
             "tools": ["read_file"],
             "prompts": ["codeWriter.md", 42, None, "steelFramedCodeWriter.md"],
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            agent = get_special_agent("special:mixed-prompts")
+            agent = get_special_agent("agent:mixed-prompts")
             assert agent is not None
             assert agent.prompts == [
                 "codeWriter.md",
@@ -148,14 +148,14 @@ class TestRegistryPromptsLoading:
         coder_def = {
             "role": "coder",
             "name": "StrPrompts",
-            "session_key": "special:str-prompts",
+            "session_key": "agent:str-prompts",
             "emoji": "🤖",
             "tools": ["read_file"],
             "prompts": "codeWriter.md",
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            agent = get_special_agent("special:str-prompts")
+            agent = get_special_agent("agent:str-prompts")
             assert agent is not None
             assert agent.prompts == []
 
@@ -166,13 +166,13 @@ class TestRegistryPromptsLoading:
         coder_def = {
             "role": "coder",
             "name": "NoPrompts",
-            "session_key": "special:no-prompts",
+            "session_key": "agent:no-prompts",
             "emoji": "🤖",
             "tools": ["read_file"],
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            agent = get_special_agent("special:no-prompts")
+            agent = get_special_agent("agent:no-prompts")
             assert agent is not None
             assert agent.prompts == []
 
@@ -236,7 +236,7 @@ class TestRootKeysWorktree:
         project = tmp_path / "proj"
         project.mkdir()
         _git_repo(project)
-        for sk in ("special:coder", "special:debugger", "special:supervisor"):
+        for sk in ("agent:coder", "agent:debugger", "agent:supervisor"):
             assert handler._worktree_for_turn(
                 sk, _writer_def(), str(project)
             ) is None
@@ -248,10 +248,10 @@ class TestRootKeysWorktree:
         _git_repo(project)
 
         got = handler._worktree_for_turn(
-            "special:coder-2", _writer_def(), str(project)
+            "agent:coder-2", _writer_def(), str(project)
         )
         assert got is not None
-        assert os.path.basename(got) == "special-coder-2"
+        assert os.path.basename(got) == "agent-coder-2"
         assert os.path.isdir(got)
 
     def test_agent_key_gets_worktree(self, tmp_path):

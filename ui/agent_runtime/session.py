@@ -30,9 +30,9 @@ class RuntimeSessionMixin:
 
         Spec: docs/specs/STEP-COUNT-RESET-FIX.md Edit 4.
         """
-        # Guard: only special-agent sessions can be cleared this way.
-        # `special:coder`, `special:debugger`, `special:crabcakes`, etc.
-        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+        # Guard: only local-agent sessions can be cleared this way.
+        # `agent:coder`, `agent:debugger`, `agent:crabcakes`, etc.
+        if not isinstance(session_key, str) or not session_key.startswith("agent:"):
             _mod().logger.warning(
                 "clear_conversation: refusing non-special session_key=%r",
                 session_key,
@@ -91,7 +91,7 @@ class RuntimeSessionMixin:
                 # — messages are now empty, so the cache MUST be invalidated
                 # or the next trim pass will read a stale value.
                 conv.task_card = ""
-                conv._token_estimate_cache = None
+                conv.invalidate_token_estimate()
                 rt.drop_read_cache(session_key)
                 rt.drop_compile(session_key)
                 rt.drop_repo_map(session_key)
@@ -138,7 +138,7 @@ class RuntimeSessionMixin:
         Spec: docs/specs/SPEC-CONTEXT-UI-COMPACT-LLM-2026-07-10.md §3.2.
 
         Args:
-            session_key: "special:coder" etc.
+            session_key: "agent:coder" etc.
             focus_text: Optional focus instructions for Phase C's LLM
                 strategy (Phase B's textual strategy ignores this).
 
@@ -151,7 +151,7 @@ class RuntimeSessionMixin:
 
         Returns an empty dict {"messages_removed": 0, ...} on failure.
         """
-        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+        if not isinstance(session_key, str) or not session_key.startswith("agent:"):
             _mod().logger.warning(
                 "compact_conversation: refusing non-special session_key=%r",
                 session_key,
@@ -251,7 +251,7 @@ class RuntimeSessionMixin:
 
     def _owned_conversation(self, session_key: str):
         """Return (conversation, runtime, error). error is a string or None."""
-        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+        if not isinstance(session_key, str) or not session_key.startswith("agent:"):
             return None, None, "not a special agent"
         agent_def = self._agents.get(session_key)
         if agent_def is None:
@@ -372,10 +372,10 @@ class RuntimeSessionMixin:
             }
         before = _estimate(conv)
         conv.messages[:] = kept_messages(conv.messages, remove)
-        conv._token_estimate_cache = None
+        conv.invalidate_token_estimate()
         after = _estimate(conv)
         persisted = self._persist_context(conv, session_key)
-        conv._token_estimate_cache = None
+        conv.invalidate_token_estimate()
         error = "" if persisted else "in-memory edit applied; the conversation file was not written"
         return {
             "ok": persisted,
@@ -431,6 +431,15 @@ class RuntimeSessionMixin:
                                "Open a project first. Special agents work within projects.")
             return
 
+        # Obtain the runtime and claim the session BEFORE writing the reply
+        # target: a queued send must not rotate the running turn's target or
+        # token, and a failed _get_runtime (no provider / no API key) must
+        # not leave a new reply target on a send that did not start
+        # (SPEC-WIRE-CONTEXT-PRESSURE §2.3).
+        rt = self._get_runtime(agent_def.display_name, agent_def=agent_def)
+        if not rt.begin_send(session_key, text):
+            return
+
         # SPEC-12 (BUG#18/#26): ALWAYS normalize the slot for a send that will
         # actually run — a non-targeting caller defaults to the routing
         # (project) key, so no stale private target survives. Placed AFTER
@@ -446,7 +455,6 @@ class RuntimeSessionMixin:
             project_name, project_path = self._active_project
         else:
             project_name, project_path = "(none)", None
-        rt = self._get_runtime(agent_def.display_name, agent_def=agent_def)
 
         _mod().logger.debug("[handler] send_to_special_agent: sk=%s agent=%s project=%s text_len=%d",
                      session_key, agent_def.display_name, project_name, len(text))
@@ -504,7 +512,10 @@ class RuntimeSessionMixin:
                 turn_token=new_token,
             )
 
-        rt.send_message(session_key, text, prepare=_prepare_turn)
+        # The session is already claimed by begin_send above; do not call
+        # send_message (it would begin_send again). Start the loop directly
+        # with the new token (SPEC-WIRE-CONTEXT-PRESSURE §2.3).
+        rt.start_claimed_loop(session_key, text, new_token, _prepare_turn)
 
     def stop_all(self) -> None:
         """Stop all agent runtimes. Called on window shutdown."""

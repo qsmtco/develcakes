@@ -264,7 +264,7 @@ def test_tree_version_invalidates_cache(tmp_path):
     (tmp_path / "a.py").write_text("def alpha():\n    return 1\n")
     _commit(tmp_path, "init")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:treever"
+    sk = "agent:treever"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True
     conv = rt.get_conversation(sk)
@@ -315,7 +315,7 @@ def test_preambles_present(tmp_path):
     _commit(tmp_path, "init")
     init_project_config(str(tmp_path), "p")
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "special:coder")
+    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "agent:coder")
     memory = build_awareness_dict(str(tmp_path))["PROJECT_MEMORY"]
     preamble = "Live facts, sha-scoped, self-invalidate when files change — verify before acting."
     open_at = memory.index('<untrusted-project-data source="facts.json">')

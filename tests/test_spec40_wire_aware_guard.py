@@ -7,7 +7,7 @@ from agent.runtime import AgentRuntime
 from models.conversation import Conversation, MessageRole, ToolCall
 from tests.test_agent_runtime import _make_cfg
 
-_SK = "special:coder"
+_SK = "agent:coder"
 _BODY = "line one\nline two\nline three\n"
 
 

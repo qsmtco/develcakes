@@ -36,7 +36,7 @@ class TestCmdCompact:
         handler._compact_callback = None
         handler._compact_chat_callback = None
         cmd = Command(name="compact", args=[], flags={}, raw_text="/compact",
-                      body="", source_session_key="special:coder")
+                      body="", source_session_key="agent:coder")
         result = handler.cmd_compact(cmd)
         assert result.handled is True
         assert "unavailable" in result.response_text.lower()
@@ -49,7 +49,7 @@ class TestCmdCompact:
         }
         handler._compact_chat_callback = None
         cmd = Command(name="compact", args=[], flags={}, raw_text="/compact",
-                      body="", source_session_key="special:coder")
+                      body="", source_session_key="agent:coder")
         result = handler.cmd_compact(cmd)
         assert result.handled is True
         assert "5 message" in result.response_text
@@ -66,7 +66,7 @@ class TestCmdCompact:
         handler._compact_callback = capture_cb
         handler._compact_chat_callback = None
         cmd = Command(name="compact", args=[], flags={}, raw_text='/compact "focus on auth"',
-                      body="focus on auth", source_session_key="special:coder")
+                      body="focus on auth", source_session_key="agent:coder")
         result = handler.cmd_compact(cmd)
         assert captured["focus"] == "focus on auth"
 
@@ -79,7 +79,7 @@ class TestCmdCompact:
         }
         handler._compact_chat_callback = None
         cmd = Command(name="compact", args=[], flags={}, raw_text="/compact",
-                      body=None, source_session_key="special:coder")
+                      body=None, source_session_key="agent:coder")
         result = handler.cmd_compact(cmd)
         assert result.handled is True
 
@@ -133,10 +133,10 @@ class TestTargetSessionKey:
         cmd = Command(
             name="compact", args=[], flags={}, raw_text="/compact @Coder",
             body="", source_session_key="project:foo",
-            target_session_key="special:coder"
+            target_session_key="agent:coder"
         )
         result = handler.cmd_compact(cmd)
-        assert captured["sk"] == "special:coder"
+        assert captured["sk"] == "agent:coder"
         assert result.handled is True
 
     def test_cmd_clear_uses_target_session_key(self):
@@ -150,10 +150,10 @@ class TestTargetSessionKey:
         cmd = Command(
             name="clear", args=[], flags={}, raw_text="/clear @Coder",
             body="", source_session_key="project:foo",
-            target_session_key="special:coder"
+            target_session_key="agent:coder"
         )
         result = handler.cmd_clear(cmd)
-        assert captured["sk"] == "special:coder"
+        assert captured["sk"] == "agent:coder"
         assert result.handled is True
 
     def test_cmd_compact_falls_back_to_source(self):
@@ -169,8 +169,8 @@ class TestTargetSessionKey:
         from models.command import Command
         cmd = Command(
             name="compact", args=[], flags={}, raw_text="/compact",
-            body="", source_session_key="special:coder",
+            body="", source_session_key="agent:coder",
             target_session_key=None
         )
         result = handler.cmd_compact(cmd)
-        assert captured["sk"] == "special:coder"
+        assert captured["sk"] == "agent:coder"

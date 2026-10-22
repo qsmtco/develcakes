@@ -13,7 +13,7 @@ from tests.test_agent_runtime import _make_cfg, _resp
 
 def _runtime(project: str):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:coder"
+    sk = "agent:coder"
     rt.create_conversation("Coder", sk, project, defer_prompt_build=True)
     return rt, sk, rt.get_conversation(sk)
 
@@ -122,7 +122,7 @@ def test_cleanup_drops_fingerprint_so_next_turn_rereads(tmp_path):
 
 def test_drop_read_cache_missing_key_is_noop():
     rt = AgentRuntime(_make_cfg())
-    rt.drop_read_cache("special:missing")
+    rt.drop_read_cache("agent:missing")
 
 
 def test_failed_read_is_not_fingerprinted(tmp_path):
@@ -196,17 +196,17 @@ def test_task_card_round_trip_and_wire_prefix(tmp_path, monkeypatch):
     assert anth[1]["content"].startswith("read a.py offset=0")
 
     with patch("agent.persistence.conversations_dir", return_value=str(tmp_path)):
-        save_conversation_to_disk(conv, "special:card")
-        loaded, _meta = load_conversation_from_disk("special:card")
+        save_conversation_to_disk(conv, "agent:card")
+        loaded, _meta = load_conversation_from_disk("agent:card")
         assert loaded.task_card == conv.task_card
-        raw = json.loads((tmp_path / "special:card.json").read_text())
+        raw = json.loads((tmp_path / "agent:card.json").read_text())
         del raw["task_card"]
-        (tmp_path / "special:card.json").write_text(json.dumps(raw))
-        old, _meta = load_conversation_from_disk("special:card")
+        (tmp_path / "agent:card.json").write_text(json.dumps(raw))
+        old, _meta = load_conversation_from_disk("agent:card")
         assert old.task_card == ""
         raw["task_card"] = 12
-        (tmp_path / "special:card.json").write_text(json.dumps(raw))
-        bad, _meta = load_conversation_from_disk("special:card")
+        (tmp_path / "agent:card.json").write_text(json.dumps(raw))
+        bad, _meta = load_conversation_from_disk("agent:card")
         assert bad.task_card == ""
 
 
@@ -229,7 +229,7 @@ def test_note_task_trims_to_last_500_on_a_newline(tmp_path):
 def test_next_turn_rereads_instead_of_reporting_unchanged(tmp_path):
     (tmp_path / "a.txt").write_text("hello world\n")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:turns"
+    sk = "agent:turns"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True
     calls = {"n": 0}
@@ -300,7 +300,7 @@ def test_system_prompt_rebuilds_only_when_inputs_change(tmp_path):
     crab.mkdir()
     (crab / "context.md").write_text("# start\n")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:coder"
+    sk = "agent:coder"
     calls = {"n": 0}
 
     def counting(*args, **kwargs):
@@ -328,7 +328,7 @@ def test_deferred_prompt_builds_once_on_the_first_turn(tmp_path):
     from agent.context import build_system_prompt as real_build
 
     rt = AgentRuntime(_make_cfg())
-    sk = "special:coder"
+    sk = "agent:coder"
     calls = {"n": 0}
 
     def counting(*args, **kwargs):

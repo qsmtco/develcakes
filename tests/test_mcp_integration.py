@@ -111,7 +111,7 @@ class TestYAMLLoading(TestState):
     def test_mcp_servers_loaded_from_yaml(self):
         """Agent YAML with mcp_servers: [memory] → SpecialAgentDef has it."""
         agent = SpecialAgentDef(
-            conv_id_prefix="special:test",
+            conv_id_prefix="agent:test",
             display_name="Test",
             role="tester",
             emoji="🧪",

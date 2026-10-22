@@ -9,11 +9,11 @@
 #
 # Adding a new special agent: create a YAML file in the agents config dir,
 # or use the Agent Builder UI. No code changes needed. The registry key
-# defaults to "special:<role>" when the file omits session_key. The Agent
-# Builder save path writes a unique session_key (special:<role>-2, -3, …)
-# when that default is already owned, and keeps role as the prompt
-# selector. A hand-edited file that shares a role and omits session_key
-# still collides here and the later file replaces the earlier one.
+# defaults to "agent:<role-slug>" when the file omits session_key. The
+# Agent Builder save path writes a unique session_key (agent:<name-slug>)
+# and keeps role as the prompt selector. A hand-edited file that shares a
+# role and omits session_key still collides here and the later file
+# replaces the earlier one.
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class SpecialAgentDef:
     Fields llm_name and self_improvement are optional overrides —
     when None, the global agent config defaults apply.
     """
-    conv_id_prefix: str           # e.g. "special:coder" — used as session_key
+    conv_id_prefix: str           # e.g. "agent:coder" — used as session_key
     display_name: str             # e.g. "Coder"
     role: str                     # e.g. "coder" — matches prompts/system/{role}.md
     emoji: str                    # e.g. "🛠️"
@@ -73,7 +73,7 @@ SPECIAL_AGENTS: dict[str, SpecialAgentDef] | None = None
 
 def _load_registry() -> dict[str, SpecialAgentDef]:
     """Load agent definitions from config files and build the registry."""
-    from utils.agent_defs import load_agent_defs
+    from utils.agent_defs import agent_slug, load_agent_defs
 
     defs = load_agent_defs()
     registry: dict[str, SpecialAgentDef] = {}
@@ -81,13 +81,15 @@ def _load_registry() -> dict[str, SpecialAgentDef]:
     for agent_def in defs:
         role = agent_def.get("role", "").lower()
         name = agent_def.get("name", "Agent")
-        # Session key resolution. Default is derived from the role (legacy
-        # behaviour, preserved so existing keys and conversations are stable).
-        # save_agent_def writes a unique session_key for a second agent of
-        # the same role. A hand-edited file that omits session_key still
-        # collides here, and the later one replaces the earlier one. role
-        # stays the prompt selector in agent/context.py build_system_prompt.
-        session_key = str(agent_def.get("session_key") or "").strip() or f"special:{role}"
+        # Session key resolution. Default is derived from the role slug:
+        # agent:<role-slug>. save_agent_def writes an explicit unique
+        # session_key for user agents. A hand-edited file that omits
+        # session_key still collides here, and the later one replaces the
+        # earlier one. role stays the prompt selector in agent/context.py
+        # build_system_prompt.
+        session_key = str(agent_def.get("session_key") or "").strip()
+        if not session_key:
+            session_key = f"agent:{agent_slug(role)}"
         tools = agent_def.get("tools", [])
 
         # BUG #30: Coerce mcp_servers to list if YAML gave a string
@@ -106,8 +108,7 @@ def _load_registry() -> dict[str, SpecialAgentDef]:
         if session_key in registry:
             logger.warning(
                 "Duplicate session key %r — agent %r replaces %r. Two agents "
-                "may not share a role unless one declares an explicit "
-                "'session_key' in its YAML.",
+                "may not share a session key.",
                 session_key, name, registry[session_key].display_name,
             )
 
@@ -167,20 +168,17 @@ def get_special_agent(prefix: str) -> SpecialAgentDef | None:
 def is_local_agent_key(session_key: str) -> bool:
     """True when the session key belongs to a local (non-gateway) agent.
 
-    Local agents are addressed either by their legacy-built-in id
-    (``special:<role>``) or by their id minted from the display name
-    (``agent:<slug>``). Gateway session keys are not local.
+    Local agents are addressed by their ``agent:<slug>`` id. Gateway
+    session keys are not local.
     """
-    return isinstance(session_key, str) and (
-        session_key.startswith("special:") or session_key.startswith("agent:")
-    )
+    return isinstance(session_key, str) and session_key.startswith("agent:")
 
 
 def unregister_special_agent(prefix: str) -> bool:
     """Remove a special agent from the registry by its session key prefix.
 
     Args:
-        prefix: The agent's conv_id_prefix (e.g. "special:coder").
+        prefix: The agent's conv_id_prefix (e.g. "agent:coder").
 
     Returns:
         True if the agent was found and removed, False otherwise.

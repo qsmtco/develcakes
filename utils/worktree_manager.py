@@ -130,7 +130,7 @@ class WorktreeManager:
     def worktree_id_for_session(session_key: str) -> str:
         """Derive + validate the filesystem-safe worktree id for a session
         key: ':' -> '-' (the LOW-2 filesystem sanitization),
-        ``special:coder`` -> ``special-coder``; then class-validate and
+        ``agent:coder`` -> ``agent-coder``; then class-validate and
         reject dot-segments (order matters: the class admits '.', so the
         explicit rejection is load-bearing).
 

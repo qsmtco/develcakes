@@ -47,12 +47,12 @@ def _null_lock():
 
 
 # SPEC-AGENT-ID-AND-ROLES §2.10: the three built-in session keys stay on
-# the open project root. Every other local writer (agent:<slug> or a
-# suffixed legacy special:<role>-N key) gets its own worktree.
+# the open project root. Every other local writer (agent:<slug>) gets its
+# own worktree.
 _ROOT_KEYS = frozenset({
-    "special:supervisor",
-    "special:coder",
-    "special:debugger",
+    "agent:supervisor",
+    "agent:coder",
+    "agent:debugger",
 })
 
 
@@ -798,7 +798,7 @@ class AgentRuntimeHandler(
 
         # SPEC-19 SP4 Part C: a live-bridge approval resolves the page's
         # Promise (the runtime forward below is a no-op for bridge calls —
-        # no runtime owns "special:live-bridge"). The window registers the
+        # no runtime owns "agent:live-bridge"). The window registers the
         # resolver seam; late-bound so ARH never imports the render handler.
         bridge_call_id = pending.get("live_bridge_call_id")
 
@@ -845,7 +845,7 @@ class AgentRuntimeHandler(
         Public wrapper so window callbacks do not reach into ``_get_runtime``.
         Creates the runtime lazily, matching ``clear_conversation``.
         """
-        if not isinstance(session_key, str) or not session_key.startswith("special:"):
+        if not isinstance(session_key, str) or not session_key.startswith("agent:"):
             return None
         agent_def = self._agents.get(session_key)
         if agent_def is None:
@@ -939,11 +939,10 @@ class AgentRuntimeHandler(
         """SPEC-09 SP2 (+ SPEC-AGENT-ID-AND-ROLES §2.10): worktree cwd.
 
         A writer enters its worktree when its session key is NOT one of the
-        three built-in root keys (special:supervisor, special:coder,
-        special:debugger). Built-in keys run in the project root. Every
-        other local writer (agent:<slug>, or a suffixed legacy
-        special:<role>-N key) gets branch agent/<session-id> under
-        <project>/.worktrees/.
+        three built-in root keys (agent:supervisor, agent:coder,
+        agent:debugger). Built-in keys run in the project root. Every
+        other local writer (agent:<slug>) gets branch agent/<session-id>
+        under <project>/.worktrees/.
 
         Non-writer, root-key writer, non-git project, or ANY worktree
         failure -> None (the turn runs in the project root).
@@ -1422,7 +1421,7 @@ class AgentRuntimeHandler(
             metadata={
                 "tool_name": method,
                 "tool_args": params,
-                "session_key": "special:live-bridge",
+                "session_key": "agent:live-bridge",
                 "status": "pending_approval",
                 "needs_approval": True,
                 "live_bridge_call_id": call_id,
@@ -1430,7 +1429,7 @@ class AgentRuntimeHandler(
         )
         card_id = self._fh.add_card(card)
         self._pending_approvals[card_id] = {
-            "session_key": "special:live-bridge",
+            "session_key": "agent:live-bridge",
             "tool_name": method,
             "args": params,
             "live_bridge_call_id": call_id,
@@ -1672,7 +1671,7 @@ class AgentRuntimeHandler(
             # Always log for observability (preserve existing behavior).
             logger.info(
                 "[token-breakdown] sk=%s system_prompt=%d conv=%d total=%d/%d "
-                "remaining=%d (%.1f%%) trimmed=%s removed=%d",
+                "remaining=%d (%.1f%%) transcript=%d trimmed=%s removed=%d",
                 session_key,
                 breakdown["system_prompt_tokens"],
                 breakdown["conversation_tokens"],
@@ -1680,6 +1679,7 @@ class AgentRuntimeHandler(
                 breakdown["model_max_tokens"],
                 breakdown["remaining_tokens"],
                 breakdown["usage_percent"],
+                breakdown.get("transcript_tokens", breakdown.get("total_used_tokens", 0)),
                 breakdown.get("trimmed_this_turn", False),
                 breakdown.get("messages_removed_this_turn", 0),
             )

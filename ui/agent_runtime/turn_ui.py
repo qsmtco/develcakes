@@ -592,6 +592,12 @@ class RuntimeTurnUiMixin:
             if (complete_token is not None
                     and self._turn_tokens.get(session_key) is my_token):
                 self._turn_reply_target.pop(session_key, None)
+        # SPEC-WIRE-CONTEXT-PRESSURE §2.6: texts that missed the loop are
+        # started as fresh turns now — after this completion accepted the old
+        # token and after the finally popped the old reply slot. A return
+        # inside the try (duplicate) or before the try (stale token) does not
+        # reach here.
+        self._flush_stranded_sends(session_key)
 
     def _do_error(self, session_key: str, message: str | BaseException, error_token: object = None) -> None:
         """Main-thread portion of _on_error.
@@ -772,4 +778,15 @@ class RuntimeTurnUiMixin:
             if (error_token is not None
                     and self._turn_tokens.get(session_key) is my_token):
                 self._turn_reply_target.pop(session_key, None)
+        # SPEC-WIRE-CONTEXT-PRESSURE §2.6: texts that missed the loop are
+        # started as fresh turns now — after this handler accepted the old
+        # token and after the finally popped the old reply slot.
+        self._flush_stranded_sends(session_key)
+
+    def _flush_stranded_sends(self, session_key: str) -> None:
+        rt = self.runtime_for(session_key)
+        if rt is None:
+            return
+        for text in rt.take_stranded(session_key):
+            self.send_to_special_agent(session_key, text)
 

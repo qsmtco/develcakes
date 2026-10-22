@@ -13,7 +13,7 @@ def test_index_is_separate_from_facts(tmp_path, monkeypatch):
     root.mkdir()
     (root / "facts.json").write_text("[]", encoding="utf-8")
     result = dispatch(
-        str(tmp_path), "special:supervisor", "supervisor", "promote",
+        str(tmp_path), "agent:supervisor", "supervisor", "promote",
         name="auth", body="argon2 decision",
     )
     assert result.success is True

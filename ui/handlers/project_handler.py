@@ -371,13 +371,11 @@ class ProjectHandler:
         """Extract a human-readable name from a session key when AgentManager has no mapping.
 
         Examples:
-          'special:tester'    → 'tester'
+          'agent:tester'    → 'tester'
           'agent:qtr:telegram:direct:123' → 'qtr'
           'agent:qaster:telegram:direct:456' → 'Qaster'
         """
         parts = session_key.split(":")
-        if parts[0] == "special" and len(parts) >= 2:
-            return parts[1]
         if parts[0] == "agent" and len(parts) >= 2:
             return parts[1]
         return session_key
@@ -462,7 +460,7 @@ class ProjectHandler:
         Spec: docs/specs/STEP-COUNT-RESET-FIX.md Edit 3.
 
         Wired by window.py to AgentRuntimeHandler.clear_conversation. The
-        callback takes a session_key (e.g. "special:coder") and returns
+        callback takes a session_key (e.g. "agent:coder") and returns
         True on success, False otherwise. cmd_clear invokes this callback
         to reset the in-memory conversation + delete the persisted JSON.
 
@@ -480,7 +478,7 @@ class ProjectHandler:
 
         Wired by window.py to a closure that resolves the chat box via
         self._main_content.get_chat_box_for_session(sk) and removes all
-        its children. The callback takes a session_key (e.g. "special:coder")
+        its children. The callback takes a session_key (e.g. "agent:coder")
         and returns None. cmd_clear invokes this AFTER the data-plane
         clear (self._clear_callback) succeeds, so a UI failure cannot
         roll back the data reset.
@@ -573,7 +571,7 @@ class ProjectHandler:
                 if existing is not None:
                     # Preserve existing member record exactly (order == input)
                     new_members.append(existing)
-                elif sk.startswith("special:"):
+                elif sk.startswith("agent:"):
                     agent_def = get_special_agent(sk)
                     if agent_def is not None:
                         new_members.append(TeamMember(
@@ -724,7 +722,7 @@ class ProjectHandler:
         Authoritative source: the persisted conversation file at
         ``<config_dir>/conversations/<session_key>.json`` (which the
         runtime updates via `record_usage` and saves to disk after every
-        turn). Used for special:* session keys.
+        turn). Used for local agent:* session keys.
 
         Fallback: the in-memory ``_session_usage`` dict injected via
         ``set_runtime_usage_fn`` from the runtime handler. Used for
@@ -765,8 +763,8 @@ class ProjectHandler:
         Spec: docs/specs/STEP-COUNT-RESET-FIX.md Edit 2.
 
         Clears messages, step_count, total_tokens, total_cost for the agent
-        whose tab the user is typing in. Only operates on special agent
-        tabs (session_key starts with "special:"). Project tabs are a
+        whose tab the user is typing in. Only operates on local agent
+        tabs (session_key starts with "agent:"). Project tabs are a
         no-op with a hint telling the user to use /clear in an agent tab.
         """
         sk = cmd.target_session_key or cmd.source_session_key or session_key
@@ -785,9 +783,9 @@ class ProjectHandler:
                 response_text="Use /clear in an agent tab to reset that agent's conversation.",
             )
 
-        # Special agent tabs: dispatch to the runtime handler via the
+        # Local-agent tabs: dispatch to the runtime handler via the
         # callback injected by window.py.
-        if sk.startswith("special:"):
+        if sk.startswith("agent:"):
             agent_name = sk.split(":", 1)[1]
             if self._clear_callback is None:
                 return CommandResult(
@@ -873,7 +871,7 @@ class ProjectHandler:
                 ),
             )
 
-        if sk.startswith("special:"):
+        if sk.startswith("agent:"):
             agent_name = sk.split(":", 1)[1]
             if self._compact_callback is None:
                 return CommandResult(

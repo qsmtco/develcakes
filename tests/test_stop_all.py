@@ -572,12 +572,12 @@ class TestStopAllARH:
         arh.set_feed_handler(feed)
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
-        rt._active_loops.add("special:coder")  # simulate an in-flight loop
+        rt._active_loops.add("agent:coder")  # simulate an in-flight loop
         arh._runtimes["Coder"] = rt
 
         merged = arh.stop_all_agents()
 
-        assert merged.get("special:coder") == "cancelled"
+        assert merged.get("agent:coder") == "cancelled"
         assert arh.stop_all_in_progress() is False  # cleared after
         assert len(feed.cards) == 1, f"expected ONE summary card; got {len(feed.cards)}"
         card = feed.cards[0]
@@ -605,7 +605,7 @@ class TestStopAllARH:
         arh.set_feed_handler(feed)
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
-        rt._active_loops.add("special:coder")
+        rt._active_loops.add("agent:coder")
         arh._runtimes["Coder"] = rt
 
         with patch("agent.tools.cancel_all_processes") as fake_cancel:
@@ -616,7 +616,7 @@ class TestStopAllARH:
 
         # mock-truthiness guard: pin the call shape the card aggregation reads.
         assert fake_cancel.call_count == 2
-        assert merged.get("special:coder") == "cancelled+killed:1+1-unkillable"
+        assert merged.get("agent:coder") == "cancelled+killed:1+1-unkillable"
         assert "*" not in merged  # global sweep found nothing (0, 0)
         assert arh.stop_all_in_progress() is False
         assert len(feed.cards) == 1

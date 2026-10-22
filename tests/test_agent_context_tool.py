@@ -11,11 +11,11 @@ def _agent(role, key, name):
 
 
 def test_coder_cannot_clear_a_peer(monkeypatch):
-    coder = _agent("coder", "special:coder", "Coder")
-    debugger = _agent("debugger", "special:debugger", "Debugger")
+    coder = _agent("coder", "agent:coder", "Coder")
+    debugger = _agent("debugger", "agent:debugger", "Debugger")
     monkeypatch.setattr(
         "agent.special_agents.get_special_agent",
-        lambda key: coder if key == "special:coder" else None,
+        lambda key: coder if key == "agent:coder" else None,
     )
     monkeypatch.setattr(
         "agent.special_agents.get_special_agents",
@@ -33,7 +33,7 @@ def test_coder_cannot_clear_a_peer(monkeypatch):
             "agent_context",
             {"agent": "Debugger", "action": "clear"},
             "/tmp/proj",
-            session_key="special:coder",
+            session_key="agent:coder",
         )
     finally:
         set_agent_context_callback(None)
@@ -43,10 +43,10 @@ def test_coder_cannot_clear_a_peer(monkeypatch):
 
 
 def test_supervisor_can_target_self(monkeypatch):
-    supervisor = _agent("supervisor", "special:supervisor", "Supervisor")
+    supervisor = _agent("supervisor", "agent:supervisor", "Supervisor")
     monkeypatch.setattr(
         "agent.special_agents.get_special_agent",
-        lambda key: supervisor if key == "special:supervisor" else None,
+        lambda key: supervisor if key == "agent:supervisor" else None,
     )
     monkeypatch.setattr(
         "agent.special_agents.get_special_agents",
@@ -64,14 +64,14 @@ def test_supervisor_can_target_self(monkeypatch):
             "agent_context",
             {"agent": "self", "action": "edit", "drop": ["0-1"]},
             "/tmp/proj",
-            session_key="special:supervisor",
+            session_key="agent:supervisor",
         )
     finally:
         set_agent_context_callback(None)
     assert result.success is True
     assert called == [(
-        "special:supervisor",
-        "special:supervisor",
+        "agent:supervisor",
+        "agent:supervisor",
         "edit",
         "",
         {"drop": [0, 1], "keep": None},
@@ -79,11 +79,11 @@ def test_supervisor_can_target_self(monkeypatch):
 
 
 def test_coder_can_edit_self_and_not_a_peer(monkeypatch):
-    coder = _agent("coder", "special:coder", "Coder")
-    debugger = _agent("debugger", "special:debugger", "Debugger")
+    coder = _agent("coder", "agent:coder", "Coder")
+    debugger = _agent("debugger", "agent:debugger", "Debugger")
     monkeypatch.setattr(
         "agent.special_agents.get_special_agent",
-        lambda key: coder if key == "special:coder" else None,
+        lambda key: coder if key == "agent:coder" else None,
     )
     monkeypatch.setattr(
         "agent.special_agents.get_special_agents",
@@ -101,27 +101,27 @@ def test_coder_can_edit_self_and_not_a_peer(monkeypatch):
             "agent_context",
             {"agent": "Coder", "action": "inspect"},
             "/tmp/proj",
-            session_key="special:coder",
+            session_key="agent:coder",
         )
         peer_edit = execute_tool(
             "agent_context",
             {"agent": "Debugger", "action": "edit", "keep": [0]},
             "/tmp/proj",
-            session_key="special:coder",
+            session_key="agent:coder",
         )
     finally:
         set_agent_context_callback(None)
     assert self_edit.success is True
-    assert called == [("special:coder", "special:coder", "inspect", "", None)]
+    assert called == [("agent:coder", "agent:coder", "inspect", "", None)]
     assert peer_edit.success is False
     assert peer_edit.error == "agent_context is supervisor-only"
 
 
 def test_edit_rejects_both_drop_and_keep(monkeypatch):
-    supervisor = _agent("supervisor", "special:supervisor", "Supervisor")
+    supervisor = _agent("supervisor", "agent:supervisor", "Supervisor")
     monkeypatch.setattr(
         "agent.special_agents.get_special_agent",
-        lambda key: supervisor if key == "special:supervisor" else None,
+        lambda key: supervisor if key == "agent:supervisor" else None,
     )
     monkeypatch.setattr("agent.special_agents.get_special_agents", lambda: [supervisor])
     called = []
@@ -131,7 +131,7 @@ def test_edit_rejects_both_drop_and_keep(monkeypatch):
             "agent_context",
             {"agent": "self", "action": "edit", "drop": [1], "keep": [0]},
             "/tmp/proj",
-            session_key="special:supervisor",
+            session_key="agent:supervisor",
         )
     finally:
         set_agent_context_callback(None)
@@ -148,10 +148,10 @@ def test_prompt_teaches_self_edit():
 
 
 def test_unknown_peer(monkeypatch):
-    supervisor = _agent("supervisor", "special:supervisor", "Supervisor")
+    supervisor = _agent("supervisor", "agent:supervisor", "Supervisor")
     monkeypatch.setattr(
         "agent.special_agents.get_special_agent",
-        lambda key: supervisor if key == "special:supervisor" else None,
+        lambda key: supervisor if key == "agent:supervisor" else None,
     )
     monkeypatch.setattr("agent.special_agents.get_special_agents", lambda: [supervisor])
     set_agent_context_callback(lambda *a: ToolResult(success=True, output="x"))
@@ -160,7 +160,7 @@ def test_unknown_peer(monkeypatch):
             "agent_context",
             {"agent": "Nobody", "action": "clear"},
             "/tmp/proj",
-            session_key="special:supervisor",
+            session_key="agent:supervisor",
         )
     finally:
         set_agent_context_callback(None)

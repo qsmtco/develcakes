@@ -23,10 +23,10 @@ def test_member_click_opens_project_tab():
     w = _shell()
     ph = MagicMock()
     ph.get_active_project_name.return_value = "alpha"
-    ph.get_project_members.return_value = ["agent:q1", "special:coder"]
+    ph.get_project_members.return_value = ["agent:q1", "agent:coder"]
     w._project_handler = ph
 
-    w._on_agent_selected("special:coder", "Coder")
+    w._on_agent_selected("agent:coder", "Coder")
 
     w._main_content.create_chat_tab.assert_called_once_with(
         "project:alpha", "alpha")
@@ -40,7 +40,7 @@ def test_non_member_click_is_noop():
     ph.get_project_members.return_value = ["agent:q1"]
     w._project_handler = ph
 
-    w._on_agent_selected("special:coder", "Coder")
+    w._on_agent_selected("agent:coder", "Coder")
 
     w._main_content.create_chat_tab.assert_not_called()
 
@@ -52,7 +52,7 @@ def test_no_active_project_click_is_noop():
     ph.get_active_project_name.return_value = None
     w._project_handler = ph
 
-    w._on_agent_selected("special:coder", "Coder")
+    w._on_agent_selected("agent:coder", "Coder")
 
     w._main_content.create_chat_tab.assert_not_called()
 
@@ -62,6 +62,6 @@ def test_pre_build_click_is_noop_not_crash():
     before that (or on a partially-built window) must not raise."""
     w = _shell()  # no _project_handler attribute at all
 
-    w._on_agent_selected("special:coder", "Coder")  # must not raise
+    w._on_agent_selected("agent:coder", "Coder")  # must not raise
 
     w._main_content.create_chat_tab.assert_not_called()

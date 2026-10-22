@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 # normal in-app collaboration path, so direct CLI reach into Coder/Debugger
 # buys nothing and widens the blast radius. Any other target exits 3.
 _NUDGE_PERMITTED_TARGETS = ("supervisor",)
-_NUDGE_SESSION_KEYS = {"supervisor": "special:supervisor"}
+_NUDGE_SESSION_KEYS = {"supervisor": "agent:supervisor"}
 _NUDGE_MAX_CHARS = 4096  # mirrors the /ask payload cap (project-awareness.md)
 
 # Exit codes (§3.3)

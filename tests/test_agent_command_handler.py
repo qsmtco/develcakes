@@ -117,7 +117,7 @@ class TestNoCommands:
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
-        handler.on_agent_response("special:coder", "Just a regular response", "crabwatch")
+        handler.on_agent_response("agent:coder", "Just a regular response", "crabwatch")
 
         assert len(fake_cmd.processed) == 0
         assert len(fake_rt.sent) == 0
@@ -132,8 +132,8 @@ class TestNoCommands:
         handler.set_agent_runtime_handler(fake_rt)
 
         # Should not raise
-        handler.on_agent_response("special:coder", "", "crabwatch")
-        handler.on_agent_response("special:coder", None, "crabwatch")
+        handler.on_agent_response("agent:coder", "", "crabwatch")
+        handler.on_agent_response("agent:coder", None, "crabwatch")
 
         assert len(fake_rt.sent) == 0
 
@@ -145,7 +145,7 @@ class TestNoCommands:
         handler.set_agent_runtime_handler(fake_rt)
 
         # Should not raise
-        handler.on_agent_response("special:coder", "/ask @Debugger hello", "crabwatch")
+        handler.on_agent_response("agent:coder", "/ask @Debugger hello", "crabwatch")
         assert len(fake_rt.sent) == 0
 
 
@@ -156,37 +156,37 @@ class TestAskCommand:
         """/ask @Debugger question routes to Debugger via special agent send."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Debugger \"should I use observer or polling?\"",
             "crabwatch"
         )
 
         assert len(fake_rt.sent) == 1
         target_sk, text = fake_rt.sent[0]
-        assert target_sk == "special:debugger"
+        assert target_sk == "agent:debugger"
         assert "should I use observer" in text
 
     def test_ask_records_pending_ask(self):
         """Ask command records _pending_asks so relay can find the source."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Debugger \"should I use X or Y?\"",
             "crabwatch"
         )
 
-        assert "special:debugger" in handler._pending_asks
-        assert handler._pending_asks["special:debugger"] == "special:coder"
+        assert "agent:debugger" in handler._pending_asks
+        assert handler._pending_asks["agent:debugger"] == "agent:coder"
 
     def test_ask_unknown_target_routes_via_runtime_receiver(self):
         """/ask @Qaster where Qaster is not a special agent → routed through the
@@ -201,7 +201,7 @@ class TestAskCommand:
         handler.set_agent_manager(fake_am)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Qaster \"is X compatible with the gateway?\"",
             "crabwatch"
         )
@@ -217,37 +217,37 @@ class TestTellCommand:
         """/tell @Agent info — message sent but no pending ask recorded."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask", "tell"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/tell @Debugger \"the feed.json has been cleared\"",
             "crabwatch"
         )
 
         assert len(fake_rt.sent) == 1
         # NO pending ask for tell — it's one-way
-        assert "special:debugger" not in handler._pending_asks
+        assert "agent:debugger" not in handler._pending_asks
 
     def test_delegate_command_records_pending(self):
         """/delegate @Agent task — like ask, records pending ask for relay."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask", "delegate"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/delegate @Debugger \"review the parser logic\"",
             "crabwatch"
         )
 
         assert len(fake_rt.sent) == 1
-        assert "special:debugger" in handler._pending_asks
-        assert handler._pending_asks["special:debugger"] == "special:coder"
+        assert "agent:debugger" in handler._pending_asks
+        assert handler._pending_asks["agent:debugger"] == "agent:coder"
 
 
 class TestRelay:
@@ -257,16 +257,16 @@ class TestRelay:
         """When agent responds with a pending ask, relay to source agent."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={
-            "special:debugger": "Debugger",
-            "special:coder": "Coder",
+            "agent:debugger": "Debugger",
+            "agent:coder": "Coder",
         })
         handler.set_agent_runtime_handler(fake_rt)
 
         # Set up pending ask: Debugger was asked by Coder
-        handler._pending_asks["special:debugger"] = "special:coder"
+        handler._pending_asks["agent:debugger"] = "agent:coder"
 
         handler.on_agent_response(
-            "special:debugger",
+            "agent:debugger",
             "Use the observer pattern. It integrates natively with watchdog.",
             "crabwatch"
         )
@@ -274,41 +274,41 @@ class TestRelay:
         # Relay should have been sent to Coder
         assert len(fake_rt.sent) == 1
         target_sk, relay_text = fake_rt.sent[0]
-        assert target_sk == "special:coder"
+        assert target_sk == "agent:coder"
         assert relay_text.startswith("[Debugger responded]:")
         assert "observer pattern" in relay_text
 
     def test_relay_clears_pending_ask(self):
         """After relay, the pending ask entry is removed."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_agent_runtime_handler(fake_rt)
 
-        handler._pending_asks["special:debugger"] = "special:coder"
-        handler.on_agent_response("special:debugger", "Answer text", "crabwatch")
+        handler._pending_asks["agent:debugger"] = "agent:coder"
+        handler.on_agent_response("agent:debugger", "Answer text", "crabwatch")
 
-        assert "special:debugger" not in handler._pending_asks
+        assert "agent:debugger" not in handler._pending_asks
 
     def test_relay_clears_source_chain_depth(self):
         """When relay is sent, source chain depth is cleared (relay is new context)."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_agent_runtime_handler(fake_rt)
 
-        handler._chain_depth["special:coder"] = 2
-        handler._pending_asks["special:debugger"] = "special:coder"
-        handler.on_agent_response("special:debugger", "Answer", "crabwatch")
+        handler._chain_depth["agent:coder"] = 2
+        handler._pending_asks["agent:debugger"] = "agent:coder"
+        handler.on_agent_response("agent:debugger", "Answer", "crabwatch")
 
-        assert "special:coder" not in handler._chain_depth
+        assert "agent:coder" not in handler._chain_depth
 
     def test_no_pending_ask_no_relay(self):
         """Agent responds with no pending ask — no relay, only command scan."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_agent_runtime_handler(fake_rt)
 
         # No pending ask — agent responds freely
-        handler.on_agent_response("special:debugger", "Just answering without being asked", "crabwatch")
+        handler.on_agent_response("agent:debugger", "Just answering without being asked", "crabwatch")
 
         assert len(fake_rt.sent) == 0
 
@@ -316,13 +316,13 @@ class TestRelay:
         """Relay text must start with '[AgentName responded]:'."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={
-            "special:debugger": "Debugger",
-            "special:coder": "Coder",
+            "agent:debugger": "Debugger",
+            "agent:coder": "Coder",
         })
         handler.set_agent_runtime_handler(fake_rt)
 
-        handler._pending_asks["special:debugger"] = "special:coder"
-        handler.on_agent_response("special:debugger", "Short answer.", "crabwatch")
+        handler._pending_asks["agent:debugger"] = "agent:coder"
+        handler.on_agent_response("agent:debugger", "Short answer.", "crabwatch")
 
         _, relay_text = fake_rt.sent[0]
         assert relay_text.startswith("[Debugger responded]:")
@@ -332,19 +332,19 @@ class TestRelay:
         but the asker is a special agent, the response relays to the asker via
         the runtime receiver."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:coder": "Coder"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:coder": "Coder"})
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_agent_runtime_handler(fake_rt)
         handler.set_agent_manager(fake_am)
 
         # Qaster was asked by Coder
-        handler._pending_asks["agent:qaster:..."] = "special:coder"
+        handler._pending_asks["agent:qaster:..."] = "agent:coder"
         handler.on_agent_response("agent:qaster:...", "Yes, X is compatible.", "crabwatch")
 
         # Relay goes to special agent via send_to_special_agent
         assert len(fake_rt.sent) == 1
         target_sk, relay_text = fake_rt.sent[0]
-        assert target_sk == "special:coder"
+        assert target_sk == "agent:coder"
         assert "[Qaster responded]:" in relay_text
 
 
@@ -355,68 +355,68 @@ class TestMultiHop:
         """When agent A routes to agent B, B's chain depth = A's depth + 1."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
         handler.set_agent_manager(fake_am)
 
-        handler._chain_depth["special:coder"] = 0
+        handler._chain_depth["agent:coder"] = 0
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Debugger \"is X compatible?\"",
             "crabwatch"
         )
 
-        assert handler._chain_depth.get("special:debugger") == 1
+        assert handler._chain_depth.get("agent:debugger") == 1
 
     def test_chain_depth_limit_drops_commands(self):
         """When agent reaches chain depth >= _MAX_CHAIN_DEPTH, commands are dropped."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         fake_am = FakeAgentManager(names={"agent:qaster:...": "Qaster"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
         handler.set_agent_manager(fake_am)
 
         # Simulate Coder at max depth
-        handler._chain_depth["special:coder"] = _MAX_CHAIN_DEPTH
+        handler._chain_depth["agent:coder"] = _MAX_CHAIN_DEPTH
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Debugger \"is X compatible?\"",
             "crabwatch"
         )
 
         # No routing — command dropped due to chain depth
         assert len(fake_rt.sent) == 0
-        assert "special:debugger" not in handler._pending_asks
+        assert "agent:debugger" not in handler._pending_asks
 
     def test_chain_depth_cleared_after_response(self):
         """After on_agent_response completes (no new commands), chain depth is cleared."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_agent_runtime_handler(fake_rt)
 
         # Pre-set chain depth for the source agent
-        handler._chain_depth["special:coder"] = 2
-        # No pending ask, no commands → session_key is special:coder
-        handler.on_agent_response("special:coder", "Just a regular response", "crabwatch")
+        handler._chain_depth["agent:coder"] = 2
+        # No pending ask, no commands → session_key is agent:coder
+        handler.on_agent_response("agent:coder", "Just a regular response", "crabwatch")
 
-        assert "special:coder" not in handler._chain_depth
+        assert "agent:coder" not in handler._chain_depth
 
     def test_no_pending_ask_just_chain_depth_cleared(self):
         """When no pending ask exists, chain depth still cleared on response."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_agent_runtime_handler(fake_rt)
 
         # Pre-set chain depth for the responding agent
-        handler._chain_depth["special:coder"] = 1
-        handler.on_agent_response("special:coder", "No commands here", "crabwatch")
+        handler._chain_depth["agent:coder"] = 1
+        handler.on_agent_response("agent:coder", "No commands here", "crabwatch")
 
-        assert "special:coder" not in handler._chain_depth
+        assert "agent:coder" not in handler._chain_depth
 
 
 class TestFencedBlocks:
@@ -426,30 +426,30 @@ class TestFencedBlocks:
         """Content inside fenced code blocks is not scanned for commands."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "Here's the fix:\n\n```python\nresult = /ask @Debugger  # not a command\n```\n\nBut /ask @Debugger \"is this right?\" ← IS a command",
             "crabwatch"
         )
 
         # Only the post-fence command should be routed
         assert len(fake_rt.sent) == 1
-        assert fake_rt.sent[0][0] == "special:debugger"
+        assert fake_rt.sent[0][0] == "agent:debugger"
 
     def test_non_command_backtick_ignored(self):
         """Single-backtick content that is NOT a known command is skipped."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})  # "tell" is NOT registered
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "Try `print('hello') and see what happens",
             "crabwatch"
         )
@@ -466,7 +466,7 @@ class TestFencedBlocks:
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "```\n/ask @Someone\n/ask @Else\n```",
             "crabwatch"
         )
@@ -483,14 +483,14 @@ class TestMultipleCommands:
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})
         fake_rt = FakeAgentRuntimeHandler(special_agents={
-            "special:debugger": "Debugger",
-            "special:coder": "Coder",
+            "agent:debugger": "Debugger",
+            "agent:coder": "Coder",
         })
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/ask @Debugger \"q1\" /ask @Coder \"q2\" /ask @Debugger \"q3\" /ask @Coder \"q4\" /ask @Debugger \"q5\"",
             "crabwatch"
         )
@@ -516,30 +516,30 @@ class TestMultipleCommands:
                     return CommandResult(handled=True, forward_to=target, forward_text=msg)
                 return super().process_input(sk, text, skip_dispatch=skip_dispatch)
 
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         fake_cmd = AtAwareCommandHandler(commands={"ask"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/@Debugger \"is this edge case valid?\"",
             "crabwatch"
         )
 
         assert len(fake_rt.sent) == 1
-        assert fake_rt.sent[0][0] == "special:debugger"
+        assert fake_rt.sent[0][0] == "agent:debugger"
 
     def test_unknown_command_ignored(self):
         """Backtick text starting with an unknown command is skipped."""
         handler = AgentCommandHandler()
         fake_cmd = FakeCommandHandler(commands={"ask"})  # "foobar" not registered
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:debugger": "Debugger"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
         handler.set_command_handler(fake_cmd)
         handler.set_agent_runtime_handler(fake_rt)
 
         handler.on_agent_response(
-            "special:coder",
+            "agent:coder",
             "/foobar @Debugger some text",
             "crabwatch"
         )
@@ -554,13 +554,13 @@ class TestDisplayNameResolution:
         """Relay prefix uses special agent display name."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={
-            "special:debugger": "DebuggEr",
-            "special:coder": "Coder",
+            "agent:debugger": "DebuggEr",
+            "agent:coder": "Coder",
         })
         handler.set_agent_runtime_handler(fake_rt)
-        handler._pending_asks["special:debugger"] = "special:coder"
+        handler._pending_asks["agent:debugger"] = "agent:coder"
 
-        handler.on_agent_response("special:debugger", "Short answer.", "crabwatch")
+        handler.on_agent_response("agent:debugger", "Short answer.", "crabwatch")
 
         _, relay_text = fake_rt.sent[0]
         assert relay_text.startswith("[DebuggEr responded]:")
@@ -568,11 +568,11 @@ class TestDisplayNameResolution:
     def test_relay_uses_agent_manager_name(self):
         """Relay prefix falls back to AgentManager display name."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:coder": "Coder"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:coder": "Coder"})
         fake_am = FakeAgentManager(names={"agent:qaster:...": "QasterBot"})
         handler.set_agent_runtime_handler(fake_rt)
         handler.set_agent_manager(fake_am)
-        handler._pending_asks["agent:qaster:..."] = "special:coder"
+        handler._pending_asks["agent:qaster:..."] = "agent:coder"
 
         handler.on_agent_response("agent:qaster:...", "Answer.", "crabwatch")
 
@@ -582,17 +582,17 @@ class TestDisplayNameResolution:
     def test_relay_uses_session_key_fallback(self):
         """Relay prefix falls back to last segment of session key if no name found."""
         handler = AgentCommandHandler()
-        fake_rt = FakeAgentRuntimeHandler(special_agents={"special:coder": "Coder"})
+        fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:coder": "Coder"})
         handler.set_agent_runtime_handler(fake_rt)
 
         # Session key contains a "/" so split("/")[-1] produces a readable fallback name
         # Session key with an embedded "/" (remote-style key; ensures parsing handles it)
         target_sk = "agent/unknown/12345"
-        handler._pending_asks[target_sk] = "special:coder"
+        handler._pending_asks[target_sk] = "agent:coder"
 
         handler.on_agent_response(target_sk, "Answer.", "crabwatch")
 
-        # source_sk="special:coder" is special → relay via send_to_special_agent
+        # source_sk="agent:coder" is special → relay via send_to_special_agent
         assert len(fake_rt.sent) == 1
         _, relay_text = fake_rt.sent[0]
         # Fallback: session_key.split("/")[-1] = "12345"
@@ -918,7 +918,7 @@ class TestAgentIssuedCompactClear:
         handler = AgentCommandHandler(GLib_module=None)
         handler.set_command_handler(None)  # no command handler = scanner skips
         # Should not raise
-        handler.on_agent_response("special:supervisor", "no commands here", None)
+        handler.on_agent_response("agent:supervisor", "no commands here", None)
 
     def test_no_duplicate_match_on_quoted_compact(self):
         """BUG #1: /compact @Coder "x" must produce exactly 1 command, not 2."""
@@ -957,7 +957,7 @@ class TestAgentIssuedCompactClear:
 
         handler._agent_runtime_handler = mock_arh
 
-        handler._record_action_result("special:supervisor", "Compacted. Freed 12K tokens.")
+        handler._record_action_result("agent:supervisor", "Compacted. Freed 12K tokens.")
 
         mock_conv.add_user_message.assert_called_once()
         call_arg = mock_conv.add_user_message.call_args[0][0]
@@ -974,5 +974,5 @@ class TestAgentIssuedCompactClear:
         mock_arh.get_special_agent_def.return_value = None
         handler._agent_runtime_handler = mock_arh
 
-        handler._record_action_result("special:unknown", "test")
+        handler._record_action_result("agent:unknown", "test")
         # No exception = pass

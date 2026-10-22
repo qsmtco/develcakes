@@ -57,7 +57,7 @@ def test_refused_grep_does_not_ask_for_approval(tmp_path):
 
     rt._dispatch_approval = boom
     stopped = rt._execute_tool_batch(
-        "special:coder",
+        "agent:coder",
         None,
         conv,
         "",
@@ -81,7 +81,7 @@ def test_coder_edit_runs_syntax_not_lint(tmp_path):
         project_path=str(tmp_path),
     )
     stopped = rt._execute_tool_batch(
-        "special:coder",
+        "agent:coder",
         None,
         conv,
         "",
@@ -111,7 +111,7 @@ def test_debugger_edit_still_lints(tmp_path):
         project_path=str(tmp_path),
     )
     rt._execute_tool_batch(
-        "special:debugger",
+        "agent:debugger",
         None,
         conv,
         "",

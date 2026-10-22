@@ -38,8 +38,8 @@ def _make_handler(fake_glib):
     handler._crh.is_streaming.return_value = False
     handler._active_project = ("test", "/tmp/test")
     handler._agents = {
-        "special:coder": SpecialAgentDef(
-            conv_id_prefix="special:coder",
+        "agent:coder": SpecialAgentDef(
+            conv_id_prefix="agent:coder",
             display_name="Coder",
             role="coder",
             emoji="🛠️",
@@ -74,9 +74,9 @@ class TestBatchedBubbleDelivery:
         n_events = 6
 
         for i in range(3):
-            handler._do_tool_call_start("special:coder", "read_file", {"path": f"f{i}.txt"})
-            handler._pending_tool_args["special:coder"] = {"path": f"f{i}.txt"}
-            handler._do_tool_call_result("special:coder", "read_file", "content", success=True)
+            handler._do_tool_call_start("agent:coder", "read_file", {"path": f"f{i}.txt"})
+            handler._pending_tool_args["agent:coder"] = {"path": f"f{i}.txt"}
+            handler._do_tool_call_result("agent:coder", "read_file", "content", success=True)
 
         # Nothing is delivered before the cadence tick.
         assert delivered == [], (
@@ -90,7 +90,7 @@ class TestBatchedBubbleDelivery:
         )
         assert len(flushes) == 1, "one burst must arm exactly one flush timer"
 
-        _fire_armed_flush(fake_glib, "special:coder")
+        _fire_armed_flush(fake_glib, "agent:coder")
 
         assert [b.type for b in delivered] == [
             "tool_start", "tool_end",
@@ -98,34 +98,34 @@ class TestBatchedBubbleDelivery:
             "tool_start", "tool_end",
         ], "all bubbles must be delivered, in emission order"
         assert delivered[-1].status.name == "SUCCESS", "final state must be the tool_end"
-        assert all(b.session_key == "special:coder" for b in delivered)
+        assert all(b.session_key == "agent:coder" for b in delivered)
 
     def test_flush_rearms_for_a_later_burst(self, fake_glib):
         """After a flush, the next event arms a fresh timer (no lost bubbles)."""
         handler, delivered = _make_handler(fake_glib)
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "a.txt"})
-        _fire_armed_flush(fake_glib, "special:coder")
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "a.txt"})
+        _fire_armed_flush(fake_glib, "agent:coder")
         assert [b.type for b in delivered] == ["tool_start"]
 
-        handler._pending_tool_args["special:coder"] = {"path": "a.txt"}
-        handler._do_tool_call_result("special:coder", "read_file", "content", success=True)
+        handler._pending_tool_args["agent:coder"] = {"path": "a.txt"}
+        handler._do_tool_call_result("agent:coder", "read_file", "content", success=True)
         assert [b.type for b in delivered] == ["tool_start"], "second burst waits too"
 
-        _fire_armed_flush(fake_glib, "special:coder")
+        _fire_armed_flush(fake_glib, "agent:coder")
         assert [b.type for b in delivered] == ["tool_start", "tool_end"]
 
     def test_error_and_patch_bubbles_keep_their_order(self, fake_glib):
         """write_file success → patch (not tool_end) still rides the batch."""
         handler, delivered = _make_handler(fake_glib)
 
-        handler._do_tool_call_start("special:coder", "write_file", {"path": "src/main.py"})
-        handler._do_tool_call_result("special:coder", "write_file", "OK — wrote 12 bytes to src/main.py", success=True)
-        handler._do_tool_call_start("special:coder", "exec_command", {"command": "false"})
-        handler._pending_tool_args["special:coder"] = {"command": "false"}
-        handler._do_tool_call_result("special:coder", "exec_command", "boom", success=False)
+        handler._do_tool_call_start("agent:coder", "write_file", {"path": "src/main.py"})
+        handler._do_tool_call_result("agent:coder", "write_file", "OK — wrote 12 bytes to src/main.py", success=True)
+        handler._do_tool_call_start("agent:coder", "exec_command", {"command": "false"})
+        handler._pending_tool_args["agent:coder"] = {"command": "false"}
+        handler._do_tool_call_result("agent:coder", "exec_command", "boom", success=False)
 
-        _fire_armed_flush(fake_glib, "special:coder")
+        _fire_armed_flush(fake_glib, "agent:coder")
 
         assert [b.type for b in delivered] == [
             "tool_start", "patch", "tool_start", "tool_error",
@@ -134,8 +134,8 @@ class TestBatchedBubbleDelivery:
     def test_per_session_queues_are_independent(self, fake_glib):
         """One session's flush must not deliver another session's bubbles."""
         handler, delivered = _make_handler(fake_glib)
-        handler._agents["special:debugger"] = SpecialAgentDef(
-            conv_id_prefix="special:debugger",
+        handler._agents["agent:debugger"] = SpecialAgentDef(
+            conv_id_prefix="agent:debugger",
             display_name="Debugger",
             role="debugger",
             emoji="🔍",
@@ -143,14 +143,14 @@ class TestBatchedBubbleDelivery:
             can_write=False,
         )
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "a.txt"})
-        handler._do_tool_call_start("special:debugger", "read_file", {"path": "b.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "a.txt"})
+        handler._do_tool_call_start("agent:debugger", "read_file", {"path": "b.txt"})
         assert len([t for t in fake_glib.armed if t[1] == 250]) == 2
 
-        _fire_armed_flush(fake_glib, "special:debugger")
+        _fire_armed_flush(fake_glib, "agent:debugger")
 
-        assert [b.session_key for b in delivered] == ["special:debugger"]
-        assert handler._bubble_queue.get("special:coder"), "coder's bubble is still queued"
+        assert [b.session_key for b in delivered] == ["agent:debugger"]
+        assert handler._bubble_queue.get("agent:coder"), "coder's bubble is still queued"
 
     def test_no_glib_delivers_inline(self):
         """No main loop (tests / direct callers) → immediate delivery."""
@@ -176,10 +176,10 @@ class TestTurnEndOrdering:
             lambda sk, name, phase: order.append(("lifecycle", phase))
         )
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "a.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "a.txt"})
         assert order == [], "fixture precondition: the bubble is queued, not delivered"
 
-        handler._do_response_complete("special:coder", "Done")
+        handler._do_response_complete("agent:coder", "Done")
 
         assert order == [("bubble", "tool_start"), ("lifecycle", "end")], (
             f"drawer ordering broken: {order}"
@@ -193,8 +193,8 @@ class TestTurnEndOrdering:
             lambda sk, name, phase: order.append(("lifecycle", phase))
         )
 
-        handler._do_tool_call_start("special:coder", "exec_command", {"command": "ls"})
-        handler._do_error("special:coder", "Cancelled by user")
+        handler._do_tool_call_start("agent:coder", "exec_command", {"command": "ls"})
+        handler._do_error("agent:coder", "Cancelled by user")
 
         assert order == [("bubble", "tool_start"), ("lifecycle", "end")], (
             f"drawer ordering broken on the error path: {order}"
@@ -204,14 +204,14 @@ class TestTurnEndOrdering:
         """flush_pending_activity_bubbles drains now and drops the timer."""
         handler, delivered = _make_handler(fake_glib)
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "a.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "a.txt"})
         timer_id = [t for t in fake_glib.armed if t[1] == 250][0][0]
 
-        handler.flush_pending_activity_bubbles("special:coder")
+        handler.flush_pending_activity_bubbles("agent:coder")
 
         assert [b.type for b in delivered] == ["tool_start"]
         assert timer_id not in fake_glib.armed_ids, "the armed timer must be removed"
-        assert "special:coder" not in handler._bubble_timers
+        assert "agent:coder" not in handler._bubble_timers
         # Firing the stale callback again must not duplicate the delivery.
-        handler._flush_activity_bubbles("special:coder")
+        handler._flush_activity_bubbles("agent:coder")
         assert [b.type for b in delivered] == ["tool_start"]

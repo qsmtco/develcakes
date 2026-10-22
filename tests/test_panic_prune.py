@@ -84,7 +84,7 @@ def test_panic_twice_frees_nothing_more():
 
 def test_under_threshold_does_not_panic(tmp_path, monkeypatch):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:panic"
+    sk = "agent:panic"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     conv.get_token_estimate = lambda: 1_000  # type: ignore[method-assign]
@@ -109,7 +109,7 @@ def test_under_threshold_does_not_panic(tmp_path, monkeypatch):
 
 def test_over_threshold_lands_on_the_goal(tmp_path, monkeypatch):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:panic"
+    sk = "agent:panic"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     conv.get_token_estimate = lambda: 10_000_000  # type: ignore[method-assign]
@@ -153,7 +153,7 @@ def test_over_ceiling_stubs_previous_turn_and_keeps_the_current_turn(tmp_path):
     hot = tmp_path / "hot.py"
     hot.write_text("pinned\n")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:panic"
+    sk = "agent:panic"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     conv = rt.get_conversation(sk)
     rt._note_tool_path(sk, conv, "read_file", {"path": "hot.py"})

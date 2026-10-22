@@ -240,9 +240,9 @@ class ChatHandler:
                             self._send_local(target, forward_text)
                             return
                         if self._mc.get_chat_box_for_session(target) is None:
-                            # BUG#20c: "special:coder" has no "/", split(...,1)
+                            # BUG#20c: "agent:coder" has no "/", split(...,1)
                             # still yields the whole string — strip the
-                            # "special:" prefix for a clean tab label.
+                            # "agent:" prefix for a clean tab label.
                             label = target.split(":", 1)[-1]
                             self._mc.create_chat_tab(target, label)
                         self._agent_runtime_handler.send_to_special_agent(

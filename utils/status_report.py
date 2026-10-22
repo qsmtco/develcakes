@@ -60,7 +60,7 @@ CONVERSATION_MAX_BYTES = 64 * 1024 * 1024   # per-conversation read cap (BUG #5)
 HEAD_META_BYTES = 8192                # head scan for project_path/agent_name
 CACHE_FILENAME = "status-feed.json"
 STATE_FILENAME = "status-state.json"
-SESSION_FILE_PREFIX = "special:"      # agent session files in <config>/conversations
+SESSION_FILE_PREFIX = "agent:"      # agent session files in <config>/conversations
 PROC_ROOT = "/proc"                   # pinned by tests
 CRASH_DIR = "/var/crash"              # pinned by tests
 
@@ -1055,9 +1055,9 @@ def _collect_work(project_path):
 # ── agents section ───────────────────────────────────────────────────────────
 
 def _collect_agents(project_path, config_dir, body_cap, now):
-    """§2.1 `agents` section — one entry per `<config>/conversations/special:*.json`.
+    """§2.1 `agents` section — one entry per `<config>/conversations/agent:*.json`.
 
-    Discovery is filtered to the `special:` session files the app writes: the
+    Discovery is filtered to the `agent:` session files the app writes: the
     live config dir holds tens of thousands of unrelated `.json` files (test
     debris), and opening them all would blow the <1 s report budget.
     """

@@ -45,10 +45,10 @@ class TestSaveLoadRoundtrip:
     def test_save_and_load_preserves_messages(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         conv = _conv()
-        path = save_conversation_to_disk(conv, "special:coder")
+        path = save_conversation_to_disk(conv, "agent:coder")
         assert os.path.isfile(path)
         assert os.stat(path).st_mode & 0o777 == 0o600
-        result = load_conversation_from_disk("special:coder")
+        result = load_conversation_from_disk("agent:coder")
         assert result is not None
         loaded, _data = result
         assert loaded.agent_name == "Coder"
@@ -67,14 +67,14 @@ class TestSaveLoadRoundtrip:
 
     def test_saved_file_does_not_contain_api_key(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
-        path = save_conversation_to_disk(_conv(), "special:coder")
+        path = save_conversation_to_disk(_conv(), "agent:coder")
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         assert "api_key" not in data
 
     def test_load_ignores_api_key_in_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
-        path = save_conversation_to_disk(_conv(), "special:coder")
+        path = save_conversation_to_disk(_conv(), "agent:coder")
         data = json.loads(open(path, encoding="utf-8").read())
         data["api_key"] = "sk-SECRET"
         with open(path, "w", encoding="utf-8") as f:
@@ -83,14 +83,14 @@ class TestSaveLoadRoundtrip:
         provider.name = "openai"
         provider.api_key = "sk-REAL"
         with patch("utils.providers_store.load_providers", return_value=[provider]):
-            loaded, raw = load_conversation_from_disk("special:coder")
+            loaded, raw = load_conversation_from_disk("agent:coder")
         assert loaded is not None
         assert loaded.api_key == "sk-REAL"
         assert raw["api_key"] == "sk-SECRET"
 
     def test_failed_write_keeps_previous_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
-        path = save_conversation_to_disk(_conv(), "special:coder")
+        path = save_conversation_to_disk(_conv(), "agent:coder")
         before = open(path, "rb").read()
 
         def boom(*_a, **_k):
@@ -98,35 +98,35 @@ class TestSaveLoadRoundtrip:
 
         monkeypatch.setattr("agent.persistence.json.dump", boom)
         with pytest.raises(TypeError, match="dump failed"):
-            save_conversation_to_disk(_conv(), "special:coder")
+            save_conversation_to_disk(_conv(), "agent:coder")
         assert open(path, "rb").read() == before
         assert not os.path.exists(path + ".tmp")
 
     def test_missing_file_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
-        assert load_conversation_from_disk("special:coder") is None
+        assert load_conversation_from_disk("agent:coder") is None
 
     def test_corrupt_file_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         d = conversations_dir()
-        with open(os.path.join(d, "special:coder.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(d, "agent:coder.json"), "w", encoding="utf-8") as f:
             f.write("{not json")
-        assert load_conversation_from_disk("special:coder") is None
+        assert load_conversation_from_disk("agent:coder") is None
 
 
 class TestResolveSessionWorkspace:
     def test_valid_session_key(self, tmp_path):
-        ws = resolve_session_workspace(str(tmp_path), "special:coder")
+        ws = resolve_session_workspace(str(tmp_path), "agent:coder")
         assert os.path.isdir(ws)
 
     def test_empty_project_path_raises(self):
         with pytest.raises(ValueError, match="LOW-2"):
-            resolve_session_workspace("", "special:coder")
+            resolve_session_workspace("", "agent:coder")
 
     def test_path_escape_rejected(self, tmp_path):
         with pytest.raises(ValueError, match="LOW-2"):
             resolve_session_workspace(str(tmp_path), "../escape")
 
     def test_colon_sanitized(self, tmp_path):
-        ws = resolve_session_workspace(str(tmp_path), "special:coder")
-        assert "special-coder" in ws
+        ws = resolve_session_workspace(str(tmp_path), "agent:coder")
+        assert "agent-coder" in ws

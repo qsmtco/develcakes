@@ -102,10 +102,8 @@ class AgentBuilderDialog:
         self._name_entry.set_hexpand(True)
         self._name_entry.connect("changed", lambda *_: self._update_save_button())
         self._add_labeled(name_role_row, "Name", self._name_entry)
-        self._role_entry = Gtk.Entry()
-        self._role_entry.set_placeholder_text("e.g. coder, debugger")
-        self._role_entry.set_hexpand(True)
-        self._add_labeled(name_role_row, "Role", self._role_entry)
+        self._role_dropdown = self._build_role_dropdown()
+        self._add_labeled(name_role_row, "Role", self._role_dropdown)
         form_box.append(name_role_row)
 
         # Hidden emoji — not shown in form, defaults to 🤖
@@ -179,7 +177,7 @@ class AgentBuilderDialog:
         """
         name = self._name_entry.get_text().strip()
         emoji = self._emoji_entry.get_text().strip() or "🤖"
-        role = self._role_entry.get_text().strip() or name.lower().replace(" ", "-")
+        role = self._get_selected_role_value()
         llm_name = self._get_selected_llm_name()
 
         prompts = self._get_selected_prompts()
@@ -270,6 +268,154 @@ class AgentBuilderDialog:
         """Add a labeled widget to the form."""
         box = self._labeled_box(label_text, widget, expand)
         parent.append(box)
+
+    # ── Role dropdown + Create-role dialog ─────────────────────────────
+
+    def _build_role_dropdown(self) -> Gtk.DropDown:
+        """Build the Role dropdown.
+
+        Rows, in order: Supervisor, Coder, Debugger, user roles from
+        handler.get_role_options(), then the 'Create role…' sentinel
+        (value ''). New-agent default is Coder.
+        """
+        self._role_labels: list[str] = []
+        self._role_values: list[str] = []
+        self._previous_role_index: int | None = None
+        self._create_role_window = None
+        dropdown = Gtk.DropDown()
+        self._role_dropdown = dropdown
+        self._rebuild_role_options(self._handler.get_role_options())
+        dropdown.set_selected(self._coder_index())
+        dropdown.connect("notify::selected", self._on_role_changed)
+        return dropdown
+
+    def _rebuild_role_options(self, options) -> None:
+        """Replace the Role dropdown rows from (label, value) pairs."""
+        self._role_labels = [label for label, _ in options]
+        self._role_values = [value for _, value in options]
+        self._role_labels.append("Create role…")
+        self._role_values.append("")
+        self._role_dropdown.set_model(Gtk.StringList.new(self._role_labels))
+
+    def _on_role_changed(self, dropdown, _param) -> None:
+        """Sentinel ('Create role…') restores the previous selection and opens
+        the create-role dialog; any other selection is remembered."""
+        idx = dropdown.get_selected()
+        if 0 <= idx < len(self._role_values) and self._role_values[idx] == "":
+            prev = self._previous_role_index
+            if prev is None or not (0 <= prev < len(self._role_values)):
+                prev = self._coder_index()
+            dropdown.set_selected(prev)
+            self._open_create_role_dialog()
+            return
+        if idx >= 0:
+            self._previous_role_index = idx
+        self._update_save_button()
+
+    def _get_selected_role_value(self) -> str:
+        """Selected role row's value, '' for the 'Create role…' sentinel."""
+        idx = self._role_dropdown.get_selected()
+        if 0 <= idx < len(self._role_values):
+            return self._role_values[idx]
+        return ""
+
+    def _coder_index(self) -> int:
+        try:
+            return self._role_values.index("coder")
+        except ValueError:
+            return 0
+
+    def _index_of_role_value(self, value: str) -> int | None:
+        try:
+            return self._role_values.index(value)
+        except ValueError:
+            return None
+
+    def _insert_role_before_sentinel(self, value: str) -> int:
+        """Insert a stored role missing from the dropdown just before the
+        'Create role…' sentinel and select it."""
+        insert_idx = len(self._role_values) - 1
+        self._role_labels.insert(insert_idx, value)
+        self._role_values.insert(insert_idx, value)
+        self._role_dropdown.set_model(Gtk.StringList.new(self._role_labels))
+        self._role_dropdown.set_selected(insert_idx)
+        return insert_idx
+
+    def _open_create_role_dialog(self) -> None:
+        """Open the modal Create-role dialog (Name + Prompt, Cancel/Create)."""
+        if self._create_role_window is not None:
+            return
+        win = Gtk.Window(title="Create role")
+        win.set_transient_for(self._window)
+        win.set_modal(True)
+        win.set_default_size(440, 340)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+
+        self._create_role_name = Gtk.Entry()
+        self._create_role_name.set_placeholder_text("Role name")
+        box.append(self._labeled_box("Name", self._create_role_name))
+
+        prompt_scroll = Gtk.ScrolledWindow()
+        prompt_scroll.set_vexpand(True)
+        prompt_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._create_role_prompt = Gtk.TextView()
+        self._create_role_prompt.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        prompt_scroll.set_child(self._create_role_prompt)
+        box.append(self._labeled_box("Prompt", prompt_scroll, expand=True))
+
+        self._create_role_error = Gtk.Label()
+        self._create_role_error.add_css_class("agent-builder-error")
+        self._create_role_error.set_visible(False)
+        self._create_role_error.set_wrap(True)
+        box.append(self._create_role_error)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_row.set_halign(Gtk.Align.END)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_: win.close())
+        create_btn = Gtk.Button(label="Create")
+        create_btn.add_css_class("suggested-action")
+        create_btn.connect("clicked", self._on_create_role_submit)
+        btn_row.append(cancel_btn)
+        btn_row.append(create_btn)
+        box.append(btn_row)
+
+        win.set_child(box)
+        self._create_role_window = win
+        win.connect("close-request", self._on_create_role_close_request)
+        win.present()
+
+    def _on_create_role_close_request(self, widget, _data=None) -> bool:
+        """Record dialog close so a later sentinel click can reopen it."""
+        if self._create_role_window is widget:
+            self._create_role_window = None
+        return False
+
+    def _on_create_role_submit(self, _button=None) -> None:
+        """Create button: persist via handler.save_role, then refresh the dropdown."""
+        name = self._create_role_name.get_text().strip()
+        buf = self._create_role_prompt.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        slug, error = self._handler.save_role(name, text)
+        if error:
+            self._create_role_error.set_text(error)
+            self._create_role_error.set_visible(True)
+            return
+        win = self._create_role_window
+        self._create_role_window = None
+        if win is not None:
+            win.close()
+        self._rebuild_role_options(self._handler.get_role_options())
+        idx = self._index_of_role_value(slug)
+        if idx is not None:
+            self._role_dropdown.set_selected(idx)
+        else:
+            self._role_dropdown.set_selected(self._coder_index())
 
     # ── Provider + Model dropdowns ────────────────────────────────────
 
@@ -708,7 +854,18 @@ class AgentBuilderDialog:
 
         self._name_entry.set_text(agent_def.get("name", ""))
         self._emoji_entry.set_text(agent_def.get("emoji", ""))
-        self._role_entry.set_text(agent_def.get("role", ""))
+        # Role dropdown — select the stored role's row. An unknown stored
+        # role is inserted before the 'Create role…' sentinel so an edit
+        # never silently retargets the agent.
+        stored_role = agent_def.get("role", "")
+        if stored_role:
+            role_idx = self._index_of_role_value(stored_role)
+            if role_idx is None:
+                self._insert_role_before_sentinel(stored_role)
+            else:
+                self._role_dropdown.set_selected(role_idx)
+        else:
+            self._role_dropdown.set_selected(self._coder_index())
 
         # Select provider dropdown
         provider_id = agent_def.get("llm_name", "")
@@ -769,7 +926,11 @@ class AgentBuilderDialog:
         Actual validation lives in validate_agent_def().
         """
         has_name = bool(self._name_entry.get_text().strip())
-        has_prompts = any(c.get_active() for c in self._prompt_checks.values())
+        # A role is a prompt: a non-sentinel role satisfies has_prompts even
+        # when the System Prompts checklist is empty.
+        has_prompts = bool(self._get_selected_role_value()) or any(
+            c.get_active() for c in self._prompt_checks.values()
+        )
         has_tools = any(c.get_active() for c in self._tool_checks.values())
         has_provider = bool(self._get_selected_llm_name())
         has_fallback = bool(self._get_selected_fallback_provider())

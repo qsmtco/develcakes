@@ -212,7 +212,7 @@ def test_report_healthy_exit0(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("user", "go", NOW - 600),
                          _msg("tool", "ok", NOW - 590)],
                         mtime=NOW - 590)
@@ -260,7 +260,7 @@ def test_turn_stalled_detected(tmp_path):
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
     last = "Confirmed the bug. Writing the red tests first."
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("user", "fix it", NOW - 4000),
                          _msg("assistant", last, NOW - 3600,
                               tool_calls=[_tool_call("exec_command",
@@ -269,7 +269,7 @@ def test_turn_stalled_detected(tmp_path):
     report = _collect(project, config)
 
     assert "turn_stalled" in _stall_classes(report)
-    session = _sessions(report)["special:coder"]
+    session = _sessions(report)["agent:coder"]
     assert session["last_role"] == "assistant"
     assert session["idle_seconds"] == pytest.approx(3600, abs=5)
     # a dangling tool call is reported by NAME only — never its arguments
@@ -279,7 +279,7 @@ def test_turn_stalled_detected(tmp_path):
     summary, code = status_report.assess(report)
     assert code == 2
     assert "turn_stalled" in summary
-    assert "special:coder" in summary and "Coder" in summary
+    assert "agent:coder" in summary and "Coder" in summary
     assert "60" in summary or "60 minutes" in summary or "60m" in summary
 
 
@@ -287,7 +287,7 @@ def test_turn_stalled_not_fired_when_tool_follows(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "running tests", NOW - 4000),
                          _msg("tool", "1 passed", NOW - 3600,
                               tool_calls=None)],
@@ -295,7 +295,7 @@ def test_turn_stalled_not_fired_when_tool_follows(tmp_path):
     report = _collect(project, config)
 
     assert report["stalls"] == []
-    assert _sessions(report)["special:coder"]["last_role"] == "tool"
+    assert _sessions(report)["agent:coder"]["last_role"] == "tool"
     assert status_report.assess(report)[1] == 0
 
 
@@ -303,7 +303,7 @@ def test_turn_stalled_not_fired_when_repo_write_is_newer(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "writing tests", NOW - 3600)],
                         mtime=NOW - 3600)
     edited = project / "utils.py"
@@ -319,13 +319,13 @@ def test_turn_stalled_not_fired_within_threshold(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "still working", NOW - 120)],
                         mtime=NOW - 120)
     report = _collect(project, config)
 
     assert report["stalls"] == []
-    assert _sessions(report)["special:coder"]["idle_seconds"] == pytest.approx(120, abs=5)
+    assert _sessions(report)["agent:coder"]["idle_seconds"] == pytest.approx(120, abs=5)
 
 
 def test_turn_stalled_threshold_uses_module_constant(tmp_path, monkeypatch):
@@ -333,7 +333,7 @@ def test_turn_stalled_threshold_uses_module_constant(tmp_path, monkeypatch):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "idle 30m", NOW - 1800)],
                         mtime=NOW - 1800)
     report = _collect(project, config)
@@ -345,18 +345,18 @@ def test_truncated_conversation_json_degrades_only_that_section(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:supervisor", project,
+    _write_conversation(config, "agent:supervisor", project,
                         [_msg("assistant", "fine", NOW - 30)], mtime=NOW - 30)
-    _write_conversation(config, "special:coder", project, [],
+    _write_conversation(config, "agent:coder", project, [],
                         mtime=NOW - 30,
-                        raw='{"session_key": "special:coder", "messages": [{"role"')
+                        raw='{"session_key": "agent:coder", "messages": [{"role"')
     report = _collect(project, config)
 
     sessions = _sessions(report)
-    assert sessions["special:coder"]["unreadable"] is True
-    assert sessions["special:coder"]["last_role"] is None
-    assert sessions["special:supervisor"]["unreadable"] is False
-    assert "special:supervisor" in status_report.render_text(report)
+    assert sessions["agent:coder"]["unreadable"] is True
+    assert sessions["agent:coder"]["last_role"] is None
+    assert sessions["agent:supervisor"]["unreadable"] is False
+    assert "agent:supervisor" in status_report.render_text(report)
     assert report["agents"]["degraded"] is True
 
 
@@ -442,11 +442,11 @@ def test_content_truncated_by_default(tmp_path):
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     long_text = "A" * 90 + SECRET + "B" * 90
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", long_text, NOW - 30)], mtime=NOW - 30)
     report = _collect(project, config)
 
-    session = _sessions(report)["special:coder"]
+    session = _sessions(report)["agent:coder"]
     assert len(session["last_message"]) <= status_report.BODY_CAP_DEFAULT
     assert SECRET not in json.dumps(report)
     text = status_report.render_text(report)
@@ -459,11 +459,11 @@ def test_full_flag_raises_message_cap_only(tmp_path):
     config = _config_dir(tmp_path)
     # body is 2500 chars of message + a secret beyond the 2 000-char --full cap
     body = "M" * 1500 + "P" * 1000 + SECRET
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", body, NOW - 30)], mtime=NOW - 30)
     report = _collect(project, config, body_cap=status_report.BODY_CAP_FULL)
 
-    session = _sessions(report)["special:coder"]
+    session = _sessions(report)["agent:coder"]
     assert len(session["last_message"]) == status_report.BODY_CAP_FULL
     full_text = status_report.render_text(report, show_content=True)
     assert "M" * 1500 in full_text          # message bodies raised to 2000
@@ -495,7 +495,7 @@ def test_feed_card_command_never_rendered(tmp_path):
                    source="system", author="system", ts=NOW - 2),
     ])
     # tool output lands in the conversation too
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "run it", NOW - 20),
                          _msg("tool", f"stdout: {SECRET}", NOW - 10)],
                         mtime=NOW - 10)
@@ -519,7 +519,7 @@ def test_feed_card_command_never_rendered(tmp_path):
     assert len(cards[3]["title"]) == status_report.COMMAND_CAP
     assert "T" * 400 not in dumped
     # the tool OUTPUT in the conversation is reported, never its content
-    session = _sessions(report)["special:coder"]
+    session = _sessions(report)["agent:coder"]
     assert session["last_role"] == "tool"
     assert session["last_message"] == ""
     assert "tool output omitted" in status_report.render_text(report)
@@ -745,7 +745,7 @@ def test_alert_deduped_by_episode(tmp_path):
     state = status_report.load_alert_state(str(state_file))
     assert state == {}
 
-    episode = status_report.episode_id("special:coder", NOW - 3600, "abc123")
+    episode = status_report.episode_id("agent:coder", NOW - 3600, "abc123")
     alert, state = status_report.should_alert(state, episode, NOW)
     assert alert is True
     assert state["episodes"][episode]["first_seen"] == NOW
@@ -765,7 +765,7 @@ def test_alert_deduped_by_episode(tmp_path):
     assert reloaded["episodes"][episode]["last_alert"] == NOW + 3700
 
     # a new episode alerts immediately (state change)
-    other = status_report.episode_id("special:coder", NOW - 60, "def456")
+    other = status_report.episode_id("agent:coder", NOW - 60, "def456")
     alert, reloaded = status_report.should_alert(reloaded, other, NOW + 3701)
     assert alert is True
     assert set(reloaded["episodes"]) == {episode, other}
@@ -779,12 +779,12 @@ def test_alert_deduped_by_episode(tmp_path):
 
 
 def test_episode_id_stable_then_changes():
-    a = status_report.episode_id("special:coder", 1234.5, "sha")
-    assert a == status_report.episode_id("special:coder", 1234.5, "sha")
+    a = status_report.episode_id("agent:coder", 1234.5, "sha")
+    assert a == status_report.episode_id("agent:coder", 1234.5, "sha")
     assert len(a) == 16 and all(c in "0123456789abcdef" for c in a)
-    assert a != status_report.episode_id("special:debugger", 1234.5, "sha")
-    assert a != status_report.episode_id("special:coder", 1234.6, "sha")
-    assert a != status_report.episode_id("special:coder", 1234.5, "other")
+    assert a != status_report.episode_id("agent:debugger", 1234.5, "sha")
+    assert a != status_report.episode_id("agent:coder", 1234.6, "sha")
+    assert a != status_report.episode_id("agent:coder", 1234.5, "other")
 
 
 def test_load_alert_state_tolerant(tmp_path):
@@ -824,7 +824,7 @@ def test_alert_helpers_do_not_mutate_caller_state():
     state = {"episodes": {"old": {"first_seen": 1.0, "last_alert": 1.0,
                                  "attempts": 1}}, "last_exit": 2}
     before = copy.deepcopy(state)
-    episode = status_report.episode_id("special:coder", NOW, "sha")
+    episode = status_report.episode_id("agent:coder", NOW, "sha")
 
     _, updated = status_report.should_alert(state, episode, NOW)
     assert state == before, "should_alert mutated the caller's state"
@@ -852,7 +852,7 @@ def test_report_writes_nothing_outside_cache(tmp_path):
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
     _write_feed(project, [_feed_card("card A", ts=NOW - 10)])
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "hi", NOW - 60)], mtime=NOW - 60)
 
     def snapshot():
@@ -996,7 +996,7 @@ def test_turn_stalled_not_suppressed_by_truncated_scan(tmp_path, monkeypatch):
         decoy = project / f"decoy{i}.py"
         decoy.write_text("x = 1\n")
         os.utime(decoy, (NOW - 300, NOW - 300))
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "I am stuck", NOW - 3600)],
                         mtime=NOW - 3600)
     report = _collect(project, config)
@@ -1034,12 +1034,12 @@ def test_oversize_conversation_reports_read_cap_not_writer(tmp_path, monkeypatch
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "y" * 4000, NOW - 3600)],
                         mtime=NOW - 3600)
     report = _collect(project, config)
 
-    session = _sessions(report)["special:coder"]
+    session = _sessions(report)["agent:coder"]
     assert session["oversize"] is True
     assert "read cap" in session["error"]
     assert "writer active" not in session["error"]
@@ -1057,11 +1057,11 @@ def test_oversize_conversation_within_threshold_is_not_stalled(tmp_path, monkeyp
     project = _project(tmp_path)
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "y" * 4000, NOW - 30)], mtime=NOW - 30)
     report = _collect(project, config)
 
-    assert _sessions(report)["special:coder"]["oversize"] is True
+    assert _sessions(report)["agent:coder"]["oversize"] is True
     assert report["stalls"] == []
     assert status_report.assess(report)[1] == 0
 

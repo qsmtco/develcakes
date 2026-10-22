@@ -22,7 +22,7 @@ from utils.provider_failure_store import recent, record, reset_for_tests, summar
 def _failure(kind: FailureClass, provider: str = "OpenRouter", attempt: int = 1):
     from agent.llm.failure_classifier import ProviderFailure
     return ProviderFailure(
-        session_key="special:coder",
+        session_key="agent:coder",
         provider=provider,
         model="openrouter/demo",
         failure_class=kind,
@@ -213,9 +213,9 @@ class TestStore:
             record(_failure(FailureClass.TRANSIENT, provider=f"p{i}"))
         assert len(recent(limit=1000)) == 100
         other = _failure(FailureClass.UNKNOWN)
-        other.session_key = "special:other"
+        other.session_key = "agent:other"
         record(other)
-        assert recent(session_key="special:other") == [other]
+        assert recent(session_key="agent:other") == [other]
 
     def test_rejects_garbage(self, tmp_config_dir):
         record("nope")  # type: ignore[arg-type]
@@ -244,7 +244,7 @@ class TestStore:
         summed = summary()
         assert summed["last_24h"] == 1
         assert summed["by_class"] == {"permanent_auth": 1}
-        assert summed["agents_affected"] == ["special:coder"]
+        assert summed["agents_affected"] == ["agent:coder"]
 
     def test_summary_cold_empty_audit_log(self, tmp_config_dir):
         reset_for_tests()
@@ -406,7 +406,7 @@ class TestStore:
             handle.write(json.dumps({
                 "kind": "provider_failure",
                 "timestamp": now,
-                "session_key": "special:coder",
+                "session_key": "agent:coder",
                 "provider": "OpenRouter",
                 "model": "openrouter/demo",
                 "failure_class": "galactic_drift",
@@ -419,7 +419,7 @@ class TestStore:
         assert len(out) == 1
         assert out[0].failure_class == FailureClass.UNKNOWN
         # the rest of the record still round-trips
-        assert out[0].session_key == "special:coder"
+        assert out[0].session_key == "agent:coder"
         assert out[0].provider == "OpenRouter"
 
     def test_recent_cold_path_survives_non_numeric_attempt(self, tmp_config_dir):
@@ -433,7 +433,7 @@ class TestStore:
             handle.write(json.dumps({
                 "kind": "provider_failure",
                 "timestamp": now,
-                "session_key": "special:coder",
+                "session_key": "agent:coder",
                 "provider": "OpenRouter",
                 "model": "openrouter/demo",
                 "failure_class": "transient",
@@ -447,7 +447,7 @@ class TestStore:
         # hostile attempt degrades, does not propagate
         assert out[0].attempt == 0
         # every other field still rehydrates intact
-        assert out[0].session_key == "special:coder"
+        assert out[0].session_key == "agent:coder"
         assert out[0].provider == "OpenRouter"
         assert out[0].model == "openrouter/demo"
         assert out[0].failure_class == FailureClass.TRANSIENT
@@ -467,7 +467,7 @@ class TestStore:
             handle.write(json.dumps({
                 "kind": "provider_failure",
                 "timestamp": now,
-                "session_key": "special:coder",
+                "session_key": "agent:coder",
                 "provider": "OpenRouter",
                 "model": "openrouter/demo",
                 "failure_class": "transient",
@@ -480,7 +480,7 @@ class TestStore:
             handle.write(json.dumps({
                 "kind": "provider_failure",
                 "timestamp": True,
-                "session_key": "special:debugger",
+                "session_key": "agent:debugger",
                 "provider": "OpenRouter",
                 "model": "openrouter/demo",
                 "failure_class": "transient",
@@ -492,7 +492,7 @@ class TestStore:
         out = recent()  # must not raise
         # the timestamp-bool line is dropped, not coerced
         assert len(out) == 1
-        assert out[0].session_key == "special:coder"
+        assert out[0].session_key == "agent:coder"
         assert out[0].status_code is None
         # the rest of the surviving record still round-trips
         assert out[0].provider == "OpenRouter"
@@ -511,7 +511,7 @@ class TestStore:
             handle.write(json.dumps({
                 "kind": "provider_failure",
                 "timestamp": now,
-                "session_key": "special:coder",
+                "session_key": "agent:coder",
                 "provider": "OpenRouter",
                 "model": "openrouter/demo",
                 "failure_class": "transient",
@@ -526,7 +526,7 @@ class TestStore:
         assert out[0].attempt == -3
         assert out[0].attempt != 0
         # surrounding record unaffected
-        assert out[0].session_key == "special:coder"
+        assert out[0].session_key == "agent:coder"
         assert out[0].status_code == 500
         assert out[0].timestamp == now
 
@@ -591,11 +591,11 @@ class TestRuntimeRecordOnce:
         from agent.runtime import AgentRuntime, TurnResult, TurnStatus
         rt = AgentRuntime(config=AgentConfig())
         exc = urllib.error.HTTPError("https://x", 401, "no", hdrs=None, fp=None)
-        rt._attach_provider_failure(exc, "special:coder", "request")
-        rt._attach_provider_failure(exc, "special:coder", "request_boundary")
+        rt._attach_provider_failure(exc, "agent:coder", "request")
+        rt._attach_provider_failure(exc, "agent:coder", "request_boundary")
         result = rt._terminate_turn(TurnResult(
             status=TurnStatus.FAILED,
-            session_key="special:coder",
+            session_key="agent:coder",
             turn_token=object(),
             error=exc,
         ))
@@ -641,7 +641,7 @@ class TestRuntimeRecordOnce:
         )
         rt = AgentRuntime(cfg)
         rt.start()
-        sk = "special:coder"
+        sk = "agent:coder"
         rt.create_conversation("Coder", sk, str(tmp_path))
 
         class _Provider:
@@ -974,7 +974,7 @@ class TestAuditTailRecordBound:
         return {
             "kind": "provider_failure",
             "timestamp": now if timestamp is None else timestamp,
-            "session_key": "special:default",
+            "session_key": "agent:default",
             "provider": provider,
             "model": "m",
             "failure_class": "transient",

@@ -266,23 +266,23 @@ class TestAgentResponseComposition:
         handler AND the bridge's Supervisor mirror."""
         win._agent_command_handler = MagicMock()
         win._bridge_handler = MagicMock()
-        win._on_agent_response("special:supervisor", "hi", "Proj")
+        win._on_agent_response("agent:supervisor", "hi", "Proj")
         win._agent_command_handler.on_agent_response.assert_called_once_with(
-            "special:supervisor", "hi", "Proj")
+            "agent:supervisor", "hi", "Proj")
         win._bridge_handler.on_supervisor_reply.assert_called_once_with(
-            "special:supervisor", "hi")
+            "agent:supervisor", "hi")
 
     def test_bridge_fault_never_breaks_pipeline(self, win):
         win._agent_command_handler = MagicMock()
         win._bridge_handler = MagicMock()
         win._bridge_handler.on_supervisor_reply.side_effect = RuntimeError("boom")
-        win._on_agent_response("special:supervisor", "hi", "Proj")  # no raise
+        win._on_agent_response("agent:supervisor", "hi", "Proj")  # no raise
         win._agent_command_handler.on_agent_response.assert_called_once()
 
     def test_missing_bridge_is_safe(self, win):
         win._agent_command_handler = MagicMock()
         win._bridge_handler = None
-        win._on_agent_response("special:supervisor", "hi", "Proj")  # no raise
+        win._on_agent_response("agent:supervisor", "hi", "Proj")  # no raise
         win._agent_command_handler.on_agent_response.assert_called_once()
 
     def test_build_registers_composed_callback(self):
@@ -368,7 +368,7 @@ class TestRemoteStatusSummary:
         assert "no project data" in win._remote_status_summary().lower()
 
     def test_summary_includes_project_and_review(self, win):
-        win._project_handler.get_project_members.return_value = ["special:coder"]
+        win._project_handler.get_project_members.return_value = ["agent:coder"]
         out = win._remote_status_summary()
         assert "Proj" in out
         assert "Members: 1" in out

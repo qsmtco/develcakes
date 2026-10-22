@@ -49,7 +49,7 @@ class TestSpecialAgentDef:
     def test_create_with_minimal_fields(self):
         """Creating with the required fields works; llm_name defaults to None."""
         agent = SpecialAgentDef(
-            conv_id_prefix="special:test",
+            conv_id_prefix="agent:test",
             display_name="Test",
             role="test",
             emoji="🔬",
@@ -61,7 +61,7 @@ class TestSpecialAgentDef:
 
     def test_create_with_llm_name(self):
         agent = SpecialAgentDef(
-            conv_id_prefix="special:custom",
+            conv_id_prefix="agent:custom",
             display_name="Custom",
             role="custom",
             emoji="🤖",
@@ -77,7 +77,7 @@ class TestSpecialAgentDef:
 class TestGetSelfImprovementConfig:
     def test_writer_defaults(self):
         agent = SpecialAgentDef(
-            conv_id_prefix="special:w",
+            conv_id_prefix="agent:w",
             display_name="Writer",
             role="writer",
             emoji="✏️",
@@ -90,7 +90,7 @@ class TestGetSelfImprovementConfig:
 
     def test_reader_defaults(self):
         agent = SpecialAgentDef(
-            conv_id_prefix="special:r",
+            conv_id_prefix="agent:r",
             display_name="Reader",
             role="reader",
             emoji="📖",
@@ -102,7 +102,7 @@ class TestGetSelfImprovementConfig:
 
     def test_override_applies(self):
         agent = SpecialAgentDef(
-            conv_id_prefix="special:o",
+            conv_id_prefix="agent:o",
             display_name="Override",
             role="override",
             emoji="🔧",
@@ -154,7 +154,7 @@ class TestRegistry:
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            coder = get_special_agent("special:coder")
+            coder = get_special_agent("agent:coder")
             assert coder is not None
             assert "write_file" in coder.tools
             assert coder.can_write is True
@@ -178,14 +178,14 @@ class TestRegistry:
         mandate is unchanged in prompts/system/debugger.md, which now states the
         heredoc ban explicitly.
         """
-        debugger = get_special_agent("special:debugger")
+        debugger = get_special_agent("agent:debugger")
         assert debugger is not None
         assert "write_file" in debugger.tools
         assert "edit_file" in debugger.tools
         assert debugger.can_write is True
 
     def test_get_nonexistent_returns_none(self):
-        assert get_special_agent("special:nonexistent") is None
+        assert get_special_agent("agent:nonexistent") is None
 
     def test_coder_has_llm_name(self):
         from unittest.mock import patch
@@ -198,7 +198,7 @@ class TestRegistry:
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            coder = get_special_agent("special:coder")
+            coder = get_special_agent("agent:coder")
             assert coder.llm_name == "minimax"
 
     def test_coder_si_full_stack(self):
@@ -220,7 +220,7 @@ class TestRegistry:
         }
         with patch("utils.agent_defs.load_agent_defs", return_value=[coder_def]):
             reload_registry()
-            coder = get_special_agent("special:coder")
+            coder = get_special_agent("agent:coder")
             si = coder.get_self_improvement_config()
             assert si["bug_journal"] is True
             assert si["enforcement"] is True
@@ -228,7 +228,7 @@ class TestRegistry:
             assert si["dream_consolidation"] is True
 
     def test_debugger_si_context_only(self):
-        debugger = get_special_agent("special:debugger")
+        debugger = get_special_agent("agent:debugger")
         si = debugger.get_self_improvement_config()
         assert si["enforcement"] is False
         assert si["structured_feedback"] is False
@@ -280,14 +280,14 @@ class TestSupervisorDef:
             reload_registry()
 
     def test_supervisor_loads(self, supervisor_def_present):
-        sup = get_special_agent("special:supervisor")
+        sup = get_special_agent("agent:supervisor")
         assert sup is not None
         assert sup.role == "supervisor"
         assert sup.display_name == "Supervisor"
         assert sup.auto_add_to_projects is False
 
     def test_supervisor_can_write_derived_from_tools(self, supervisor_def_present):
-        sup = get_special_agent("special:supervisor")
+        sup = get_special_agent("agent:supervisor")
         assert sup is not None
         assert "write_file" in sup.tools
         assert "edit_file" in sup.tools

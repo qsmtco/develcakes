@@ -763,7 +763,7 @@ class TestPersistentBadges:
 #  The git-reject _mark() callback needs _project_handler for the
 #  member fan-out. Pre-fix it was NEVER assigned (no ctor arg, no
 #  setter) → AttributeError killed the callback before the member
-#  notify, the special:supervisor fallback, AND _add_git_card.
+#  notify, the agent:supervisor fallback, AND _add_git_card.
 # ═══════════════════════════════════════════════════════════════════
 
 class TestGitRejectMemberFanout:
@@ -784,7 +784,7 @@ class TestGitRejectMemberFanout:
         monkeypatch.setattr(fh, "threading", _SyncThreading)
         project_handler = MagicMock(name="ProjectHandler")
         project_handler.get_project_members.return_value = [
-            "special:coder", "special:qa",
+            "agent:coder", "agent:qa",
         ]
         on_send = MagicMock(name="on_send_to_agent")
         h = FeedHandler(
@@ -818,7 +818,7 @@ class TestGitRejectMemberFanout:
             f"both members must be notified; got {on_send.call_args_list!r}"
         )
         assert [c.args[0] for c in on_send.call_args_list] == [
-            "special:coder", "special:qa",
+            "agent:coder", "agent:qa",
         ]
         assert all(c.args[1] == expected for c in on_send.call_args_list)
 
@@ -5505,7 +5505,7 @@ class TestNonGitDecisionPersist:
         # approve_exec resolves via its own pending-approval map (normally
         # populated by _do_approval_needed); register the entry it needs.
         art._pending_approvals[card_id] = {
-            "session_key": "special:coder", "tool_name": "exec_command",
+            "session_key": "agent:coder", "tool_name": "exec_command",
             "args": {"command": "ls"},
         }
 
@@ -5537,7 +5537,7 @@ class TestNonGitDecisionPersist:
         art = AgentRuntimeHandler(MagicMock(), MagicMock(), GLib_module=MagicMock())
         art._fh = h
         art._pending_approvals[card_id] = {
-            "session_key": "special:coder", "tool_name": "exec_command",
+            "session_key": "agent:coder", "tool_name": "exec_command",
             "args": {"command": "ls"},
         }
 

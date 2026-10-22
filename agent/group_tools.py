@@ -78,7 +78,7 @@ def _resolve_peer(agent_name: str, caller_key: str) -> tuple[object | None, str 
     if isinstance(agent_name, str) and agent_name.strip().casefold() == "self":
         caller = get_special_agent(caller_key) if isinstance(caller_key, str) else None
         key = getattr(caller, "conv_id_prefix", "") if caller is not None else ""
-        if caller is None or not isinstance(key, str) or not key.startswith("special:"):
+        if caller is None or not isinstance(key, str) or not key.startswith("agent:"):
             return None, "agent_context self needs a special agent"
         return caller, None
     if not isinstance(agent_name, str) or not agent_name.strip():
@@ -102,7 +102,7 @@ def _resolve_peer(agent_name: str, caller_key: str) -> tuple[object | None, str 
         return None, f"agent name {needle} is ambiguous"
     peer = matches[0]
     key = peer.conv_id_prefix
-    if not isinstance(key, str) or not key.startswith("special:"):
+    if not isinstance(key, str) or not key.startswith("agent:"):
         return None, f"no agent named {needle}"
     return peer, None
 

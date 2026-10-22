@@ -132,16 +132,16 @@ class TestQueueStoreSurface:
         """D9b surface: empty → []; one agent; two agents; per-agent counts."""
         handler = _make_handler()
         assert handler.agents_with_pending("proj") == []
-        assert handler.pending_count("proj", "special:coder") == 0
+        assert handler.pending_count("proj", "agent:coder") == 0
 
-        handler._enqueue("proj", "special:coder", _entry("special:coder", "a" * 40, "/p"))
-        handler._enqueue("proj", "special:debugger", _entry("special:debugger", "b" * 40, "/p"))
-        handler._enqueue("proj", "special:coder", _entry("special:coder", "c" * 40, "/p"))
+        handler._enqueue("proj", "agent:coder", _entry("agent:coder", "a" * 40, "/p"))
+        handler._enqueue("proj", "agent:debugger", _entry("agent:debugger", "b" * 40, "/p"))
+        handler._enqueue("proj", "agent:coder", _entry("agent:coder", "c" * 40, "/p"))
 
         assert handler.agents_with_pending("proj") == [
-            "special:coder", "special:debugger"]
-        assert handler.pending_count("proj", "special:coder") == 2
-        assert handler.pending_count("proj", "special:debugger") == 1
+            "agent:coder", "agent:debugger"]
+        assert handler.pending_count("proj", "agent:coder") == 2
+        assert handler.pending_count("proj", "agent:debugger") == 1
         assert handler.pending_count("proj", "nobody") == 0
 
     def test_queue_cap_drops_oldest(self):
@@ -150,10 +150,10 @@ class TestQueueStoreSurface:
         handler = _make_handler(on_feed_card=captured.append)
         shas = [f"{i:040x}" for i in range(51)]
         for sha in shas:
-            handler._enqueue("proj", "special:coder", _entry("special:coder", sha, "/p"))
+            handler._enqueue("proj", "agent:coder", _entry("agent:coder", sha, "/p"))
 
-        assert handler.pending_count("proj", "special:coder") == 50
-        remaining = [e.sha for e in handler._queues["proj"]["special:coder"]]
+        assert handler.pending_count("proj", "agent:coder") == 50
+        remaining = [e.sha for e in handler._queues["proj"]["agent:coder"]]
         assert remaining == shas[1:], "oldest entry was not dropped FIFO"
         assert _wait_until(lambda: len(captured) >= 1), "no cap-overflow card"
         assert any("cap" in c.title.lower() for c in captured), (
@@ -181,19 +181,19 @@ class TestAcceptAgentQueue:
 
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", wt_sha_before, os.path.realpath(wt_dir)))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", wt_sha_before, os.path.realpath(wt_dir)))
 
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(lambda: len(captured) >= 1), "no summary card"
 
-        assert handler.pending_count("testproject", "special:coder") == 0, (
+        assert handler.pending_count("testproject", "agent:coder") == 0, (
             "worktree entry not dequeued")
         assert gitpython.Repo(temp_repo).head.commit.hexsha == proj_sha_before, (
             "project HEAD changed on a worktree mark-reviewed accept")
         assert gitpython.Repo(wt_dir).head.commit.hexsha == wt_sha_before, (
             "worktree HEAD changed — accept committed when it must not (D3 BUG#4)")
-        assert any("special:coder" in c.title for c in captured), (
+        assert any("agent:coder" in c.title for c in captured), (
             f"summary card missing agent attribution: {[c.title for c in captured]}")
 
     def test_accept_agent_queue_stale_worktree_dropped(self, temp_repo):
@@ -208,22 +208,22 @@ class TestAcceptAgentQueue:
 
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "1" * 40, os.path.realpath(wt_dir)))
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "2" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "1" * 40, os.path.realpath(wt_dir)))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "2" * 40, temp_repo))
         shutil.rmtree(wt_dir)  # worktree vanishes before accept
 
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(
-            lambda: handler.pending_count("testproject", "special:coder") == 0), (
+            lambda: handler.pending_count("testproject", "agent:coder") == 0), (
             "stale entry never dequeued")
 
         titles = [c.title for c in captured]
         assert any("stale" in t.lower() for t in titles), (
             f"no stale-drop card: {titles}")
         body = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
-        assert "Agent: special:coder" in body.splitlines(), (
+        assert "Agent: agent:coder" in body.splitlines(), (
             "root entry after the stale one was not accepted")
         assert any("1 stale" in t for t in titles), (
             f"summary must report the stale count: {titles}")
@@ -233,10 +233,10 @@ class TestAcceptAgentQueue:
         the abort card reports exactly how many succeeded first."""
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), "/tmp/spec10-not-a-repo")
-        entries = [_entry("special:coder", f"{i:040x}", "/tmp/spec10-not-a-repo")
+        entries = [_entry("agent:coder", f"{i:040x}", "/tmp/spec10-not-a-repo")
                    for i in range(3)]
         for e in entries:
-            handler._enqueue("testproject", "special:coder", e)
+            handler._enqueue("testproject", "agent:coder", e)
 
         with patch("ui.handlers.review_handler.git_ops") as mock_git:
             mock_git.stage_all.return_value = MockGitResult(success=True)
@@ -244,11 +244,11 @@ class TestAcceptAgentQueue:
                 MockGitResult(success=True, sha="a" * 40),
                 MockGitResult(success=False, error="boom"),
             ]
-            handler.accept_agent_queue("special:coder", "testproject")
+            handler.accept_agent_queue("agent:coder", "testproject")
             assert _wait_until(lambda: any("PARTIAL" in c.title for c in captured)), (
                 f"no partial-abort card: {[c.title for c in captured]}")
 
-        remaining = handler._queues["testproject"]["special:coder"]
+        remaining = handler._queues["testproject"]["agent:coder"]
         assert remaining == entries[1:], (
             f"expected entries 2+3 to remain queued: {[e.sha[:7] for e in remaining]}")
         partial = next(c for c in captured if "PARTIAL" in c.title)
@@ -261,7 +261,7 @@ class TestAcceptAgentQueue:
         batch and remains queued for the next one."""
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), "/tmp/spec10-not-a-repo")
-        late = _entry("special:coder", "f" * 40, "/tmp/spec10-not-a-repo")
+        late = _entry("agent:coder", "f" * 40, "/tmp/spec10-not-a-repo")
 
         commit_calls = {"n": 0}
 
@@ -271,19 +271,19 @@ class TestAcceptAgentQueue:
             # `late` at exactly that moment.
             commit_calls["n"] += 1
             if commit_calls["n"] == 2:
-                handler._enqueue("testproject", "special:coder", late)
+                handler._enqueue("testproject", "agent:coder", late)
             return MockGitResult(success=True, sha="a" * 40)
 
-        handler._enqueue("testproject", "special:coder", _entry("special:coder", "1" * 40, "/tmp/spec10-not-a-repo"))
-        handler._enqueue("testproject", "special:coder", _entry("special:coder", "2" * 40, "/tmp/spec10-not-a-repo"))
+        handler._enqueue("testproject", "agent:coder", _entry("agent:coder", "1" * 40, "/tmp/spec10-not-a-repo"))
+        handler._enqueue("testproject", "agent:coder", _entry("agent:coder", "2" * 40, "/tmp/spec10-not-a-repo"))
 
         with patch("ui.handlers.review_handler.git_ops") as mock_git:
             mock_git.stage_all.return_value = MockGitResult(success=True)
             mock_git.commit.side_effect = _commit_with_racing_enqueue
-            handler.accept_agent_queue("special:coder", "testproject")
+            handler.accept_agent_queue("agent:coder", "testproject")
             assert _wait_until(lambda: len(captured) >= 1), "no summary card"
 
-        remaining = handler._queues["testproject"]["special:coder"]
+        remaining = handler._queues["testproject"]["agent:coder"]
         assert remaining == [late], (
             "mid-batch enqueue must land in the NEXT batch, not this one")
 
@@ -292,8 +292,8 @@ class TestAcceptAgentQueue:
         queue."""
         handler = _activate(_make_handler(), "/tmp/spec10-not-a-repo")
         handler._enqueue("testproject", "pm", _entry("pm", "p" * 40, "/tmp/spec10-not-a-repo"))
-        handler._enqueue("testproject", "special:coder", _entry("special:coder", "c" * 40, "/tmp/spec10-not-a-repo"))
-        handler._enqueue("testproject", "special:debugger", _entry("special:debugger", "d" * 40, "/tmp/spec10-not-a-repo"))
+        handler._enqueue("testproject", "agent:coder", _entry("agent:coder", "c" * 40, "/tmp/spec10-not-a-repo"))
+        handler._enqueue("testproject", "agent:debugger", _entry("agent:debugger", "d" * 40, "/tmp/spec10-not-a-repo"))
 
         with patch("ui.handlers.review_handler.git_ops") as mock_git:
             mock_git.stage_all.return_value = MockGitResult(success=True)
@@ -314,12 +314,12 @@ class TestQueueLifecycle:
         entries (in-memory persistence across reopen)."""
         handler = _make_handler()
         handler.on_project_opened("testproject", "/tmp/spec10-not-a-repo")
-        handler._enqueue("testproject", "special:coder", _entry("special:coder", "c" * 40, "/tmp/spec10-not-a-repo"))
+        handler._enqueue("testproject", "agent:coder", _entry("agent:coder", "c" * 40, "/tmp/spec10-not-a-repo"))
 
         handler.on_project_closed("testproject")
 
         assert handler.get_state("testproject") is None, "state should be popped"
-        assert handler.agents_with_pending("testproject") == ["special:coder"], (
+        assert handler.agents_with_pending("testproject") == ["agent:coder"], (
             "queues must survive project close (GAP-5b)")
 
 
@@ -338,12 +338,12 @@ class TestCleanTreeSemantics:
 
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "3" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "3" * 40, temp_repo))
 
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(
-            lambda: handler.pending_count("testproject", "special:coder") == 0), (
+            lambda: handler.pending_count("testproject", "agent:coder") == 0), (
             "clean-tree root entry stranded in the queue (BUG#1)")
 
         commits_after = len(list(gitpython.Repo(temp_repo).iter_commits()))
@@ -368,12 +368,12 @@ class TestCleanTreeSemantics:
 
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "0" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "0" * 40, temp_repo))
 
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(
-            lambda: handler.pending_count("testproject", "special:coder") == 0), (
+            lambda: handler.pending_count("testproject", "agent:coder") == 0), (
             "root entry not dequeued after accept")
 
         commits_after = len(list(gitpython.Repo(temp_repo).iter_commits()))
@@ -381,7 +381,7 @@ class TestCleanTreeSemantics:
             f"expected exactly one real commit, got {commits_before}→{commits_after}")
         body = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
         assert "[review] accepted:" in body
-        assert "Agent: special:coder" in body.splitlines(), (
+        assert "Agent: agent:coder" in body.splitlines(), (
             f"accept commit missing agent trailer: {body!r}")
         assert any("accepted" in c.title.lower() for c in captured), (
             f"no success card: {[c.title for c in captured]}")
@@ -408,10 +408,10 @@ class TestAcceptAllSerialization:
 
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "a" * 40, temp_repo))
-        handler._enqueue("testproject", "special:debugger", _entry(
-            "special:debugger", "b" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "a" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:debugger", _entry(
+            "agent:debugger", "b" * 40, temp_repo))
 
         # BUG#5 (fix round 4) daemon-bleed hardening: path-filtered counting
         # stage — a prior test's outliving _do daemon must NOT land in this
@@ -453,7 +453,7 @@ class TestAcceptAllSerialization:
         # The FIRST-queued agent hits the dirty tree and commits (with its
         # trailer); the second agent's accept then finds a clean tree and
         # drains via REV 3 bookkeeping — exactly one real commit, total.
-        first_agent = "special:coder"
+        first_agent = "agent:coder"
         made = [r for r in real_commit_recorder if r.success]
         assert len(made) == 1, f"expected exactly 1 real commit, got {len(made)}"
         body = gitpython.Repo(temp_repo).git.log("--format=%B", "-1")
@@ -567,10 +567,10 @@ class TestCrossInvocationSerialization:
     def _two_agents_one_dirty(self, handler, temp_repo):
         with open(os.path.join(temp_repo, "dbg_work.txt"), "w") as f:
             f.write("debugger work\n")
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "a" * 40, temp_repo))
-        handler._enqueue("testproject", "special:debugger", _entry(
-            "special:debugger", "b" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "a" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:debugger", _entry(
+            "agent:debugger", "b" * 40, temp_repo))
 
     def test_double_accept_all_no_race(self, temp_repo):
         """Two concurrent accept_all_queues calls: both queues drain, no
@@ -610,8 +610,8 @@ class TestCrossInvocationSerialization:
             f"D3 REV 4: stage_all overlapped on one repo (max={counter['max']})")
         assert not any("PARTIAL" in t for t in titles), (
             f"PARTIAL cards under concurrent accept: {titles}")
-        assert handler.pending_count("testproject", "special:coder") == 0
-        assert handler.pending_count("testproject", "special:debugger") == 0
+        assert handler.pending_count("testproject", "agent:coder") == 0
+        assert handler.pending_count("testproject", "agent:debugger") == 0
         # Exactly one real commit (the FIRST-queued agent's loop hits the
         # dirty tree; the second pass finds it clean and drains via REV 3).
         # The commit's files belong to the OTHER agent's edit — that shared-
@@ -622,7 +622,7 @@ class TestCrossInvocationSerialization:
         assert len(made) == 1, (
             f"expected exactly 1 real commit, got {len(made)}: "
             f"{[m[0][:50] for m in commits]}")
-        assert "Agent: special:coder" in gitpython.Repo(temp_repo).git.log(
+        assert "Agent: agent:coder" in gitpython.Repo(temp_repo).git.log(
             "--format=%B", "-1").splitlines()
         assert commits_before + 1 == len(list(gitpython.Repo(temp_repo).iter_commits()))
 
@@ -646,7 +646,7 @@ class TestCrossInvocationSerialization:
             t1 = th.Thread(target=handler.accept_all_queues, args=("testproject",))
             t2 = th.Thread(
                 target=handler.accept_agent_queue,
-                args=("special:debugger", "testproject"))
+                args=("agent:debugger", "testproject"))
             t1.start(); t2.start(); t1.join(); t2.join()
             assert _wait_until(lambda: handler.agents_with_pending("testproject") in ([], ["pm"])), (
                 f"queues did not drain: {handler.agents_with_pending('testproject')}")
@@ -656,8 +656,8 @@ class TestCrossInvocationSerialization:
             f"D3 REV 4: stage_all overlapped (max={counter['max']})")
         assert not any("PARTIAL" in t for t in titles), (
             f"PARTIAL cards under mixed concurrent accept: {titles}")
-        assert handler.pending_count("testproject", "special:coder") == 0
-        assert handler.pending_count("testproject", "special:debugger") == 0
+        assert handler.pending_count("testproject", "agent:coder") == 0
+        assert handler.pending_count("testproject", "agent:debugger") == 0
 
 
 class TestDiffReadErrorDrainsPm:
@@ -725,8 +725,8 @@ class TestAllEntryPointsSerialized:
         # agent work (queue-driven) + PM work (accept_changes-driven)
         with open(os.path.join(temp_repo, "dbg_work.txt"), "w") as f:
             f.write("agent work\n")
-        handler._enqueue("testproject", "special:debugger", _entry(
-            "special:debugger", "b" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:debugger", _entry(
+            "agent:debugger", "b" * 40, temp_repo))
         with open(os.path.join(temp_repo, "pm_edit.txt"), "w") as f:
             f.write("pm work\n")
 
@@ -743,7 +743,7 @@ class TestAllEntryPointsSerialized:
                            args=("testproject", "approved"))
             t1.start(); t2.start(); t1.join(); t2.join()
             assert _wait_until(
-                lambda: handler.pending_count("testproject", "special:debugger") == 0), (
+                lambda: handler.pending_count("testproject", "agent:debugger") == 0), (
                 "agent queue did not drain")
             assert _wait_until(
                 lambda: handler.get_state("testproject").checkpoint_sha is None), (
@@ -795,8 +795,8 @@ class TestAllEntryPointsSerialized:
         handler = _activate(_make_handler(), temp_repo)
         with open(os.path.join(temp_repo, "dbg_work.txt"), "w") as f:
             f.write("agent work\n")
-        handler._enqueue("testproject", "special:debugger", _entry(
-            "special:debugger", "b" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:debugger", _entry(
+            "agent:debugger", "b" * 40, temp_repo))
 
         from utils import git_ops as real_ops
         counter = {"cur": 0, "max": 0}
@@ -813,7 +813,7 @@ class TestAllEntryPointsSerialized:
                 lambda: handler.get_state("testproject").checkpoint_sha), (
                 "start_review never produced a checkpoint")
             assert _wait_until(
-                lambda: handler.pending_count("testproject", "special:debugger") == 0), (
+                lambda: handler.pending_count("testproject", "agent:debugger") == 0), (
                 "agent queue did not drain")
 
         assert counter["max"] == 1, (
@@ -841,13 +841,13 @@ class TestStaleCardEmitsUnlocked:
 
         wt_dir = os.path.join(temp_repo, ".worktrees", "coder-9")
         os.makedirs(wt_dir)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "9" * 40, os.path.realpath(wt_dir)))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "9" * 40, os.path.realpath(wt_dir)))
         shutil.rmtree(wt_dir)  # stale before accept
 
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(
-            lambda: handler.pending_count("testproject", "special:coder") == 0), (
+            lambda: handler.pending_count("testproject", "agent:coder") == 0), (
             "stale entry never dequeued")
 
         assert any("stale" in c.title.lower() for c in captured), (
@@ -987,8 +987,8 @@ class TestCheckoutPathsSerialized:
         self._active_session_with_dirty_files(handler, temp_repo, ["hello.txt"])
         with open(os.path.join(temp_repo, "agent_work.txt"), "w") as f:
             f.write("agent work\n")
-        handler._enqueue("testproject", "special:debugger", _entry(
-            "special:debugger", "d" * 40, temp_repo))
+        handler._enqueue("testproject", "agent:debugger", _entry(
+            "agent:debugger", "d" * 40, temp_repo))
 
         from utils import git_ops as real_ops
         counter = {"cur": 0, "max": 0}
@@ -1003,10 +1003,10 @@ class TestCheckoutPathsSerialized:
                            args=("testproject", "hello.txt",
                                  handler.get_state("testproject").checkpoint_sha))
             t2 = th.Thread(target=handler.accept_agent_queue,
-                           args=("special:debugger", "testproject"))
+                           args=("agent:debugger", "testproject"))
             t1.start(); t2.start(); t1.join(); t2.join()
             assert _wait_until(
-                lambda: handler.pending_count("testproject", "special:debugger") == 0), (
+                lambda: handler.pending_count("testproject", "agent:debugger") == 0), (
                 "batch accept never drained")
 
         assert counter["max"] == 1, (
@@ -1041,19 +1041,19 @@ class TestSp3BarRefreshWiring:
         """enqueue_agent_checkpoint → bar.set_queue_view with the pending
         list (order + counts)."""
         rh, bar = self._wired()
-        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
-        rh.enqueue_agent_checkpoint("proj", "special:debugger", "b" * 40, "/y")
-        rh.enqueue_agent_checkpoint("proj", "special:coder", "c" * 40, "/z")
+        rh.enqueue_agent_checkpoint("proj", "agent:coder", "a" * 40, "/x")
+        rh.enqueue_agent_checkpoint("proj", "agent:debugger", "b" * 40, "/y")
+        rh.enqueue_agent_checkpoint("proj", "agent:coder", "c" * 40, "/z")
         assert bar.calls[-1] == [
-            ("special:coder", 2), ("special:debugger", 1)]
+            ("agent:coder", 2), ("agent:debugger", 1)]
 
     def test_dequeue_and_drain_refresh_bar(self):
         """_dequeue and _drain_pm_queue both refresh (chips vanish)."""
         rh, bar = self._wired()
-        e1 = _entry("special:coder", "a" * 40, "/x")
-        rh._enqueue("proj", "special:coder", e1)
+        e1 = _entry("agent:coder", "a" * 40, "/x")
+        rh._enqueue("proj", "agent:coder", e1)
         n0 = len(bar.calls)
-        rh._dequeue("proj", "special:coder", e1)
+        rh._dequeue("proj", "agent:coder", e1)
         assert bar.calls[-1] == []
         rh._enqueue("proj", "pm", _entry("pm", "b" * 40, "/p"))
         rh._drain_pm_queue("proj")
@@ -1064,41 +1064,41 @@ class TestSp3BarRefreshWiring:
         """get_review_bar() → None (headless/before tab build) → no crash."""
         rh = _make_handler()
         rh._mc.get_review_bar.return_value = None
-        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
-        assert rh.pending_count("proj", "special:coder") == 1
+        rh.enqueue_agent_checkpoint("proj", "agent:coder", "a" * 40, "/x")
+        assert rh.pending_count("proj", "agent:coder") == 1
 
     def test_confirm_path_without_window(self):
         """5c: on_confirm_batch_accept=None (tests) → accept runs directly."""
         rh, _bar = self._wired()
         assert rh._on_confirm_batch_accept is None
-        rh._enqueue("proj", "special:coder", _entry("special:coder", "a" * 40, "/x"))
+        rh._enqueue("proj", "agent:coder", _entry("agent:coder", "a" * 40, "/x"))
         called = []
         rh.accept_agent_queue = lambda ak, p, session_key=None: called.append(ak)
-        rh._confirm_and_accept_agent("proj", "special:coder")
-        assert called == ["special:coder"]
+        rh._confirm_and_accept_agent("proj", "agent:coder")
+        assert called == ["agent:coder"]
 
     def test_confirm_path_with_window(self):
         """5c: injected confirmer receives (project, N, cb); the accept
         runs only when the confirmer invokes cb."""
         rh, _bar = self._wired()
-        rh._enqueue("proj", "special:coder", _entry("special:coder", "a" * 40, "/x"))
+        rh._enqueue("proj", "agent:coder", _entry("agent:coder", "a" * 40, "/x"))
         seen = []
         rh._on_confirm_batch_accept = (
             lambda project, n, cb: seen.append((project, n, cb)))
         called = []
         rh.accept_agent_queue = lambda ak, p, session_key=None: called.append(ak)
-        rh._confirm_and_accept_agent("proj", "special:coder")
+        rh._confirm_and_accept_agent("proj", "agent:coder")
         assert [s[:2] for s in seen] == [("proj", 1)]
         assert called == []          # NOT accepted yet
         seen[0][2]()                 # confirmer says yes
-        assert called == ["special:coder"]
+        assert called == ["agent:coder"]
 
     def test_confirm_all_sums_agent_queues_excluding_pm(self):
         """D8: _confirm_and_accept_all's N excludes the pm queue."""
         rh, _bar = self._wired()
         rh._enqueue("proj", "pm", _entry("pm", "a" * 40, "/p"))
-        rh._enqueue("proj", "special:coder", _entry("special:coder", "b" * 40, "/x"))
-        rh._enqueue("proj", "special:debugger", _entry("special:debugger", "c" * 40, "/y"))
+        rh._enqueue("proj", "agent:coder", _entry("agent:coder", "b" * 40, "/x"))
+        rh._enqueue("proj", "agent:debugger", _entry("agent:debugger", "c" * 40, "/y"))
         seen = []
         rh._on_confirm_batch_accept = (
             lambda project, n, cb: seen.append((project, n, cb)))
@@ -1111,11 +1111,11 @@ class TestSp3BarRefreshWiring:
         cards = []
         rh = _make_handler(on_feed_card=lambda c: cards.append(c))
         rh._mc.get_review_bar.return_value = None
-        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "/x")
+        rh.enqueue_agent_checkpoint("proj", "agent:coder", "a" * 40, "/x")
         checkpoint_cards = [c for c in cards
                             if "Checkpoint queued" in c.title]
         assert checkpoint_cards, f"no checkpoint card in {[c.title for c in cards]}"
-        assert checkpoint_cards[0].metadata.get("agent") == "special:coder"
+        assert checkpoint_cards[0].metadata.get("agent") == "agent:coder"
         assert checkpoint_cards[0].commit_sha == "a" * 40
 
     def test_accept_summary_card_metadata_agent(self):
@@ -1130,15 +1130,15 @@ class TestSp3BarRefreshWiring:
                                              review_mode="review")
             # A project-ROOT item (path not under .worktrees) → the root
             # accept branch → mocked stage+commit succeed → summary card.
-            rh._enqueue("proj", "special:coder",
-                        _entry("special:coder", "b" * 40, "/x"))
-            rh.accept_agent_queue("special:coder", "proj")
+            rh._enqueue("proj", "agent:coder",
+                        _entry("agent:coder", "b" * 40, "/x"))
+            rh.accept_agent_queue("agent:coder", "proj")
             target, args = mthread.call_args.kwargs["target"], \
                 mthread.call_args.kwargs["args"]
             target(*args)
         summary = [c for c in cards if c.title.startswith("Queue accepted for")]
         assert summary, f"no summary card in {[c.title for c in cards]}"
-        assert summary[0].metadata.get("agent") == "special:coder"
+        assert summary[0].metadata.get("agent") == "agent:coder"
 
 
 class TestSp3FixRound:
@@ -1157,14 +1157,14 @@ class TestSp3FixRound:
         rh = _make_handler()
         rh._mc.get_review_bar.return_value = None  # no bar yet (closed tab)
         rh._enqueue("proj", "pm", _entry("pm", "a" * 40, "/p"))
-        rh._enqueue("proj", "special:coder", _entry("special:coder", "b" * 40, "/x"))
+        rh._enqueue("proj", "agent:coder", _entry("agent:coder", "b" * 40, "/x"))
         bar = _BarDouble()
         rh._mc.get_review_bar.return_value = bar
         assert bar.calls == [], "precondition: surviving queues never refreshed a bar"
         rh._show_review_bar("proj", ReviewState(project_path="/p",
                                                 review_mode="review"))
         assert bar.calls, "set_queue_view never called — bar built chipless"
-        assert bar.calls[-1] == [("pm", 1), ("special:coder", 1)]
+        assert bar.calls[-1] == [("pm", 1), ("agent:coder", 1)]
 
     def test_stale_drop_card_metadata_agent(self, temp_repo):
         """BUG#2: the stale-drop card carries metadata['agent'] (feed
@@ -1173,12 +1173,12 @@ class TestSp3FixRound:
         os.makedirs(wt_dir)
         captured = []
         handler = _activate(_make_handler(on_feed_card=captured.append), temp_repo)
-        handler._enqueue("testproject", "special:coder", _entry(
-            "special:coder", "3" * 40, os.path.realpath(wt_dir)))
+        handler._enqueue("testproject", "agent:coder", _entry(
+            "agent:coder", "3" * 40, os.path.realpath(wt_dir)))
         shutil.rmtree(wt_dir)
-        handler.accept_agent_queue("special:coder", "testproject")
+        handler.accept_agent_queue("agent:coder", "testproject")
         assert _wait_until(
-            lambda: handler.pending_count("testproject", "special:coder") == 0)
+            lambda: handler.pending_count("testproject", "agent:coder") == 0)
         stale = [c for c in captured if "stale entry dropped" in c.title]
         assert stale, f"no stale card in {[c.title for c in captured]}"
-        assert stale[0].metadata.get("agent") == "special:coder"
+        assert stale[0].metadata.get("agent") == "agent:coder"

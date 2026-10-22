@@ -540,8 +540,8 @@ class LeftPanel(Gtk.Box):
         name_lbl.add_css_class("agent-name-label")
 
         # Tag line: source + session count
-        is_special = session_key.startswith("special:")
-        source_tag = "DevelCakes" if is_special else "Openclaw"
+        is_local = session_key.startswith("agent:")
+        source_tag = "DevelCakes" if is_local else "Openclaw"
         session_word = "Session" if session_count == 1 else "Sessions"
         tag_text = f"{source_tag}: {session_count} {session_word}"
         tag_lbl = Gtk.Label(label=tag_text)
@@ -607,9 +607,9 @@ class LeftPanel(Gtk.Box):
         For local (special) agents: show Edit/Delete options.
         """
         row_widget = gesture.get_widget()
-        is_special = session_key.startswith("special:")
+        is_local = session_key.startswith("agent:")
 
-        if is_special:
+        if is_local:
             self._show_local_agent_menu(row_widget, name)
             return
 

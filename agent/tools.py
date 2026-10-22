@@ -72,7 +72,7 @@ class ToolResult:
 
 # Approval callback: called before exec_command. Returns True to allow, False to deny.
 _approval_callback: Callable[[str, str, dict], bool] | None = None
-# "special:coder" or "special:debugger", tool_name, {"command": "...", "cwd": "..."}
+# "agent:coder" or "agent:debugger", tool_name, {"command": "...", "cwd": "..."}
 
 
 def set_approval_callback(cb: Callable[[str, str, dict], bool] | None) -> None:
@@ -2144,7 +2144,7 @@ def _register_tools() -> None:
                 "properties": {
                     "session_key": {
                         "type": "string",
-                        "description": "Session key filter, e.g. special:coder",
+                        "description": "Session key filter, e.g. agent:coder",
                     },
                     "limit": {
                         "type": "integer",

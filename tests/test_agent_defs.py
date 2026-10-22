@@ -141,7 +141,7 @@ class TestSaveLoad:
         ad.save_agent_def(agent)
         loaded = ad.load_agent_def("My Agent")
         assert loaded["role"] == "my-agent"
-        assert loaded["session_key"] == "special:my-agent"
+        assert loaded["session_key"] == "agent:my-agent"
 
 
 def _coder_body(name, role="coder"):
@@ -156,29 +156,36 @@ def _coder_body(name, role="coder"):
 
 
 class TestSessionKeyAllocation:
-    def test_first_of_role_gets_default_key(self, tmp_agents_dir):
+    def test_builtin_name_refused_session_key(self, tmp_agents_dir):
+        """A name whose slug collides with a built-in key mints NO key."""
         ad.save_agent_def(_coder_body("Coder"))
         loaded = ad.load_agent_def("Coder")
-        assert loaded["session_key"] == "special:coder"
+        assert loaded["session_key"] == ""
 
-    def test_second_same_role_gets_suffix(self, tmp_agents_dir):
+    def test_non_builtin_name_mints_agent_key(self, tmp_agents_dir):
+        """A non-builtin name slug mints agent:<name-slug>."""
+        ad.save_agent_def(_coder_body("AlphaCoder"))
+        loaded = ad.load_agent_def("AlphaCoder")
+        assert loaded["session_key"] == "agent:alphacoder"
+
+    def test_distinct_name_mints_own_agent_key(self, tmp_agents_dir):
         os.makedirs(tmp_agents_dir, exist_ok=True)
         import yaml
         with open(os.path.join(tmp_agents_dir, "coder.yaml"), "w", encoding="utf-8") as f:
             yaml.dump(_coder_body("Coder"), f)
 
         ad.save_agent_def(_coder_body("Coder 2"))
-        assert ad.load_agent_def("Coder 2")["session_key"] == "special:coder-2"
-        # The hand-written primary still owns special:coder by role.
+        assert ad.load_agent_def("Coder 2")["session_key"] == "agent:coder-2"
+        # The hand-written primary (builtin name) still owns no session_key.
         with open(os.path.join(tmp_agents_dir, "coder.yaml"), encoding="utf-8") as f:
             primary = yaml.safe_load(f)
-        assert "session_key" not in primary
+        assert primary.get("session_key") in (None, "")
 
-    def test_third_skips_taken_suffix(self, tmp_agents_dir):
+    def test_third_distinct_name_gets_own_key(self, tmp_agents_dir):
         ad.save_agent_def(_coder_body("Coder"))
         ad.save_agent_def(_coder_body("Coder 2"))
         ad.save_agent_def(_coder_body("Coder 3"))
-        assert ad.load_agent_def("Coder 3")["session_key"] == "special:coder-3"
+        assert ad.load_agent_def("Coder 3")["session_key"] == "agent:coder-3"
 
     def test_edit_preserves_assigned_key(self, tmp_agents_dir):
         ad.save_agent_def(_coder_body("Coder"))
@@ -187,28 +194,28 @@ class TestSessionKeyAllocation:
         edited["emoji"] = "🧪"
         ad.save_agent_def(edited)
         loaded = ad.load_agent_def("Coder 2")
-        assert loaded["session_key"] == "special:coder-2"
+        assert loaded["session_key"] == "agent:coder-2"
         assert loaded["emoji"] == "🧪"
 
     def test_explicit_session_key_is_kept(self, tmp_agents_dir):
         agent = _coder_body("Coder 2")
-        agent["session_key"] = "special:alpha"
+        agent["session_key"] = "agent:alpha"
         ad.save_agent_def(_coder_body("Coder"))
         ad.save_agent_def(agent)
-        assert ad.load_agent_def("Coder 2")["session_key"] == "special:alpha"
+        assert ad.load_agent_def("Coder 2")["session_key"] == "agent:alpha"
 
     def test_edit_preserves_auto_open(self, tmp_agents_dir):
         os.makedirs(tmp_agents_dir, exist_ok=True)
         import yaml
         body = _coder_body("Coder")
         body["auto_open"] = True
-        body["session_key"] = "special:coder"
+        body["session_key"] = "agent:coder"
         with open(os.path.join(tmp_agents_dir, "coder.yaml"), "w", encoding="utf-8") as f:
             yaml.dump(body, f)
         ad.save_agent_def(_coder_body("Coder"))
         loaded = ad.load_agent_def("Coder")
         assert loaded["auto_open"] is True
-        assert loaded["session_key"] == "special:coder"
+        assert loaded["session_key"] == "agent:coder"
 
 
 # ── load_agent_defs ────────────────────────────────────────────────────────

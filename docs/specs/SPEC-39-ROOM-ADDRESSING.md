@@ -7,6 +7,7 @@
 **Implements:** PM direction confirmed 2026-10-18. Related, not the source of the rules: `docs/proposals/DEVELCAKES-V2-CHANGE-LIST.md` §1.3 (JEV as a Choice over the roster). SPEC-12 left this as post-MVP.
 **Depends on:** SPEC-12 (one project surface; solo send and group send both reply into `project:<name>`), SPEC-22 (`post_decision` fail-open contract)
 **Target branch:** main
+**Note (2026-10-22, PM direction):** This spec is the plan of record for group chat ("Program 5" in `docs/proposals/PROPOSAL-META.md` §6), covering addressing and JEV routing only. The proposal's transcript-model item (SQLite/WAL shared transcript) stays in the proposal as a design note and is deliberately not part of this spec; the room is per-agent witness lines, not a shared store.
 
 > Architecture compliance: `agent/` stays free of GTK. The decision call lives in
 > `agent/llm/jev_client.py`. Conversation mutation lives in `agent/runtime.py`.

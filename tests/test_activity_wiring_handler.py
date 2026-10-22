@@ -122,9 +122,9 @@ class TestActivityWiringHandler:
         handler, _, agent_runtime, _ = self._make_handler()
         agent_runtime.get_agent_name_for_session.return_value = "Coder"
 
-        name = handler._resolve_local_agent_name("special:coder")
+        name = handler._resolve_local_agent_name("agent:coder")
 
-        agent_runtime.get_agent_name_for_session.assert_called_once_with("special:coder")
+        agent_runtime.get_agent_name_for_session.assert_called_once_with("agent:coder")
         assert name == "Coder"
 
     def test_resolve_local_agent_name_falls_back_to_Agent_when_unknown(self):
@@ -132,7 +132,7 @@ class TestActivityWiringHandler:
         handler, _, agent_runtime, _ = self._make_handler()
         agent_runtime.get_agent_name_for_session.return_value = ""
 
-        name = handler._resolve_local_agent_name("special:unknown")
+        name = handler._resolve_local_agent_name("agent:unknown")
 
         assert name == "Agent"
 

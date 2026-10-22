@@ -178,7 +178,7 @@ class FeedReviewMixin:
                     # Notify agents — FIX 6.2 (SP2 audit): the former
                     # f"project:{name}" key was a guaranteed no-op receiver.
                     # Per-member routing mirrors ReviewHandler's rejection
-                    # fan-out; special:supervisor is the fallback when the
+                    # fan-out; agent:supervisor is the fallback when the
                     # project has no registered members (honest minimal
                     # option — the FeedHandler callback shape is a single
                     # (session_key, text) pair, so member iteration happens
@@ -197,7 +197,7 @@ class FeedReviewMixin:
                                 "feed: member lookup for %s failed: %s",
                                 card.project_name, exc,
                             )
-                    targets = members or ["special:supervisor"]
+                    targets = members or ["agent:supervisor"]
                     for target in targets:
                         self._on_send_to_agent(target, msg)
                     # Add git card

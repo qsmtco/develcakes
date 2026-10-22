@@ -560,6 +560,8 @@ self._branch_active_token: int | None = None       # token of in-flight worker (
 self._branch_request_path: str | None = None       # project path captured at schedule time (BUG #2)
 ```
 
+**Context meter (SPEC-WIRE-CONTEXT-PRESSURE §2.5):** the bar shows `_last_breakdown` for `get_current_session_key()` and ignores breakdowns for other keys. `_on_context_meter(sk, breakdown)` paints only when `sk` is the visible tab; `_update_agent_display` (the tab-change callback) loads `handler.get_last_breakdown(sk)` for the new tab and paints that percent, or clears the bar (`set_context_meter(sk, -1)`) when the cache is empty — including for `canvas:` / `welcome:` and `project:` tabs, which have no breakdown of their own.
+
 ### 3.6a `ui/handlers/input_toolbar_handler.py` — Input Toolbar Handler
 
 **Responsibility:** All input toolbar logic — find/replace, spell check, file I/O, word count. Pure data layer; imports no `Gtk.*` widget types in module scope. GTK types are accessed only via `self._mc.user_input.get_buffer()` which returns `Gtk.TextBuffer` (the established pattern).
@@ -1703,7 +1705,15 @@ class ToolCallStatus(str, Enum): PENDING = "pending" | EXECUTING = "executing" |
 token counts (BUG #5 fix). Provider prefixes are stripped from model
 names (e.g., `"openai/gpt-4o"` → `"gpt-4o"`). Unknown model names
 fall back to the `cl100k_base` encoding. The `chars // 4` heuristic is
-the final fallback when `tiktoken` is unavailable.
+the final fallback when `tiktoken` is unavailable. `get_token_estimate()`
+counts the **stored transcript** (every message in `conv.messages`), not
+the wire list. The compaction trigger and the meter percent use the wire
+count from `AgentRuntime._wire_messages_and_count` (see §3.21m): the plain
+path is the transcript estimate plus the repo-map addon plus the tool-schema
+JSON; the compiled path is `_compile_token_count` of the compiled list,
+after the hot-window drop. The breakdown keeps the transcript total on
+`transcript_tokens` and overwrites `total_used_tokens` / `conversation_tokens`
+/ `remaining_tokens` / `usage_percent` with the wire count.
 
 Requires `tiktoken>=0.7` (MIT-licensed, ~2MB).
 
@@ -1714,7 +1724,11 @@ the task card changes. This prevents the trim loop from re-encoding the full
 conversation on every iteration (which took ~6s per call for a 100K-char
 system prompt before the cache). The count includes each tool body once, on
 the tool message. `ToolCall.result` is an execution record and is cleared
-before the next serialization.
+before the next serialization. The cache write is skipped when `_token_gen`
+changes during the count — a stub that lands mid-count cannot store the
+pre-stub total under the post-stub key. All invalidation goes through
+`Conversation.invalidate_token_estimate()` (which drops the cache and bumps
+`_token_gen`); it is the only clearer.
 
 **Rules:** No imports from `ui/`, `agent/`, `gateway/`, `subprocess`.
 
@@ -1727,6 +1741,10 @@ before the next serialization.
 **Modular extraction (Phase 1 + Phases 4–8 + SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION):** `runtime.py` reduced from 3297 → 2714 lines. Cost re-exports removed (Phase 4). AuditLog extracted to `agent/audit.py` (Phase 5). Persistence extracted to `agent/persistence.py` (Phase 6). Pure re-export aliases removed (Phase 8). LLM dispatch uses `get_provider(caller_key).call()` / `.stream()`. Tool execution routes through `self._tool_chain.run()`. `_PROVIDER_CALLERS` retained for validation taxonomy (values are now direct provider lookups, not bound-method aliases). `_PROVIDER_STREAMERS` and the `_call_*` / `_stream_*_events` aliases **removed** (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 — superseded by registry dispatch in Phase B6). Per-turn state machine added: `TurnStatus` enum (5 states), `TurnResult` dataclass, `_terminate_turn()` chokepoint (all terminal paths funnel through one function), `_state_lock` for atomic state transitions. See post-mortems for all phases.
 
 After an enforced write, the next model call is a compiled list: the system prompt, one user message (goal, optional repo map, a one-line replay preamble, hunk, checks), then messages appended after that write. `conv.messages` is not trimmed by this path. The replay line says the write and its checks already ran. Two SPEC-40 additions ride this packet: hot-window carry — the last two served read bodies (512-char probe floor, edited paths evicted) are replayed verbatim in the compiled message, and an over-budget retry drops them first; and the wire-aware guard — the transcript is an audit trail, not the wire: a read or shell reprint whose newest live body sits below the packet cut is served fresh instead of `[unchanged`/REFUSED.
+
+**Wire-sized context pressure (SPEC-WIRE-CONTEXT-PRESSURE).** The compaction trigger and the meter percent are the wire count, not the stored transcript. `AgentRuntime._wire_messages_and_count(session_key, conv, model_max, tools)` builds the list `_messages_for_model` would send and returns `(messages, count)` without raising; `_messages_for_model` is a thin wrapper that raises `_over_budget_error` when the count is `>= model_max - _RESPONSE_RESERVE_TOKENS`. `_compact_before_llm` resolves the tools first (the tool-schema JSON is part of the pressure), measures that same count, and when it is at or under the soft ceiling records a fresh no-op `compact` (budget `max(soft, get_token_estimate())`) instead of panicking — off-wire transcript stays. The panic path is unchanged. After the LLM call, `get_token_breakdown(model_max)` has its request fields overwritten from the local wire count and keeps the transcript total on `transcript_tokens`.
+
+**One loop per session (SPEC-WIRE-CONTEXT-PRESSURE).** `_active_loops` is claimed in `begin_send(session_key, text)` before the thread starts — under `self._lock`, it moves any stranded texts to `_inbox`, and if the session is already active it appends `text` to `_inbox` and returns `False` (the caller must not publish a turn token or start a thread). A claim that returns `True` is handed to `start_claimed_loop`, which starts `_run_loop` and releases the claim in `_finish_loop` on failure. `_run_loop` still adds `_active_loops` itself for direct test calls; its `finally` calls `_finish_loop`, which moves leftover inbox text to `_stranded`. `_drain_inbox` runs at turn start and at the top of each iteration; queued text becomes user messages in arrival order on the same turn token, and a drain before the COMPLETED terminal `continue`s the same loop. `cancel()` drops `_inbox` and `_stranded`. Coders do not share a runtime: `AgentRuntimeHandler._runtimes` is keyed by display name, so two coders are two `AgentRuntime` objects with disjoint `_active_loops` sets.
 
 Same-turn `read_file` dedup keys `(path, offset or 0, limit)` to `(st_mtime_ns, st_size)` on `_read_fingerprints`, cleared at turn end and by `drop_read_cache`. A re-read returns the full body when no live `read_file` body for that key remains in the transcript (the newest real result is a mask or compact stub, the results were evicted, or the walk fails). `[unchanged]` applies only while a live copy of that same window remains. Notices and results from other tools do not count as that copy.
 

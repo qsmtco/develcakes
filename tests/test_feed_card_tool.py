@@ -81,11 +81,11 @@ def test_divergence():
     sources.
     """
     stub = _Stub()
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     card = stub._feed_handler.cards[0]
     assert card.project_name == "B"
     assert card.metadata["tab_key"] == "project:A"
-    assert card.metadata["session_key"] == "special:coder"
+    assert card.metadata["session_key"] == "agent:coder"
     assert result.success is True
 
 
@@ -97,19 +97,19 @@ def test_project_handler_none_falls_back_to_runtime_active_project():
     pin is preserved — tab_key still comes from _reply_key."""
     stub = _Stub(project_name=None)
     stub._agent_runtime_handler._active_project = ("runtimep", "/path/to/runtimep")
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     assert result.success is True, result
     card = stub._feed_handler.cards[0]
     assert card.project_name == "runtimep"
     assert card.metadata["tab_key"] == "project:A"
-    assert card.metadata["session_key"] == "special:coder"
+    assert card.metadata["session_key"] == "agent:coder"
 
 
 def test_both_projects_none_still_fails():
     """When both the project handler and the runtime report no project, the
     card is rejected exactly as before (no feed cards exist at all)."""
     stub = _Stub(project_name=None)
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     assert result.success is False
     assert "feed_card needs an open project" in result.error
     assert stub._feed_handler.cards == []
@@ -117,7 +117,7 @@ def test_both_projects_none_still_fails():
 
 def test_happy_path_maps_fields():
     stub = _Stub()
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     card = stub._feed_handler.cards[0]
     assert card.card_type == "diff"
     assert card.title == "t"
@@ -134,7 +134,7 @@ def test_happy_path_maps_fields():
 def test_empty_optional_fields_become_none():
     stub = _Stub()
     fields = dict(_FIELDS, file_path="", task_id="")
-    result = MainWindow._post_feed_card(stub, "special:coder", fields)
+    result = MainWindow._post_feed_card(stub, "agent:coder", fields)
     card = stub._feed_handler.cards[0]
     assert card.file_path is None
     assert card.task_id is None
@@ -143,7 +143,7 @@ def test_empty_optional_fields_become_none():
 
 def test_no_open_project_rejects_without_calling_add_card():
     stub = _Stub(project_name=None)
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     assert result.success is False
     assert result.error == "feed_card needs an open project"
     assert stub._feed_handler.calls == 0
@@ -158,7 +158,7 @@ def test_author_uses_display_name_when_agent_is_registered(monkeypatch):
 
     monkeypatch.setattr(sa, "get_special_agent", lambda sk: _Def())
     stub = _Stub()
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     card = stub._feed_handler.cards[0]
     assert card.author == "Coder"
     assert result.success is True
@@ -170,7 +170,7 @@ def test_author_fallback_uses_session_suffix(monkeypatch):
 
     monkeypatch.setattr(sa, "get_special_agent", lambda sk: None)
     stub = _Stub()
-    result = MainWindow._post_feed_card(stub, "special:coder", _FIELDS)
+    result = MainWindow._post_feed_card(stub, "agent:coder", _FIELDS)
     card = stub._feed_handler.cards[0]
     assert card.author == "coder"
     assert result.success is True
@@ -221,7 +221,7 @@ def test_public_path_forwards_every_parameter(captured):
             "task_id": "WU-12",
         },
         _PROJ,
-        session_key="special:coder",
+        session_key="agent:coder",
     )
     assert result.success is True
     assert captured == {
@@ -232,7 +232,7 @@ def test_public_path_forwards_every_parameter(captured):
         "additions": 7,
         "deletions": 3,
         "task_id": "WU-12",
-        "session_key": "special:coder",
+        "session_key": "agent:coder",
     }
 
 

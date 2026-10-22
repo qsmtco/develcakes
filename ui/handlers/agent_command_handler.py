@@ -255,7 +255,7 @@ class AgentCommandHandler:
 
         Args:
             session_key: The responding agent's session key
-                         (e.g. "special:coder" or "agent:qaster:...")
+                         (e.g. "agent:coder" or "agent:qaster:...")
             text: The agent's full response text
             project_name: Active project name, or None
         """
@@ -465,7 +465,7 @@ class AgentCommandHandler:
                          project_name: str | None) -> None:
         """Send message to a target agent via the correct transport."""
         # Check if target_sk is already a session key (direct lookup in special_agents).
-        # This handles relay calls where source_sk is already a session key like "special:coder".
+        # This handles relay calls where source_sk is already a session key like "agent:coder".
         if self._agent_runtime_handler is not None and \
            target_sk in self._agent_runtime_handler.get_special_agents():
             self._agent_runtime_handler.send_to_special_agent(target_sk, text)

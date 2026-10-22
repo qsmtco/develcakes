@@ -391,3 +391,66 @@ class TestProviderTaxonomyDuplicationInvariant:
             "instead of get_valid_callers(); the new caller was not "
             "honored by the correction gate."
         )
+
+
+class TestRoleOptions:
+    """SPEC-AGENT-ID-AND-ROLES §2.6 — handler.get_role_options() and
+    handler.save_role() passthrough to utils.roles."""
+
+    def test_get_role_options_lists_builtins_first(self, handler, tmp_config_dir):
+        h, _, _ = handler
+        options = h.get_role_options()
+        assert options[:3] == [
+            ("Supervisor", "supervisor"),
+            ("Coder", "coder"),
+            ("Debugger", "debugger"),
+        ]
+
+    def test_get_role_options_includes_saved_user_roles(self, handler, tmp_config_dir):
+        from utils.roles import save_role
+        save_role("Reviewer", "Do careful reviews.")
+        save_role("Architect", "Design systems.")
+
+        h, _, _ = handler
+        options = h.get_role_options()
+        # Built-ins first, then user roles ASCII-sorted by name (case-insensitive).
+        assert options[:3] == [
+            ("Supervisor", "supervisor"),
+            ("Coder", "coder"),
+            ("Debugger", "debugger"),
+        ]
+        assert ("Architect", "architect") in options
+        assert ("Reviewer", "reviewer") in options
+        assert options[3:] == [
+            ("Architect", "architect"),
+            ("Reviewer", "reviewer"),
+        ]
+
+    def test_get_role_options_excludes_builtin_names(self, handler, tmp_config_dir):
+        from utils.roles import save_role
+        slug, err = save_role("Coder", "builtin prompt")
+        assert slug is None
+        assert err is not None
+
+        h, _, _ = handler
+        values = [v for _, v in h.get_role_options()]
+        # 'coder' appears exactly once (the built-in row).
+        assert values.count("coder") == 1
+
+    def test_save_role_passthrough_success(self, handler, tmp_config_dir):
+        h, _, _ = handler
+        slug, err = h.save_role("My Role", "some prompt text")
+        assert slug == "my-role"
+        assert err is None
+        from utils.roles import load_role
+        assert load_role("my-role") == {
+            "name": "My Role",
+            "slug": "my-role",
+            "prompt": "some prompt text",
+        }
+
+    def test_save_role_passthrough_error(self, handler, tmp_config_dir):
+        h, _, _ = handler
+        slug, err = h.save_role("Coder", "prompt")
+        assert slug is None
+        assert err is not None

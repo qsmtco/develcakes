@@ -2477,7 +2477,7 @@ class TestEmptyResponseFallbackBubble:
         chat_box = unittest.mock.MagicMock()
         handler._resolve_chat_box = unittest.mock.MagicMock(return_value=chat_box)
 
-        handler._do_response_complete("special:coder", "")
+        handler._do_response_complete("agent:coder", "")
 
         # render_sync must have been called with a fallback message
         crh.render_sync.assert_called_once()
@@ -2495,7 +2495,7 @@ class TestEmptyResponseFallbackBubble:
         chat_box = unittest.mock.MagicMock()
         handler._resolve_chat_box = unittest.mock.MagicMock(return_value=chat_box)
 
-        handler._do_response_complete("special:coder", "")
+        handler._do_response_complete("agent:coder", "")
 
         # render_sync should NOT have been called for fallback (streaming handles it)
         # Note: end_streaming IS called (that's fine), but no additional render
@@ -2871,7 +2871,7 @@ class TestLoadConversationStaleTolerance:
         # The file says project_path=/old/project and the system_prompt is the
         # one that was rendered against /old/project. New load() must ignore both.
         persisted = {
-            "session_key": "special:debugger",
+            "session_key": "agent:debugger",
             "agent_name": "Debugger",
             "project_path": "/old/project",
             "model": "openai/gpt-4o",
@@ -2882,11 +2882,11 @@ class TestLoadConversationStaleTolerance:
             "total_cost": 0.0,
             "step_count": 0,
         }
-        (d / "special:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
 
         # Act
         from agent.persistence import load_conversation_from_disk
-        result = load_conversation_from_disk("special:debugger")
+        result = load_conversation_from_disk("agent:debugger")
         assert result is not None, "load() should still find the file"
         conv, _ = result
 
@@ -2909,7 +2909,7 @@ class TestLoadConversationStaleTolerance:
         d.mkdir()
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         persisted = {
-            "session_key": "special:debugger",
+            "session_key": "agent:debugger",
             "agent_name": "Debugger",
             "agent_role": "debugger",
             "project_path": "/old/project",
@@ -2924,10 +2924,10 @@ class TestLoadConversationStaleTolerance:
             "fallback_provider": "openrouter",
             "fallback_model": "openrouter/owl-alpha",
         }
-        (d / "special:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
 
         from agent.persistence import load_conversation_from_disk
-        conv, _ = load_conversation_from_disk("special:debugger")
+        conv, _ = load_conversation_from_disk("agent:debugger")
 
         assert conv is not None
         assert conv.agent_name == "Debugger"
@@ -2955,7 +2955,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         sk = rt.create_conversation(
-            agent_name="Debugger", session_key="special:debugger",
+            agent_name="Debugger", session_key="agent:debugger",
             project_path=None,  # simulates load() — no project applied yet
         )
         conv = rt.get_conversation(sk)
@@ -2988,7 +2988,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         sk = rt.create_conversation(
-            agent_name="Debugger", session_key="special:debugger",
+            agent_name="Debugger", session_key="agent:debugger",
             project_path="/path/to/projects/active",
         )
         # Snapshot the current system_prompt — rebuild should leave it untouched
@@ -3006,7 +3006,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         sk = rt.create_conversation(
-            agent_name="Debugger", session_key="special:debugger",
+            agent_name="Debugger", session_key="agent:debugger",
             project_path="/path/to/projects/old",
         )
         assert rt.get_conversation(sk).project_path == "/path/to/projects/old"
@@ -3024,7 +3024,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         # Should not raise
-        rt._rebuild_conversation_context("special:never-instantiated", "/x", "")
+        rt._rebuild_conversation_context("agent:never-instantiated", "/x", "")
         rt.stop()
 
     def test_rebuild_falls_back_to_persisted_prompt_on_build_failure(self):
@@ -3035,7 +3035,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         sk = rt.create_conversation(
-            agent_name="Debugger", session_key="special:debugger",
+            agent_name="Debugger", session_key="agent:debugger",
             project_path=None,
         )
         conv = rt.get_conversation(sk)
@@ -3062,7 +3062,7 @@ class TestRebuildConversationContext:
         """
         rt = _make_runtime()
         sk = rt.create_conversation(
-            agent_name="Debugger", session_key="special:debugger",
+            agent_name="Debugger", session_key="agent:debugger",
             project_path="/A",
         )
         # Simulate the original bug state: conversation was just loaded from
@@ -3105,7 +3105,7 @@ class TestAgentRuntimeContextReconciliationFullPath:
         d.mkdir()
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         persisted = {
-            "session_key": "special:debugger",
+            "session_key": "agent:debugger",
             "agent_name": "Debugger",
             "project_path": "/A",
             "model": "openai/gpt-4o",
@@ -3122,15 +3122,15 @@ class TestAgentRuntimeContextReconciliationFullPath:
             "step_count": 0,
             "agent_role": "debugger",
         }
-        (d / "special:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
 
         rt = _make_runtime()
         # Simulate the production path: load() restores the conversation,
         # then the handler (or build_system_prompt) calls rebuild with the
         # active project.
-        ok = rt.load_conversation("special:debugger")
+        ok = rt.load_conversation("agent:debugger")
         assert ok
-        conv = rt.get_conversation("special:debugger")
+        conv = rt.get_conversation("agent:debugger")
         assert conv is not None
 
         # After load: project_path is None, system_prompt is empty
@@ -3144,7 +3144,7 @@ class TestAgentRuntimeContextReconciliationFullPath:
         assert conv.messages[1].content == "old answer"
 
         # Now reconcile against the active project /B
-        rt._rebuild_conversation_context("special:debugger", "/B", "debugger")
+        rt._rebuild_conversation_context("agent:debugger", "/B", "debugger")
 
         # After rebuild: project_path is /B, system_prompt is freshly built
         assert conv.project_path == "/B"
@@ -3184,7 +3184,7 @@ def _make_handler():
 def _register_coder(handler):
     """Register a Coder special agent and return its conv_id_prefix."""
     coder = SpecialAgentDef(
-        conv_id_prefix="special:coder",
+        conv_id_prefix="agent:coder",
         display_name="Coder",
         role="coder",
         emoji="🛠️",
@@ -3206,7 +3206,7 @@ class TestLocalAgentHeaderStreaming:
 
         crh.is_streaming.return_value = True
         # _do_response_complete writes to self._crh — call directly
-        handler._do_response_complete("special:coder", "hello world")
+        handler._do_response_complete("agent:coder", "hello world")
 
         crh.end_streaming.assert_called_once()
         # The new fix: agent_name kwarg is the display name, not None
@@ -3223,7 +3223,7 @@ class TestLocalAgentHeaderStreaming:
         else:
             assert len(call_args) >= 2 and call_args[1] == "Coder", (
                 f"FAILURE-CASE REPRO: end_streaming positional args were "
-                f"{call_args!r}; expected ('special:coder', 'Coder')"
+                f"{call_args!r}; expected ('agent:coder', 'Coder')"
             )
 
     def test_streaming_end_passes_project_mount_key(self):
@@ -3234,12 +3234,12 @@ class TestLocalAgentHeaderStreaming:
         handler, crh, mc = _make_handler()
         _register_coder(handler)
         # Project-routed fixture: no direct tab; routing table says "alpha".
-        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else object()
+        mc.get_chat_box_for_session = lambda sk: None if sk == "agent:coder" else object()
         handler._agent_to_project = unittest.mock.MagicMock()
         handler._agent_to_project.get_project = lambda sk: "alpha"
 
         crh.is_streaming.return_value = True
-        handler._do_response_complete("special:coder", "hello world")
+        handler._do_response_complete("agent:coder", "hello world")
 
         crh.end_streaming.assert_called_once()
         call_kwargs = crh.end_streaming.call_args.kwargs
@@ -3256,15 +3256,15 @@ class TestEndStreamingSecondaryMountKeys:
 
     def test_compaction_end_streaming_passes_mount_key(self):
         handler, crh, mc = _make_handler()
-        # Project-routed fixture: no direct tab ("special:coder" → None);
+        # Project-routed fixture: no direct tab ("agent:coder" → None);
         # the project box resolves to a MagicMock (the handler appends to it).
-        mc.get_chat_box_for_session = lambda sk: None if sk == "special:coder" else unittest.mock.MagicMock()
+        mc.get_chat_box_for_session = lambda sk: None if sk == "agent:coder" else unittest.mock.MagicMock()
         handler._agent_to_project = unittest.mock.MagicMock()
         handler._agent_to_project.get_project = lambda sk: "alpha"
         crh.is_streaming.return_value = True
         crh.get_streaming_text.return_value = "streaming text present"
 
-        handler._do_compaction_bubble("special:coder", {"messages_removed": 2})
+        handler._do_compaction_bubble("agent:coder", {"messages_removed": 2})
 
         crh.end_streaming.assert_called_once()
         call_kwargs = crh.end_streaming.call_args.kwargs
@@ -3281,7 +3281,7 @@ class TestLocalAgentHeaderNonStreaming:
         _register_coder(handler)
 
         crh.is_streaming.return_value = False
-        handler._do_response_complete("special:coder", "hello world")
+        handler._do_response_complete("agent:coder", "hello world")
 
         crh.render_sync.assert_called_once()
         call_kwargs = crh.render_sync.call_args.kwargs
@@ -3303,7 +3303,7 @@ class TestLocalAgentHeaderNonStreaming:
 class TestEndStreamingExplicitNameTakesPriority:
     """Test C — REPOINTED for SPEC-06 SP4: end_streaming honors an
     explicitly passed agent_name over the agent_mgr lookup path (which
-    returns '' for special: keys).
+    returns '' for agent: keys).
 
     Patches crh_module.render_message (the SPEC-13 composition seam — the
     Pango build_role_bubble is retired) and asserts on a SPY SURFACE:
@@ -3321,7 +3321,7 @@ class TestEndStreamingExplicitNameTakesPriority:
 
         crh = ChatRenderHandler(GLib_module=None)
         # mock main_content with empty _agent_mgr (simulates AgentManager miss
-        # for a special: key — the original bug condition)
+        # for a agent: key — the original bug condition)
         mc = MagicMock()
         mc._agent_mgr.get_name.return_value = ""
         crh._main_content = mc
@@ -3343,15 +3343,15 @@ class TestEndStreamingExplicitNameTakesPriority:
             def destroy(self):
                 pass
 
-        crh._surfaces["special:coder"] = _Spy()
+        crh._surfaces["agent:coder"] = _Spy()
 
         # NEW seams (SP4): streaming state is _streaming/_stream_text.
-        crh._streaming.add("special:coder")
-        crh._stream_text["special:coder"] = "hello"
+        crh._streaming.add("agent:coder")
+        crh._stream_text["agent:coder"] = "hello"
 
         with patch.object(crh_module, "render_message",
                           return_value="<p>hello</p>") as rd:
-            crh.end_streaming("special:coder", agent_name="Coder")
+            crh.end_streaming("agent:coder", agent_name="Coder")
 
         # Composition ran once with the buffered text.
         assert rd.call_count == 1
@@ -3449,7 +3449,7 @@ class TestAllowedToolsFallback:
         d.mkdir()
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         persisted = {
-            "session_key": "special:debugger",
+            "session_key": "agent:debugger",
             "agent_name": "Debugger",
             "agent_role": "debugger",
             "project_path": None,
@@ -3463,12 +3463,12 @@ class TestAllowedToolsFallback:
             # KEY: allowed_tools: null — the bug condition.
             "allowed_tools": None,
         }
-        (d / "special:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
 
         # Patch get_special_agent to return a read-only Debugger def.
         # Mirrors the production Debugger YAML (read-only).
         debugger_def = SpecialAgentDef(
-            conv_id_prefix="special:debugger",
+            conv_id_prefix="agent:debugger",
             display_name="Debugger",
             role="debugger",
             emoji="🐛",
@@ -3477,12 +3477,12 @@ class TestAllowedToolsFallback:
         )
         monkeypatch.setattr(
             "agent.special_agents.get_special_agent",
-            lambda sk: debugger_def if sk == "special:debugger" else None,
+            lambda sk: debugger_def if sk == "agent:debugger" else None,
         )
 
         # Act
         from agent.persistence import load_conversation_from_disk
-        result = load_conversation_from_disk("special:debugger")
+        result = load_conversation_from_disk("agent:debugger")
         assert result is not None
         conv, _ = result
 
@@ -3510,7 +3510,7 @@ class TestAllowedToolsFallback:
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         persisted_tools = ["read_file", "write_file"]
         persisted = {
-            "session_key": "special:coder",
+            "session_key": "agent:coder",
             "agent_name": "Coder",
             "agent_role": "coder",
             "project_path": None,
@@ -3523,13 +3523,13 @@ class TestAllowedToolsFallback:
             "step_count": 1,
             "allowed_tools": persisted_tools,  # real list, not None
         }
-        (d / "special:coder.json").write_text(_json.dumps(persisted))
+        (d / "agent:coder.json").write_text(_json.dumps(persisted))
 
         # Patch get_special_agent to return a DIFFERENT live list.
         # If the fallback fires, conv.allowed_tools would be overwritten
         # with this list. The persisted list must win.
         live_def = SpecialAgentDef(
-            conv_id_prefix="special:coder",
+            conv_id_prefix="agent:coder",
             display_name="Coder",
             role="coder",
             emoji="🛠️",
@@ -3543,7 +3543,7 @@ class TestAllowedToolsFallback:
 
         # Act
         from agent.persistence import load_conversation_from_disk
-        result = load_conversation_from_disk("special:coder")
+        result = load_conversation_from_disk("agent:coder")
         assert result is not None
         conv, _ = result
 
@@ -3569,7 +3569,7 @@ class TestAllowedToolsFallback:
         d.mkdir()
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
         persisted = {
-            "session_key": "special:deleted_agent",
+            "session_key": "agent:deleted_agent",
             "agent_name": "DeletedAgent",
             "project_path": None,
             "model": "openai/gpt-4o",
@@ -3580,7 +3580,7 @@ class TestAllowedToolsFallback:
             "step_count": 0,
             "allowed_tools": None,
         }
-        (d / "special:deleted_agent.json").write_text(_json.dumps(persisted))
+        (d / "agent:deleted_agent.json").write_text(_json.dumps(persisted))
 
         # Agent not in registry
         monkeypatch.setattr(
@@ -3588,7 +3588,7 @@ class TestAllowedToolsFallback:
         )
 
         from agent.persistence import load_conversation_from_disk
-        result = load_conversation_from_disk("special:deleted_agent")
+        result = load_conversation_from_disk("agent:deleted_agent")
         assert result is not None
         conv, _ = result
 
@@ -3951,13 +3951,13 @@ class TestLocalAgentDrawerEmissions:
         handler._fh = MagicMock()
         handler._active_project = ("test", "/tmp/test")
         handler._agents = {
-            "special:coder": SpecialAgentDef(
+            "agent:coder": SpecialAgentDef(
                 display_name="Coder",
                 role="coder",
                 emoji="🛠️",
                 tools=["exec_command", "read_file", "write_file"],
                 can_write=True,
-                conv_id_prefix="special:coder",
+                conv_id_prefix="agent:coder",
             )
         }
 
@@ -3989,29 +3989,29 @@ class TestLocalAgentDrawerEmissions:
         """_do_tool_call_start emits ActivityBubble with type='tool_start'."""
         handler, _, _ = self._make_handler_with_agent()
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "test.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "test.txt"})
 
         assert len(self._bubbles) == 1, "Expected exactly one bubble"
         assert self._bubbles[0].type == "tool_start"
-        assert self._bubbles[0].session_key == "special:coder"
+        assert self._bubbles[0].session_key == "agent:coder"
         assert self._bubbles[0].tool_name == "read_file"
 
     def test_do_tool_call_start_stores_tool_args(self):
         """_do_tool_call_start stores args in _pending_tool_args for patch path."""
         handler, _, _ = self._make_handler_with_agent()
 
-        handler._do_tool_call_start("special:coder", "write_file", {"path": "src/main.py"})
+        handler._do_tool_call_start("agent:coder", "write_file", {"path": "src/main.py"})
 
-        assert handler._pending_tool_args["special:coder"] == {"path": "src/main.py"}
+        assert handler._pending_tool_args["agent:coder"] == {"path": "src/main.py"}
 
     # ── tool_end (non-write_file) ───────────────────────────────────────
 
     def test_do_tool_call_result_emits_tool_end_bubble(self):
         """_do_tool_call_result emits ActivityBubble with type='tool_end' on success (non-write_file)."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"path": "test.txt"}
+        handler._pending_tool_args["agent:coder"] = {"path": "test.txt"}
 
-        handler._do_tool_call_result("special:coder", "read_file", "file content", success=True)
+        handler._do_tool_call_result("agent:coder", "read_file", "file content", success=True)
 
         # Should get tool_end, no patch
         types = [b.type for b in self._bubbles]
@@ -4023,9 +4023,9 @@ class TestLocalAgentDrawerEmissions:
     def test_do_tool_call_result_emits_tool_error_on_failure(self):
         """_do_tool_call_result emits ActivityBubble with type='tool_error' when success=False."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"path": "test.txt"}
+        handler._pending_tool_args["agent:coder"] = {"path": "test.txt"}
 
-        handler._do_tool_call_result("special:coder", "read_file", "permission denied", success=False)
+        handler._do_tool_call_result("agent:coder", "read_file", "permission denied", success=False)
 
         types = [b.type for b in self._bubbles]
         assert "tool_error" in types, f"Expected tool_error, got {types}"
@@ -4038,10 +4038,10 @@ class TestLocalAgentDrawerEmissions:
     def test_denied_exec_command_emits_tool_error_bubble(self):
         """Simulate exec denial path: success=False → tool_error with ❌."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"command": "rm -rf /"}
+        handler._pending_tool_args["agent:coder"] = {"command": "rm -rf /"}
 
         # Runtime dispatches with success=False for denied exec
-        handler._do_tool_call_result("special:coder", "exec_command", "denied", success=False)
+        handler._do_tool_call_result("agent:coder", "exec_command", "denied", success=False)
 
         types = [b.type for b in self._bubbles]
         assert "tool_error" in types, f"Expected tool_error, got {types}"
@@ -4052,9 +4052,9 @@ class TestLocalAgentDrawerEmissions:
     def test_sensitive_path_block_emits_tool_error_bubble(self):
         """Simulate sensitive-path write_file block: success=False → tool_error."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"path": "/etc/passwd"}
+        handler._pending_tool_args["agent:coder"] = {"path": "/etc/passwd"}
 
-        handler._do_tool_call_result("special:coder", "write_file", "blocked", success=False)
+        handler._do_tool_call_result("agent:coder", "write_file", "blocked", success=False)
 
         types = [b.type for b in self._bubbles]
         assert "tool_error" in types, f"Expected tool_error, got {types}"
@@ -4064,9 +4064,9 @@ class TestLocalAgentDrawerEmissions:
     def test_write_file_success_emits_patch_not_tool_end(self):
         """Successful write_file emits ONLY patch, NO tool_end (BUG #12)."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"path": "src/main.py"}
+        handler._pending_tool_args["agent:coder"] = {"path": "src/main.py"}
 
-        handler._do_tool_call_result("special:coder", "write_file", "OK — wrote 123 bytes to src/main.py", success=True)
+        handler._do_tool_call_result("agent:coder", "write_file", "OK — wrote 123 bytes to src/main.py", success=True)
 
         types = [b.type for b in self._bubbles]
         assert "patch" in types, f"Expected patch, got {types}"
@@ -4075,9 +4075,9 @@ class TestLocalAgentDrawerEmissions:
     def test_write_file_failure_emits_tool_error(self):
         """Failed write_file emits tool_error, not patch."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._pending_tool_args["special:coder"] = {"path": "src/main.py"}
+        handler._pending_tool_args["agent:coder"] = {"path": "src/main.py"}
 
-        handler._do_tool_call_result("special:coder", "write_file", "permission denied", success=False)
+        handler._do_tool_call_result("agent:coder", "write_file", "permission denied", success=False)
 
         types = [b.type for b in self._bubbles]
         assert "tool_error" in types, f"Expected tool_error, got {types}"
@@ -4091,20 +4091,20 @@ class TestLocalAgentDrawerEmissions:
 
         # Simulate 3 failed read_file calls
         for i in range(3):
-            handler._pending_tool_args["special:coder"] = {"path": f"file{i}.txt"}
-            handler._do_tool_call_result("special:coder", "read_file", "error", success=False)
+            handler._pending_tool_args["agent:coder"] = {"path": f"file{i}.txt"}
+            handler._do_tool_call_result("agent:coder", "read_file", "error", success=False)
 
         # After all calls, _pending_tool_args should be empty (popped each time)
-        assert "special:coder" not in handler._pending_tool_args
+        assert "agent:coder" not in handler._pending_tool_args
 
     # ── BUG #2: orphan tool_start after cancel ──────────────────────────
 
     def test_tool_start_suppressed_after_session_ended(self):
         """_do_tool_call_start returns early when session is in _ended_sessions (BUG #2)."""
         handler, _, _ = self._make_handler_with_agent()
-        handler._ended_sessions.add("special:coder")
+        handler._ended_sessions.add("agent:coder")
 
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "test.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "test.txt"})
 
         # No bubble should have been emitted
         assert len(self._bubbles) == 0, "BUG #2: Expected no tool_start for ended session"
@@ -4120,12 +4120,12 @@ class TestLocalAgentDrawerEmissions:
         handler._crh = crh
 
         # This triggers the agent-start site (is_streaming=False → start_streaming)
-        handler._do_text_delta("special:coder", "Hello")
+        handler._do_text_delta("agent:coder", "Hello")
 
         assert len(self._lifecycle_events) >= 1
         events = [(sk, name, phase) for sk, name, phase in self._lifecycle_events if phase == "start"]
         assert len(events) >= 1, f"Expected at least one 'start' event, got {self._lifecycle_events}"
-        assert events[0] == ("special:coder", "Coder", "start")
+        assert events[0] == ("agent:coder", "Coder", "start")
 
     # ── drawer-lifecycle end ────────────────────────────────────────────
 
@@ -4137,11 +4137,11 @@ class TestLocalAgentDrawerEmissions:
         handler._resolve_chat_box = MagicMock(return_value=chat_box)
         handler._crh = crh
 
-        handler._do_response_complete("special:coder", "Done")
+        handler._do_response_complete("agent:coder", "Done")
 
         events = [e for e in self._lifecycle_events if e[2] == "end"]
         assert len(events) >= 1
-        assert events[0] == ("special:coder", "Coder", "end")
+        assert events[0] == ("agent:coder", "Coder", "end")
 
     def test_do_error_emits_drawer_lifecycle_end(self):
         """_do_error emits drawer-lifecycle 'end'."""
@@ -4151,11 +4151,11 @@ class TestLocalAgentDrawerEmissions:
         handler._resolve_chat_box = MagicMock(return_value=chat_box)
         handler._crh = crh
 
-        handler._do_error("special:coder", "Something went wrong")
+        handler._do_error("agent:coder", "Something went wrong")
 
         events = [e for e in self._lifecycle_events if e[2] == "end"]
         assert len(events) >= 1
-        assert events[0] == ("special:coder", "Coder", "end")
+        assert events[0] == ("agent:coder", "Coder", "end")
 
     # ── BUG #4: tool bubbles emitted without active project ──────────────
 
@@ -4166,9 +4166,9 @@ class TestLocalAgentDrawerEmissions:
         # No _active_project set
         handler._active_project = None
         handler._agents = {
-            "special:coder": SpecialAgentDef(
+            "agent:coder": SpecialAgentDef(
                 display_name="Coder", role="coder", emoji="🛠️", tools=["read_file"],
-                can_write=True, conv_id_prefix="special:coder",
+                can_write=True, conv_id_prefix="agent:coder",
             )
         }
 
@@ -4178,13 +4178,13 @@ class TestLocalAgentDrawerEmissions:
         handler._ended_sessions = set()
 
         # tool_start must fire even without _active_project
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "test.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "test.txt"})
         assert len(bubbles) == 1, f"BUG #4: Expected tool_start bubble, got {len(bubbles)}"
         assert bubbles[0].type == "tool_start"
 
         # Store pending args for tool_end dispatch
-        handler._pending_tool_args["special:coder"] = {"path": "test.txt"}
-        handler._do_tool_call_result("special:coder", "read_file", "content", success=True)
+        handler._pending_tool_args["agent:coder"] = {"path": "test.txt"}
+        handler._do_tool_call_result("agent:coder", "read_file", "content", success=True)
         assert len(bubbles) >= 2, f"BUG #4: Expected tool_end bubble too, got {len(bubbles)}"
         assert bubbles[1].type == "tool_end"
 
@@ -4210,12 +4210,12 @@ class TestLocalAgentDrawerEmissions:
             timestamp=datetime.now(timezone.utc),
             project_name="test",
         )
-        handler._tool_card_ids["special:coder"] = "card-123"
+        handler._tool_card_ids["agent:coder"] = "card-123"
         handler._fh.get_card.return_value = card
 
         # Runtime dispatches success=False for a denied exec_command
         handler._do_tool_call_result(
-            "special:coder", "exec_command",
+            "agent:coder", "exec_command",
             "exec_command requires PM approval — request denied or timed out",
             success=False,
         )
@@ -4246,12 +4246,12 @@ class TestLocalAgentDrawerEmissions:
             timestamp=datetime.now(timezone.utc),
             project_name="test",
         )
-        handler._tool_card_ids["special:coder"] = "card-123"
+        handler._tool_card_ids["agent:coder"] = "card-123"
         handler._fh.get_card.return_value = card
-        handler._pending_tool_args["special:coder"] = {"path": "/etc/passwd"}
+        handler._pending_tool_args["agent:coder"] = {"path": "/etc/passwd"}
 
         handler._do_tool_call_result(
-            "special:coder", "write_file", "blocked: sensitive path", success=False,
+            "agent:coder", "write_file", "blocked: sensitive path", success=False,
         )
 
         types = [b.type for b in self._bubbles]
@@ -4269,17 +4269,17 @@ class TestLocalAgentDrawerEmissions:
         call, letting the second proceed and emit an orphan bubble.
         """
         handler, _, _ = self._make_handler_with_agent()
-        handler._ended_sessions.add("special:coder")
+        handler._ended_sessions.add("agent:coder")
 
         # Two stale calls, back-to-back (as if queued in GLib.idle_add)
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "a.txt"})
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "b.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "a.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "b.txt"})
 
         # Both must be suppressed — no bubbles, flag still set
         assert len(self._bubbles) == 0, (
             f"BUG #18: expected 0 bubbles for 2 stale calls, got {len(self._bubbles)}"
         )
-        assert "special:coder" in handler._ended_sessions, (
+        assert "agent:coder" in handler._ended_sessions, (
             "BUG #18: ended flag should NOT be cleared by a stale call"
         )
 
@@ -4297,11 +4297,11 @@ class TestLocalAgentDrawerEmissions:
             title="Coder is running: rm -rf /", body="⏳ Running...",
             author="Coder", timestamp=datetime.now(timezone.utc), project_name="test",
         )
-        handler._tool_card_ids["special:coder"] = "card-123"
+        handler._tool_card_ids["agent:coder"] = "card-123"
         handler._fh.get_card.return_value = card
 
         handler._do_tool_call_result(
-            "special:coder", "exec_command",
+            "agent:coder", "exec_command",
             "exec_command requires PM approval — request denied or timed out",
             success=False,
         )
@@ -4346,10 +4346,10 @@ class TestLocalAgentDrawerEmissions:
         # time the flag is already absent; this test starts from that state.
 
         # Simulate the runtime's turn-start signal — this is the fix.
-        handler._do_turn_start("special:coder")
+        handler._do_turn_start("agent:coder")
 
         # Now a tool_start arrives (tool-only turn, no real text)
-        handler._do_tool_call_start("special:coder", "read_file", {"path": "test.txt"})
+        handler._do_tool_call_start("agent:coder", "read_file", {"path": "test.txt"})
 
         types = [b.type for b in self._bubbles]
         assert "tool_start" in types, (
@@ -4380,9 +4380,9 @@ class TestLocalAgentDrawerEmissions:
         crh.get_streaming_text.return_value = ""
 
         # Turn-start starts a streaming bubble
-        handler._do_turn_start("special:coder")
+        handler._do_turn_start("agent:coder")
         # Simulate turn end with no text content (tool-only turn)
-        handler._do_response_complete("special:coder", "")
+        handler._do_response_complete("agent:coder", "")
 
         # end_streaming must have been called with render=False (empty text suppressed)
         crh.end_streaming.assert_called_once()
@@ -4404,8 +4404,8 @@ class TestLocalAgentDrawerEmissions:
         the on_turn_start redesign.
         """
         handler, crh, mc = self._make_handler_with_agent()
-        handler._ended_sessions.add("special:coder")
-        handler._session_completed.add("special:coder")
+        handler._ended_sessions.add("agent:coder")
+        handler._session_completed.add("agent:coder")
 
         # Stub the runtime so no real AgentRuntime/LLM is constructed.
         rt = MagicMock()
@@ -4413,12 +4413,12 @@ class TestLocalAgentDrawerEmissions:
         rt.load_conversation.return_value = None
         handler._get_runtime = MagicMock(return_value=rt)
 
-        handler.send_to_special_agent("special:coder", "hello")
+        handler.send_to_special_agent("agent:coder", "hello")
 
-        assert "special:coder" not in handler._ended_sessions, (
+        assert "agent:coder" not in handler._ended_sessions, (
             "send_to_special_agent must clear _ended_sessions for the new turn"
         )
-        assert "special:coder" not in handler._session_completed
+        assert "agent:coder" not in handler._session_completed
         # Phase 4 Part B: the conversation prep moved off the main thread into
         # a `prepare` closure passed to send_message. `handler._prepare_turn`
         # does not exist — the closure is a LOCAL function in
@@ -4426,7 +4426,7 @@ class TestLocalAgentDrawerEmissions:
         # the closure itself (Rule 4: real code path, not just the mock).
         rt.send_message.assert_called_once()
         call_args, call_kwargs = rt.send_message.call_args
-        assert call_args == ("special:coder", "hello")
+        assert call_args == ("agent:coder", "hello")
         prepare = call_kwargs.get("prepare")
         assert callable(prepare), (
             "Part B: send_message must receive the off-thread prepare callback"
@@ -4437,10 +4437,10 @@ class TestLocalAgentDrawerEmissions:
         handler._prepare_turn_conversation = MagicMock()
         prepare()
         prep_kwargs = handler._prepare_turn_conversation.call_args.kwargs
-        assert prep_kwargs["session_key"] == "special:coder"
+        assert prep_kwargs["session_key"] == "agent:coder"
         assert prep_kwargs["project_path"] == "/tmp/test"
-        assert prep_kwargs["turn_token"] is handler._turn_tokens["special:coder"]
-        assert handler._turn_tokens["special:coder"] is not None
+        assert prep_kwargs["turn_token"] is handler._turn_tokens["agent:coder"]
+        assert handler._turn_tokens["agent:coder"] is not None
 
     # ── BUG #21 redesign: dedicated on_turn_start signal ─────────────────
 
@@ -4454,7 +4454,7 @@ class TestLocalAgentDrawerEmissions:
         chat_box = MagicMock()
         handler._resolve_chat_box = MagicMock(return_value=chat_box)
 
-        handler._on_turn_start("special:coder")
+        handler._on_turn_start("agent:coder")
 
         assert len(glib.queue) == 1, "turn-start must be dispatched via idle_add"
         glib.drain()
@@ -4469,10 +4469,10 @@ class TestLocalAgentDrawerEmissions:
         chat_box = MagicMock()
         handler._resolve_chat_box = MagicMock(return_value=chat_box)
         handler._crh = crh
-        handler._turn_tokens["special:coder"] = object()
+        handler._turn_tokens["agent:coder"] = object()
         stale = object()
 
-        handler._do_turn_start("special:coder", stale)
+        handler._do_turn_start("agent:coder", stale)
 
         crh.start_streaming.assert_not_called()
         assert not [e for e in self._lifecycle_events if e[2] == "start"]
@@ -4488,13 +4488,13 @@ class TestLocalAgentDrawerEmissions:
         handler._resolve_chat_box = MagicMock(return_value=chat_box)
         handler._crh = crh
         token = object()
-        handler._turn_tokens["special:coder"] = token
-        handler._ended_sessions.add("special:coder")  # terminal landed first
+        handler._turn_tokens["agent:coder"] = token
+        handler._ended_sessions.add("agent:coder")  # terminal landed first
 
-        handler._do_turn_start("special:coder", token)  # same-token race
+        handler._do_turn_start("agent:coder", token)  # same-token race
 
         crh.start_streaming.assert_not_called()
-        assert "special:coder" in handler._ended_sessions
+        assert "agent:coder" in handler._ended_sessions
         assert not [e for e in self._lifecycle_events if e[2] == "start"]
 
     def test_do_error_renders_no_empty_bubble_on_tool_only_turn(self):
@@ -4507,7 +4507,7 @@ class TestLocalAgentDrawerEmissions:
         handler._crh = crh
         crh.get_streaming_text.return_value = ""  # tool-only: no content
 
-        handler._do_error("special:coder", "boom")
+        handler._do_error("agent:coder", "boom")
 
         crh.end_streaming.assert_called_once()
         kwargs = crh.end_streaming.call_args.kwargs
@@ -4524,7 +4524,7 @@ class TestLocalAgentDrawerEmissions:
         handler._crh = crh
         crh.get_streaming_text.return_value = ""
 
-        handler._do_compaction_bubble("special:coder", {
+        handler._do_compaction_bubble("agent:coder", {
             "messages_removed": 3, "tokens_freed": 1200,
             "layer": 2, "trigger": "auto",
         })
@@ -4540,7 +4540,7 @@ class TestLocalAgentDrawerEmissions:
         handler._crh = crh
         crh.get_streaming_text.return_value = ""
 
-        handler._do_usage_warning("special:coder", "approaching-limit", 82.0)
+        handler._do_usage_warning("agent:coder", "approaching-limit", 82.0)
 
         crh.end_streaming.assert_called_once()
         assert crh.end_streaming.call_args.kwargs.get("render") is False
@@ -4562,10 +4562,10 @@ class TestLocalAgentDrawerEmissions:
         )
 
         # Simulate tool_start without a project — cmd must be captured
-        handler._do_tool_call_start("special:coder", "exec_command", {"command": "ls -la"})
+        handler._do_tool_call_start("agent:coder", "exec_command", {"command": "ls -la"})
 
         # Verify _pending_exec_commands has the command
-        cmd = handler._pending_exec_commands.get("special:coder", "")
+        cmd = handler._pending_exec_commands.get("agent:coder", "")
         assert cmd == "ls -la", (
             f"BUG #15: _pending_exec_commands capture failed; got {cmd!r}, expected 'ls -la'"
         )
@@ -4578,7 +4578,7 @@ class TestLocalAgentDrawerEmissions:
             exit_code = 0
             duration_ms = 42
 
-        handler._do_tool_call_result("special:coder", "exec_command", FakeResult(), True)
+        handler._do_tool_call_result("agent:coder", "exec_command", FakeResult(), True)
 
         # command_output callback must fire with the captured command
         assert len(cmd_outputs) == 1, f"Expected 1 command_output callback, got {len(cmd_outputs)}"
@@ -5815,7 +5815,7 @@ class TestDeltaCoalescing:
 
         handler._do_text_delta = counting
         for d in deltas:
-            handler._on_text_delta("special:coder", d)
+            handler._on_text_delta("agent:coder", d)
         glib.drain()
 
         assert calls["n"] <= len(deltas) // 20 + 2, (
@@ -5828,10 +5828,10 @@ class TestDeltaCoalescing:
         handler, crh, glib = self._make()
         deltas = [f"chunk{i} " for i in range(100)]
         for d in deltas:
-            handler._on_text_delta("special:coder", d)
+            handler._on_text_delta("agent:coder", d)
         expected = "".join(deltas)
         glib.drain()
-        assert handler._streaming_text["special:coder"] == expected
+        assert handler._streaming_text["agent:coder"] == expected
 
     def test_trailing_dispatch_pending_for_last_delta(self):
         """(c)+(6) after the first coalesced dispatch drains, a trailing
@@ -5839,10 +5839,10 @@ class TestDeltaCoalescing:
         the final update_streaming carries the complete text."""
         handler, crh, glib = self._make()
         for i in range(100):
-            handler._on_text_delta("special:coder", f"chunk{i} ")
+            handler._on_text_delta("agent:coder", f"chunk{i} ")
         # drain exactly ONE dispatch (the first coalesced one)
         glib.drain(max_steps=1)
-        assert "special:coder" in handler._delta_dispatch_pending, (
+        assert "agent:coder" in handler._delta_dispatch_pending, (
             "trailing guarantee broken: no pending dispatch after the first "
             "coalesced dispatch drained, although deltas arrived while it "
             "was pending"
@@ -5862,22 +5862,22 @@ class TestDeltaCoalescing:
         handler, crh, glib = self._make()
         stale = object()
         current = object()
-        handler._turn_tokens["special:coder"] = current
-        handler._on_text_delta("special:coder", "good ", current)
-        handler._on_text_delta("special:coder", "STALE ", stale)
+        handler._turn_tokens["agent:coder"] = current
+        handler._on_text_delta("agent:coder", "good ", current)
+        handler._on_text_delta("agent:coder", "STALE ", stale)
         glib.drain()
-        assert handler._streaming_text["special:coder"] == "good "
-        assert "STALE" not in handler._streaming_text.get("special:coder", "")
+        assert handler._streaming_text["agent:coder"] == "good "
+        assert "STALE" not in handler._streaming_text.get("agent:coder", "")
 
     def test_delta_after_session_ended_dropped_no_new_bubble(self):
         """(e)+(3) a delta arriving after _ended_sessions is set is dropped —
         no start_streaming, no new bubble, no accumulation resurrection."""
         handler, crh, glib = self._make()
-        handler._ended_sessions.add("special:coder")
-        handler._on_text_delta("special:coder", "late delta")
+        handler._ended_sessions.add("agent:coder")
+        handler._on_text_delta("agent:coder", "late delta")
         glib.drain()
         crh.start_streaming.assert_not_called()
-        assert "special:coder" not in handler._streaming_text
+        assert "agent:coder" not in handler._streaming_text
 
     def test_empty_delta_still_reaches_main_thread(self):
         """(4) empty-delta bypass preserved: provider-sent empty deltas still
@@ -5885,10 +5885,10 @@ class TestDeltaCoalescing:
         returns before accumulation. (The runtime's turn-start signal moved
         to on_turn_start.)"""
         handler, crh, glib = self._make()
-        handler._on_text_delta("special:coder", "")
+        handler._on_text_delta("agent:coder", "")
         assert len(glib.queue) == 1, "empty delta must still be dispatched"
         glib.drain()
-        assert "special:coder" not in handler._streaming_text
+        assert "agent:coder" not in handler._streaming_text
 
     def test_completion_ordering_and_byte_identity(self):
         """(1)+(5) full streaming session: accumulated text is byte-identical
@@ -5905,16 +5905,16 @@ class TestDeltaCoalescing:
         crh.end_streaming.side_effect = lambda *a, **k: order.append(("end", None))
 
         for d in deltas:
-            handler._on_text_delta("special:coder", d)
+            handler._on_text_delta("agent:coder", d)
         glib.drain()
-        assert handler._streaming_text["special:coder"] == expected, (
+        assert handler._streaming_text["agent:coder"] == expected, (
             "accumulated text must be byte-identical to the delta concatenation"
         )
 
         # completion (what the runtime dispatches last, with the authoritative text)
         crh.is_streaming.return_value = True
         crh.get_streaming_text.return_value = expected
-        handler._do_response_complete("special:coder", expected)
+        handler._do_response_complete("agent:coder", expected)
 
         kinds = [k for k, _ in order]
         assert "update" in kinds and kinds.index("update") < kinds.index("end"), (
@@ -5922,7 +5922,7 @@ class TestDeltaCoalescing:
         )
         # byte identity: completion overwrites plain_text with the exact
         # delta concatenation (set_streaming_text is the authoritative write)
-        crh.set_streaming_text.assert_called_with("special:coder", expected)
+        crh.set_streaming_text.assert_called_with("agent:coder", expected)
 
 
 
@@ -5956,9 +5956,9 @@ class TestReplyKeyAndTurnSlot:
         handler._agent_to_project = unittest.mock.MagicMock()
         handler._agent_to_project.get_project = lambda sk: "alpha"
         handler._active_project = ["alpha"]
-        handler._turn_reply_target["special:coder"] = "special:coder"  # private
+        handler._turn_reply_target["agent:coder"] = "agent:coder"  # private
 
-        assert handler._reply_key("special:coder") == "special:coder", (
+        assert handler._reply_key("agent:coder") == "agent:coder", (
             "the turn-scoped slot (private) must win over routing"
         )
 
@@ -5974,7 +5974,7 @@ class TestReplyKeyAndTurnSlot:
         handler._active_project = ["alpha", "/p"]
         handler._turn_reply_target.clear()          # no per-send slot
 
-        assert handler._reply_key("special:coder") == "project:alpha", (
+        assert handler._reply_key("agent:coder") == "project:alpha", (
             "R7 active-project fallback: an unrouted agent with a project "
             "open must resolve to the project key, never the raw session key"
         )
@@ -5996,12 +5996,12 @@ class TestReplyKeyAndTurnSlot:
         handler._agent_to_project = None
         handler._active_project = ["alpha", "/p"]
         handler._turn_reply_target.clear()
-        assert handler._reply_key("special:coder") == "project:alpha"
+        assert handler._reply_key("agent:coder") == "project:alpha"
         # _resolve_chat_box also carries the fallback (BUG#27).
         project_box = object()
         mc.get_chat_box_for_session = lambda sk: (
             project_box if sk == "project:alpha" else None)
-        assert handler._resolve_chat_box("special:coder") is project_box
+        assert handler._resolve_chat_box("agent:coder") is project_box
 
     def test_turn_scoped_slot_group_then_private_then_group(self):
         """SPEC-12 BUG#11/#19: the reply target is per-send, not a session
@@ -6013,14 +6013,14 @@ class TestReplyKeyAndTurnSlot:
         handler._agent_to_project.get_project = lambda sk: "alpha"
         handler._active_project = ["alpha", "/p"]
         # Send 1: private /ask sets the slot to the agent key.
-        handler._turn_reply_target["special:coder"] = "special:coder"
-        assert handler._reply_key("special:coder") == "special:coder"  # private
+        handler._turn_reply_target["agent:coder"] = "agent:coder"
+        assert handler._reply_key("agent:coder") == "agent:coder"  # private
         # Send 2: a NON-targeting send normalizes the slot to the routing key
         # (unit-level: the real send-path normalization is pinned by
         # test_send_to_special_agent_normalizes_slot_every_send).
-        handler._turn_reply_target["special:coder"] = handler._resolve_mount_key(
-            "special:coder")
-        assert handler._reply_key("special:coder") == "project:alpha"  # group
+        handler._turn_reply_target["agent:coder"] = handler._resolve_mount_key(
+            "agent:coder")
+        assert handler._reply_key("agent:coder") == "project:alpha"  # group
 
     def test_send_to_special_agent_normalizes_slot_every_send(self):
         """SPEC-12 BUG#18/#26: the slot is set on ENTRY of EVERY send — an
@@ -6038,35 +6038,35 @@ class TestReplyKeyAndTurnSlot:
 
         # Send 1: explicit private target → slot = the agent key.
         handler.send_to_special_agent(
-            "special:coder", "private", reply_target="special:coder")
-        assert handler._turn_reply_target["special:coder"] == "special:coder"
+            "agent:coder", "private", reply_target="agent:coder")
+        assert handler._turn_reply_target["agent:coder"] == "agent:coder"
 
         # Send 2: bare send → slot NORMALIZED to the routing project key.
-        handler.send_to_special_agent("special:coder", "group")
-        assert handler._turn_reply_target["special:coder"] == "project:alpha"
+        handler.send_to_special_agent("agent:coder", "group")
+        assert handler._turn_reply_target["agent:coder"] == "project:alpha"
 
     def test_response_complete_clears_own_slot(self):
         """SPEC-12 SP3b: _do_response_complete clears the turn's slot."""
         handler, crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = ["alpha", "/p"]
-        handler._turn_tokens["special:coder"] = tok = object()
-        handler._turn_reply_target["special:coder"] = "project:alpha"
+        handler._turn_tokens["agent:coder"] = tok = object()
+        handler._turn_reply_target["agent:coder"] = "project:alpha"
         crh.is_streaming.return_value = False
-        handler._do_response_complete("special:coder", "hi", complete_token=tok)
-        assert "special:coder" not in handler._turn_reply_target
+        handler._do_response_complete("agent:coder", "hi", complete_token=tok)
+        assert "agent:coder" not in handler._turn_reply_target
 
     def test_stale_token_leaves_slot_intact(self):
         """SPEC-12 SP3b: a stale completion must NOT clear the current slot."""
         handler, crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = ["alpha", "/p"]
-        handler._turn_tokens["special:coder"] = object()          # current
-        handler._turn_reply_target["special:coder"] = "special:coder"
+        handler._turn_tokens["agent:coder"] = object()          # current
+        handler._turn_reply_target["agent:coder"] = "agent:coder"
         crh.is_streaming.return_value = False
         handler._do_response_complete(
-            "special:coder", "hi", complete_token=object())  # stale
-        assert handler._turn_reply_target.get("special:coder") == "special:coder"
+            "agent:coder", "hi", complete_token=object())  # stale
+        assert handler._turn_reply_target.get("agent:coder") == "agent:coder"
 
     def test_nested_send_slot_not_clobbered(self):
         """SPEC-12 SP3b-audit BUG#1: a nested same-key send inside the turn
@@ -6074,16 +6074,16 @@ class TestReplyKeyAndTurnSlot:
         handler, crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = ["alpha", "/p"]
-        handler._turn_tokens["special:coder"] = outer = object()
-        handler._turn_reply_target["special:coder"] = "project:alpha"
+        handler._turn_tokens["agent:coder"] = outer = object()
+        handler._turn_reply_target["agent:coder"] = "project:alpha"
         crh.is_streaming.return_value = False
 
         def nested(sk, text, proj):
             handler._turn_tokens[sk] = object()      # newer turn
             handler._turn_reply_target[sk] = sk      # newer private slot
         handler._on_agent_response = nested
-        handler._do_response_complete("special:coder", "outer", complete_token=outer)
-        assert handler._turn_reply_target.get("special:coder") == "special:coder", (
+        handler._do_response_complete("agent:coder", "outer", complete_token=outer)
+        assert handler._turn_reply_target.get("agent:coder") == "agent:coder", (
             "outer finally clobbered the nested turn's slot"
         )
 
@@ -6094,11 +6094,11 @@ class TestReplyKeyAndTurnSlot:
         handler, crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = ["alpha", "/p"]
-        handler._turn_tokens["special:coder"] = object()  # a live token exists
-        handler._turn_reply_target["special:coder"] = "kept"
+        handler._turn_tokens["agent:coder"] = object()  # a live token exists
+        handler._turn_reply_target["agent:coder"] = "kept"
         crh.is_streaming.return_value = False
-        handler._do_response_complete("special:coder", "hi", complete_token=None)
-        assert handler._turn_reply_target.get("special:coder") == "kept"
+        handler._do_response_complete("agent:coder", "hi", complete_token=None)
+        assert handler._turn_reply_target.get("agent:coder") == "kept"
 
     def test_none_token_error_leaves_slot_intact(self):
         """SPEC-12 SP3b-audit BUG#1 residual: a None-token (guard-2 deferred /
@@ -6107,10 +6107,10 @@ class TestReplyKeyAndTurnSlot:
         handler, _crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = ["alpha", "/p"]
-        handler._turn_tokens["special:coder"] = object()
-        handler._turn_reply_target["special:coder"] = "kept"
-        handler._do_error("special:coder", "boom", error_token=None)
-        assert handler._turn_reply_target.get("special:coder") == "kept"
+        handler._turn_tokens["agent:coder"] = object()
+        handler._turn_reply_target["agent:coder"] = "kept"
+        handler._do_error("agent:coder", "boom", error_token=None)
+        assert handler._turn_reply_target.get("agent:coder") == "kept"
 
     def test_no_project_send_clears_stale_slot(self):
         """SPEC-12 SP3a-audit BUG#1: the no-active-project guard POPS a stale
@@ -6120,9 +6120,9 @@ class TestReplyKeyAndTurnSlot:
         handler, _crh, _mc = _make_handler()
         _register_coder(handler)
         handler._active_project = None
-        handler._turn_reply_target["special:coder"] = "stale:private"
-        handler.send_to_special_agent("special:coder", "x")
-        assert "special:coder" not in handler._turn_reply_target
+        handler._turn_reply_target["agent:coder"] = "stale:private"
+        handler.send_to_special_agent("agent:coder", "x")
+        assert "agent:coder" not in handler._turn_reply_target
 
 
 # ═══════════════ SPEC-09 SP2: writer worktree cwd (ARH integration) ═════════
@@ -6186,7 +6186,7 @@ def test_non_writer_no_worktree(tmp_path):
     _sp2_git_repo(project)
 
     assert handler._worktree_for_turn(
-        "special:coder", _sp2_reader_def(), str(project)
+        "agent:coder", _sp2_reader_def(), str(project)
     ) is None
 
 
@@ -6198,28 +6198,28 @@ def test_primary_writer_gets_no_worktree(tmp_path):
     _sp2_git_repo(project)
 
     assert handler._worktree_for_turn(
-        "special:coder", _sp2_writer_def(), str(project)
+        "agent:coder", _sp2_writer_def(), str(project)
     ) is None
 
 
 def test_suffixed_writer_gets_worktree_without_lease(tmp_path):
-    """special:coder-2 writes branch agent/special-coder-2, lease or not."""
+    """agent:coder-2 writes branch agent/agent-coder-2, lease or not."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
     project.mkdir()
     _sp2_git_repo(project)
 
     got = handler._worktree_for_turn(
-        "special:coder-2", _sp2_writer_def(), str(project)
+        "agent:coder-2", _sp2_writer_def(), str(project)
     )
     assert got is not None
-    assert os.path.basename(got) == "special-coder-2"
+    assert os.path.basename(got) == "agent-coder-2"
     assert os.path.isdir(got)
 
 
 def test_first_of_other_role_stays_on_project_root(tmp_path):
     """SPEC-AGENT-ID-AND-ROLES §2.10: only the three _ROOT_KEYS stay on the
-    project root. special:coder-2 is NOT a root key — even as the first
+    project root. agent:coder-2 is NOT a root key — even as the first
     instance of role coder-2 it gets its own worktree."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
@@ -6229,10 +6229,10 @@ def test_first_of_other_role_stays_on_project_root(tmp_path):
     agent.role = "coder-2"
 
     got = handler._worktree_for_turn(
-        "special:coder-2", agent, str(project)
+        "agent:coder-2", agent, str(project)
     )
     assert got is not None
-    assert os.path.basename(got) == "special-coder-2"
+    assert os.path.basename(got) == "agent-coder-2"
 
 
 def test_suffixed_writer_on_non_git_stays_on_project_root(tmp_path):
@@ -6241,7 +6241,7 @@ def test_suffixed_writer_on_non_git_stays_on_project_root(tmp_path):
     project.mkdir()
 
     assert handler._worktree_for_turn(
-        "special:coder-2", _sp2_writer_def(), str(project)
+        "agent:coder-2", _sp2_writer_def(), str(project)
     ) is None
 
 
@@ -6256,7 +6256,7 @@ def test_is_worktree_of_recognizes_worktree(tmp_path):
     from utils.worktree_manager import is_worktree_of
 
     wt = handler._worktree_for_turn(
-        "special:coder-2", _sp2_writer_def(), str(project)
+        "agent:coder-2", _sp2_writer_def(), str(project)
     )
     assert wt is not None
     # the reset recognizer classifies the worktree cwd as a worktree
@@ -6377,14 +6377,14 @@ class TestSpec10AgentCheckpoints:
         rh._states["proj"] = ReviewState(
             project_path=pstr, review_mode="review",
             checkpoint_sha="c" * 40)
-        handler._agents["special:coder"] = agent_def or _sp2_writer_def()
+        handler._agents["agent:coder"] = agent_def or _sp2_writer_def()
         token = object()
-        handler._turn_tokens["special:coder"] = token
-        handler._turn_attr["special:coder"] = ("proj", pstr, pstr)
+        handler._turn_tokens["agent:coder"] = token
+        handler._turn_attr["agent:coder"] = ("proj", pstr, pstr)
         _ = gitpython  # keep import shaped like the SP2 block
         return handler, rh, pstr, token
 
-    def _finish(self, handler, sk="special:coder", token=None):
+    def _finish(self, handler, sk="agent:coder", token=None):
         token = token if token is not None else handler._turn_tokens.get(sk)
         handler._do_response_complete(sk, "done", token)
 
@@ -6398,14 +6398,14 @@ class TestSpec10AgentCheckpoints:
         self._finish(handler, token=token)
 
         assert self._wait(
-            lambda: rh.pending_count("proj", "special:coder") == 1), (
+            lambda: rh.pending_count("proj", "agent:coder") == 1), (
             "no queue entry after completed writer turn")
-        entry = rh._queues["proj"]["special:coder"][0]
-        assert entry.agent_key == "special:coder"
+        entry = rh._queues["proj"]["agent:coder"][0]
+        assert entry.agent_key == "agent:coder"
         assert entry.path_used == pstr
         body = gitpython.Repo(pstr).git.log("--format=%B", "-1")
         assert "[review] agent checkpoint" in body
-        assert "Agent: special:coder" in body.splitlines()
+        assert "Agent: agent:coder" in body.splitlines()
 
     def test_non_writer_no_checkpoint(self, tmp_path):
         """D2b: a reader (can_write=False) never checkpoints.
@@ -6418,7 +6418,7 @@ class TestSpec10AgentCheckpoints:
             tmp_path, agent_def=_sp2_reader_def())
         self._finish(handler, token=token)
         assert not self._wait(
-            lambda: rh.pending_count("proj", "special:coder") != 0,
+            lambda: rh.pending_count("proj", "agent:coder") != 0,
             timeout=1.0,
         ), "can_write guard missing: checkpoint enqueued despite reader agent"
 
@@ -6434,7 +6434,7 @@ class TestSpec10AgentCheckpoints:
             project_path=_pstr, review_mode="off", checkpoint_sha=None)
         self._finish(handler, token=token)
         assert not self._wait(
-            lambda: rh.pending_count("proj", "special:coder") != 0,
+            lambda: rh.pending_count("proj", "agent:coder") != 0,
             timeout=1.0,
         ), "review-mode guard missing: checkpoint enqueued despite mode 'off'"
 
@@ -6450,7 +6450,7 @@ class TestSpec10AgentCheckpoints:
             project_path=_pstr, review_mode="review", checkpoint_sha=None)
         self._finish(handler, token=token)
         assert not self._wait(
-            lambda: rh.pending_count("proj", "special:coder") != 0,
+            lambda: rh.pending_count("proj", "agent:coder") != 0,
             timeout=1.0,
         ), "is_active guard missing: checkpoint enqueued despite inactive session"
 
@@ -6461,16 +6461,16 @@ class TestSpec10AgentCheckpoints:
         (garbage in the dict, unreachable by pending_count)."""
         rh = self._spec10_rh()
         # Bad sha shape (not hex/HEAD) — rejected.
-        rh.enqueue_agent_checkpoint("proj", "special:coder",
+        rh.enqueue_agent_checkpoint("proj", "agent:coder",
                                     "NOT-A-SHA", "/tmp/x")
         # Non-str sha — rejected without raising.
-        rh.enqueue_agent_checkpoint("proj", "special:coder",
+        rh.enqueue_agent_checkpoint("proj", "agent:coder",
                                     12345, "/tmp/x")
         # Empty agent key — rejected.
         rh.enqueue_agent_checkpoint("proj", "", "a" * 40, "/tmp/x")
         # Whitespace-only path — rejected.
-        rh.enqueue_agent_checkpoint("proj", "special:coder", "a" * 40, "   ")
-        assert rh.pending_count("proj", "special:coder") == 0
+        rh.enqueue_agent_checkpoint("proj", "agent:coder", "a" * 40, "   ")
+        assert rh.pending_count("proj", "agent:coder") == 0
         # The pre-fix failure shape: the garbage landed under a None key.
         assert not rh._queues.get("proj", {}).get(None), (
             "garbage enqueued under a None key — validation guard missing")
@@ -6478,10 +6478,10 @@ class TestSpec10AgentCheckpoints:
     def test_malformed_enqueue_valid_sha_accepted(self):
         """SUGGESTION#3 happy path: a well-formed entry still enqueues."""
         rh = self._spec10_rh()
-        rh.enqueue_agent_checkpoint("proj", "special:coder",
+        rh.enqueue_agent_checkpoint("proj", "agent:coder",
                                     "a" * 40, "/tmp/x")
-        assert rh.pending_count("proj", "special:coder") == 1
-        entry = rh._queues["proj"]["special:coder"][0]
+        assert rh.pending_count("proj", "agent:coder") == 1
+        entry = rh._queues["proj"]["agent:coder"][0]
         assert entry.sha == "a" * 40
         assert entry.path_used == "/tmp/x"
 
@@ -6493,10 +6493,10 @@ class TestSpec10AgentCheckpoints:
         fails if the token-freshness guard is removed."""
         handler, rh, _pstr, token = self._wired(tmp_path)
         rotated = object()
-        handler._turn_tokens["special:coder"] = rotated
+        handler._turn_tokens["agent:coder"] = rotated
         self._finish(handler, token=token)  # OLD token
         assert not self._wait(
-            lambda: rh.pending_count("proj", "special:coder") != 0,
+            lambda: rh.pending_count("proj", "agent:coder") != 0,
             timeout=1.0,
         ), "token-freshness guard missing: checkpoint enqueued despite stale token"
 
@@ -6525,8 +6525,8 @@ class TestSpec10AgentCheckpoints:
         from utils.worktree_manager import WorktreeManager
 
         handler, rh, pstr, _token = self._wired(tmp_path)
-        sk = "special:coder"
-        wt = WorktreeManager(pstr).ensure_worktree("special-coder")
+        sk = "agent:coder"
+        wt = WorktreeManager(pstr).ensure_worktree("agent-coder")
         assert wt is not None
         # The snapshot's write cwd is the WORKTREE: in_worktree branch —
         # no project lock; the only serialization is the D8d session lock.
@@ -6574,9 +6574,9 @@ class TestSpec10AgentCheckpoints:
         handler._active_project = ("projB", "/tmp/spec10-other-proj")
         self._finish(handler, token=token)
         assert self._wait(
-            lambda: rh.pending_count("proj", "special:coder") == 1), (
+            lambda: rh.pending_count("proj", "agent:coder") == 1), (
             "checkpoint mis-attributed after tab switch")
-        assert rh.pending_count("projB", "special:coder") == 0
+        assert rh.pending_count("projB", "agent:coder") == 0
 
     def test_stop_all_gates_agent_checkpoint(self, tmp_path):
         """D8b REV 2 gate 1: stop-all in flight pre-thread → abort, counted,
@@ -6589,7 +6589,7 @@ class TestSpec10AgentCheckpoints:
         self._finish(handler, token=token)
         assert self._wait(lambda: handler._stop_all_aborted_checkpoints >= 1), (
             "gate-1 abort was not counted via note_stop_all_aborted")
-        assert rh.pending_count("proj", "special:coder") == 0
+        assert rh.pending_count("proj", "agent:coder") == 0
         assert gitpython.Repo(pstr).head.commit.hexsha == head_before, (
             "gate-1 abort must not commit")
 
@@ -6618,7 +6618,7 @@ class TestSpec10AgentCheckpoints:
                 lambda: handler._stop_all_aborted_checkpoints >= 1), (
                 "gate-2 abort was not counted")
 
-        assert rh.pending_count("proj", "special:coder") == 0
+        assert rh.pending_count("proj", "agent:coder") == 0
         assert gitpython.Repo(pstr).head.commit.hexsha == head_before, (
             "gate-2 must abort BEFORE the commit")
 
@@ -6634,7 +6634,7 @@ class TestSpec10AgentCheckpoints:
 
         with patch("utils.git_ops.commit", side_effect=_boom):
             self._finish(handler, token=token)  # must not raise
-        assert rh.pending_count("proj", "special:coder") == 0
+        assert rh.pending_count("proj", "agent:coder") == 0
         fh = handler._fh if handler._fh is not None else unittest.mock.MagicMock()
         card_calls = [str(c) for c in fh.add_card.call_args_list]
         assert not any("checkpoint" in c.lower() and "fail" in c.lower()
@@ -6649,7 +6649,7 @@ class TestSpec10AgentCheckpoints:
         import git as gitpython
 
         handler, rh, pstr, token = self._wired(tmp_path)
-        sk = "special:coder-2"
+        sk = "agent:coder-2"
 
         # Register the suffixed writer session and bump its turn token.
         handler._agents[sk] = _sp2_writer_def()
@@ -6674,7 +6674,7 @@ class TestSpec10AgentCheckpoints:
         entry = rh._queues["proj"][sk][0]
         assert entry.path_used == wt
         body = gitpython.Repo(wt).git.log("--format=%B", "-1")
-        assert "Agent: special:coder-2" in body.splitlines()
+        assert "Agent: agent:coder-2" in body.splitlines()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -6745,13 +6745,13 @@ class TestProviderFailureCarrier:
 
         rt = AgentRuntime(_make_cfg())
         failure = ProviderFailure(
-            session_key="special:coder", provider="OpenRouter", model="m",
+            session_key="agent:coder", provider="OpenRouter", model="m",
             failure_class=FailureClass.TRANSIENT, status_code=429,
             detail="rate limited", stage="stream", attempt=1, timestamp=0.0,
         )
         rt._terminate_turn(TurnResult(
             status=TurnStatus.FAILED,
-            session_key="special:coder",
+            session_key="agent:coder",
             turn_token=object(),
             error="Provider error (code=429): rate limited",
             metadata={"reason": "stream", "provider_failure": failure},

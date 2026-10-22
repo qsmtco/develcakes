@@ -15,7 +15,7 @@ def test_none_is_no_decision(monkeypatch):
             {"name": "compact", "meaning": "summarize"},
         ]},
         "/tmp",
-        session_key="special:coder",
+        session_key="agent:coder",
     )
     assert result.success is True
     assert result.output == "no decision"
@@ -40,7 +40,7 @@ def test_low_confidence_is_not_decisive(monkeypatch):
             {"name": "compact", "meaning": "summarize"},
         ]},
         "/tmp",
-        session_key="special:coder",
+        session_key="agent:coder",
     )
     assert result.success is True
     assert "decisive: false" in result.output
@@ -67,7 +67,7 @@ def test_high_confidence_is_decisive(monkeypatch):
             {"name": "compact", "meaning": "summarize"},
         ]},
         "/tmp",
-        session_key="special:supervisor",
+        session_key="agent:supervisor",
     )
     assert result.success is True
     assert "decisive: true" in result.output
@@ -83,7 +83,7 @@ def test_one_option_does_not_call(monkeypatch):
         "jev_ask",
         {"state": "fork", "options": [{"name": "clear", "meaning": "wipe"}]},
         "/tmp",
-        session_key="special:coder",
+        session_key="agent:coder",
     )
     assert result.success is False
     assert "2 to 5" in result.error

@@ -147,17 +147,17 @@ def test_agent_id_validation_accepts(mgr):
 def test_worktree_id_for_session_derivation():
     # BLOCKING-2: ':' -> '-' over the whole key (probe J: the raw session
     # key FAILS the class — the substitution is load-bearing).
-    assert WorktreeManager.worktree_id_for_session("special:coder") == (
-        "special-coder"
+    assert WorktreeManager.worktree_id_for_session("agent:coder") == (
+        "agent-coder"
     )
-    assert WorktreeManager.worktree_id_for_session("special:coder-2") == (
-        "special-coder-2"
+    assert WorktreeManager.worktree_id_for_session("agent:coder-2") == (
+        "agent-coder-2"
     )
 
 
 def test_worktree_id_for_session_rejects_dot_segments():
     # RULING-3 is load-bearing AFTER substitution: the class still has '.',
-    # so 'special:..' -> 'special-..' is fine, but a raw '..' key would
+    # so 'agent:..' -> 'agent-..' is fine, but a raw '..' key would
     # derive to itself — refused.
     for bad in ("..", ".", "no-separators/a"):
         with pytest.raises(ValueError):

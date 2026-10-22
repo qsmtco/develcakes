@@ -80,7 +80,7 @@ def resolve_role_from_session(
 ) -> str:
     """Resolve an agent role from a session key.
 
-    For special agents (session_key starts with "special:"), looks up
+    For local agents (session_key starts with "agent:"), looks up
     the SpecialAgentDef via the runtime handler. For gateway agents,
     returns 'unknown'.
 
@@ -88,7 +88,7 @@ def resolve_role_from_session(
         session_key: Agent session key.
         runtime_handler: AgentRuntimeHandler instance (optional).
     """
-    if session_key.startswith("special:"):
+    if session_key.startswith("agent:"):
         if runtime_handler is not None:
             sad = runtime_handler.get_special_agent_def(session_key)
             if sad is not None and hasattr(sad, "role"):

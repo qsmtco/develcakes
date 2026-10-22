@@ -117,7 +117,7 @@ class TestColorStability:
         from agent.special_agents import SpecialAgentDef
         h = AgentListHandler()  # no agent_mgr
         mock_def = SpecialAgentDef(
-            conv_id_prefix="special:mocktest",
+            conv_id_prefix="agent:mocktest",
             display_name="MockTest",
             role="mocktest",
             emoji="🧪",
@@ -153,7 +153,7 @@ class TestColorStability:
         mgr.get_color.return_value = None
         h = AgentListHandler(agent_mgr=mgr)
         mock_def = SpecialAgentDef(
-            conv_id_prefix="special:fallthrough",
+            conv_id_prefix="agent:fallthrough",
             display_name="FallThrough",
             role="fallthrough_role",
             emoji="🧪",

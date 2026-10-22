@@ -39,7 +39,7 @@ def _repo(tmp_path):
 def test_record_then_live_drops_when_the_file_changes(tmp_path):
     _repo(tmp_path)
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "special:coder")
+    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "agent:coder")
     assert load_live_facts(str(tmp_path))[0]["text"] == "a.py: syntax passed"
     (tmp_path / "a.py").write_text("x = 2\n")
     assert load_live_facts(str(tmp_path)) == []
@@ -49,7 +49,7 @@ def test_record_then_live_drops_when_the_file_changes(tmp_path):
 def test_git_failure_keeps_the_fact(tmp_path, monkeypatch):
     _repo(tmp_path)
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "keep me", ["a.py"], sha, "special:coder")
+    record_fact(str(tmp_path), "keep me", ["a.py"], sha, "agent:coder")
     (tmp_path / "a.py").write_text("x = 9\n")
 
     def _down(*_a, **_k):
@@ -65,7 +65,7 @@ def test_missing_repo_does_not_write(tmp_path):
         tier="syntax", tool="write_file", file="a.py",
         passed=True, detail="ok", output="", duration_ms=1,
     )
-    record_enforcement_fact(str(tmp_path), "special:coder", "a.py", [check])
+    record_enforcement_fact(str(tmp_path), "agent:coder", "a.py", [check])
     assert load_facts(str(tmp_path)) == []
     assert not (tmp_path / ".crabcakes" / "facts.json").exists()
 
@@ -77,7 +77,7 @@ def test_corrupt_facts_are_replaced_on_the_next_record(tmp_path):
     (crab / "facts.json").write_text("{not json")
     assert load_facts(str(tmp_path)) == []
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "recovered", ["a.py"], sha, "special:coder")
+    record_fact(str(tmp_path), "recovered", ["a.py"], sha, "agent:coder")
     rows = load_facts(str(tmp_path))
     assert [row["text"] for row in rows] == ["recovered"]
 
@@ -87,7 +87,7 @@ def test_project_memory_is_live_facts_not_the_diary(tmp_path):
     init_project_config(str(tmp_path), "p")
     save_project_context(str(tmp_path), "## 2026-10-11 — Diary heading\nDIARY_ONLY_MARKER\n")
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "special:coder")
+    record_fact(str(tmp_path), "a.py: syntax passed", ["a.py"], sha, "agent:coder")
     data = build_awareness_dict(str(tmp_path))
     assert "a.py: syntax passed" in data["PROJECT_MEMORY"]
     assert 'source="facts.json"' in data["PROJECT_MEMORY"]
@@ -98,7 +98,7 @@ def test_project_memory_is_live_facts_not_the_diary(tmp_path):
 def test_enforced_edit_appends_a_fact(tmp_path):
     _repo(tmp_path)
     rt = AgentRuntime(_make_cfg())
-    sk = "special:fact"
+    sk = "agent:fact"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True
     conv = rt.get_conversation(sk)
@@ -178,8 +178,8 @@ def test_no_new_tool_name():
 def test_empty_fact_text_does_not_write(tmp_path):
     _repo(tmp_path)
     sha = get_head_sha(str(tmp_path)).sha
-    record_fact(str(tmp_path), "  \n  ", ["a.py"], sha, "special:coder")
-    record_fact(str(tmp_path), "real", [], sha, "special:coder")
-    record_fact(str(tmp_path), "real", ["a.py"], "", "special:coder")
+    record_fact(str(tmp_path), "  \n  ", ["a.py"], sha, "agent:coder")
+    record_fact(str(tmp_path), "real", [], sha, "agent:coder")
+    record_fact(str(tmp_path), "real", ["a.py"], "", "agent:coder")
     assert load_facts(str(tmp_path)) == []
     assert not (tmp_path / ".crabcakes" / "facts.json").exists()

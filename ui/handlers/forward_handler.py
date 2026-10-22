@@ -187,11 +187,11 @@ class ForwardHandler:
                 break
 
         # Route message to special or gateway agent
-        is_special = (
+        is_local = (
             self._agent_runtime_handler is not None
             and target_session_key in self._agent_runtime_handler.get_special_agents()
         )
-        if is_special:
+        if is_local:
             target_name = self._agent_runtime_handler.get_special_agents()[target_session_key]
             target_tab_exists = self._ensure_target_tab(
                 target_session_key, target_name, target_tab_exists)
@@ -209,7 +209,7 @@ class ForwardHandler:
                 target_session_key, target_name, target_tab_exists)
             # Local path only (SPEC-05 R1); receiver no-ops for
             # unregistered/remote keys. Reply target = the target's own tab
-            # (same private-view rule as the is_special branch).
+            # (same private-view rule as the is_local branch).
             self._agent_runtime_handler.send_to_special_agent(
                 target_session_key, text, reply_target=target_session_key)
 

@@ -32,7 +32,7 @@ from transport.telegram import TelegramAuthError, TelegramTransport, redact_log_
 
 _logger = logging.getLogger(__name__)
 
-SUPERVISOR_KEY = "special:supervisor"
+SUPERVISOR_KEY = "agent:supervisor"
 
 # SP4: the exact word a phone user types to confirm a destructive remote
 # stop-all (spec §SP4 "confirmation asymmetry" — the desk dialog is enough,
@@ -156,7 +156,7 @@ class TelegramBridgeHandler:
 
     Args:
         arh: the AgentRuntimeHandler (or None). Used for
-            send_to_special_agent("special:supervisor", text).
+            send_to_special_agent("agent:supervisor", text).
         transport_factory: (**kwargs) -> TelegramTransport-like. Injected so
             tests use a fake. Production default constructs the real transport.
         load_config: () -> {bot_token, chat_id, paired_handle}. Injected

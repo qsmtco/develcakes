@@ -30,7 +30,7 @@ class TestEnforcementGating:
     def test_si_enforcement_false_skips_check(self):
         """Agent with enforcement: false should not trigger enforcement."""
         agent = SpecialAgentDef(
-            conv_id_prefix="special:test",
+            conv_id_prefix="agent:test",
             display_name="Test",
             role="test",
             emoji="🔬",
@@ -59,7 +59,7 @@ class TestEnforcementGating:
     def test_si_enforcement_none_uses_global(self):
         """Agent with no enforcement override uses global setting."""
         agent = SpecialAgentDef(
-            conv_id_prefix="special:test",
+            conv_id_prefix="agent:test",
             display_name="Test",
             role="test",
             emoji="🔬",
@@ -290,8 +290,8 @@ class TestSilentExecApprovalLookup:
         from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
 
         handler = AgentRuntimeHandler(MagicMock(), MagicMock())
-        handler._agents["special:coder"] = SpecialAgentDef(
-            conv_id_prefix="special:coder",
+        handler._agents["agent:coder"] = SpecialAgentDef(
+            conv_id_prefix="agent:coder",
             display_name="Coder",
             role="coder",
             emoji="🛠️",
@@ -305,11 +305,11 @@ class TestSilentExecApprovalLookup:
         handler.set_check_exec_auto_accept_callback(lambda: "silent")
 
         handler._do_approval_needed(
-            "special:coder", "exec_command", {"command": "pytest"},
+            "agent:coder", "exec_command", {"command": "pytest"},
         )
 
         runtime.approve_exec.assert_called_once_with(
-            "special:coder", "exec_command", {"command": "pytest"}, True,
+            "agent:coder", "exec_command", {"command": "pytest"}, True,
         )
         handler._fh.add_card.assert_not_called()
         assert handler._pending_approvals == {}

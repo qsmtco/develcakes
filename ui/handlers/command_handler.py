@@ -149,7 +149,7 @@ class CommandHandler:
     def set_special_agents(self, agents: dict[str, str]) -> None:
         """Set special agent registry for @mention resolution.
         Called by window.py after AgentRuntimeHandler is created.
-        Dict format: {session_key: display_name} e.g. {"special:coder": "Coder"}"""
+        Dict format: {session_key: display_name} e.g. {"agent:coder": "Coder"}"""
         self._special_agents = agents
 
     def register_command(

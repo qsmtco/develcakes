@@ -160,12 +160,12 @@ def test_self_edit_writes_the_in_memory_conversation_back(tmp_path, monkeypatch)
     rt = SimpleNamespace(get_conversation=lambda sk: conv, is_loop_active=lambda sk: True)
     handler = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
     handler._agents = {
-        "special:supervisor": SimpleNamespace(display_name="Supervisor"),
+        "agent:supervisor": SimpleNamespace(display_name="Supervisor"),
     }
     handler._runtimes = {"Supervisor": rt}
 
     result = handler.edit_conversation(
-        "special:supervisor",
+        "agent:supervisor",
         {"drop": [2], "keep": None},
         protect_open_turn=True,
     )
@@ -177,7 +177,7 @@ def test_self_edit_writes_the_in_memory_conversation_back(tmp_path, monkeypatch)
     assert [m.content for m in conv.messages] == ["use sqlite", "trim your context", ""]
     assert conv.messages[-1].tool_calls[0].tool_name == "agent_context"
 
-    path = tmp_path / "conversations" / "special:supervisor.json"
+    path = tmp_path / "conversations" / "agent:supervisor.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert [m["content"] for m in saved["messages"]] == ["use sqlite", "trim your context"]
 
@@ -191,7 +191,7 @@ def test_persist_restores_the_live_list_when_the_write_fails(tmp_path, monkeypat
 
     monkeypatch.setattr("agent.persistence.save_conversation_to_disk", _boom)
     try:
-        persist_conversation(conv, "special:supervisor")
+        persist_conversation(conv, "agent:supervisor")
         raised = False
     except OSError:
         raised = True

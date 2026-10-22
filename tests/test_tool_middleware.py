@@ -212,9 +212,9 @@ class TestStuckDetectionMiddleware:
         pending: dict[str, list[str]] = {}
         stuck_fn = MagicMock(return_value="stuck msg")
         mw = StuckDetectionMiddleware(stuck_fn, pending)
-        ctx = _make_context(session_key="special:coder")
+        ctx = _make_context(session_key="agent:coder")
         mw("write_file", {"path": "f.py"}, ctx, _ok_executor)
-        assert "special:coder" in pending
+        assert "agent:coder" in pending
         assert "test-session" not in pending
 
 
@@ -410,7 +410,7 @@ class TestIntegration:
         ])
 
         ctx = _make_context(
-            session_key="special:coder",
+            session_key="agent:coder",
             project_path="/proj",
             iteration=0,
             enforcement_config=MagicMock(enabled=True),
@@ -446,7 +446,7 @@ class TestIntegration:
         ])
 
         ctx = _make_context(
-            session_key="special:coder",
+            session_key="agent:coder",
             project_path="/proj",
             iteration=3,
             enforcement_config=MagicMock(enabled=True),
@@ -457,10 +457,10 @@ class TestIntegration:
 
         # Stuck check was called with the wired args
         stuck_check_fn.assert_called_once_with(
-            "special:coder", "write_file", {"path": "/proj/y.py"}, 3
+            "agent:coder", "write_file", {"path": "/proj/y.py"}, 3
         )
         # Message landed in pending, keyed by session
-        assert pending_messages["special:coder"] == [stuck_msg]
+        assert pending_messages["agent:coder"] == [stuck_msg]
 
     def test_run_loop_invokes_tool_chain(self, tmp_path):
         """Regression guard: _run_loop must call self._tool_chain.run(...).

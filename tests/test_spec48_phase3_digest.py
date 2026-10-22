@@ -320,8 +320,8 @@ class TestDigestPersistence:
             attempts_rejected=["FAILED build"],
             token_estimate=123,
         )
-        save_conversation_to_disk(conv, "special:digest")
-        loaded, data = load_conversation_from_disk("special:digest")
+        save_conversation_to_disk(conv, "agent:digest")
+        loaded, data = load_conversation_from_disk("agent:digest")
         assert loaded is not None
         assert data["digest"]["arc"] == "fix auth"
         assert loaded.digest is not None
@@ -341,8 +341,8 @@ class TestDigestPersistence:
 
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         conv.digest = ConversationDigest()  # empty
-        save_conversation_to_disk(conv, "special:emptydigest")
-        loaded, _data = load_conversation_from_disk("special:emptydigest")
+        save_conversation_to_disk(conv, "agent:emptydigest")
+        loaded, _data = load_conversation_from_disk("agent:emptydigest")
         assert loaded is not None
         assert loaded.digest is None
 
@@ -354,8 +354,8 @@ class TestDigestPersistence:
         )
 
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
-        save_conversation_to_disk(conv, "special:nodigest")
-        loaded, data = load_conversation_from_disk("special:nodigest")
+        save_conversation_to_disk(conv, "agent:nodigest")
+        loaded, data = load_conversation_from_disk("agent:nodigest")
         assert loaded is not None
         assert loaded.digest is None
         assert data.get("digest") is None

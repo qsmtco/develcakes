@@ -11,7 +11,7 @@ from tests.test_agent_runtime import _make_cfg
 
 def _runtime(project: str):
     rt = AgentRuntime(_make_cfg())
-    sk = "special:pin"
+    sk = "agent:pin"
     rt.create_conversation("Coder", sk, project, defer_prompt_build=True)
     return rt, sk, rt.get_conversation(sk)
 

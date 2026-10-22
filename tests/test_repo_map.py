@@ -62,7 +62,7 @@ def test_no_python_files_yields_empty_and_wire_is_unchanged(tmp_path):
     conv = Conversation(agent_name="Coder", system_prompt="SYS", project_path=str(tmp_path))
     conv.add_user_message("fix bar")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:empty"
+    sk = "agent:empty"
     rt._conversations[sk] = conv
     with patch("agent.repo_map.build_repo_map", return_value="") as built:
         wired = rt._messages_for_model(sk, conv, 128_000)
@@ -77,7 +77,7 @@ def test_wire_prefixes_the_map_without_touching_system_prompt(tmp_path):
     conv = Conversation(agent_name="Coder", system_prompt="SYS", project_path=str(tmp_path))
     conv.add_user_message("fix bar")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:map"
+    sk = "agent:map"
     rt._conversations[sk] = conv
     with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
         wired = rt._messages_for_model(sk, conv, 128_000)
@@ -97,7 +97,7 @@ def test_coder_role_wire_omits_the_repo_map(tmp_path):
     )
     conv.add_user_message("fix bar")
     rt = AgentRuntime(_make_cfg())
-    sk = "special:coder-map"
+    sk = "agent:coder-map"
     rt._conversations[sk] = conv
     with patch("agent.repo_map.build_repo_map", return_value="MAPBLOCK"):
         wired = rt._messages_for_model(sk, conv, 128_000)
@@ -109,7 +109,7 @@ def test_coder_role_wire_omits_the_repo_map(tmp_path):
 def test_two_iterations_call_build_repo_map_once(tmp_path):
     _fixture(tmp_path)
     rt = AgentRuntime(_make_cfg())
-    sk = "special:once"
+    sk = "agent:once"
     rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
     rt._running = True
     calls = {"n": 0, "map": 0}

@@ -192,7 +192,7 @@ def _stalled_project(tmp_path, *, app=True):
     if app:
         _fake_app(tmp_path, project)
     _backdate(project, now - 7200)
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("user", "fix it", now - 4000),
                          _msg("assistant",
                               "Confirmed the bug. Writing the red tests first.",
@@ -308,7 +308,7 @@ def test_exit_code_healthy_0(tmp_path, capsys):
     config = _config_dir(tmp_path)
     _fake_app(tmp_path, project)
     now = time.time()
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", "run the suite", now - 200),
                          _msg("tool", "1 passed", now - 100)],
                         mtime=now - 100)
@@ -378,7 +378,7 @@ def test_readonly_without_auto_resume_flag(tmp_path, monkeypatch, capsys):
 
     payload = json.loads(captured.out)
     assert {s["class"] for s in payload["stalls"]} == {"turn_stalled"}
-    assert "special:coder" in json.dumps(payload["stalls"])
+    assert "agent:coder" in json.dumps(payload["stalls"])
     assert payload["alert"] is False  # no dedupe wiring in Phase 1b
 
     cache_root = str(status_report.cache_dir())
@@ -411,7 +411,7 @@ def test_full_flag_raises_message_cap_and_never_leaks_tool_args(tmp_path, capsys
     command = f"cd /tmp && export TOKEN={SECRET} && rm -rf /"
     body = "M" * 1500 + "P" * 1000 + SECRET
     now = time.time()
-    _write_conversation(config, "special:coder", project,
+    _write_conversation(config, "agent:coder", project,
                         [_msg("assistant", body, now - 30,
                               tool_calls=[_tool_call("exec_command",
                                                      {"command": command})])],

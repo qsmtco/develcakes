@@ -778,20 +778,20 @@ class TestInlineMentionRouting:
         """Inline @Coder hello from project tab → routes to AgentRuntimeHandler."""
         from models.command import MentionResolution
         resolution = MentionResolution(
-            target_session_key="special:coder",
+            target_session_key="agent:coder",
             clean_text="hello",
         )
         handler, mc, gw, mock_arh = self._make_handler_with_inline_mention(
             "@Coder hello",
             resolution,
-            special_agents={"special:coder": "Coder"},
+            special_agents={"agent:coder": "Coder"},
         )
 
         handler.on_send()
 
         # Must route through AgentRuntimeHandler
         mock_arh.send_to_special_agent.assert_called_once_with(
-            "special:coder", "hello", reply_target=None)
+            "agent:coder", "hello", reply_target=None)
         # Receiver spy got nothing — the send went via the injected ARH mock only
         assert gw.get_sent() == []
 
@@ -806,7 +806,7 @@ class TestInlineMentionRouting:
         handler, mc, gw, mock_arh = self._make_handler_with_inline_mention(
             "@QTR status",
             resolution,
-            special_agents={"special:coder": "Coder"},  # qtr NOT in special agents
+            special_agents={"agent:coder": "Coder"},  # qtr NOT in special agents
         )
 
         handler.on_send()
@@ -822,14 +822,14 @@ class TestInlineMentionRouting:
         (special agent direct; unregistered key via the receiver's no-op)."""
         from models.command import MentionResolution
         resolution = MentionResolution(
-            broadcast_targets=["special:coder", "agent:qtr"],
+            broadcast_targets=["agent:coder", "agent:qtr"],
             clean_text="hello",
             is_broadcast=True,
         )
         handler, mc, gw, mock_arh = self._make_handler_with_inline_mention(
             "@all hello",
             resolution,
-            special_agents={"special:coder": "Coder"},
+            special_agents={"agent:coder": "Coder"},
         )
 
         handler.on_send()
@@ -841,7 +841,7 @@ class TestInlineMentionRouting:
         # (reply_target=None → R7 routes the reply) — honest pin of the
         # shipped shape (B2 targets the normal-send fan-out only).
         mock_arh.send_to_special_agent.assert_any_call(
-            "special:coder", "hello", reply_target=None)
+            "agent:coder", "hello", reply_target=None)
         mock_arh.send_to_special_agent.assert_any_call(
             "agent:qtr", "hello", reply_target=None)
         assert gw.get_sent() == []
@@ -850,25 +850,25 @@ class TestInlineMentionRouting:
         """Regression guard: inline @Coder must NOT call gw.send_message at all."""
         from models.command import MentionResolution
         resolution = MentionResolution(
-            target_session_key="special:coder",
+            target_session_key="agent:coder",
             clean_text="hello",
         )
         handler, mc, gw, mock_arh = self._make_handler_with_inline_mention(
             "@Coder hello",
             resolution,
-            special_agents={"special:coder": "Coder"},
+            special_agents={"agent:coder": "Coder"},
         )
 
         handler.on_send()
 
-        # Explicit regression check: gateway was never called with special:coder
+        # Explicit regression check: gateway was never called with agent:coder
         for sk, text in gw.get_sent():
-            assert sk != "special:coder", (
-                f"gw.send_message called with special:coder — should route via AgentRuntimeHandler instead"
+            assert sk != "agent:coder", (
+                f"gw.send_message called with agent:coder — should route via AgentRuntimeHandler instead"
             )
         # And runtime was called
         mock_arh.send_to_special_agent.assert_called_once_with(
-            "special:coder", "hello", reply_target=None)
+            "agent:coder", "hello", reply_target=None)
 
 
 # ── Tests: Slash commands in special agent tabs (BUG: /clear unreachable) ─────
@@ -886,13 +886,13 @@ class TestSlashCommandInSpecialAgentTab:
     def _make_special_agent_handler(self, input_text, command_result):
         """Create a ChatHandler wired for a special agent tab with a command handler.
 
-        - session_key = "special:supervisor" (triggers special-agent branch)
+        - session_key = "agent:supervisor" (triggers special-agent branch)
         - command handler returns the given CommandResult from process_input
         - agent_runtime_handler is mocked with supervisor as a special agent
         """
         from models.command import CommandResult
         gw = FakeGatewayClient(connected=True)
-        mc = FakeMainContent(session_key="special:supervisor", input_text=input_text)
+        mc = FakeMainContent(session_key="agent:supervisor", input_text=input_text)
         handler = make_handler(mc, gw)
 
         # Mock command handler
@@ -907,8 +907,8 @@ class TestSlashCommandInSpecialAgentTab:
         # Mock agent runtime handler with supervisor and coder registered
         mock_arh = MagicMock()
         mock_arh.get_special_agents.return_value = {
-            "special:supervisor": "Supervisor",
-            "special:coder": "Coder",
+            "agent:supervisor": "Supervisor",
+            "agent:coder": "Coder",
         }
         handler.set_agent_runtime_handler(mock_arh)
 
@@ -935,7 +935,7 @@ class TestSlashCommandInSpecialAgentTab:
         handler.on_send()
 
         # Command handler MUST have been called with the supervisor session key
-        mock_cmd.process_input.assert_called_once_with("special:supervisor", "/clear")
+        mock_cmd.process_input.assert_called_once_with("agent:supervisor", "/clear")
         # Agent runtime MUST NOT have received the literal /clear text
         mock_arh.send_to_special_agent.assert_not_called()
         # Input buffer MUST be cleared
@@ -955,10 +955,10 @@ class TestSlashCommandInSpecialAgentTab:
         handler.on_send()
 
         # Command handler was consulted but didn't handle it
-        mock_cmd.process_input.assert_called_once_with("special:supervisor", "hello supervisor")
+        mock_cmd.process_input.assert_called_once_with("agent:supervisor", "hello supervisor")
         # Agent runtime received the text via the special-agent branch
         mock_arh.send_to_special_agent.assert_called_once_with(
-            "special:supervisor", "hello supervisor", reply_target=None)
+            "agent:supervisor", "hello supervisor", reply_target=None)
 
     def test_slash_clear_does_not_send_literal_text_to_agent(self):
         """REGRESSION GUARD: Under no circumstances should the literal string
@@ -988,7 +988,7 @@ class TestSlashCommandInSpecialAgentTab:
         from models.command import CommandResult
         result = CommandResult(
             handled=True,
-            forward_to="special:coder",
+            forward_to="agent:coder",
             forward_text="do the thing",
         )
         handler, mc, mock_arh, mock_cmd = self._make_special_agent_handler(
@@ -999,15 +999,15 @@ class TestSlashCommandInSpecialAgentTab:
 
         # Command handler was called
         mock_cmd.process_input.assert_called_once()
-        # The forward target (special:coder) was called via send_to_special_agent
+        # The forward target (agent:coder) was called via send_to_special_agent
         # with the extracted payload, not the raw /ask text — and the reply is
         # routed PRIVATELY (reply_target=target, SPEC-12 BUG#11: /ask's reply
         # renders in the agent's own tab, not the project surface).
         mock_arh.send_to_special_agent.assert_called_once_with(
-            "special:coder", "do the thing", reply_target="special:coder")
+            "agent:coder", "do the thing", reply_target="agent:coder")
         # SP4a-audit BUG#1: the private tab is OPENED with the BUG#20c label
-        # ("special:" prefix stripped). Falsifier: drop create_chat_tab → RED.
-        assert mc.created_tabs == [("special:coder", "coder")], mc.created_tabs
+        # ("agent:" prefix stripped). Falsifier: drop create_chat_tab → RED.
+        assert mc.created_tabs == [("agent:coder", "coder")], mc.created_tabs
 
     def test_forward_command_does_not_recreate_existing_tab(self):
         """SP4a-audit BUG#1 residual (idempotency): a second /ask to the same
@@ -1018,20 +1018,20 @@ class TestSlashCommandInSpecialAgentTab:
         from models.command import CommandResult
         result = CommandResult(
             handled=True,
-            forward_to="special:coder",
+            forward_to="agent:coder",
             forward_text="do the thing",
         )
         handler, mc, _mock_arh, mock_cmd = self._make_special_agent_handler(
             "/ask @Coder \"do the thing\"", result,
         )
         handler.on_send()
-        assert mc.created_tabs == [("special:coder", "coder")]
+        assert mc.created_tabs == [("agent:coder", "coder")]
 
         # Refill and re-drive — the branch must see the tab already exists.
         mock_cmd.process_input.return_value = result
         mc._input_buffer.set_text('/ask @Coder "again"')
         handler.on_send()
-        assert mc.created_tabs == [("special:coder", "coder")], (
+        assert mc.created_tabs == [("agent:coder", "coder")], (
             "an existing private tab must not be recreated"
         )
 
@@ -1066,11 +1066,11 @@ class TestSpec12ReplyTargetsAndMountKey:
     def test_special_agent_private_tab_send_stays_private(self):
         """B4/BUG#19: an agent-keyed tab's send passes reply_target=session_key;
         when no tab resolves, it passes None (project routing via R7)."""
-        mc = FakeMainContent(session_key="special:coder", input_text="hi")
+        mc = FakeMainContent(session_key="agent:coder", input_text="hi")
         gw = FakeGatewayClient()
         handler = make_handler(mc, gw)
         mock_arh = MagicMock()
-        mock_arh.get_special_agents.return_value = {"special:coder": "Coder"}
+        mock_arh.get_special_agents.return_value = {"agent:coder": "Coder"}
         handler.set_agent_runtime_handler(mock_arh)
         handler.set_chat_render_handler(MagicMock())
 
@@ -1083,9 +1083,9 @@ class TestSpec12ReplyTargetsAndMountKey:
         assert targets() == [None]
 
         mc._input_buffer.set_text("hi again")    # on_send cleared the buffer
-        mc._tab_sessions = {0: "special:coder"}  # the private tab EXISTS
+        mc._tab_sessions = {0: "agent:coder"}  # the private tab EXISTS
         handler.on_send()
-        assert targets() == [None, "special:coder"]  # BUG#19: stays private
+        assert targets() == [None, "agent:coder"]  # BUG#19: stays private
 
     def test_render_async_call_sites_pass_mount_key(self):
         """SP4c: the normal-send echo renders with mount_key == the display
@@ -1139,7 +1139,7 @@ class TestMountKeyPerSite:
                              input_text='/ask @Coder "hi"')
         gw = FakeGatewayClient()
         handler = make_handler(mc, gw)
-        result = CommandResult(handled=True, forward_to="special:coder",
+        result = CommandResult(handled=True, forward_to="agent:coder",
                                forward_text="hi")
         mock_cmd = MagicMock()
         mock_cmd.process_input.return_value = result
@@ -1148,7 +1148,7 @@ class TestMountKeyPerSite:
 
         handler.on_send()
 
-        assert self._render_kwargs(handler).get("mount_key") == "special:coder"
+        assert self._render_kwargs(handler).get("mount_key") == "agent:coder"
 
     def test_mount_key_broadcast_command_echo_is_session_key(self):
         """Site 2 (:279): the /ask-all broadcast-command echo rides the
@@ -1172,17 +1172,17 @@ class TestMountKeyPerSite:
     def test_mount_key_special_agent_echo_is_session_key(self):
         """Site 3 (:317): the special-agent-tab echo rides the agent display
         key (session_key — the private tab's own surface)."""
-        mc = FakeMainContent(session_key="special:coder", input_text="hi")
+        mc = FakeMainContent(session_key="agent:coder", input_text="hi")
         gw = FakeGatewayClient()
         handler = make_handler(mc, gw)
         mock_arh = MagicMock()
-        mock_arh.get_special_agents.return_value = {"special:coder": "Coder"}
+        mock_arh.get_special_agents.return_value = {"agent:coder": "Coder"}
         handler.set_agent_runtime_handler(mock_arh)
         handler.set_chat_render_handler(MagicMock())
 
         handler.on_send()
 
-        assert self._render_kwargs(handler).get("mount_key") == "special:coder"
+        assert self._render_kwargs(handler).get("mount_key") == "agent:coder"
 
     def test_mount_key_inline_solo_echo_is_session_key(self):
         """Site 4 (:367): the inline @solo echo rides the project display key
@@ -1194,7 +1194,7 @@ class TestMountKeyPerSite:
         mock_cmd = MagicMock()
         mock_cmd.process_input.return_value = MagicMock(handled=False)
         mock_cmd.resolve_inline_mention.return_value = MentionResolution(
-            target_session_key="special:coder", clean_text="hi")
+            target_session_key="agent:coder", clean_text="hi")
         handler.set_command_handler(mock_cmd)
         handler.set_chat_render_handler(MagicMock())
 

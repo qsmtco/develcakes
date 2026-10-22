@@ -707,6 +707,11 @@ class AgentRuntime:
         # FIX-CLEAR-ASK-RACE: sessions with an in-flight _run_loop. Used by
         # is_loop_active() and maintained by _run_loop's try/finally.
         self._active_loops: set[str] = set()
+        # SPEC-WIRE-CONTEXT-PRESSURE §2.1: one loop per session. _inbox is
+        # text queued for the running loop; _stranded is text that missed the
+        # loop and waits for the next turn. Both guarded by self._lock.
+        self._inbox: dict[str, list[str]] = {}
+        self._stranded: dict[str, list[str]] = {}
 
         # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2
         # Edit B). All four attributes are read and written under
@@ -1326,7 +1331,7 @@ class AgentRuntime:
             if conv_now is conv and not conv_now.system_prompt:
                 conv_now.system_prompt = new_prompt
                 conv_now._system_prompt_fingerprint = fingerprint
-                conv_now._token_estimate_cache = None
+                conv_now.invalidate_token_estimate()
                 logger.info("System prompt built for %s in background thread (len=%d)",
                             session_key, len(new_prompt))
 
@@ -1429,7 +1434,7 @@ class AgentRuntime:
             return
         conv.system_prompt = new_prompt
         conv._system_prompt_fingerprint = fingerprint
-        conv._token_estimate_cache = None
+        conv.invalidate_token_estimate()
 
     def get_conversation(self, session_key: str) -> Any | None:  # Conversation | None
         """Get a conversation by session key."""
@@ -1439,16 +1444,10 @@ class AgentRuntime:
         """
         Send a user message. Runs the tool loop in a background thread.
 
-        Loop:
-        0. Run the optional `prepare` callback (handler-supplied turn
-           preparation) — Phase 4 Part B: this runs on the loop thread so
-           the GTK main thread never blocks on conversation disk I/O.
-        1. Append user message
-        2. Build API messages (system + history)
-        3. Call LLM API
-        4. If tool calls: execute (with approval gating for exec_command)
-        5. If text: fire on_response_complete
-        6. Check cost_limit / step_limit
+        One loop per session key (SPEC-WIRE-CONTEXT-PRESSURE §2.1). If this
+        session's loop is already running, `text` is queued to `_inbox` and
+        no second thread starts and no turn token rotates. Otherwise the
+        session is claimed and a new loop starts.
 
         Args:
             prepare: Optional zero-argument callable run on the loop thread
@@ -1457,21 +1456,72 @@ class AgentRuntime:
                 exception it raises terminates the turn as FAILED with
                 metadata reason "prepare_failed".
 
-        Option C+ lazy reconciliation: the runtime does not know the active
-        project. The handler (AgentRuntimeHandler.send_to_special_agent)
-        supplies `prepare`, which calls _rebuild_conversation_context BEFORE
-        the loop body reads the conversation. If the handler is bypassed
-        (tests, future callers), the conversation may have a stale
-        project_path. In that case the FIRST call from a cold context fires
-        _rebuild_conversation_context here — the short-circuit in that
-        method makes this O(1) when already in sync.
+        Return value stays None; direct callers that need the claim result
+        use `begin_send` before `start_claimed_loop`.
         """
-        t = threading.Thread(
-            target=self._run_loop,
-            args=(session_key, text, self._turn_token, prepare),
-            daemon=True,
-        )
-        t.start()
+        token = self._turn_token
+        if not self.begin_send(session_key, text):
+            return
+        self.start_claimed_loop(session_key, text, token, prepare)
+
+    def begin_send(self, session_key: str, text: str) -> bool:
+        """Return True when the caller must start the loop.
+
+        On True, `session_key` is already in `_active_loops`. Any stranded
+        texts are moved to `_inbox` so the loop drains them before it appends
+        `text`. On False, `text` (and any stranded texts) were appended to the
+        running loop's inbox. The caller must not publish a turn token.
+        """
+        with self._lock:
+            prior = self._stranded.pop(session_key, [])
+            if session_key in self._active_loops:
+                bucket = self._inbox.setdefault(session_key, [])
+                bucket.extend(prior)
+                bucket.append(text)
+                return False
+            self._active_loops.add(session_key)
+            if prior:
+                self._inbox[session_key] = prior
+            return True
+
+    def take_stranded(self, session_key: str) -> list[str]:
+        """Pop texts that missed the last loop. Empty when there are none."""
+        with self._lock:
+            return self._stranded.pop(session_key, [])
+
+    def start_claimed_loop(
+        self,
+        session_key: str,
+        text: str,
+        turn_token: object,
+        prepare: Callable[[], None] | None = None,
+    ) -> None:
+        try:
+            threading.Thread(
+                target=self._run_loop,
+                args=(session_key, text, turn_token, prepare),
+                daemon=True,
+            ).start()
+        except Exception:
+            with self._lock:
+                self._active_loops.discard(session_key)
+                self._inbox.pop(session_key, None)
+                self._stranded.pop(session_key, None)
+            raise
+
+    def _drain_inbox(self, session_key: str, conv) -> int:
+        with self._lock:
+            pending = self._inbox.pop(session_key, [])
+        for item in pending:
+            conv.add_user_message(item)
+        return len(pending)
+
+    def _finish_loop(self, session_key: str) -> None:
+        with self._lock:
+            pending = self._inbox.pop(session_key, [])
+            self._active_loops.discard(session_key)
+            if pending:
+                self._stranded[session_key] = pending
 
     def cancel(self, session_key: str) -> None:
         """Cancel an in-progress conversation.
@@ -1504,6 +1554,11 @@ class AgentRuntime:
             self._cancelled_epochs.add(session_key)
             # Signal the running thread to break out of the loop immediately
             self._cancel_requested = True
+            # SPEC-WIRE-CONTEXT-PRESSURE §2.1: queued and stranded text is
+            # dropped on cancel; the loop's finally is what releases the
+            # active-loop claim, so we do not discard it here.
+            self._inbox.pop(session_key, None)
+            self._stranded.pop(session_key, None)
             for sk in list(self._pending_approvals):
                 if sk.startswith(session_key):
                     ev = self._pending_approvals[sk]["event"]
@@ -1909,7 +1964,10 @@ class AgentRuntime:
                     # fingerprints — a new turn must not carry the old
                     # turn's served bodies.
                     self._hot_windows.pop(session_key, None)
-                # Step 1: add user message
+                # Step 1: add user message. Drain stranded texts from a previous
+                # turn first — they are older than `text` (SPEC-WIRE-CONTEXT-
+                # PRESSURE §2.1). begin_send parked them for this new turn.
+                self._drain_inbox(session_key, conv)
                 conv.add_user_message(text)
                 logger.debug("[tool-loop] sk=%s starting user_msg_len=%d model=%s",
                              session_key, len(text), conv.model or self._config.default_model)
@@ -1956,6 +2014,11 @@ class AgentRuntime:
                     iteration += 1
                     logger.debug("[tool-loop] sk=%s iteration=%d/%d", session_key, iteration, max_iter)
 
+                    # Drain text that queued during the previous iteration. Same
+                    # turn token; prepare is not called again. add_user_message runs
+                    # outside the lock (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
+                    self._drain_inbox(session_key, conv)
+
                     # §0: Pluggable context strategy — compaction before each LLM call.
                     # The strategy lives in agent/context_strategy.py; the former
                     # Conversation trim/summary delegation shim was removed in
@@ -1966,7 +2029,29 @@ class AgentRuntime:
                     # threshold defaults to 0.80 (configurable per-provider).
                     soft_ceiling, hard_ceiling = self._compute_compaction_threshold(conv)
                     model_max = hard_ceiling  # preserve for breakdown dispatch below
-                    self._compact_before_llm(session_key, conv, soft_ceiling, hard_ceiling)
+
+                    # Resolve tools BEFORE compaction so the pressure count covers
+                    # the tool schemas. This block reads conv.allowed_tools and
+                    # conv.mcp_servers — not conv.messages — so moving it above
+                    # compaction is safe (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
+                    from agent.tools import get_tool_definitions_for_api
+                    tools = get_tool_definitions_for_api(conv.allowed_tools)
+
+                    # Phase B: Merge MCP tools if configured
+                    if conv.mcp_servers:
+                        try:
+                            from utils.mcp_client import get_tools_for_api
+                            mcp_tools = get_tools_for_api(
+                                conv.mcp_servers,
+                                session_key if session_key != "_unknown" else None,
+                            )
+                            tools.extend(mcp_tools)
+                        except Exception as e:
+                            logger.warning(f"Failed to load MCP tools for {session_key}: {e}")
+
+                    self._compact_before_llm(
+                        session_key, conv, soft_ceiling, hard_ceiling, tools=tools,
+                    )
                     # §2.8: Telemetry — read strategy.last_result, append to history.
                     # Audit-Fix-7: Patch hard_ceiling — strategy doesn't know the real value
                     # (computed by _compute_compaction_threshold at the runtime level).
@@ -2006,24 +2091,10 @@ class AgentRuntime:
                     # but no longer carries meaningful state. See tests for the
                     # deprecation notice.
 
-                    # Get tools for this agent (filtered by allowed_tools if set)
-                    from agent.tools import get_tool_definitions_for_api
-                    tools = get_tool_definitions_for_api(conv.allowed_tools)
-
-                    # Phase B: Merge MCP tools if configured
-                    if conv.mcp_servers:
-                        try:
-                            from utils.mcp_client import get_tools_for_api
-                            mcp_tools = get_tools_for_api(
-                                conv.mcp_servers,
-                                session_key if session_key != "_unknown" else None,
-                            )
-                            tools.extend(mcp_tools)
-                        except Exception as e:
-                            logger.warning(f"Failed to load MCP tools for {session_key}: {e}")
-
-                    # Build API messages AFTER compact so the wire payload reflects
-                    # the trimmed conversation. Bug fix: was captured before compact().
+                    # Build the wire once AFTER compact so the payload reflects the
+                    # trimmed conversation. The count is the same number the meter
+                    # and the over-budget raise use; keep it local for the breakdown
+                    # overwrite below (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
 
                     # Pre-call budget guard: if the conversation still exceeds
                     # the model's context window after compaction, raise a clear
@@ -2031,9 +2102,11 @@ class AgentRuntime:
                     # HTTP 400 rejections (which corrupt conversation state because
                     # the assistant message is already added by the time the error
                     # surfaces). Response reserve accounts for output tokens.
-                    messages = self._messages_for_model(
+                    messages, wire_tokens = self._wire_messages_and_count(
                         session_key, conv, model_max, tools,
                     )
+                    if wire_tokens >= model_max - self._RESPONSE_RESERVE_TOKENS:
+                        raise self._over_budget_error(wire_tokens, model_max)
 
                     # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION
                     # §2.2 Edit G): transition RUNNING → STREAMING (non-terminal)
@@ -2078,6 +2151,17 @@ class AgentRuntime:
                     # compaction state.
                     if self._on_token_breakdown is not None:
                         breakdown = conv.get_token_breakdown(model_max)
+                        # SPEC-WIRE-CONTEXT-PRESSURE §2.1: the request fields are
+                        # the wire count, not the stored transcript. The total
+                        # transcript stays on its own key.
+                        breakdown["transcript_tokens"] = breakdown["total_used_tokens"]
+                        system_tokens = breakdown["system_prompt_tokens"]
+                        breakdown["total_used_tokens"] = wire_tokens
+                        breakdown["conversation_tokens"] = max(0, wire_tokens - system_tokens)
+                        breakdown["remaining_tokens"] = max(0, model_max - wire_tokens)
+                        breakdown["usage_percent"] = (
+                            round(wire_tokens / model_max * 100, 1) if model_max > 0 else 0
+                        )
                         breakdown["trimmed_this_turn"] = _compaction_happened
                         breakdown["messages_remaining"] = len(conv.messages)
                         # Tag the most recent breakdown so _last_trim_removed knows
@@ -2263,6 +2347,12 @@ class AgentRuntime:
                                 metadata={"reason": stopped_reason, "iteration": iteration},
                             ))
                             return
+                        # Text arrived while this turn was finishing. Drain it and
+                        # continue the same loop instead of completing: a second
+                        # COMPLETED for the same (session_key, turn_token) would be
+                        # rejected (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
+                        if self._drain_inbox(session_key, conv):
+                            continue
                         self._terminate_turn(TurnResult(
                             status=TurnStatus.COMPLETED,
                             session_key=session_key,
@@ -2380,9 +2470,9 @@ class AgentRuntime:
         finally:
             # FIX-CLEAR-ASK-RACE: always release the active-loop marker, even
             # on exception or early return, so a crashed loop doesn't block
-            # /clear for this session permanently.
-            with self._lock:
-                self._active_loops.discard(session_key)
+            # /clear for this session permanently. Texts still in the inbox
+            # become stranded (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
+            self._finish_loop(session_key)
 
     def _execute_tool_batch(
         self,
@@ -3790,17 +3880,19 @@ class AgentRuntime:
             return 0
         return self._addon_tokens(conv, json.dumps(tools))
 
-    def _messages_for_model(
+    def _wire_messages_and_count(
         self,
         session_key: str,
         conv,
         model_max: int,
         tools: list | None = None,
-    ) -> list[dict]:
-        """Wire list for the next model call.
+    ) -> tuple[list[dict], int]:
+        """Build the wire list and count its tokens, without raising.
 
-        After an enforced write, this is the compiled packet plus messages
-        appended after that write. Otherwise it is to_api_messages().
+        Same rules as the old _messages_for_model body, split out so the
+        compaction trigger and the meter percent see the exact count the
+        request would carry. Do not raise here; the caller decides when
+        the count is over budget (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
 
         Plain branch: get_token_estimate() already counts the task card,
         so the map and the tool schemas are added on top of it and the card
@@ -3811,7 +3903,6 @@ class AgentRuntime:
         the count comes from _compile_token_count() — the card added once,
         the map covered by the wire, one estimator for all of it.
         """
-        effective = model_max - self._RESPONSE_RESERVE_TOKENS
         block = self._repo_map_block_for(session_key, conv)
         if getattr(conv, "agent_role", "") == "coder":
             block = ""
@@ -3821,24 +3912,41 @@ class AgentRuntime:
             map_text = ""
             if block:
                 map_text = REPO_MAP_HEADER + "\n\n" + block + "\n\n"
-            post = conv.get_token_estimate() + self._addon_tokens(conv, map_text) + schema_tokens
-            if post >= effective:
-                raise self._over_budget_error(post, model_max)
-            return self._prefix_repo_map(conv.to_api_messages(), block)
+            count = conv.get_token_estimate() + self._addon_tokens(conv, map_text) + schema_tokens
+            messages = self._prefix_repo_map(conv.to_api_messages(), block)
+            return messages, count
         messages = self._compiled_messages(conv, packet, block)
         # The repo map rides inside the packet's fact_lines, so the wire
         # count already covers it; the card and the schema JSON are the
         # two addons, both at the same estimator rate as the wire.
-        compiled = self._compile_token_count(conv, messages, tools)
+        count = self._compile_token_count(conv, messages, tools)
+        effective = model_max - self._RESPONSE_RESERVE_TOKENS
         # SPEC-40 §2.2d: the hot-window replay is continuity, not the write
         # record — it is the first thing to drop when the wire does not fit.
         # Hot text lives inside the compiled user message, so the recount
         # below sees its absence without any extra bookkeeping.
-        if compiled >= effective and packet.get("hot"):
+        if count >= effective and packet.get("hot"):
             messages = self._compiled_messages(conv, packet, block, hot=False)
-            compiled = self._compile_token_count(conv, messages, tools)
-        if compiled >= effective:
-            raise self._over_budget_error(compiled, model_max)
+            count = self._compile_token_count(conv, messages, tools)
+        return messages, count
+
+    def _messages_for_model(
+        self,
+        session_key: str,
+        conv,
+        model_max: int,
+        tools: list | None = None,
+    ) -> list[dict]:
+        """Wire list for the next model call, raising when over budget.
+
+        After an enforced write, this is the compiled packet plus messages
+        appended after that write. Otherwise it is to_api_messages().
+        """
+        messages, count = self._wire_messages_and_count(
+            session_key, conv, model_max, tools,
+        )
+        if count >= model_max - self._RESPONSE_RESERVE_TOKENS:
+            raise self._over_budget_error(count, model_max)
         return messages
 
     def _maybe_compile(self, session_key: str, conv, tool_name: str, args, result) -> None:
@@ -4054,15 +4162,31 @@ class AgentRuntime:
         conv,
         soft_ceiling: int,
         hard_ceiling: int,
+        tools: list | None = None,
     ) -> None:
         """Under the provider line, compact toward that line (usually a no-op).
 
         Over the line, stub older tool results and compact toward the landing goal
         without deleting the current turn or a protected path.
+
+        Pressure is the wire count (the list _messages_for_model would send),
+        not the stored transcript. When the wire is under the ceiling the
+        off-wire audit log stays; compact() still records a fresh no-op
+        last_result so the previous iteration's event does not stick.
         """
         landing_goal = self._compute_landing_goal(hard_ceiling)
-        estimate = conv.get_token_estimate()
-        if estimate > soft_ceiling and soft_ceiling > landing_goal:
+        _messages, pressure = self._wire_messages_and_count(
+            session_key, conv, hard_ceiling, tools,
+        )
+        if pressure <= soft_ceiling:
+            # Fresh no-op last_result. Budget >= the transcript estimate means
+            # prune_tool_outputs returns 0 and the trim loop does not run.
+            # max(..., soft_ceiling) keeps the under-threshold call at `soft`
+            # when the transcript is already under the line (existing tests).
+            ceiling = max(soft_ceiling, conv.get_token_estimate())
+            self._context_strategy.compact(conv, ceiling)
+            return
+        if soft_ceiling > landing_goal:
             protect = self._protect_paths(session_key, conv)
             self._context_strategy.panic_prune(conv, protect_paths=protect)
             self._context_strategy.compact(
@@ -4186,7 +4310,7 @@ class AgentRuntime:
                 tail = tail[nl + 1:]
             card = tail
         conv.task_card = card
-        conv._token_estimate_cache = None
+        conv.invalidate_token_estimate()
 
     def _key_body_in_transcript(
         self, conv: Any, path: str, offset: int | None, limit: int | None,
@@ -4639,7 +4763,7 @@ class AgentRuntime:
         conv.system_prompt = new_prompt
         if not failed:
             conv._system_prompt_fingerprint = self._system_prompt_fingerprint(conv)
-            conv._token_estimate_cache = None
+        conv.invalidate_token_estimate()
         logger.info(
             "Reconciled conversation context for %s: project_path=%r",
             session_key, project_path,
@@ -4772,6 +4896,7 @@ class AgentRuntime:
             finally:
                 self._context_strategy = original_strategy
                 conv.system_prompt = original_sp
+                conv.invalidate_token_estimate()
 
         ev = strat.last_result
         if ev is None:

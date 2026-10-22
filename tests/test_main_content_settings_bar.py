@@ -307,23 +307,23 @@ class TestXmlEscapeHardening:
 class TestResolveAgentDisplayName:
     def test_resolve_agent_display_name_fallback(self, mc):
         """No _agent_mgr / _agent_runtime_handler -> session_key as-is."""
-        assert mc._resolve_agent_display_name("special:coder") == "special:coder"
+        assert mc._resolve_agent_display_name("agent:coder") == "agent:coder"
 
     def test_resolve_agent_display_name_empty_value_fallback(self, mc):
-        """ARTH.get_special_agents() returning {'special:x': ''} must fall
+        """ARTH.get_special_agents() returning {'agent:x': ''} must fall
         through to session_key, NOT return '' (Round 3 BUG #7)."""
         arth = MagicMock()
-        arth.get_special_agents.return_value = {"special:x": ""}
+        arth.get_special_agents.return_value = {"agent:x": ""}
         mc._agent_runtime_handler = arth
-        assert mc._resolve_agent_display_name("special:x") == "special:x"
+        assert mc._resolve_agent_display_name("agent:x") == "agent:x"
 
     def test_resolve_agent_display_name_none_value_fallback(self, mc):
-        """ARTH.get_special_agents() returning {'special:x': None} must fall
+        """ARTH.get_special_agents() returning {'agent:x': None} must fall
         through to session_key (BUG #7 truthiness)."""
         arth = MagicMock()
-        arth.get_special_agents.return_value = {"special:x": None}
+        arth.get_special_agents.return_value = {"agent:x": None}
         mc._agent_runtime_handler = arth
-        assert mc._resolve_agent_display_name("special:x") == "special:x"
+        assert mc._resolve_agent_display_name("agent:x") == "agent:x"
 
     def test_resolve_agent_display_name_uses_agent_mgr_first(self, mc):
         """_agent_mgr name wins over the ARTH fallback."""
@@ -331,9 +331,9 @@ class TestResolveAgentDisplayName:
         mgr.get_name.return_value = "Coder"
         mc._agent_mgr = mgr
         arth = MagicMock()
-        arth.get_special_agents.return_value = {"special:coder": "Other"}
+        arth.get_special_agents.return_value = {"agent:coder": "Other"}
         mc._agent_runtime_handler = arth
-        assert mc._resolve_agent_display_name("special:coder") == "Coder"
+        assert mc._resolve_agent_display_name("agent:coder") == "Coder"
 
 
 class TestClickHandlersGuard:
@@ -344,7 +344,7 @@ class TestClickHandlersGuard:
         pins their absence instead of their no-op behavior."""
         mc._on_agent_cycle = None
         mc._on_autoaccept_cycle = None
-        mc._on_agent_label_clicked("special:x")   # must not raise
+        mc._on_agent_label_clicked("agent:x")   # must not raise
         mc._on_autoaccept_label_clicked("off")    # must not raise
         assert not hasattr(mc, "_on_settings_btn_clicked")
         assert not hasattr(mc, "set_on_settings_clicked")
@@ -357,8 +357,8 @@ class TestClickHandlersGuard:
         mc.set_on_agent_cycle(lambda sk: agent_calls.append(sk))
         mc.set_on_autoaccept_cycle(lambda lvl: auto_calls.append(lvl))
 
-        mc._on_agent_label_clicked("special:x")
+        mc._on_agent_label_clicked("agent:x")
         mc._on_autoaccept_label_clicked("files")
 
-        assert agent_calls == ["special:x"]
+        assert agent_calls == ["agent:x"]
         assert auto_calls == ["files"]
