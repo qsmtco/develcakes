@@ -38,7 +38,7 @@ from gi.repository import Gtk, Gdk, Gio, GLib
 from ui.views.left_panel import LeftPanel
 from ui.views.activity_pill import ActivityPillAdapter
 from ui.views.main_content import MainContent
-from ui.views.activity_drawer import ActivityDrawer
+from ui.views.agent_dashboard import AgentDashboard
 from ui.handlers.chat_handler import ChatHandler
 from ui.handlers.file_tree_handler import FileTreeHandler
 from ui.handlers.media_handler import MediaHandler
@@ -623,8 +623,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._crabwatch_handler.start_watching(p, n),
                 self._chat_render_handler.set_project_name(n),
                 self._agent_runtime_handler.set_active_project(n, p),
-                # SPEC-activity-drawer: clear stale events when switching projects
-                self._activity_drawer.clear_events(),
+                # SPEC-AGENT-DASHBOARD: rebuild the dashboard rows for the
+                # newly opened project (was: clear the event drawer).
+                self._refresh_agent_dashboard(),
                 self._on_feed_bar_update(n, len(self._project_handler.get_project_members(n)) if n else 0),
                 # LOW-7 wiring: publish the active project path so the image viewer
                 # in event_cards.py can scope _open_in_viewer to the project root
@@ -664,8 +665,15 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._feed_handler.shutdown_persist_writer(),
             )
         )
+        # SPEC-AGENT-DASHBOARD §2.3: COMPOSE the members-changed callback —
+        # the feed-bar count update AND the dashboard refresh both run. Do not
+        # replace _on_feed_bar_update; a removed agent disappears from the
+        # dashboard and an added one appears with an em dash.
         self._project_handler.set_on_members_changed(
-            lambda n, m: self._on_feed_bar_update(n, len(m))
+            lambda n, m: (
+                self._on_feed_bar_update(n, len(m)),
+                self._refresh_agent_dashboard(),
+            )
         )
         # ── End Feed handler ──────────────────────────────────────────────
         # Collab handler — collaboration commands (Phase 7)
@@ -846,22 +854,15 @@ class MainWindow(Gtk.ApplicationWindow):
             gateway_handler=None,  # gateway strip: ARH does the sends; source_name falls back to ARH
         )
 
-        # SPEC-activity-drawer Phase 1: construct the ActivityDrawer BEFORE the
-        # connection sync handler tries to wire it. The drawer widget itself is
-        # lightweight (a Gtk.Box shell), so constructing it here is safe; the
-        # actual re-parenting of main_content into the vertical Paned happens
-        # in the drawer block at the end of _build().
-        self._activity_drawer = ActivityDrawer()
-        # ActivityWiringHandler owns ALL activity→drawer routing (online + offline).
-        # Wire() is called unconditionally at startup so the drawer works from the
-        # first local-agent tool call — no gateway required.
-        from ui.handlers.activity_wiring_handler import ActivityWiringHandler
-        self._activity_wiring_handler = ActivityWiringHandler(
-            activity_handler=self._activity_handler,
-            agent_runtime_handler=self._agent_runtime_handler,
-            activity_drawer=self._activity_drawer,
-        )
-        self._activity_wiring_handler.wire()
+        # SPEC-AGENT-DASHBOARD: construct the AgentDashboard in the same early
+        # slot the event drawer used to occupy. The dashboard widget is a
+        # lightweight Gtk.Box shell; the actual re-parenting of main_content
+        # into the vertical Paned happens in the paned block at the end of
+        # _build(). ActivityDrawer and ActivityWiringHandler are no longer
+        # mounted — wire() must not run, it calls append_event.
+        self._agent_dashboard = AgentDashboard()
+        self._agent_dashboard.set_on_compact(self._on_dashboard_compact)
+        self._agent_dashboard.set_on_clear(self._on_dashboard_clear)
 
         # Wire project lifecycle → ReviewHandler
         self._project_handler.set_on_project_opened(

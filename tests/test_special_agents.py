@@ -485,13 +485,27 @@ class _RoomFakeRuntime:
         self.create_calls = []
         self.note_calls = []
         self.load_calls = []
+        self.rebuild_calls = []
+        self.loaded_from_disk = False  # set True to simulate a disk hit
 
     def get_conversation(self, session_key):
         return self.conv
 
     def load_conversation(self, session_key):
         self.load_calls.append(session_key)
+        if self.loaded_from_disk:
+            # Simulate the persistence contract: _conversation_from_data
+            # loads project_path=None, system_prompt="" (untrusted from disk).
+            self.conv = _RoomFakeConv()
+            self.conv.project_path = None
+            return True
         return None  # nothing persisted on disk
+
+    def _rebuild_conversation_context(self, session_key, project_path,
+                                      agent_role=""):
+        self.rebuild_calls.append((session_key, project_path, agent_role))
+        if self.conv is not None:
+            self.conv.project_path = project_path
 
     def create_conversation(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -547,6 +561,35 @@ class TestRecordRoomLine:
         handler, _ = _make_room_handler(fake)
         handler.record_room_line("special:room", "hello")
         assert fake.load_calls == ["special:room"]
+
+    def test_disk_load_reconciles_project_context(self):
+        """LOW-2 regression: a loaded-from-disk conversation (project_path
+        None by the persistence contract) must be reconciled to the active
+        project BEFORE the send path short-circuits on get_conversation()
+        is not None — otherwise the next turn dies at
+        resolve_session_workspace(None, ...) with LOW-2."""
+        fake = _RoomFakeRuntime()
+        fake.loaded_from_disk = True
+        handler, _ = _make_room_handler(fake)
+        handler.record_room_line("special:room", "hello")
+        # No create — the disk hit satisfied the conversation lookup.
+        assert fake.create_calls == []
+        # Reconcile ran with the ACTIVE project path and the agent's role.
+        assert fake.rebuild_calls == [("special:room", "/tmp/proj", "coder")]
+        assert fake.conv.project_path == "/tmp/proj"
+        # Witness line still recorded.
+        assert fake.note_calls == [("special:room", "hello")]
+
+    def test_disk_load_without_active_project_clears_stale_path(self):
+        """No active project → reconcile with None (cleared), still no LOW-2
+        crash path left behind: record_room_line survives and notes."""
+        fake = _RoomFakeRuntime()
+        fake.loaded_from_disk = True
+        handler, _ = _make_room_handler(fake)
+        handler._active_project = None
+        handler.record_room_line("special:room", "hello")
+        assert fake.rebuild_calls == [("special:room", None, "coder")]
+        assert fake.note_calls == [("special:room", "hello")]
 
     def test_record_room_line_never_assigns_step_count(self):
         fake = _RoomFakeRuntime()

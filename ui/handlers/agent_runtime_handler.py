@@ -1185,7 +1185,26 @@ class AgentRuntimeHandler(
             rt = self._get_runtime(agent_def.display_name, agent_def=agent_def)
             with self._prep_lock(session_key):
                 if rt.get_conversation(session_key) is None:
+                    # LOW-2/ROOM-WITNESS FIX: the persisted file carries
+                    # project_path=None by design (_conversation_from_data
+                    # does not trust it from disk) and system_prompt="". The
+                    # send path reconciles via _rebuild_conversation_context
+                    # (agent_runtime_handler.py:1068), but record_room_line
+                    # loaded the conversation WITHOUT reconciling — leaving
+                    # a hot conversation with project_path=None so the NEXT
+                    # send short-circuited (get_conversation() is not None)
+                    # and the tool loop died at
+                    # resolve_session_workspace(None, ...) with LOW-2.
+                    # Reconcile here too, inside the same prep lock, so the
+                    # loaded conversation always carries the active project.
                     rt.load_conversation(session_key)
+                    if rt.get_conversation(session_key) is not None:
+                        rt._rebuild_conversation_context(
+                            session_key,
+                            self._active_project[1]
+                            if self._active_project is not None else None,
+                            agent_role=agent_def.role,
+                        )
                 if rt.get_conversation(session_key) is None:
                     project_path = (
                         self._active_project[1]
