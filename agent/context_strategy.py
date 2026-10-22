@@ -16,6 +16,7 @@ from typing import Callable, Protocol
 
 from models.conversation import (
     Conversation,
+    ConversationDigest,
     Message,
     MessageRole,
     _tiktoken_encoding_for,
@@ -186,6 +187,19 @@ class DefaultContextStrategy:
         # Re-snapshot tokens_after after Layer 1 for telemetry accuracy.
         tokens_after_layer1 = conv.get_token_estimate()
 
+        # SPEC-48 Phase 3: snapshot the trimmable region the trim can
+        # actually remove — between keep_first and len - tail_preserve —
+        # AFTER prune_tool_outputs (which rewrites bodies in place and
+        # removes nothing). The head and tail survive the trim, so they
+        # are not digest material. Assistant messages only; summaries
+        # are never digest source.
+        trim_end = len(conv.messages) - tail_preserve
+        digest_source = [
+            m
+            for m in conv.messages[keep_first:trim_end]
+            if m.role == MessageRole.ASSISTANT and not m.is_summary
+        ]
+
         # ── Trim loop ─────────────────────────────────────────────────────────
         # Phase 4: delegates candidate selection to ``_select_prune_candidate``,
         # which implements P2 (keep_first) and P3 (protect_is_summary) as a
@@ -313,6 +327,12 @@ class DefaultContextStrategy:
         if messages_removed > 0 and len(conv.messages) >= min_messages:
             summary = self._summary(conv, token_budget=token_budget, keep_first=keep_first)
             if summary:
+                # SPEC-48 Phase 3: compute the digest from the RAW summary
+                # (tags intact) BEFORE _fit_summary truncates it — a small
+                # budget must not strip the tags and silently empty the
+                # digest. It is assigned only when a summary is actually
+                # injected (C11: a no-op compaction must not clear one).
+                digest = _digest_for_summary(summary, digest_source)
                 current_tokens = conv.get_token_estimate()
                 fitted = self._fit_summary(conv, summary, token_budget, current_tokens)
                 if fitted is not None:
@@ -330,6 +350,8 @@ class DefaultContextStrategy:
                     )
                     insert_at = max(keep_first, len(conv.messages) - tail_preserve)
                     conv.messages.insert(insert_at, summary_msg)
+                    digest.token_estimate = conv.get_token_estimate()
+                    conv.digest = digest
 
         # Invalidate cache and snapshot post-state for telemetry.
         # Cache is invalidated inside the loop after each stub (line 335).
@@ -978,6 +1000,134 @@ class DefaultContextStrategy:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _digest_from_tagged_summary(text: str) -> ConversationDigest:
+    """Parse the nine-tag LLM summary into a ConversationDigest (SPEC-48).
+
+    Tags that are missing or empty leave the corresponding field empty.
+    A tag whose body is a single line becomes one list item; a multi-line
+    body becomes one item per non-empty line, with leading "- " stripped.
+
+    F4: sections are consumed left-to-right — the earliest `<tag>` opening
+    in the remaining text wins, its own `</tag>` closes it, and the whole
+    consumed span is removed before searching for the next tag. A tag literal
+    inside another section's body is therefore scoped to that section and
+    can never corrupt a later parse.
+    """
+    _tags = (
+        "task", "progress", "files", "decisions", "constraints",
+        "errors", "open_questions", "next_steps", "user_preferences",
+    )
+
+    def _items(body: str) -> list[str]:
+        items: list[str] = []
+        for ln in body.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            if ln.startswith("- "):
+                ln = ln.removeprefix("- ")
+            items.append(ln)
+        return items
+
+    sections: dict[str, str] = {}
+    remaining = text
+    while True:
+        best_start = -1
+        best_tag = None
+        for tag in _tags:
+            idx = remaining.find(f"<{tag}>")
+            if idx != -1 and (best_start == -1 or idx < best_start):
+                best_start = idx
+                best_tag = tag
+        if best_tag is None:
+            break
+        start_marker = f"<{best_tag}>"
+        end_marker = f"</{best_tag}>"
+        begin = best_start + len(start_marker)
+        finish = remaining.find(end_marker, begin)
+        if finish == -1:
+            break
+        sections[best_tag] = remaining[begin:finish].strip()
+        remaining = remaining[:best_start] + remaining[finish + len(end_marker):]
+
+    files_body = sections.get("files", "")
+    paths: list[str] = []
+    if files_body:
+        for part in files_body.split(","):
+            p = part.strip()
+            if p:
+                paths.append(p)
+
+    return ConversationDigest(
+        arc=sections.get("task", ""),
+        decisions=_items(sections.get("decisions", "")),
+        constraints=_items(sections.get("constraints", "")),
+        open_questions=_items(sections.get("open_questions", "")),
+        paths_touched=paths,
+        attempts_rejected=_items(sections.get("errors", "")),
+    )
+
+
+def _digest_from_snapshot(snapshot: list, summary_text: str) -> ConversationDigest:
+    """Tier 1 — deterministic fields only, no LLM call, no guessing (SPEC-48).
+
+    arc = first line of the textual summary; paths_touched = path args of
+    tool calls on the snapshotted messages (first-appearance order, deduped,
+    cap 32); attempts_rejected = snapshotted assistant text starting
+    REFUSED: or containing a 'FAILED ' line (cap 16).
+    decisions/constraints/open_questions stay EMPTY in Tier 1.
+    """
+    arc = next((ln.strip() for ln in summary_text.splitlines() if ln.strip()), "")
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for msg in snapshot:
+        for tc in getattr(msg, "tool_calls", None) or []:
+            args = tc.arguments if isinstance(tc.arguments, dict) else {}
+            path = args.get("path")
+            if isinstance(path, str) and path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+                if len(paths) >= 32:
+                    break
+        if len(paths) >= 32:
+            break
+
+    rejected: list[str] = []
+    for msg in snapshot:
+        content = msg.content or ""
+        if content.startswith("REFUSED:"):
+            rejected.append(content)
+            if len(rejected) >= 16:
+                break
+            continue
+        for ln in content.splitlines():
+            if ln.startswith("FAILED "):
+                rejected.append(ln)
+                if len(rejected) >= 16:
+                    break
+        if len(rejected) >= 16:
+            break
+
+    return ConversationDigest(
+        arc=arc,
+        paths_touched=paths,
+        attempts_rejected=rejected,
+    )
+
+
+def _digest_for_summary(summary_text: str, snapshot: list) -> ConversationDigest:
+    """Tier 2 when the summary carries the tags; Tier 1 otherwise (SPEC-48).
+
+    The tag check IS the tier check: an LLM strategy that fell back to the
+    textual summary must not be treated as Tier 2, or the digest silently
+    empties on every LLM failure.
+    """
+    if "<task>" in summary_text and "</task>" in summary_text:
+        return _digest_from_tagged_summary(summary_text)
+    return _digest_from_snapshot(snapshot, summary_text)
 
 
 class LLMSummarizeStrategy(DefaultContextStrategy):

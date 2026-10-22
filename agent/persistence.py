@@ -49,6 +49,10 @@ def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
     providers.yaml keyed by conv.model / conv.provider.
     """
     path = os.path.join(conversations_dir(), f"{session_key}.json")
+    # F3 (SPEC-48 Phase 3 fix): null-safe AND type-safe — a plain dict (or
+    # missing attribute) must not crash the save; write None in that case.
+    from models.conversation import ConversationDigest
+    _dg = getattr(conv, "digest", None)
     data = {
         "session_key": session_key,
         "agent_name": conv.agent_name,
@@ -79,6 +83,7 @@ def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
         "total_cost": conv.total_cost,
         "step_count": conv.step_count,
         "allowed_tools": conv.allowed_tools,
+        "digest": _dg.to_dict() if isinstance(_dg, ConversationDigest) else None,
         "mcp_servers": list(conv.mcp_servers) if conv.mcp_servers else [],
         "si_enforcement": conv.si_enforcement,
         "agent_role": conv.agent_role,
@@ -153,8 +158,9 @@ def _conversation_from_data(data: dict) -> "Conversation":
     project_path and system_prompt are not trusted from disk. The runtime
     rebuilds them against the active project on the next send.
     """
-    from models.conversation import Conversation
+    from models.conversation import Conversation, ConversationDigest
     messages = [_message_from_data(m) for m in data.get("messages", [])]
+    digest = ConversationDigest.from_dict(data.get("digest") or {})
     return Conversation(
         agent_name=data["agent_name"],
         project_path=None,
@@ -166,6 +172,7 @@ def _conversation_from_data(data: dict) -> "Conversation":
         total_tokens=data.get("total_tokens", 0),
         total_cost=data.get("total_cost", 0.0),
         step_count=data.get("step_count", 0),
+        digest=digest if any(digest.to_dict().values()) else None,
         allowed_tools=data.get("allowed_tools"),
         app_title=data.get("app_title", ""),
         mcp_servers=data.get("mcp_servers", []),

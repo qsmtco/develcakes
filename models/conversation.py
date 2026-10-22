@@ -248,6 +248,54 @@ def serialize_messages(messages: list[Message], *, index_base: int = 0) -> list[
 
 
 @dataclass
+class ConversationDigest:
+    """Typed summary of a compacted conversation (SPEC-48).
+
+    Pure data. The strategy fills it; the runtime persists it; the agent
+    queries it. No prose — each field is queryable.
+    """
+    arc: str = ""
+    decisions: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    paths_touched: list[str] = field(default_factory=list)
+    attempts_rejected: list[str] = field(default_factory=list)
+    token_estimate: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "arc": self.arc,
+            "decisions": list(self.decisions),
+            "constraints": list(self.constraints),
+            "open_questions": list(self.open_questions),
+            "paths_touched": list(self.paths_touched),
+            "attempts_rejected": list(self.attempts_rejected),
+            "token_estimate": self.token_estimate,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ConversationDigest":
+        """Rebuild a digest from persisted data. Unknown keys are ignored."""
+        if not isinstance(data, dict):
+            return cls()
+        # F2 (SPEC-48 Phase 3 fix): a corrupt/non-numeric token_estimate must
+        # not raise — tolerate any input and fall back to 0.
+        try:
+            _te = int(data.get("token_estimate", 0) or 0)
+        except (TypeError, ValueError):
+            _te = 0
+        return cls(
+            arc=str(data.get("arc", "") or ""),
+            decisions=[str(x) for x in (data.get("decisions") or [])],
+            constraints=[str(x) for x in (data.get("constraints") or [])],
+            open_questions=[str(x) for x in (data.get("open_questions") or [])],
+            paths_touched=[str(x) for x in (data.get("paths_touched") or [])],
+            attempts_rejected=[str(x) for x in (data.get("attempts_rejected") or [])],
+            token_estimate=_te,
+        )
+
+
+@dataclass
 class Conversation:
     """Full conversation state for a single agent tab.
 
@@ -291,6 +339,10 @@ class Conversation:
     total_tokens: int = 0
     total_cost: float = 0.0              # cumulative USD cost
     step_count: int = 0                  # number of complete agent turns
+
+    # SPEC-48: the latest typed digest. Set by the compaction strategy when
+    # it injects a summary; survives message trimming; persisted on disk.
+    digest: ConversationDigest | None = None
 
     # Phase CB-5: token-estimate cache (BUG #1 fix from end-to-end audit).
     # Invalidated by any message add/remove/trim operation. Keyed on
