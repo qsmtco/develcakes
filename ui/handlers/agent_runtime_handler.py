@@ -179,6 +179,9 @@ class AgentRuntimeHandler(
         # NEW: drawer-lifecycle callback for agent start/end separators.
         # cb(session_key, agent_name, phase) where phase ∈ {"start", "end"}.
         self._on_drawer_lifecycle: Callable | None = None
+        # SPEC-39 §2.5: room-members callback for the reply witness.
+        # cb(project_name: str) -> list[str]; None clears it.
+        self._on_room_members: Callable | None = None
         # NEW: pending tool args for patch path enrichment.
         # session_key → dict of args from _do_tool_call_start.
         self._pending_tool_args: dict[str, dict] = {}
@@ -196,6 +199,11 @@ class AgentRuntimeHandler(
         # Unlike a counter, the token does NOT change at completion time,
         # so same-turn deltas are never wrongly dropped.
         self._turn_tokens: dict[str, object] = {}
+        # SPEC-39 (§2.3): per-session room-turn mark. A unique object copied
+        # from _turn_tokens by mark_room_turn right after a
+        # send_to_special_agent returns; take_room_turn compares and pops it.
+        # Never stored in _turn_reply_target (that dict is render routing).
+        self._room_turn_tokens: dict[str, object] = {}
 
         # SPEC-12 (R5 REV 3): turn-scoped reply target. session_key → the
         # DISPLAY key the CURRENT turn's reply renders under. Set on ENTRY of
@@ -516,6 +524,14 @@ class AgentRuntimeHandler(
         """Set AgentRoutingTable. Called by window.py during _build.
         Used to route special agent responses to project chat boxes."""
         self._agent_to_project = routing_table
+
+    def set_on_room_members(self, cb) -> None:
+        """SPEC-39 §2.5: set the room-members resolver for the reply witness.
+
+        ``cb(project_name: str) -> list[str]`` returns the members of a
+        project's room. ``None`` clears it.
+        """
+        self._on_room_members = cb
 
     def set_active_project(self, project_name: str, project_path: str) -> None:
         """
@@ -1146,7 +1162,85 @@ class AgentRuntimeHandler(
             else:
                 self._turn_attr.pop(session_key, None)
 
+    # ── Room addressing (SPEC-39 §2.3) ─────────────────────────────────────
 
+    def record_room_line(self, session_key: str, line: str) -> None:
+        """Persist one overheard line for a special agent. Never starts a turn.
+
+        Unregistered session key: return. ``_get_runtime`` raises ``RuntimeError``
+        when no provider or API key is configured: catch it, log, return.
+        Under ``_prep_lock(session_key)``: if ``get_conversation`` is ``None``,
+        ``load_conversation``; if it is still ``None``, ``create_conversation``
+        with the same arguments as ``_prepare_turn_conversation``'s create call
+        (``defer_prompt_build=True``, model from ``_resolve_agent_model``,
+        ``si_enforcement`` from ``get_self_improvement_config().get("enforcement")``).
+        Do not set ``step_count``. Do not rotate ``_turn_tokens``.
+        Then call ``rt.note_room_line``. Catch ``Exception`` around the whole
+        body, log, and return. A witness failure must not block the addressee's send.
+        """
+        try:
+            agent_def = self._agents.get(session_key)
+            if agent_def is None:
+                return
+            rt = self._get_runtime(agent_def.display_name, agent_def=agent_def)
+            with self._prep_lock(session_key):
+                if rt.get_conversation(session_key) is None:
+                    rt.load_conversation(session_key)
+                if rt.get_conversation(session_key) is None:
+                    project_path = (
+                        self._active_project[1]
+                        if self._active_project is not None else None
+                    )
+                    si_enforcement = None
+                    if hasattr(agent_def, "get_self_improvement_config"):
+                        si_enforcement = (
+                            agent_def.get_self_improvement_config().get("enforcement")
+                        )
+                    rt.create_conversation(
+                        agent_name=agent_def.display_name,
+                        session_key=session_key,
+                        project_path=project_path,
+                        model=self._resolve_agent_model(agent_def),
+                        allowed_tools=agent_def.tools,
+                        mcp_servers=agent_def.mcp_servers,
+                        agent_role=agent_def.role,
+                        si_enforcement=si_enforcement,
+                        api_key=agent_def.api_key,
+                        app_title=agent_def.app_title,
+                        fallback_provider=agent_def.fallback_provider,
+                        defer_prompt_build=True,
+                    )
+                rt.note_room_line(session_key, line)
+        except RuntimeError as exc:
+            logger.warning("record_room_line: %s", exc)
+            return
+        except Exception:
+            logger.exception("record_room_line failed for %s", session_key)
+            return
+
+    def mark_room_turn(self, session_key: str) -> None:
+        """Remember that the turn ``send_to_special_agent`` just started is a room turn.
+
+        Copies ``self._turn_tokens.get(session_key)`` into
+        ``self._room_turn_tokens[session_key]``. No token: do not write.
+        """
+        token = self._turn_tokens.get(session_key)
+        if token is not None:
+            self._room_turn_tokens[session_key] = token
+
+    def take_room_turn(self, session_key: str, token: object) -> bool:
+        """Return True when ``token`` is the marked room turn, and pop it.
+
+        A mismatch leaves the mark in place (a newer room send owns it).
+        A ``None`` token (legacy caller) never matches — mark_room_turn
+        never stores a ``None`` mark, so there is nothing to pop.
+        """
+        if token is None:
+            return False
+        if self._room_turn_tokens.get(session_key) is token:
+            del self._room_turn_tokens[session_key]
+            return True
+        return False
 
     def reload_agents_and_mcp(
         self,

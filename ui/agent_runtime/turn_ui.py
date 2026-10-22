@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
 import time
 from dataclasses import is_dataclass, replace
 from datetime import datetime, timezone
@@ -580,6 +581,52 @@ class RuntimeTurnUiMixin:
                 agent_def_dl = self._agents.get(session_key)
                 agent_name_dl = agent_def_dl.display_name if agent_def_dl else "Agent"
                 self._on_drawer_lifecycle(session_key, agent_name_dl, "end")
+            # SPEC-39 §2.5: reply witness. Broadcast this completed ROOM turn's
+            # reply to the project's other members (never the speaker). Stale/
+            # duplicate completions already returned above; solo sends, /ask
+            # private turns, and unmarked turns fail take_room_turn and yield
+            # no witness. Do not render the room line — the chat surface
+            # already rendered the reply.
+            if complete_token is not None and self.take_room_turn(session_key, complete_token):
+                if isinstance(text, str) and text.strip():
+                    speaker = resolved_name or session_key
+                    line = f"[room] {speaker}: {text}"
+                    project_name = (
+                        self._active_project[0]
+                        if self._active_project is not None else None
+                    )
+                    members = None
+                    if project_name is not None and self._on_room_members is not None:
+                        try:
+                            members = self._on_room_members(project_name)
+                        except Exception:
+                            _mod().logger.exception(
+                                "_do_response_complete: room members callback failed "
+                                "for %s", project_name,
+                            )
+                    if not members:
+                        _mod().logger.info(
+                            "_do_response_complete: no room members for %s — "
+                            "skipping witness", project_name,
+                        )
+                    else:
+                        def _witness(member: str) -> None:
+                            try:
+                                self.record_room_line(member, line)
+                            except Exception:
+                                _mod().logger.exception(
+                                    "record_room_line failed for member %s", member,
+                                )
+
+                        for member in members:
+                            if member == session_key:
+                                continue
+                            if self._GLib is not None:
+                                threading.Thread(
+                                    target=_witness, args=(member,), daemon=True,
+                                ).start()
+                            else:
+                                _witness(member)
             # _ended_sessions is now set at the TOP of _do_response_complete (line 1454)
             # for race-safety. This duplicate add is harmless (idempotent) but kept
             # for documentation of the lifecycle endpoint.

@@ -454,3 +454,230 @@ class TestSeedDefaultsPerFile:
         for fname in ("coder.yaml", "debugger.yaml"):
             assert os.path.isfile(os.path.join(iso_agents_dir, fname)), fname
 
+
+# ── SPEC-39 §2.3 — room addressing handler plumbing ──────────────────────────
+# Tests for ui/handlers/agent_runtime_handler.py:
+#   * record_room_line  — persist an overheard line without starting a turn
+#   * mark_room_turn    — claim the current turn as a room turn
+#   * take_room_turn    — pop the claim when the token matches
+#
+# The runtime side (rt.note_room_line) is Phase 2 (agent/runtime.py), so the
+# runtime is faked here with exactly the surface record_room_line touches.
+#
+# NOTE: These were written to live in tests/test_room_addressing_handler.py
+# (a new file), but this agent has no write/create-file tool (write_file is
+# not permitted and edit_file refuses non-existent paths), so they are hosted
+# here temporarily until write access is granted.
+
+class _RoomFakeConv:
+    """Minimal conversation stand-in; step_count is pre-set so a stray
+    assignment in record_room_line would be caught."""
+
+    def __init__(self):
+        self.step_count = 99
+
+
+class _RoomFakeRuntime:
+    """Fake AgentRuntime exposing the record_room_line contract only."""
+
+    def __init__(self):
+        self.conv = None
+        self.create_calls = []
+        self.note_calls = []
+        self.load_calls = []
+
+    def get_conversation(self, session_key):
+        return self.conv
+
+    def load_conversation(self, session_key):
+        self.load_calls.append(session_key)
+        return None  # nothing persisted on disk
+
+    def create_conversation(self, **kwargs):
+        self.create_calls.append(kwargs)
+        self.conv = _RoomFakeConv()
+        return kwargs.get("session_key")
+
+    def note_room_line(self, session_key, line):
+        self.note_calls.append((session_key, line))
+
+
+def _make_room_handler(fake_rt):
+    from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+    handler = AgentRuntimeHandler(main_content=None, chat_render_handler=None)
+    agent_def = SpecialAgentDef(
+        conv_id_prefix="special:room",
+        display_name="Roomie",
+        role="coder",
+        emoji="🛠️",
+        tools=[],
+        can_write=False,
+    )
+    handler._agents["special:room"] = agent_def
+    handler._runtimes["Roomie"] = fake_rt
+    handler._active_project = ("proj", "/tmp/proj")
+    return handler, agent_def
+
+
+class TestRecordRoomLine:
+    def test_create_conversation_called_exactly_once_when_none(self):
+        fake = _RoomFakeRuntime()
+        handler, _ = _make_room_handler(fake)
+
+        result = handler.record_room_line("special:room", "hello")
+        assert result is None
+        assert len(fake.create_calls) == 1
+        kwargs = fake.create_calls[0]
+        assert kwargs["session_key"] == "special:room"
+        assert kwargs["project_path"] == "/tmp/proj"
+        assert kwargs["defer_prompt_build"] is True
+        assert fake.note_calls == [("special:room", "hello")]
+
+        # Second call: conversation now exists — NO second create, note only.
+        handler.record_room_line("special:room", "again")
+        assert len(fake.create_calls) == 1
+        assert fake.note_calls == [
+            ("special:room", "hello"),
+            ("special:room", "again"),
+        ]
+
+    def test_load_conversation_attempted_before_create(self):
+        fake = _RoomFakeRuntime()
+        handler, _ = _make_room_handler(fake)
+        handler.record_room_line("special:room", "hello")
+        assert fake.load_calls == ["special:room"]
+
+    def test_record_room_line_never_assigns_step_count(self):
+        fake = _RoomFakeRuntime()
+        handler, _ = _make_room_handler(fake)
+        handler.record_room_line("special:room", "hello")
+        assert fake.conv.step_count == 99  # untouched
+
+    def test_record_room_line_returns_none_when_note_raises(self):
+        class _RaisingNote(_RoomFakeRuntime):
+            def note_room_line(self, session_key, line):
+                raise RuntimeError("boom")
+
+        fake = _RaisingNote()
+        handler, _ = _make_room_handler(fake)
+        result = handler.record_room_line("special:room", "hello")
+        assert result is None
+
+    def test_unregistered_session_key_returns_without_touching_runtime(self):
+        fake = _RoomFakeRuntime()
+        handler, _ = _make_room_handler(fake)
+        result = handler.record_room_line("special:nobody", "hello")
+        assert result is None
+        assert fake.load_calls == []
+        assert fake.create_calls == []
+        assert fake.note_calls == []
+
+
+class TestMarkTakeRoomTurn:
+    def test_mark_copies_turn_token(self):
+        handler, _ = _make_room_handler(_RoomFakeRuntime())
+        token = object()
+        handler._turn_tokens["special:room"] = token
+        handler.mark_room_turn("special:room")
+        assert handler._room_turn_tokens["special:room"] is token
+
+    def test_mark_without_token_does_not_write(self):
+        handler, _ = _make_room_handler(_RoomFakeRuntime())
+        handler.mark_room_turn("special:room")
+        assert "special:room" not in handler._room_turn_tokens
+
+    def test_take_pops_on_match(self):
+        handler, _ = _make_room_handler(_RoomFakeRuntime())
+        token = object()
+        handler._room_turn_tokens["special:room"] = token
+        assert handler.take_room_turn("special:room", token) is True
+        assert "special:room" not in handler._room_turn_tokens
+
+    def test_take_leaves_mark_on_mismatch(self):
+        handler, _ = _make_room_handler(_RoomFakeRuntime())
+        marked = object()
+        handler._room_turn_tokens["special:room"] = marked
+        assert handler.take_room_turn("special:room", object()) is False
+        assert handler._room_turn_tokens["special:room"] is marked
+
+
+# ── SPEC-39 §2.5 — reply witness ─────────────────────────────────────────────
+# The witness lives at the END of the successful path of
+# _do_response_complete (ui/agent_runtime/turn_ui.py). It fires only when
+# take_room_turn(session_key, complete_token) returns True, and it calls
+# record_room_line for every project member OTHER than the speaker.
+
+class TestReplyWitness:
+    def _handler_with_debugger_and_coder(self):
+        from unittest.mock import MagicMock
+
+        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+        crh = MagicMock()
+        crh.is_streaming.return_value = True
+        crh.get_streaming_text.return_value = ""
+        handler = AgentRuntimeHandler(
+            main_content=MagicMock(), chat_render_handler=crh, GLib_module=None,
+        )
+        debugger = SpecialAgentDef(
+            conv_id_prefix="special:debugger", display_name="Debugger",
+            role="debugger", emoji="🐞", tools=["read_file"], can_write=False,
+        )
+        coder = SpecialAgentDef(
+            conv_id_prefix="special:coder", display_name="Coder",
+            role="coder", emoji="🛠️", tools=["read_file"], can_write=False,
+        )
+        handler.add_special_agent(debugger)
+        handler.add_special_agent(coder)
+        handler._active_project = ("proj", "/tmp/proj")
+        recorded = []
+        handler.record_room_line = lambda member, line: recorded.append((member, line))
+        handler.set_on_room_members(
+            lambda pname: ["special:coder", "special:debugger"]
+        )
+        return handler, recorded
+
+    def _mark_room_turn(self, handler, sk):
+        token = object()
+        handler._turn_tokens[sk] = token
+        handler.mark_room_turn(sk)
+        return token
+
+    def test_take_true_witnesses_other_member_only(self):
+        handler, recorded = self._handler_with_debugger_and_coder()
+        token = self._mark_room_turn(handler, "special:debugger")
+        handler._do_response_complete("special:debugger", "hey", complete_token=token)
+        assert recorded == [("special:coder", "[room] Debugger: hey")]
+
+    def test_take_false_no_witness(self):
+        handler, recorded = self._handler_with_debugger_and_coder()
+        # A normal, unmarked send: token matches the current turn but the
+        # room mark was never set → take_room_turn returns False.
+        token = object()
+        handler._turn_tokens["special:debugger"] = token
+        handler._do_response_complete("special:debugger", "hey", complete_token=token)
+        assert recorded == []
+
+    def test_empty_text_no_witness(self):
+        handler, recorded = self._handler_with_debugger_and_coder()
+        token = self._mark_room_turn(handler, "special:debugger")
+        handler._do_response_complete("special:debugger", "", complete_token=token)
+        assert recorded == []
+
+    def test_stale_token_no_witness(self):
+        handler, recorded = self._handler_with_debugger_and_coder()
+        token = self._mark_room_turn(handler, "special:debugger")
+        # A different (stale) token: the completion returns before the witness.
+        handler._do_response_complete(
+            "special:debugger", "hey", complete_token=object(),
+        )
+        assert recorded == []
+
+    def test_missing_callback_skips_witness(self):
+        handler, recorded = self._handler_with_debugger_and_coder()
+        handler._on_room_members = None  # simulate no wiring
+        token = self._mark_room_turn(handler, "special:debugger")
+        handler._do_response_complete("special:debugger", "hey", complete_token=token)
+        assert recorded == []
+
