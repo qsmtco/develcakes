@@ -1913,6 +1913,14 @@ class AgentRuntimeHandler(
         """
         return self._last_breakdown.get(session_key)
 
+    def forget_breakdown(self, session_key: str) -> None:
+        """Drop the cached breakdown for ``session_key`` (SPEC-AGENT-DASHBOARD §2.4).
+
+        Called when the session is cleared/compacted so a stale meter
+        does not linger.
+        """
+        self._last_breakdown.pop(session_key, None)
+
     def set_on_token_breakdown_extra(
         self, cb: Callable[[str, dict], None] | None
     ) -> None:
