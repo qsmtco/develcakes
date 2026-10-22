@@ -46,17 +46,14 @@ def _null_lock():
     return contextlib.nullcontext()
 
 
-def _suffixed_writer(session_key: str, agent_def: Any) -> bool:
-    """True when this writer is not the role's default session.
-
-    special:coder stays on the project root. special:coder-2 (same role,
-    key assigned by save_agent_def) gets its own worktree. An empty role
-    is not a suffixed writer.
-    """
-    role = str(getattr(agent_def, "role", "") or "").strip().lower()
-    if not role or not isinstance(session_key, str):
-        return False
-    return session_key.casefold() != f"special:{role}"
+# SPEC-AGENT-ID-AND-ROLES §2.10: the three built-in session keys stay on
+# the open project root. Every other local writer (agent:<slug> or a
+# suffixed legacy special:<role>-N key) gets its own worktree.
+_ROOT_KEYS = frozenset({
+    "special:supervisor",
+    "special:coder",
+    "special:debugger",
+})
 
 
 class AgentRuntimeHandler(
@@ -939,26 +936,25 @@ class AgentRuntimeHandler(
         agent_def: Any,
         project_path: str | None,
     ) -> str | None:
-        """SPEC-09 SP2: the worktree cwd for this turn, or None.
+        """SPEC-09 SP2 (+ SPEC-AGENT-ID-AND-ROLES §2.10): worktree cwd.
 
-        A writer enters its worktree when its session key is NOT the role
-        default special:<role> (special:coder-2, special:debugger-3, …).
-        A primary special:<role> writer runs in the project root. Extra
-        same-role writers get branch agent/<session-id> under
+        A writer enters its worktree when its session key is NOT one of the
+        three built-in root keys (special:supervisor, special:coder,
+        special:debugger). Built-in keys run in the project root. Every
+        other local writer (agent:<slug>, or a suffixed legacy
+        special:<role>-N key) gets branch agent/<session-id> under
         <project>/.worktrees/.
 
-        Non-writer, primary writer, non-git project, or ANY worktree
+        Non-writer, root-key writer, non-git project, or ANY worktree
         failure -> None (the turn runs in the project root).
         """
         if not getattr(agent_def, "can_write", False):
             return None
         if not project_path:
             return None
+        if session_key in _ROOT_KEYS:
+            return None
         try:
-            # A suffixed writer always gets its own worktree; a primary
-            # special:<role> writer runs in the project root.
-            if not _suffixed_writer(session_key, agent_def):
-                return None
             from utils.worktree_manager import WorktreeManager
 
             manager = self._worktree_manager_for(project_path)
@@ -1033,13 +1029,14 @@ class AgentRuntimeHandler(
                 )
                 return
 
-            # SPEC-09 SP2: a WRITER holding a LIVE lease runs this turn in
-            # its per-writer worktree (<project>/.worktrees/<id>, realpath'd
-            # — SP0 BUG#14); everyone else (and any worktree failure) runs
-            # in the project root. MED-6 reset: the lease-loss branch lives
-            # in _worktree_for_turn via is_worktree_of on the CURRENT conv
-            # path — an expired lease repoints the cwd at the project while
-            # the worktree/branch survive for review.
+            # SPEC-09 SP2 + SPEC-AGENT-ID-AND-ROLES §2.10: a WRITER whose
+            # session key is not one of the built-in root keys runs this turn
+            # in its per-writer worktree (<project>/.worktrees/<id>,
+            # realpath'd — SP0 BUG#14); root-key writers and everyone else
+            # (and any worktree failure) run in the project root. MED-6
+            # reset: when the worktree cwd is no longer active, the reset
+            # branch below repoints the cwd at the project while the
+            # worktree/branch survive for review.
             worktree_cwd = self._worktree_for_turn(
                 session_key, agent_def, project_path
             )
@@ -1084,10 +1081,12 @@ class AgentRuntimeHandler(
                 conv = rt.get_conversation(session_key)
                 if conv is not None:
                     # SPEC-09 SP2: keep the conversation's cwd in step with
-                    # the lease state. A just-claimed lease repoints a hot
-                    # conversation INTO the worktree (the write cwd lands
-                    # without a restart); a lapsed lease repoints a stale
-                    # worktree cwd back at the project root (LOW-8: the
+                    # the worktree resolution. A writer entering its worktree
+                    # repoints a hot conversation INTO the worktree (the
+                    # write cwd lands without a restart); when the worktree
+                    # cwd is no longer active (root-key writer, worktree
+                    # failure, or manager disabled) the stale worktree cwd
+                    # is repointed back at the project root (LOW-8: the
                     # worktree/branch survive for review — never deleted
                     # here).
                     if worktree_cwd is not None:
@@ -1102,8 +1101,8 @@ class AgentRuntimeHandler(
 
                         if is_worktree_of(project_path, conv.project_path):
                             logger.info(
-                                "turn for %s: lease gone — resetting stale "
-                                "worktree cwd to project root",
+                                "turn for %s: worktree cwd no longer active — "
+                                "resetting stale worktree cwd to project root",
                                 session_key,
                             )
                             conv.project_path = project_path
@@ -1139,8 +1138,8 @@ class AgentRuntimeHandler(
             # THIS, never _active_project (project-tab switch mid-turn must
             # not mis-attribute, GAP-6). Keyed by session; token freshness is
             # enforced at completion (the prep's own token check already ran).
-            # write_cwd is conv.project_path AFTER the lease/worktree
-            # reconciliation above (worktree for leased writers, else root).
+            # write_cwd is conv.project_path AFTER the worktree reconciliation
+            # above (worktree for non-root writers, else root).
             if conv is not None and conv.project_path:
                 self._turn_attr[session_key] = (
                     project_name or "(none)", project_path, conv.project_path,

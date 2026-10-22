@@ -88,17 +88,25 @@ BUILTIN_ROLES: tuple[str, ...] = ("supervisor", "coder", "debugger")
 def role_slug(name: str) -> str:
     """Lowercase, spaces to hyphens, drop every other character.
     Strip leading and trailing hyphens and underscores. '' when nothing remains.
+    Consecutive separators collapse to one: "Hello  World" -> "hello-world".
+    ASCII only: non-ASCII alphanumerics are dropped, because a role slug
+    becomes a worktree/branch id and _validate_agent_id (utils/worktree_manager.py)
+    admits [a-zA-Z0-9._-] only.
     """
 
 def load_roles() -> list[dict]:
-    """User roles only, sorted by name. Each dict is
+    """User roles only, ASCII-sorted (case-insensitive). Each dict is
     {name: str, slug: str, prompt: str}. Skips a file that does not parse,
     has an empty name, or has an empty prompt. Does not include the three
-    built-in names.
+    built-in names. The slug is the one stored in the file when present
+    (used by load_role to find it); role_slug(name) otherwise.
     """
 
 def load_role(slug: str) -> dict | None:
-    """One user role, or None. Builtin slugs return None (they are not files)."""
+    """One user role, or None. Builtin slugs return None (they are not files).
+    The returned dict's slug is the slug STORED in the file when present,
+    matching load_roles; the input slug is only the file lookup key.
+    """
 
 def save_role(name: str, prompt: str) -> tuple[str | None, str | None]:
     """Write the role. Returns (slug, None) on success, (None, error) on refusal.
@@ -108,7 +116,7 @@ def save_role(name: str, prompt: str) -> tuple[str | None, str | None]:
     """
 ```
 
-`save_role` creates `roles/` with `os.makedirs(..., exist_ok=True)`. `get_config_dir()` itself does not create directories. The file body is `name`, `slug`, and `prompt`. `prompt` is the dialog text, stored as a string, not as a path under `prompts/`.
+`save_role` creates `roles/` with `os.makedirs(..., exist_ok=True)`. `get_config_dir()` itself does not create directories. The file body is `name`, `slug`, and `prompt`. `prompt` is the dialog text, stored as a string, not as a path under `prompts/`. `save_role` strips leading/trailing whitespace from `name` (it derives the slug) but stores `prompt` verbatim (ruling 2026-10-22: the prompt is stored verbatim, not stripped; the empty-prompt refusal remains, defined as `prompt.strip() == ''`).
 
 Return value: the caller shows `error` in the dialog and does not close it. `slug` is how the dropdown selects the new row.
 

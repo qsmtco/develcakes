@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SPECIAL_AGENTS", "SpecialAgentDef", "get_special_agents", "get_special_agent", "unregister_special_agent", "get_auto_open_agents", "get_project_onboarding_agents"]
+__all__ = ["SPECIAL_AGENTS", "SpecialAgentDef", "get_special_agents", "get_special_agent", "is_local_agent_key", "unregister_special_agent", "get_auto_open_agents", "get_project_onboarding_agents"]
 
 
 @dataclass
@@ -46,6 +46,7 @@ class SpecialAgentDef:
     app_title: str | None = None   # OpenRouter X-Title header (e.g. "Coder:develcakes")
     self_improvement: dict = field(default_factory=dict)  # SI layer toggles
     mcp_servers: list[str] = field(default_factory=list)  # MCP servers for Phase B
+    prompts: list[str] = field(default_factory=list)      # agent-owned prompt files
     auto_open: bool = False           # open tab automatically on every app launch
     auto_add_to_projects: bool = False  # auto-add to every new project's team
     compaction_strategy: str = "textual"  # Phase C — "textual" | "llm"
@@ -96,6 +97,12 @@ def _load_registry() -> dict[str, SpecialAgentDef]:
         elif not isinstance(raw_mcp, list):
             raw_mcp = []  # Invalid type → treat as empty
 
+        # Agent-owned prompt files. Only a list of strings is kept.
+        raw_prompts = agent_def.get("prompts") or []
+        if not isinstance(raw_prompts, list):
+            raw_prompts = []
+        prompts = [p for p in raw_prompts if isinstance(p, str)]
+
         if session_key in registry:
             logger.warning(
                 "Duplicate session key %r — agent %r replaces %r. Two agents "
@@ -119,6 +126,7 @@ def _load_registry() -> dict[str, SpecialAgentDef]:
             app_title=agent_def.get("app_title"),
             self_improvement=agent_def.get("self_improvement", {}),
             mcp_servers=raw_mcp,  # Phase B: MCP server list (coerced)
+            prompts=prompts,      # agent-owned prompt files (strings only)
             auto_open=agent_def.get("auto_open", False),
             auto_add_to_projects=agent_def.get("auto_add_to_projects", False),
             compaction_strategy=agent_def.get("compaction_strategy", "textual"),
@@ -154,6 +162,18 @@ def get_special_agents() -> list[SpecialAgentDef]:
 def get_special_agent(prefix: str) -> SpecialAgentDef | None:
     """Look up a special agent by its session key prefix."""
     return _ensure_loaded().get(prefix)
+
+
+def is_local_agent_key(session_key: str) -> bool:
+    """True when the session key belongs to a local (non-gateway) agent.
+
+    Local agents are addressed either by their legacy-built-in id
+    (``special:<role>``) or by their id minted from the display name
+    (``agent:<slug>``). Gateway session keys are not local.
+    """
+    return isinstance(session_key, str) and (
+        session_key.startswith("special:") or session_key.startswith("agent:")
+    )
 
 
 def unregister_special_agent(prefix: str) -> bool:

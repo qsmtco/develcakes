@@ -6218,7 +6218,9 @@ def test_suffixed_writer_gets_worktree_without_lease(tmp_path):
 
 
 def test_first_of_other_role_stays_on_project_root(tmp_path):
-    """special:coder-2 is the default key when the role itself is coder-2."""
+    """SPEC-AGENT-ID-AND-ROLES §2.10: only the three _ROOT_KEYS stay on the
+    project root. special:coder-2 is NOT a root key — even as the first
+    instance of role coder-2 it gets its own worktree."""
     handler = _sp2_make_handler()
     project = tmp_path / "proj"
     project.mkdir()
@@ -6226,9 +6228,11 @@ def test_first_of_other_role_stays_on_project_root(tmp_path):
     agent = _sp2_writer_def()
     agent.role = "coder-2"
 
-    assert handler._worktree_for_turn(
+    got = handler._worktree_for_turn(
         "special:coder-2", agent, str(project)
-    ) is None
+    )
+    assert got is not None
+    assert os.path.basename(got) == "special-coder-2"
 
 
 def test_suffixed_writer_on_non_git_stays_on_project_root(tmp_path):
