@@ -177,6 +177,39 @@ class SettingsHandler:
         if self._on_status_changed:
             self._on_status_changed(has_any_verified_provider(providers))
 
+    # ── Agent settings (SPEC-53 §3) ────────────────────────────────────
+
+    def get_room_fallback(self) -> str:
+        """Read the JEV room-fallback setting, validated.
+
+        Returns one of ``ROOM_FALLBACK_VALUES``. A missing, corrupt, or
+        out-of-vocabulary stored value resolves to ``ROOM_FALLBACK_DEFAULT``
+        (never raises). Mirrors the runtime fallback's tolerant read.
+        """
+        from agent.config import ROOM_FALLBACK_DEFAULT, ROOM_FALLBACK_VALUES
+        from agent.config import get_agent_setting
+
+        value = get_agent_setting("jev_room_fallback", ROOM_FALLBACK_DEFAULT)
+        if value not in ROOM_FALLBACK_VALUES:
+            value = ROOM_FALLBACK_DEFAULT
+        return value
+
+    def set_room_fallback(self, value: str) -> None:
+        """Persist the JEV room-fallback setting to agent.json.
+
+        Raises ValueError for values outside ``ROOM_FALLBACK_VALUES``.
+        OSError propagates if the write fails.
+        """
+        from agent.config import ROOM_FALLBACK_VALUES, set_agent_setting
+
+        if value not in ROOM_FALLBACK_VALUES:
+            raise ValueError(
+                "jev_room_fallback must be one of "
+                f"{', '.join(ROOM_FALLBACK_VALUES)}; got {value!r}"
+            )
+        set_agent_setting("jev_room_fallback", value)
+        logger.info("Saved JEV room-fallback setting: %s", value)
+
     def test_provider(
         self,
         provider: ProviderConfig,

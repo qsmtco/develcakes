@@ -81,10 +81,15 @@ APP_CSS = """
 }
 
 /* -- Buttons ------------------------------------------------------------ */
+/* Compact shared button height (PM polish 2026-10-22): Send / Prompt /
+   Improve / dashboard Compact & Clear all match the feed-toolbar 22px
+   small-button pattern. */
 button.suggested-action {
     background: #6366f1;
     color: #ffffff;
     border-radius: 6px;
+    min-height: 22px;
+    padding: 1px 10px;
 }
 button.suggested-action:hover {
     background: #4f46e5;
@@ -96,6 +101,8 @@ button.btn-improve {
     border-radius: 6px;
     border: none;
     box-shadow: none;
+    min-height: 22px;
+    padding: 1px 10px;
 }
 button.btn-improve:hover {
     background: rgba(99, 102, 241, 0.35);
@@ -108,6 +115,8 @@ button.btn-improving {
     border-radius: 6px;
     border: none;
     box-shadow: none;
+    min-height: 22px;
+    padding: 1px 10px;
     animation: improve-pulse 1.2s ease-in-out infinite;
 }
 @keyframes improve-pulse {
@@ -122,6 +131,8 @@ button.btn-prompt {
     border-radius: 6px;
     border: none;
     box-shadow: none;
+    min-height: 22px;
+    padding: 1px 10px;
 }
 button.btn-prompt:hover {
     background: rgba(34, 197, 94, 0.25);
@@ -468,12 +479,9 @@ button.lib-fav-star {
 .tab-dot-idle {
     background: #4ade80;
 }
-/* Context meter — ProgressBar between chat tabs and input box.
-   Zone classes are applied by set_context_meter() in main_content.py:
-   low (<70%, green), medium (70-90%, yellow), high (>=90%, red). */
-.context-meter {
-    filter: none;
-}
+/* Context-meter zone classes — reused by the agent dashboard rows
+   (SPEC-AGENT-DASHBOARD §2.5): low (<70%, green), medium (70-90%, yellow),
+   high (>=90%, red). The button-bar meter that once owned them was removed. */
 .context-meter-low trough {
     background: rgba(74, 222, 128, 0.15);
     border-color: rgba(74, 222, 128, 0.4);
@@ -498,18 +506,6 @@ button.lib-fav-star {
 .context-meter-high progress {
     background: #ef4444;
 }
-.context-meter-label {
-    font-size: 10px;
-    color: #a0a0b0;
-}
-.context-meter-pct {
-    font-size: 10px;
-    color: #a0a0b0;
-}
-.context-meter-caption {
-    font-size: 9px;
-    color: #707088;
-}
 /* Agent dashboard (SPEC-AGENT-DASHBOARD §2.5) — padding only.
    The bar reuses .context-meter-low/medium/high; those are NOT redefined. */
 .agent-dashboard-header {
@@ -517,6 +513,65 @@ button.lib-fav-star {
 }
 .agent-dashboard-row {
     padding: 2px 8px;
+}
+
+/* Agent dashboard row polish (SPEC-AGENT-DASHBOARD §2.5) */
+.agent-dot {
+    min-width: 8px;
+    min-height: 8px;
+    border-radius: 50%;
+    margin-right: 2px;
+}
+.agent-dash-name {
+    font-size: 11.5px;
+    color: #d8d8e8;
+}
+.agent-dash-role {
+    font-size: 9px;
+    color: #707088;
+}
+.agent-dash-pct {
+    font-size: 9px;
+    color: #a0a0b0;
+}
+.agent-dash-state-working {
+    font-size: 9px;
+    color: #facc15;
+}
+.agent-dash-state-idle {
+    font-size: 9px;
+    color: #7d7d8c;
+}
+button.agent-dash-compact {
+    background: rgba(79, 70, 229, 0.15);
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.28);
+    border-radius: 6px;
+    box-shadow: none;
+    min-height: 22px;
+    padding: 1px 8px;
+}
+button.agent-dash-compact:hover {
+    background: rgba(99, 102, 241, 0.3);
+    color: #c7d2fe;
+}
+button.agent-dash-clear {
+    background: rgba(244, 63, 94, 0.12);
+    color: #fda4af;
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    border-radius: 6px;
+    box-shadow: none;
+    min-height: 22px;
+    padding: 1px 8px;
+}
+button.agent-dash-clear:hover {
+    background: rgba(244, 63, 94, 0.22);
+    color: #fecdd3;
+}
+button.agent-dash-clear:disabled {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #55555f;
 }
 .agent-context-box {
     margin-right: 4px;

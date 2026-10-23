@@ -109,24 +109,55 @@ class AgentDashboard(Gtk.Box):
 
     def _build_row(self, row: dict) -> Gtk.Box:
         name = str(row.get("name", "Agent"))
+        role = str(row.get("role", "")).strip()
         session_key = row.get("session_key", "")
         busy = bool(row.get("busy"))
 
         row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         row_box.add_css_class("agent-dashboard-row")  # SPEC §2.2
 
+        # Colored dot matching the agent's tab color (SPEC §2.5). The row's
+        # 'color' key is a #rrggbb string from color_for_special_agent(role);
+        # fall back to the indigo class when it is missing/invalid.
+        color = row.get("color")
+        dot_cls = (
+            f"agent-dot-{color.lstrip('#').lower()}"
+            if isinstance(color, str)
+            and color.startswith("#")
+            and len(color.lstrip("#")) == 6
+            else "agent-dot-6366f1"
+        )
+        dot = Gtk.Box()
+        dot.add_css_class("agent-dot")
+        dot.add_css_class(dot_cls)
+        dot.set_size_request(8, 8)
+        dot.set_valign(Gtk.Align.CENTER)
+        row_box.append(dot)
+
+        name_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        name_box.set_size_request(120, -1)
+        name_box.set_halign(Gtk.Align.START)
         name_lbl = Gtk.Label(label=name, xalign=0)
-        name_lbl.set_size_request(120, -1)
-        name_lbl.set_halign(Gtk.Align.START)
-        row_box.append(name_lbl)
+        name_lbl.add_css_class("agent-dash-name")
+        name_box.append(name_lbl)
+        if role:
+            role_lbl = Gtk.Label(label=role, xalign=0)
+            role_lbl.add_css_class("agent-dash-role")
+            name_box.append(role_lbl)
+        row_box.append(name_box)
 
         pct_text, zone, fraction = _percent_display(row.get("usage_percent"))
         pct_lbl = Gtk.Label(label=pct_text, xalign=0)
+        pct_lbl.add_css_class("agent-dash-pct")
         pct_lbl.set_size_request(48, -1)
+        # Center vertically with the meter and state label (default valign
+        # is FILL, which top-glues the small text in its cell).
+        pct_lbl.set_valign(Gtk.Align.CENTER)
         row_box.append(pct_lbl)
 
         progress = Gtk.ProgressBar()
         progress.set_size_request(80, 6)
+        progress.set_valign(Gtk.Align.CENTER)  # center with the labels
         progress.set_fraction(fraction)
         if zone is not None:
             progress.add_css_class(zone)
@@ -136,13 +167,17 @@ class AgentDashboard(Gtk.Box):
         state_lbl = Gtk.Label(
             label="working" if busy else "idle", xalign=0
         )
+        state_lbl.set_valign(Gtk.Align.CENTER)
+        state_lbl.add_css_class(
+            "agent-dash-state-working" if busy else "agent-dash-state-idle"
+        )
         state_lbl.set_size_request(64, -1)
         row_box.append(state_lbl)
 
         # SPEC §2.2: Compact stays clickable while busy — the window's
         # handler derives protect_open_turn from the loop state.
         compact_btn = Gtk.Button(label="Compact")
-        compact_btn.add_css_class("flat")
+        compact_btn.add_css_class("agent-dash-compact")
         compact_btn.set_focus_on_click(False)
         compact_btn.connect(
             "clicked",
@@ -151,7 +186,7 @@ class AgentDashboard(Gtk.Box):
         row_box.append(compact_btn)
 
         clear_btn = Gtk.Button(label="Clear")
-        clear_btn.add_css_class("flat")
+        clear_btn.add_css_class("agent-dash-clear")
         clear_btn.set_focus_on_click(False)
         clear_btn.set_sensitive(not busy)
         clear_btn.connect(

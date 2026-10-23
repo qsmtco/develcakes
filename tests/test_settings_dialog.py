@@ -3,6 +3,8 @@
 # Pattern: construct the dialog with a real handler (using tmp_config_dir),
 # inspect the widget tree, do not actually open a window (no Gtk.Window present).
 
+import json
+
 import pytest
 
 try:
@@ -11,6 +13,7 @@ try:
 except (ImportError, ValueError):
     GTK_AVAILABLE = False
 
+from agent.config import get_agent_setting
 from models.providers import ProviderConfig
 from ui.handlers.settings_handler import SettingsHandler
 from ui.views.settings_dialog import SettingsDialog
@@ -681,3 +684,81 @@ class TestDecisionModelPage:
         assert card._name_entry.get_text() == "DecisionModel"
         # No stored card yet — index lookups on the store see nothing.
         assert all(p.name != "DecisionModel" for p in h.list_providers())
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-53 §3 — Agents page: JEV room-fallback combo field
+# ═══════════════════════════════════════════════════════════════════
+
+class TestAgentsRoomFallback:
+    """SPEC-53 Phase 3: one combo field, persisted to agent.json key
+    ``jev_room_fallback`` (values supervisor|all|drop, default supervisor)."""
+
+    def _agent_json(self, tmp_config_dir):
+        return tmp_config_dir / "agent.json"
+
+    def test_page_exists(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert d._stack.get_child_by_name("agents") is not None
+        assert d._agents_fallback_dropdown is not None
+
+    def test_default_on_missing_selects_supervisor(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert h.get_room_fallback() == "supervisor"
+        # Index 0 is "Route to Supervisor".
+        assert d._agents_fallback_dropdown.get_selected() == 0
+
+    def test_save_load_round_trip(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        # Index 1 → "Broadcast to all" → value "all". Selecting persists now.
+        d._agents_fallback_dropdown.set_selected(1)
+        assert get_agent_setting("jev_room_fallback") == "all"
+        assert h.get_room_fallback() == "all"
+        # The raw agent.json holds the key.
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "all"
+        # A fresh dialog loads the saved selection.
+        h2 = SettingsHandler()
+        d2 = SettingsDialog(parent=None, handler=h2)
+        assert d2._agents_fallback_dropdown.get_selected() == 1
+        assert h2.get_room_fallback() == "all"
+
+    def test_drop_value_round_trip(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._agents_fallback_dropdown.set_selected(2)  # "Don't route" → "drop"
+        assert h.get_room_fallback() == "drop"
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "drop"
+
+    def test_corrupt_value_selects_default(self, tmp_config_dir):
+        self._agent_json(tmp_config_dir).write_text(
+            json.dumps({"jev_room_fallback": "not-a-valid-mode"})
+        )
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert h.get_room_fallback() == "supervisor"
+        assert d._agents_fallback_dropdown.get_selected() == 0
+
+    def test_invalid_value_rejected_by_handler(self, tmp_config_dir):
+        h = SettingsHandler()
+        with pytest.raises(ValueError):
+            h.set_room_fallback("nope")
+        # The store is untouched.
+        assert get_agent_setting("jev_room_fallback") is None
+
+    def test_save_preserves_existing_agent_json_keys(self, tmp_config_dir):
+        self._agent_json(tmp_config_dir).write_text(
+            json.dumps({"default_model": "openai/gpt-4o", "user_id": "u-7"})
+        )
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._agents_fallback_dropdown.set_selected(1)
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "all"
+        # Unrelated keys survive the write.
+        assert raw["default_model"] == "openai/gpt-4o"
+        assert raw["user_id"] == "u-7"

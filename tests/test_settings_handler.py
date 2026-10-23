@@ -6,10 +6,12 @@
 #
 # No GTK imports — pure handler logic.
 
+import json
 import threading
 
 import pytest
 
+from agent.config import get_agent_setting
 from models.providers import ProviderConfig
 from ui.handlers.settings_handler import SettingsHandler
 from utils.provider_test import TestResult
@@ -780,3 +782,64 @@ class TestAddOrUpdatePrefixConsistency:
             and "openrouter" in rec.message
             for rec in caplog.records
         ), f"no correction warning found in {[r.message for r in caplog.records]}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-53 §3 — JEV room-fallback setting (handler/persistence)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestRoomFallbackSetting:
+    """SPEC-53 Phase 3: handler + agent.json persistence for
+    ``jev_room_fallback`` (supervisor|all|drop, default supervisor).
+    Headless — pure handler logic, no GTK, runs without a display."""
+
+    def _agent_json(self, tmp_config_dir):
+        return tmp_config_dir / "agent.json"
+
+    def test_default_on_missing(self, tmp_config_dir):
+        h = SettingsHandler()
+        assert h.get_room_fallback() == "supervisor"
+        # Nothing is written just by reading.
+        assert get_agent_setting("jev_room_fallback") is None
+
+    def test_save_load_round_trip(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.set_room_fallback("all")
+        assert get_agent_setting("jev_room_fallback") == "all"
+        assert h.get_room_fallback() == "all"
+        # A fresh handler (fresh dialog) reads the saved value.
+        assert SettingsHandler().get_room_fallback() == "all"
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "all"
+
+    def test_drop_value_round_trip(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.set_room_fallback("drop")
+        assert h.get_room_fallback() == "drop"
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "drop"
+
+    def test_corrupt_value_selects_default(self, tmp_config_dir):
+        self._agent_json(tmp_config_dir).write_text(
+            json.dumps({"jev_room_fallback": "not-a-valid-mode"})
+        )
+        h = SettingsHandler()
+        assert h.get_room_fallback() == "supervisor"
+
+    def test_invalid_value_rejected(self, tmp_config_dir):
+        h = SettingsHandler()
+        with pytest.raises(ValueError):
+            h.set_room_fallback("nope")
+        # The store is untouched.
+        assert get_agent_setting("jev_room_fallback") is None
+
+    def test_save_preserves_existing_agent_json_keys(self, tmp_config_dir):
+        self._agent_json(tmp_config_dir).write_text(
+            json.dumps({"default_model": "openai/gpt-4o", "user_id": "u-7"})
+        )
+        SettingsHandler().set_room_fallback("all")
+        raw = json.loads(self._agent_json(tmp_config_dir).read_text())
+        assert raw["jev_room_fallback"] == "all"
+        # Unrelated keys survive the write.
+        assert raw["default_model"] == "openai/gpt-4o"
+        assert raw["user_id"] == "u-7"

@@ -360,28 +360,33 @@ def probe_decision_model(provider: object, timeout: float = 4.0):
 
 _ROOM_INSTRUCTIONS = (
     "The human just spoke in a group chat. Decide who should answer. "
-    "Choose all when the message names nobody, greets the room, or addresses "
-    "more than one participant. Choose one participant when the message "
-    "addresses that participant by name or role. For example, \"hi debugger\" "
-    "addresses the participant named Debugger. Choose exactly one option."
+    "Choose one or more participants when the message addresses them by "
+    "name or role. Choose \"all\" when the message names nobody, greets "
+    "the room, or addresses the whole room. For example, \"hi debugger\" "
+    "addresses only the participant named Debugger, while \"hi debugger "
+    "and coder\" addresses both. You may select multiple participants."
 )
 
 
-def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> str:
-    """Return ``"all"`` or one ``session_key`` from ``roster``.
+def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> list[str]:
+    """Return ``["all"]``, validated ``session_key``(s), or ``[]``.
 
     ``roster`` entries are ``(session_key, display_name)``. An empty roster,
     a non-string ``text``, any ``post_decision`` failure, a choice outside
     the roster, a bool confidence, or confidence below
-    ``_DECISION_MIN_CONFIDENCE`` returns ``"all"``. Never raises.
-    The return is the session key to wake, or ``"all"`` to wake every
-    member. The human text is not modified.
+    ``_DECISION_MIN_CONFIDENCE`` returns ``[]``. Never raises.
+
+    A genuine whole-room pick returns ``["all"]``. On success the return is
+    the (possibly multi-select) list of session keys to wake; hallucinated
+    keys are dropped — a fully invalid selection collapses to ``[]``.
+    Fallback routing is the caller's responsibility. The human text is not
+    modified.
     """
     if not isinstance(roster, list) or not roster or not isinstance(text, str):
-        return "all"
+        return []
     criteria: dict[str, str] = {
         "all": "The message addresses the whole room, or names nobody, or "
-               "names more than one participant."
+               "greets the room."
     }
     kept: list[tuple[str, str]] = []
     for session_key, display_name in roster:
@@ -395,7 +400,7 @@ def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> str:
             )
             kept.append((session_key, display_name))
     if not kept:
-        return "all"
+        return []
     state = (
         "message:\n" + text[:4000]
         + "\n\nparticipants:\n"
@@ -407,25 +412,39 @@ def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> str:
         {
             "addressee": {
                 "type": "choice",
+                "selection": "multi",
                 "instructions": _ROOM_INSTRUCTIONS,
                 "criteria": criteria,
             }
         },
     )
     if answers is None:
-        return "all"
+        return []
     try:
         answer = answers["addressee"]
         if not isinstance(answer, dict) or answer.get("type") != "choice":
-            return "all"
-        choice = answer.get("choice")
+            return []
+        raw = answer.get("choice")
         confidence = answer.get("confidence", 0.0)
-        if not isinstance(choice, str) or choice not in criteria:
-            return "all"
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            return "all"
+            return []
         if confidence < _DECISION_MIN_CONFIDENCE:
-            return "all"
+            return []
+        if isinstance(raw, str):
+            selected = [raw]
+        elif isinstance(raw, list):
+            selected = list(raw)
+        else:
+            return []
     except (KeyError, TypeError, AttributeError):
-        return "all"
-    return choice
+        return []
+    # Validate: keep only known criterion keys (drop hallucinated/duplicate).
+    seen: set[str] = set()
+    validated: list[str] = []
+    for key in selected:
+        if isinstance(key, str) and key in criteria and key not in seen:
+            seen.add(key)
+            validated.append(key)
+    if "all" in seen:  # a genuine whole-room pick dominates member picks
+        return ["all"]
+    return validated

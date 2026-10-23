@@ -127,3 +127,184 @@ def test_solo_target_skips_resolver(monkeypatch):
     assert rt.sent == [("special:coder", "hi debugger", "project:foo")]
     assert rt.room_marks == []
     assert rt.room_lines == []
+
+
+# ── SPEC-53 §2: fallback routing (jev_room_fallback) ──────────────────────────
+
+SUPERVISOR_MEMBERS = ["special:supervisor", "special:coder", "special:debugger"]
+SUPERVISOR_NAMES = {
+    "special:supervisor": "Supervisor",
+    "special:coder": "Coder",
+    "special:debugger": "Debugger",
+}
+
+FALLBACK_NOTE_SUPERVISOR = "[room] JEV offline — routed to Supervisor"
+FALLBACK_NOTE_ALL = "[room] JEV offline — broadcast to all (fallback)"
+FALLBACK_NOTE_DROP = "[room] JEV offline — message not routed"
+
+
+def _set_fallback_setting(monkeypatch, value):
+    """Patch jev_room_fallback. ``None`` simulates a missing setting (→ default)."""
+    if value is None:
+        monkeypatch.setattr(
+            "agent.config.get_agent_setting",
+            lambda key, default=None: default,
+        )
+    else:
+        monkeypatch.setattr(
+            "agent.config.get_agent_setting",
+            lambda key, default=None: value if key == "jev_room_fallback" else default,
+        )
+
+
+def _make_fallback_handler(runtime_handler, members=MEMBERS, names=NAMES):
+    mc = FakeMainContent(session_key="project:foo", input_text="hi debugger")
+    handler = make_handler(mc, runtime_handler, projects_module=FakeProjectsModule())
+    handler.set_project_handler(FakeProjectHandler(members))
+    runtime_handler.names = dict(names)
+    return mc, handler
+
+
+def _force_resolver_empty(monkeypatch):
+    monkeypatch.setattr(
+        "agent.llm.jev_client.resolve_room_addressee",
+        lambda text, roster: [],
+    )
+
+
+def test_all_branch_fallback_supervisor_default_routes_to_supervisor(monkeypatch):
+    """SPEC-53 acceptance: JEV returns [] → fallback (default supervisor) wakes
+    ONLY the Supervisor member and a visible [room] note appears on its session.
+    The other members get the human PM line, not the raw text."""
+    _force_resolver_empty(monkeypatch)
+    _set_fallback_setting(monkeypatch, None)  # missing → supervisor
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(
+        rt, members=SUPERVISOR_MEMBERS, names=SUPERVISOR_NAMES)
+
+    handler.on_send()
+
+    assert rt.sent == [("special:supervisor", "hi debugger", "project:foo")]
+    assert rt.room_marks == ["special:supervisor"]
+    assert rt.room_lines == [
+        ("special:coder", "[room] PM: hi debugger"),
+        ("special:debugger", "[room] PM: hi debugger"),
+        ("special:supervisor", FALLBACK_NOTE_SUPERVISOR),
+    ]
+
+
+def test_all_branch_fallback_supervisor_no_supervisor_falls_through_to_all(monkeypatch):
+    """Supervisor fallback with no Supervisor member in the roster falls through
+    to the historical 'all' broadcast (with the broadcast note line)."""
+    _force_resolver_empty(monkeypatch)
+    _set_fallback_setting(monkeypatch, "supervisor")
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(rt)  # MEMBERS has no Supervisor
+
+    handler.on_send()
+
+    assert rt.sent == [
+        ("special:coder", "hi debugger", "project:foo"),
+        ("special:debugger", "hi debugger", "project:foo"),
+    ]
+    assert rt.room_marks == ["special:coder", "special:debugger"]
+    assert rt.room_lines == [
+        ("special:coder", FALLBACK_NOTE_ALL),
+        ("special:debugger", FALLBACK_NOTE_ALL),
+    ]
+
+
+def test_all_branch_fallback_invalid_setting_behaves_as_supervisor(monkeypatch):
+    """A corrupt/unknown setting value behaves as 'supervisor' (SPEC-53 §2)."""
+    _force_resolver_empty(monkeypatch)
+    _set_fallback_setting(monkeypatch, "sideways")
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(
+        rt, members=SUPERVISOR_MEMBERS, names=SUPERVISOR_NAMES)
+
+    handler.on_send()
+
+    assert rt.sent == [("special:supervisor", "hi debugger", "project:foo")]
+    assert rt.room_marks == ["special:supervisor"]
+    assert rt.room_lines[-1] == ("special:supervisor", FALLBACK_NOTE_SUPERVISOR)
+
+
+def test_all_branch_fallback_setting_all_broadcasts(monkeypatch):
+    """jev_room_fallback=all: keep the current broadcast-to-every-member
+    behaviour, with the broadcast note line on each member."""
+    _force_resolver_empty(monkeypatch)
+    _set_fallback_setting(monkeypatch, "all")
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(rt)
+
+    handler.on_send()
+
+    assert rt.sent == [
+        ("special:coder", "hi debugger", "project:foo"),
+        ("special:debugger", "hi debugger", "project:foo"),
+    ]
+    assert rt.room_marks == ["special:coder", "special:debugger"]
+    assert rt.room_lines == [
+        ("special:coder", FALLBACK_NOTE_ALL),
+        ("special:debugger", FALLBACK_NOTE_ALL),
+    ]
+
+
+def test_all_branch_fallback_setting_drop_wakes_nobody(monkeypatch):
+    """jev_room_fallback=drop: nobody is woken (no send_local / no marks), the
+    human line is rendered as a room PM for every member, and the 'not routed'
+    note is visible."""
+    _force_resolver_empty(monkeypatch)
+    _set_fallback_setting(monkeypatch, "drop")
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(rt)
+
+    handler.on_send()
+
+    assert rt.sent == []
+    assert rt.room_marks == []
+    assert rt.room_lines == [
+        ("special:coder", "[room] PM: hi debugger"),
+        ("special:debugger", "[room] PM: hi debugger"),
+        ("special:coder", FALLBACK_NOTE_DROP),
+        ("special:debugger", FALLBACK_NOTE_DROP),
+    ]
+
+
+def test_all_branch_fallback_all_invalid_selection(monkeypatch):
+    """A list selection with only hallucinated keys (already filtered to []
+    by the resolver, but a stray legacy value must not broadcast) triggers the
+    same fallback path as []."""
+    monkeypatch.setattr(
+        "agent.llm.jev_client.resolve_room_addressee",
+        lambda text, roster: ["special:nope", "ghost"],
+    )
+    _set_fallback_setting(monkeypatch, "supervisor")
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(
+        rt, members=SUPERVISOR_MEMBERS, names=SUPERVISOR_NAMES)
+
+    handler.on_send()
+
+    assert rt.sent == [("special:supervisor", "hi debugger", "project:foo")]
+    assert rt.room_marks == ["special:supervisor"]
+    assert rt.room_lines[-1] == ("special:supervisor", FALLBACK_NOTE_SUPERVISOR)
+
+
+def test_all_branch_fallback_resolver_exception_routes_same_path(monkeypatch):
+    """The exception fallback in _resolve_and_deliver routes through the same
+    fallback path (supervisor default), not a hard-coded broadcast."""
+    def exploding_resolver(text, roster):
+        raise RuntimeError("JEV down")
+
+    monkeypatch.setattr("agent.llm.jev_client.resolve_room_addressee", exploding_resolver)
+    _set_fallback_setting(monkeypatch, None)  # missing → supervisor
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(
+        rt, members=SUPERVISOR_MEMBERS, names=SUPERVISOR_NAMES)
+
+    handler.on_send()
+
+    assert rt.sent == [("special:supervisor", "hi debugger", "project:foo")]
+    assert rt.room_marks == ["special:supervisor"]
+    assert rt.room_lines[-1] == ("special:supervisor", FALLBACK_NOTE_SUPERVISOR)

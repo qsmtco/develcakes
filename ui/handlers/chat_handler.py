@@ -175,6 +175,33 @@ class ChatHandler:
         self._agent_runtime_handler.send_to_special_agent(
             session_key, text, reply_target=reply_target)
 
+    def _resolve_room_fallback(self, members, roster):
+        """Resolve fallback targets per the `jev_room_fallback` setting.
+
+        SPEC-53 §2: when the room resolver returns [] (JEV failed / empty /
+        unknown) or an all-invalid selection, the delivery routes through this
+        fallback instead of broadcasting. Values: "supervisor" (default) |
+        "all" | "drop". A missing or invalid setting behaves as "supervisor".
+
+        Returns a ``(targets, note_suffix)`` tuple where ``targets`` is an
+        ordered, deduplicated list of session keys to wake (preserving member
+        order) and ``note_suffix`` is the human-readable tail of the visible
+        ``[room] JEV offline — ...`` note line.
+        """
+        from agent.config import get_agent_setting
+        setting = get_agent_setting("jev_room_fallback", "supervisor")
+        if setting == "drop":
+            return [], "message not routed"
+        if setting == "all":
+            return list(members), "broadcast to all (fallback)"
+        # "supervisor" (or any missing/unknown value): route to the Supervisor
+        # member if present in the project roster; otherwise fall through to
+        # the historical "all" broadcast.
+        for member, name in roster:
+            if name.lower() == "supervisor":
+                return [member], f"routed to {name}"
+        return list(members), "broadcast to all (fallback)"
+
     def on_send_clicked(self, _btn=None):
         """GTK signal handler for the Send button. Delegates to on_send."""
         self.on_send()
@@ -443,24 +470,68 @@ class ChatHandler:
 
                     def _deliver(choice):
                         arh = self._agent_runtime_handler
-                        if choice == "all" or choice not in members:
+                        # SPEC-53 Phase 2: the resolver returns a list. ['all']
+                        # is a genuine whole-room pick; [] or an all-invalid
+                        # selection triggers fallback routing per the
+                        # jev_room_fallback setting (supervisor | all | drop).
+                        # Legacy string choices remain accepted for back-compat.
+                        if isinstance(choice, list):
+                            if choice == ["all"]:
+                                targets = list(members)
+                            else:
+                                # Keep member order; drop anything not in the
+                                # roster so the result is a deduplicated list.
+                                targets = [m for m in members if m in choice]
+                        elif isinstance(choice, str):
+                            if choice == "all":
+                                targets = list(members)
+                            elif choice in members:
+                                targets = [choice]
+                            else:
+                                targets = []
+                        else:
+                            targets = []
+
+                        note_line = None
+                        if not targets:
+                            # JEV failed / empty / hallucinated selection →
+                            # fallback routing (SPEC-53 §2).
+                            targets, note_suffix = self._resolve_room_fallback(
+                                members, roster)
+                            note_line = f"[room] JEV offline — {note_suffix}"
+
+                        if len(targets) == len(members):
+                            # Whole room (or intentionally every member): raw
+                            # text to all; no [room] PM lines.
                             for member in members:
                                 self._send_local(
                                     member, text, reply_target=f"project:{project_name}")
                                 if arh is not None and hasattr(arh, "mark_room_turn"):
                                     arh.mark_room_turn(member)
                         else:
-                            # One addressee: the raw text is their user message;
+                            # Addressee(s): the raw text is their user message;
                             # every other member gets the human line as a room PM.
-                            self._send_local(
-                                choice, text, reply_target=f"project:{project_name}")
-                            if arh is not None and hasattr(arh, "mark_room_turn"):
-                                arh.mark_room_turn(choice)
+                            for target in targets:
+                                self._send_local(
+                                    target, text, reply_target=f"project:{project_name}")
+                                if arh is not None and hasattr(arh, "mark_room_turn"):
+                                    arh.mark_room_turn(target)
                             if arh is not None and hasattr(arh, "record_room_line"):
                                 for member in members:
-                                    if member != choice:
+                                    if member not in targets:
                                         arh.record_room_line(
                                             member, f"[room] PM: {text}")
+                        # SPEC-53 §2 visibility: when a fallback fired, emit the
+                        # [room] note per woken target — or to every member for
+                        # "drop" so the human sees the message was not routed.
+                        if note_line is not None and arh is not None \
+                                and hasattr(arh, "record_room_line"):
+                            if targets:
+                                for target in targets:
+                                    arh.record_room_line(target, note_line)
+                            else:
+                                for member in members:
+                                    arh.record_room_line(member, note_line)
 
                     def _resolve_and_deliver():
                         # Import inside the worker so a module import never loads
@@ -471,10 +542,10 @@ class ChatHandler:
                         except Exception as exc:
                             _logger.exception(
                                 "[chat] resolve_room_addressee failed for %r "
-                                "(falling back to 'all'): %r",
+                                "(fallback routing will apply): %r",
                                 project_name, exc,
                             )
-                            choice = "all"
+                            choice = []
                         if self._GLib is not None:
                             self._GLib.idle_add(
                                 lambda choice=choice: (_deliver(choice), False)[1])

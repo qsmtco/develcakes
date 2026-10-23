@@ -21,6 +21,7 @@ gi.require_version('Gtk', '4.0')
 
 from gi.repository import Gtk
 
+from agent.config import ROOM_FALLBACK_VALUES as _ROOM_FALLBACK_VALUES
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER as _DECISION_MODEL_PROVIDER
 from models.providers import (
     ProviderConfig,
@@ -33,6 +34,15 @@ from utils import stt_config as _stt_config
 # Settings page pre-names its card with this; the general Providers list and
 # agent-provider dropdowns filter it out (it is not a chat model).
 _REASONING_LEVELS = ("off", "low", "medium", "high")
+
+# SPEC-53 §3: the agents-section combo. Order matches ROOM_FALLBACK_VALUES
+# in agent/config.py (supervisor | all | drop), so dropdown index i maps to
+# _ROOM_FALLBACK_VALUES[i].
+_AGENTS_FALLBACK_LABELS = (
+    "Route to Supervisor",
+    "Broadcast to all",
+    "Don't route",
+)
 
 # SPEC-37: the "STT Model" page reads through the _stt_config MODULE (never
 # `from … import` names) so tests can monkeypatch stt_config.* cleanly.
@@ -49,6 +59,7 @@ _SETTINGS_GROUPS = (
     ("decision-model", "Decision Model"),
     ("stt", "STT Model"),
     ("speech", "Speech"),
+    ("agents", "Agents"),
 )
 
 
@@ -600,6 +611,10 @@ class SettingsDialog:
         # ── Speech page (talk tool) ──────────────────────────────────
         self._speech_page = self._build_speech_page()
         self._stack.add_titled(self._speech_page, "speech", "Speech")
+
+        # ── Agents page (SPEC-53 §3) ─────────────────────────────────
+        self._agents_page = self._build_agents_page()
+        self._stack.add_titled(self._agents_page, "agents", "Agents")
 
         self._group_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self._group_box.set_margin_start(8)
@@ -1161,6 +1176,112 @@ class SettingsDialog:
         self._speech_status_label.set_text("✓ Saved. Applies on the next talk.")
         self._speech_token_entry.set_text("")
         self._refresh_speech_section()
+
+    # ── Agents section (SPEC-53 §3) ────────────────────────────────────
+
+    def _build_agents_page(self) -> Gtk.Box:
+        """Build the "Agents" page: ONE JEV room-fallback combo field.
+
+        Pure view — every read/write goes through SettingsHandler, which owns
+        agent.json persistence. Selecting an option persists it immediately
+        (STT-dropdown pattern); refresh-time selection blocks the notify
+        handler, so constructing the dialog never writes.
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "When the JEV decision model cannot route a group message "
+            "(timeout, low confidence, empty result), this setting chooses "
+            "where the message goes."
+        )
+        page.append(intro)
+
+        self._agents_fallback_dropdown = Gtk.DropDown.new_from_strings(
+            list(_AGENTS_FALLBACK_LABELS)
+        )
+        self._agents_fallback_dropdown.set_hexpand(True)
+        self._agents_fallback_handler_id = self._agents_fallback_dropdown.connect(
+            "notify::selected", self._on_agents_fallback_changed
+        )
+        page.append(
+            self._labeled_row(
+                "When JEV can't route a group message:",
+                self._agents_fallback_dropdown,
+            )
+        )
+
+        caption = Gtk.Label()
+        caption.set_xalign(0.0)
+        caption.set_wrap(True)
+        caption.add_css_class("dim-label")
+        caption.set_text(
+            "Options: Route to Supervisor (default) — send to the project's "
+            "Supervisor member when present; Broadcast to all — send to every "
+            "member; Don't route — show the note in the room, wake nobody."
+        )
+        page.append(caption)
+
+        self._agents_status_label = Gtk.Label(label="")
+        self._agents_status_label.set_xalign(0.0)
+        self._agents_status_label.set_wrap(True)
+        page.append(self._agents_status_label)
+
+        self._refresh_agents_section()
+        return page
+
+    def _refresh_agents_section(self) -> None:
+        """Sync the dropdown with the stored agent.json value.
+
+        A missing or out-of-vocabulary stored value selects the default
+        (index 0, "Route to Supervisor"). The notify handler is blocked
+        during set_selected so refresh never writes.
+        """
+        if getattr(self, "_agents_fallback_dropdown", None) is None:
+            return
+        value = self._handler.get_room_fallback()
+        index = (
+            _ROOM_FALLBACK_VALUES.index(value)
+            if value in _ROOM_FALLBACK_VALUES
+            else 0
+        )
+        self._agents_fallback_dropdown.handler_block(
+            self._agents_fallback_handler_id
+        )
+        try:
+            self._agents_fallback_dropdown.set_selected(index)
+        finally:
+            self._agents_fallback_dropdown.handler_unblock(
+                self._agents_fallback_handler_id
+            )
+
+    def _on_agents_fallback_changed(self, dropdown, _pspec) -> None:
+        """Persist the chosen fallback mode immediately (STT-dropdown pattern)."""
+        del dropdown  # signal payload; the index is read from the dropdown
+        selected = int(self._agents_fallback_dropdown.get_selected())
+        if not (0 <= selected < len(_ROOM_FALLBACK_VALUES)):
+            return
+        value = _ROOM_FALLBACK_VALUES[selected]
+        try:
+            self._handler.set_room_fallback(value)
+        except Exception as e:  # noqa: BLE001 — surface save failures to the user
+            self._agents_status_label.set_text(f"❌ save failed: {e}")
+            self._agents_status_label.remove_css_class("settings-status-ok")
+            self._agents_status_label.add_css_class("settings-status-fail")
+            return
+        self._agents_status_label.remove_css_class("settings-status-fail")
+        self._agents_status_label.add_css_class("settings-status-ok")
+        self._agents_status_label.set_text(
+            f"✓ Saved: {_AGENTS_FALLBACK_LABELS[selected]}. "
+            "Applies on the next unrouted group message."
+        )
 
     def _refresh_stt_section(self) -> None:
         """Sync dropdown/entry with stt.yaml; render inert on degraded store.

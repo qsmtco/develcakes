@@ -287,6 +287,92 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
     )
 
 
+# SPEC-53 §3: canonical values + default for the JEV room-fallback setting.
+# Kept next to the readers/writers so the runtime fallback (chat_handler) and
+# the settings UI share one vocabulary. Values: "supervisor" (default) |
+# "all" | "drop". A missing or invalid stored value behaves as "supervisor".
+ROOM_FALLBACK_DEFAULT = "supervisor"
+ROOM_FALLBACK_VALUES = ("supervisor", "all", "drop")
+
+
+def get_agent_setting(key: str, default: Any = None) -> Any:
+    """Read one top-level agent.json setting, tolerantly.
+
+    Follows the same JSON read pattern as ``load_agent_config`` (agent.json is
+    the app-level agent settings file) but returns only the one key — no
+    providers.yaml load, no ``AgentConfig`` parse. A missing or corrupt
+    agent.json, or a non-dict payload, returns ``default``. Never raises.
+    """
+    try:
+        import importlib
+        utils_config = importlib.import_module("utils.config")
+        config_path = os.path.join(utils_config.get_config_dir(), "agent.json")
+        if not os.path.isfile(config_path):
+            return default
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return default
+        return raw.get(key, default)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def set_agent_setting(key: str, value: Any) -> None:
+    """Write one top-level agent.json setting, preserving all other keys.
+
+    Mirrors the tolerant read discipline of ``get_agent_setting``: a missing
+    file is created, a corrupt or non-dict payload is replaced (with a
+    warning) rather than raising. Uses an atomic temp-file rename, then
+    applies owner-only modes (dir 0700, file 0600) to match the rest of
+    agent.json handling. OSError propagates if the write fails.
+    """
+    import importlib
+    utils_config = importlib.import_module("utils.config")
+    config_path = os.path.join(utils_config.get_config_dir(), "agent.json")
+
+    raw: dict[str, Any] = {}
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                raw = loaded
+            else:
+                logger.warning(
+                    "agent.json root is not a mapping (%s) — rewriting with only %r",
+                    type(loaded).__name__, key,
+                )
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(
+                "agent.json unreadable (%s) — rewriting with only %r", e, key,
+            )
+    raw[key] = value
+
+    dir_path = os.path.dirname(config_path)
+    os.makedirs(dir_path, exist_ok=True)
+    tmp_path = config_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, indent=4, ensure_ascii=False)
+        os.replace(tmp_path, config_path)
+    finally:
+        if os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass  # non-POSIX filesystem
+    try:
+        os.chmod(dir_path, 0o700)
+    except OSError:
+        pass  # non-POSIX filesystem
+    logger.info("agent.json: saved setting %s = %r", key, value)
+
+
 def _create_default_config(path: str) -> None:
     """Create agent.json with minimal default config.
 

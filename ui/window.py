@@ -799,43 +799,18 @@ class MainWindow(Gtk.ApplicationWindow):
             return agent_name, agent_color
 
         def _update_agent_display(sk: str):
-            """Update context meter avatar/name and the status-bar agent label."""
-            # Canvas/Welcome tabs display a document, not a conversation; they
-            # have no agent identity. Clear the bar instead of leaving the
-            # previous agent's percent up (SPEC-WIRE-CONTEXT-PRESSURE §2.5).
-            if isinstance(sk, str) and sk.startswith(("canvas:", "welcome:")):
-                self._main_content.set_context_meter(sk, -1)
-                return
+            """Update the agent avatar/name box and the status-bar agent label."""
             agent_name, agent_color = _resolve_agent_info(sk)
             if agent_name:
                 self._main_content.update_agent_context_display(agent_name, agent_color or "#6366f1")
                 self.update_agent_id_display(agent_name)
             else:
                 self.update_agent_id_display("—")
-            # Tab switch: paint this tab's cached breakdown, or clear the bar
-            # when the cache is empty. A project: tab has no breakdown, so
-            # switching to it clears the bar.
-            handler = self._agent_runtime_handler
-            breakdown = handler.get_last_breakdown(sk) if handler is not None else None
-            if breakdown is None:
-                self._main_content.set_context_meter(sk, -1)
-            else:
-                self._main_content.set_context_meter(
-                    sk, breakdown.get("usage_percent", 0.0),
-                )
 
         def _on_context_meter(sk: str, breakdown: dict) -> None:
-            # Paint the bar only when this breakdown's session is the visible
-            # tab. The agent name stays with the tab (SPEC-WIRE-CONTEXT-
-            # PRESSURE §2.5).
-            # SPEC-AGENT-DASHBOARD §2.3: the dashboard refresh runs on EVERY
-            # breakdown, including when the early return fires because the
-            # visible tab is not the reporting agent. The button-bar rule above
-            # is unchanged — a project: tab still does not paint agent reports.
-            visible = self._main_content.get_current_session_key()
-            if sk == visible:
-                usage_pct = breakdown.get("usage_percent", 0.0)
-                self._main_content.set_context_meter(sk, usage_pct)
+            # SPEC-AGENT-DASHBOARD §2.3: every breakdown refreshes the agent
+            # dashboard rows. The button-bar context meter was removed, so no
+            # per-tab meter painting happens here.
             self._refresh_agent_dashboard()
         self._agent_runtime_handler.set_on_token_breakdown_extra(_on_context_meter)
 
@@ -1806,6 +1781,7 @@ class MainWindow(Gtk.ApplicationWindow):
             rows.append({
                 "session_key": sk,
                 "name": name,
+                "role": role,
                 "usage_percent": pct,
                 "busy": busy,
                 "color": color_for_special_agent(role if isinstance(role, str) else ""),

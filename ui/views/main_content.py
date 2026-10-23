@@ -126,26 +126,7 @@ class MainContent(Gtk.Box):
         # the load (which would re-render over the live splash).
         self._welcome_loaded = False
 
-        # Phase A — Context meter widget (Claude Code style).
-        # These are instance attributes so set_context_meter() can find them.
-        self._context_meter = Gtk.ProgressBar()
-        self._context_meter.set_size_request(80, 6)
-        self._context_meter.set_show_text(False)
-        self._context_meter.set_fraction(0.0)
-        self._context_meter.add_css_class("context-meter")
-        self._context_meter_label = Gtk.Label(label="")
-        self._context_meter_label.add_css_class("context-meter-label")
-        self._context_meter_label.set_visible(False)  # hidden — meter bar color conveys zone
-        self._context_pct_label = Gtk.Label(label="0%")
-        self._context_pct_label.add_css_class("context-meter-pct")
-        self._context_caption_label = Gtk.Label(label="context")
-        self._context_caption_label.add_css_class("context-meter-caption")
-        meter_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        meter_box.append(self._context_pct_label)
-        meter_box.append(self._context_meter)
-        meter_box.append(self._context_caption_label)
-
-        # Agent avatar + name display (left of meter in button bar)
+        # Agent avatar + name display (left of the prompt button in the bar)
         self._context_avatar = Gtk.Picture()
         self._context_avatar.set_size_request(28, 28)
         self._context_avatar.add_css_class("context-avatar")
@@ -272,7 +253,6 @@ class MainContent(Gtk.Box):
 
         button_bar.set_spacing(6)
         button_bar.append(self._agent_context_box)
-        button_bar.append(meter_box)
         button_bar.append(self._prompt_button)
         button_bar.append(self._improve_button)
         button_bar.append(self._send_button)
@@ -1377,46 +1357,6 @@ class MainContent(Gtk.Box):
         if texture is not None:
             self._context_avatar.set_paintable(texture)
         self._context_name_label.set_text(agent_name or "")
-
-    def set_context_meter(
-        self, session_key: str, usage_percent: float
-    ) -> None:
-        """Update the context-meter widget for the active ``session_key``.
-
-        Called from window.py when AgentRuntimeHandler emits a breakdown.
-        ``usage_percent`` is 0.0-100.0. Negative values reset to idle.
-        """
-        if usage_percent is None or not isinstance(usage_percent, (int, float)):
-            self._context_meter.set_fraction(0.0)
-            self._context_meter_label.set_text("")
-            return
-        if usage_percent != usage_percent:  # NaN check
-            self._context_meter.set_fraction(0.0)
-            self._context_meter_label.set_text("")
-            return
-        if usage_percent < 0:
-            self._context_meter.set_fraction(0.0)
-            self._context_meter_label.set_text("")
-            return
-        self._context_meter.set_fraction(min(usage_percent / 100.0, 1.0))
-        # Pick CSS class per zone (green < 70%, yellow 70-90%, red >= 90%).
-        existing_classes = [
-            c for c in self._context_meter.get_css_classes()
-            if c.startswith("context-meter-")
-        ]
-        for c in existing_classes:
-            self._context_meter.remove_css_class(c)
-        if usage_percent >= 90.0:
-            self._context_meter.add_css_class("context-meter-high")
-            color_label = "high"
-        elif usage_percent >= 70.0:
-            self._context_meter.add_css_class("context-meter-medium")
-            color_label = "med"
-        else:
-            self._context_meter.add_css_class("context-meter-low")
-            color_label = "ok"
-        self._context_meter_label.set_text(f"{color_label} {usage_percent:.0f}%")
-        self._context_pct_label.set_text(f"{usage_percent:.0f}%")
 
     # ── STT (Speech-to-Text) ───────────────────────────────────────────────
     # State machine: idle → click → recording → click → idle.
