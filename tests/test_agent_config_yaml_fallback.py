@@ -6,24 +6,22 @@
 
 import json
 import os
-import pytest
 
 from agent.config import (
-    _load_providers_from_yaml,
     ensure_providers_yaml_exists,
     load_agent_config,
 )
-from utils.providers_store import save_providers, load_providers
 from models.providers import ProviderConfig
+from utils.providers_store import load_providers, save_providers
 
 
 def _make_provider(name="openai", **overrides) -> ProviderConfig:
-    defaults = dict(
-        name=name,
-        base_url=f"https://api.{name}.example.com/v1",
-        api_key="test-key",
-        default_model=f"openai/{name}-model",
-    )
+    defaults = {
+        "name": name,
+        "base_url": f"https://api.{name}.example.com/v1",
+        "api_key": "test-key",
+        "default_model": f"openai/{name}-model",
+    }
     defaults.update(overrides)
     return ProviderConfig(**defaults)
 
@@ -217,3 +215,38 @@ class TestLoadProvidersFromYamlPrefixKeys:
         assert "zai" in result
         assert result["zai"] is result["GLM 5.3"]
         assert "zai/glm-5.3" in result
+
+    def test_non_chat_fixed_card_shares_prefix_without_stealing_bare_key(
+        self, monkeypatch
+    ):
+        """SPEC-55 BUG #2: an ImproveModel card sharing an openrouter/* prefix
+        must not drop the chat card's bare-prefix key — get_api_key('openrouter')
+        keeps resolving to the chat card."""
+        from utils.improve import IMPROVE_MODEL_PROVIDER
+
+        cards = [
+            ProviderConfig(name="OpenRouter", base_url="https://or.example/v1",
+                           api_key="sk-chat-key",
+                           default_model="openrouter/some-model", caller="openrouter"),
+            ProviderConfig(name=IMPROVE_MODEL_PROVIDER,
+                           base_url="https://or.example/v1",
+                           api_key="sk-improve-key",
+                           default_model="openrouter/improve-model", caller=""),
+        ]
+        result = self._load(monkeypatch, cards)
+        # The chat card is the single owner of the 'openrouter' prefix — the
+        # non-chat ImproveModel card is excluded from ownership entirely.
+        assert "openrouter" in result
+        assert result["openrouter"] is result["OpenRouter"]
+        assert result["openrouter"].api_key == "sk-chat-key"
+        # ImproveModel still registers by fixed name and full model string.
+        assert IMPROVE_MODEL_PROVIDER in result
+        assert "openrouter/improve-model" in result
+        # get_api_key('openrouter') still returns the chat card's key.
+        import types
+        monkeypatch.setattr(
+            "agent.config.load_agent_config",
+            lambda: types.SimpleNamespace(providers=result),
+        )
+        from agent.config import get_api_key
+        assert get_api_key("openrouter") == "sk-chat-key"

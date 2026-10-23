@@ -278,6 +278,17 @@ class MainContent(Gtk.Box):
         bottom_box.append(input_scroll)
         bottom_box.append(button_bar)
 
+        # Transient Improve status line (SPEC-55 §3d) — surfaces unconfigured /
+        # error messages from the improve flow near the input. Cleared on the
+        # next improve click or input edit.
+        self._improve_status_label = Gtk.Label()
+        self._improve_status_label.set_xalign(0.0)
+        self._improve_status_label.set_wrap(True)
+        self._improve_status_label.add_css_class("dim-label")
+        self._improve_status_label.add_css_class("improve-status")
+        self._improve_status_label.set_visible(False)
+        bottom_box.append(self._improve_status_label)
+
         # --- VERTICAL PANED SPLIT ---
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         paned.set_start_child(top_box)
@@ -555,8 +566,25 @@ class MainContent(Gtk.Box):
     def _on_input_buffer_changed(self, buf) -> None:
         """Fire the registered callback (if any). The actual buf.connect
         is in __init__; this is the indirection layer."""
+        # Input edit clears any transient Improve status (SPEC-55 §3d).
+        status = getattr(self, "_improve_status_label", None)
+        if status is not None:
+            status.set_visible(False)
         if self._on_buffer_changed is not None:
             self._on_buffer_changed(buf)
+
+    def set_improve_status(self, text: str) -> None:
+        """Show/hide the transient Improve status line (SPEC-55 §3d).
+
+        Called by MediaHandler with the improve error string (or "" to
+        clear). Empty/None hides it; the next improve click or input edit
+        clears it again.
+        """
+        if text:
+            self._improve_status_label.set_text(text)
+            self._improve_status_label.set_visible(True)
+        else:
+            self._improve_status_label.set_visible(False)
 
     def set_on_input_right_click(self, cb: callable) -> None:
         """Register callback for right-click on input TextView.

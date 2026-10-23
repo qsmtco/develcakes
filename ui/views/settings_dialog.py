@@ -29,6 +29,7 @@ from models.providers import (
     validate_provider_reasoning_effort,
 )
 from utils import stt_config as _stt_config
+from utils.improve import IMPROVE_MODEL_PROVIDER as _IMPROVE_MODEL_PROVIDER
 
 # SPEC-22 §2.8: the structural handle the code looks the JEV card up by. The
 # Settings page pre-names its card with this; the general Providers list and
@@ -60,6 +61,7 @@ _SETTINGS_GROUPS = (
     ("stt", "STT Model"),
     ("speech", "Speech"),
     ("agents", "Agents"),
+    ("improve-model", "Improve Model"),
 )
 
 
@@ -616,6 +618,10 @@ class SettingsDialog:
         self._agents_page = self._build_agents_page()
         self._stack.add_titled(self._agents_page, "agents", "Agents")
 
+        # ── Improve Model page (SPEC-55) ─────────────────────────────
+        self._improve_page = self._build_improve_page()
+        self._stack.add_titled(self._improve_page, "improve-model", "Improve Model")
+
         self._group_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self._group_box.set_margin_start(8)
         self._group_box.set_margin_end(8)
@@ -696,16 +702,20 @@ class SettingsDialog:
         the provider list. Dirty cards keep their entry values but get
         their provider reference updated so status labels reflect test results.
 
-        SPEC-22 §2.8: the DecisionModel card is NOT a chat provider — it is
-        filtered out of the general Providers list (it lives on its own page).
+        SPEC-22 §2.8 + SPEC-55: the DecisionModel and ImproveModel cards are NOT
+        chat providers — they are filtered out of the general Providers list
+        (each lives on its own page).
         """
-        # SPEC-22 §2.8: sync the Decision Model page from the UNFILTERED list
-        # (its card lives on its own page), then filter it out of the general
-        # Providers list — it is not a chat provider.
+        # SPEC-22 §2.8 + SPEC-55: sync the dedicated pages from the UNFILTERED
+        # list (their cards live on their own pages), then filter them out of
+        # the general Providers list — neither is a chat provider.
         self._refresh_decision_card(providers)
+        self._refresh_improve_card(providers)
         providers = [
             p for p in providers
-            if getattr(p, "name", "") != _DECISION_MODEL_PROVIDER
+            if getattr(p, "name", "") not in (
+                _DECISION_MODEL_PROVIDER, _IMPROVE_MODEL_PROVIDER,
+            )
         ]
 
         # Build lookup of current cards by provider name
@@ -920,6 +930,152 @@ class SettingsDialog:
         else:
             card._provider = stored
             card._populate_from_provider()
+
+    # ── Improve Model section (SPEC-55) ───────────────────────────────
+
+    def _build_improve_page(self) -> Gtk.Box:
+        """Build the "Improve Model" page: ONE fixed-name provider card.
+
+        Mirrors the Decision Model page (SPEC-22 §2.8): a real ProviderConfig
+        in providers.yaml reached by the code through
+        ``IMPROVE_MODEL_PROVIDER``, name locked, every other field
+        user-editable. The Improve ✦ button (utils/improve.py) reads this card
+        for its endpoint/key/model — no hardcoded provider remains.
+        """
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page.set_margin_start(16)
+        page.set_margin_end(16)
+        page.set_margin_top(12)
+        page.set_margin_bottom(12)
+
+        intro = Gtk.Label()
+        intro.set_xalign(0.0)
+        intro.set_wrap(True)
+        intro.add_css_class("dim-label")
+        intro.set_text(
+            "The Improve ✦ button rewrites your input box text before you "
+            "send it. This card is the model it uses — point it at any "
+            "OpenAI-compatible chat endpoint. The name is fixed; the rest "
+            "is yours."
+        )
+        page.append(intro)
+
+        self._improve_card = _ProviderCard(
+            self,
+            # Placeholder; synced from the store by _refresh_improve_card.
+            ProviderConfig(
+                name=_IMPROVE_MODEL_PROVIDER,
+                base_url="", api_key="", default_model="", caller="",
+            ),
+            fixed_name=True,
+            allow_empty_caller=True,  # improve uses the card verbatim; no caller
+            test_runner=self._improve_test_runner,
+        )
+        page.append(self._improve_card.get_widget())
+        return page
+
+    def _refresh_improve_card(self, providers: list[ProviderConfig]) -> None:
+        """Sync the Improve Model card with the stored card (if present).
+
+        ``providers`` is the full unfiltered list; the caller filters only the
+        general list. A dirty card keeps the user's unsaved edits.
+        """
+        card = getattr(self, "_improve_card", None)
+        if card is None:
+            return
+        stored = next(
+            (p for p in providers
+             if getattr(p, "name", "") == _IMPROVE_MODEL_PROVIDER),
+            None,
+        )
+        if stored is None:
+            # No stored card — leave the empty placeholder editable but keep
+            # the fixed name present so Save can create it.
+            card._name_entry.set_text(_IMPROVE_MODEL_PROVIDER)
+            return
+        if card._is_dirty():
+            card._update_provider_ref(stored)
+        else:
+            card._provider = stored
+            card._populate_from_provider()
+
+    def _improve_test_runner(self) -> None:
+        """Run an honest chat-completions probe for the ImproveModel card off-thread.
+
+        SPEC-55 fix round (BUG #3): the generic runner derives the caller from
+        the model prefix and fails for unprefixed models like 'gpt-4o'. This
+        dedicated runner tests the card's own base_url/api_key/default_model
+        directly against `base_url.rstrip('/') + '/chat/completions'` — the
+        same endpoint utils/improve.py POSTs to — with no caller logic. Not a
+        stored chat provider, so it must NOT stamp providers.yaml; the result
+        updates the card's status label only (see
+        `_ProviderCard._apply_test_result_inline`).
+        """
+        card = self._improve_card
+        provider = card._collect_from_form()
+
+        def _worker():
+            try:
+                import json as _json
+
+                from utils.provider_test import TestResult, _do_request
+
+                base_url = (provider.base_url or "").strip()
+                api_key = (provider.api_key or "").strip()
+                model = (provider.default_model or "").strip()
+                if not base_url:
+                    result = TestResult(
+                        ok=False, latency_ms=0, error="Base URL is required",
+                        model_used="improve probe",
+                    )
+                elif not api_key:
+                    result = TestResult(
+                        ok=False, latency_ms=0, error="API key is required",
+                        model_used="improve probe",
+                    )
+                elif not model:
+                    result = TestResult(
+                        ok=False, latency_ms=0, error="Default model is required",
+                        model_used="improve probe",
+                    )
+                else:
+                    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+                    payload = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    }
+                    body = _json.dumps(payload).encode()
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                    }
+                    result = _do_request(
+                        endpoint, body, headers, model, "openai",
+                        timeout_seconds=8.0,
+                        base_url=base_url, api_key=api_key,
+                    )
+            except Exception as exc:  # noqa: BLE001 — probe failure is its payload
+                from utils.provider_test import TestResult
+                result = TestResult(
+                    ok=False, latency_ms=0, error=f"probe raised: {exc}",
+                    model_used="improve probe",
+                )
+
+            def _dispatch():
+                try:
+                    card._apply_test_result_inline(result)
+                except Exception:
+                    logger.exception("improve-model probe result dispatch failed")
+
+            glib = getattr(card._dialog._handler, "_GLib", None)
+            if glib is not None and hasattr(glib, "idle_add"):
+                glib.idle_add(_dispatch)
+            else:
+                _dispatch()
+
+        import threading
+        threading.Thread(target=_worker, daemon=True, name="improve-model-probe").start()
 
     def _decision_test_runner(self) -> None:
         """Run the honest pre-adapter DecisionModel probe off-thread.

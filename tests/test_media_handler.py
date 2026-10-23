@@ -69,11 +69,16 @@ class FakeMainContent:
         self._input_text = initial_input
         self._improve_button = MagicMock()
         self._append_calls = []
+        self._improve_status_calls = []
         self._input_buffer = FakeTextBuffer(initial_input)
         self._input_view = FakeTextView(self._input_buffer)
 
     def update_stt_state(self, state):
         self._stt_state = state
+
+    def set_improve_status(self, text):
+        """Record transient improve status updates (SPEC-55 §3d)."""
+        self._improve_status_calls.append(text)
 
     def append_stt_text(self, text):
         self._append_calls.append(text)
@@ -322,13 +327,87 @@ class TestImproveResult:
 
         mc._improve_button.set_sensitive.assert_called_once_with(True)
 
-    def test_empty_result_no_change(self):
-        """Empty improved text does not change input."""
+    def test_result_error_surfaces_status(self):
+        """Error path surfaces the error text via set_improve_status (SPEC-55 §3d)."""
+        mc = FakeMainContent()
+        handler = make_handler(main_content=mc)
+        handler._mc._improve_button = MagicMock()
+
+        err = "Improve model not configured — Settings → Improve Model"
+        handler._on_improve_result(None, err)
+
+        assert mc._improve_status_calls[-1] == err
+
+    def test_result_success_clears_status(self):
+        """Success path clears the transient improve status."""
+        mc = FakeMainContent()
+        handler = make_handler(main_content=mc)
+        handler._mc._improve_button = MagicMock()
+
+        handler._on_improve_result("Better prompt text", None)
+
+        assert mc._improve_status_calls[-1] == ""
+
+    def test_empty_result_clears_status(self):
+        """Empty result (no error) also clears the transient status."""
         mc = FakeMainContent(initial_input="original")
         handler = make_handler(main_content=mc)
         handler._mc._improve_button = MagicMock()
 
         handler._on_improve_result("", None)
 
-        assert mc._input_text == "original"
+        assert mc._improve_status_calls[-1] == ""
+
+    def test_improve_click_clears_status_before_call(self):
+        """A new improve click clears any previous transient status."""
+        mc = FakeMainContent(initial_input="raw input text")
+        improve = FakeImprove()
+        handler = make_handler(main_content=mc, improve_module=improve)
+
+        handler.on_improve_click()
+
+        assert mc._improve_status_calls[-1] == ""
+
+
+class _NoStatusSurface(FakeMainContent):
+    """A MainContent-like surface WITHOUT set_improve_status (SPEC-55 BUG #4)."""
+
+    set_improve_status = None  # type: ignore[assignment]
+
+
+class TestImproveStatusGuard:
+    """SPEC-55 BUG #4: surfaces lacking set_improve_status must not break improve."""
+
+    def test_no_status_surface_never_raises(self):
+        mc = _NoStatusSurface(initial_input="raw input text")
+        handler = make_handler(main_content=mc, improve_module=FakeImprove())
+        handler._mc._improve_button = MagicMock()
+
+        # None of these may raise AttributeError.
+        handler.on_improve_click()
+        handler._on_improve_result(None, "some API error")
+        handler._on_improve_result("better text", None)
+
+    def test_error_result_still_reenables_button_without_surface(self):
+        mc = _NoStatusSurface(initial_input="raw input text")
+        handler = make_handler(main_content=mc, improve_module=FakeImprove())
+        handler._mc._improve_button = MagicMock()
+
+        handler._on_improve_result(None, "some API error")
+
         mc._improve_button.set_sensitive.assert_called_once_with(True)
+
+    def test_status_surface_failure_is_contained(self):
+        class _ExplodingSurface(FakeMainContent):
+            def set_improve_status(self, text):
+                raise RuntimeError("surface broken")
+
+        mc = _ExplodingSurface(initial_input="raw input text")
+        handler = make_handler(main_content=mc, improve_module=FakeImprove())
+        handler._mc._improve_button = MagicMock()
+
+        handler.on_improve_click()
+        handler._on_improve_result(None, "API error")
+
+        # click disabled it; the result must re-enable it despite the broken surface.
+        mc._improve_button.set_sensitive.assert_called_with(True)

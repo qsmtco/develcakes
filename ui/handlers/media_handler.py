@@ -69,8 +69,30 @@ class MediaHandler:
 
     # ── Improve — Public API ────────────────────────────────────────────────
 
+    def _set_improve_status(self, text: str) -> None:
+        """Surface a transient Improve status line, guarded (SPEC-55 BUG #4).
+
+        ``self._mc`` may be any object with the improve surface — not every
+        MainContent-like surface exposes ``set_improve_status`` (e.g. fake
+        hosts in tests). Never let a missing surface crash the improve flow,
+        but DO surface a real failure loudly: a status call that raises is
+        logged, not silently swallowed by the dispatch wrapper.
+        """
+        setter = getattr(self._mc, "set_improve_status", None)
+        if not callable(setter):
+            return
+        try:
+            setter(text)
+        except Exception:  # the status line must never break the improve flow
+            import logging
+            logging.warning(
+                "[improve] status surface failed for text %r", text, exc_info=True
+            )
+
     def on_improve_click(self, _btn=None):
-        """Get current input text, send to MiniMax API for improvement."""
+        """Get current input text, send to the configured Improve model."""
+        # A new improve click clears the previous transient status (SPEC-55 §3d).
+        self._set_improve_status("")
         buf = self._mc.user_input.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True).strip()
         if not text:
@@ -99,6 +121,10 @@ class MediaHandler:
         if error:
             import logging
             logging.warning("[improve] error: %s", error)
+            # SPEC-55 §3d: surface unconfigured/API errors near the input so the
+            # failure is visible, not a silent flash.
+            self._set_improve_status(error)
             return
+        self._set_improve_status("")
         if improved_text:
             self._mc.replace_input_text(improved_text)

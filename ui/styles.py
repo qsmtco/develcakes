@@ -1587,6 +1587,14 @@ button.settings-remove-btn:hover {
     color: #6b6b7a;
 }
 
+/* Transient Improve status line (SPEC-55 §3d) — small, error-tinted,
+   sits above the input box; hidden by default. */
+.improve-status {
+    color: #f87171;
+    font-size: 12px;
+    padding: 0px 4px 2px 4px;
+}
+
 .settings-empty-state {
     color: #6b6b7a;
     font-size: 14px;

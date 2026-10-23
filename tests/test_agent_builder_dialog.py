@@ -279,3 +279,34 @@ class TestDecisionModelExcluded:
         model = dlg._fallback_dropdown.get_model()
         names = [model.get_string(i) for i in range(model.get_n_items())]
         assert "DecisionModel" not in names
+
+
+class TestNonChatCardsExcluded:
+    """SPEC-55: both the DecisionModel and ImproveModel cards never appear as an
+    agent provider or fallback (neither is a chat model)."""
+
+    def test_improve_model_hidden_from_provider_dropdown(self, gtk_parent):
+        providers = [
+            ProviderConfig("openai", "u", "k", "gpt-4o", True),
+            ProviderConfig("ImproveModel", "u", "k", "openai/gpt-4o-mini", True),
+            ProviderConfig("anthropic", "u", "k", "c", True),
+        ]
+        dlg = _make_dlg(gtk_parent, providers)
+        model = dlg._provider_dropdown.get_model()
+        names = [model.get_string(i) for i in range(model.get_n_items())]
+        assert "ImproveModel" not in names
+        assert names == ["openai", "anthropic"]
+
+    def test_decision_and_improve_hidden_from_fallback_dropdown(self, gtk_parent):
+        providers = [
+            ProviderConfig("openai", "u", "k", "gpt-4o", True),
+            ProviderConfig("DecisionModel", "u", "k", "typesafe/s1", True),
+            ProviderConfig("ImproveModel", "u", "k", "openai/gpt-4o-mini", True),
+            ProviderConfig("anthropic", "u", "k", "c", True),
+        ]
+        dlg = _make_dlg(gtk_parent, providers)
+        dlg._populate_fallback_provider_dropdown()
+        model = dlg._fallback_dropdown.get_model()
+        names = [model.get_string(i) for i in range(model.get_n_items())]
+        assert "DecisionModel" not in names
+        assert "ImproveModel" not in names

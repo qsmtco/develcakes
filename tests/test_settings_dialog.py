@@ -687,6 +687,68 @@ class TestDecisionModelPage:
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  SPEC-55 — Improve Model settings page
+# ═══════════════════════════════════════════════════════════════════
+
+class TestImproveModelPage:
+    def test_page_exists_and_name_is_locked(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        # The page is in the settings stack.
+        assert d._stack.get_child_by_name("improve-model") is not None
+        card = d._improve_card
+        # The card is pre-named with the constant, and the name is FIXED.
+        assert card._name_entry.get_text() == "ImproveModel"
+        assert card._name_entry.get_editable() is False
+
+    def test_page_reachable_from_group_navigation(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        names = [name for name, _btn in d._group_buttons]
+        assert "improve-model" in names
+
+    def test_present_card_hidden_from_general_providers_list(self, tmp_config_dir):
+        h = SettingsHandler()
+        # A real ImproveModel card stored via the same yaml store.
+        h.add_or_update(_make_provider(
+            "ImproveModel",
+            base_url="https://improve.example/v1",
+            default_model="openai/gpt-4o-mini",
+        ), allow_empty_caller=True)
+        h.add_or_update(_make_provider("Chat"))
+        d = SettingsDialog(parent=None, handler=h)
+        # Only the chat provider appears in the general list.
+        assert [c._provider.name for c in d._cards] == ["Chat"]
+        # The improve card reflects the stored card.
+        assert d._improve_card._provider.name == "ImproveModel"
+        assert d._improve_card._base_url_entry.get_text() == "https://improve.example/v1"
+
+    def test_round_trips_through_save_load(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._improve_card
+        card._base_url_entry.set_text("https://improve.example/v1")
+        card._api_key_entry.set_text("improve-key")
+        card._model_entry.set_text("openai/gpt-4o-mini")
+        card._on_save_clicked()
+        reloaded = {p.name: p for p in h.list_providers()}
+        assert "ImproveModel" in reloaded
+        stored = reloaded["ImproveModel"]
+        assert stored.base_url == "https://improve.example/v1"
+        assert stored.api_key == "improve-key"
+        assert stored.default_model == "openai/gpt-4o-mini"
+        # caller stays empty (allow_empty_caller) — improve uses the card verbatim.
+        assert stored.caller == ""
+
+    def test_absent_card_leaves_page_placeholder_editable(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._improve_card
+        assert card._name_entry.get_text() == "ImproveModel"
+        assert all(p.name != "ImproveModel" for p in h.list_providers())
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  SPEC-53 §3 — Agents page: JEV room-fallback combo field
 # ═══════════════════════════════════════════════════════════════════
 

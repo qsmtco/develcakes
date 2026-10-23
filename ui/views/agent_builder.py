@@ -17,6 +17,7 @@ from gi.repository import Gtk, Gio, GLib
 
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER
 from models.providers import ProviderConfig
+from utils.improve import IMPROVE_MODEL_PROVIDER
 from utils.agent_defs import VALID_COMPACTION_STRATEGIES, merge_preserved_tools
 from utils.mcp_config import load_mcp_servers, MCPConfigError
 
@@ -428,18 +429,21 @@ class AgentBuilderDialog:
         (from handler.get_provider_options()) and normalizes to ProviderConfig.
         Each provider's default_model becomes the only entry in its model dropdown.
 
-        SPEC-22 §2.8: the DecisionModel/JEV card is filtered out — it is not a
-        chat model and must never appear as an agent's provider or fallback.
+        SPEC-22 §2.8 + SPEC-55: the DecisionModel/JEV and ImproveModel cards are
+        filtered out — they are not chat models and must never appear as an
+        agent's provider or fallback.
 
         Raises:
             TypeError: if providers is not a list or contains non-dict/non-ProviderConfig elements.
         """
         if providers and isinstance(providers, list):
-            # Drop the DecisionModel card before anything else sees it.
+            # Drop the non-chat cards (DecisionModel/JEV + ImproveModel) before
+            # anything else sees them — neither is a chat model.
+            _NON_CHAT = (DECISION_MODEL_PROVIDER, IMPROVE_MODEL_PROVIDER)
             providers = [
                 p for p in providers
                 if (p.get("name") if isinstance(p, dict) else getattr(p, "name", ""))
-                != DECISION_MODEL_PROVIDER
+                not in _NON_CHAT
             ]
         if not providers:
             self._providers = []

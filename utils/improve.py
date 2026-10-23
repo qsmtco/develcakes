@@ -1,13 +1,14 @@
 # utils/improve.py
-# Prompt improvement via MiniMax API.
+# Prompt improvement via a user-configured provider card (SPEC-55).
 #
 # Security Manifest:
-#   Reads: ~/.config/develcakes/config.json (apiKey, baseUrl, model)
+#   Reads: providers.yaml via utils.providers_store.load_providers (card lookup)
 #   Reads: <crabcakes_root>/prompts/system/improve.md (system prompt template)
-#   External: POST to baseUrl (MiniMax API), HTTPS
-#   No files written; no secrets stored
+#   External: POST to the card's base_url (user-configured, HTTPS required)
+#   No files written; no secrets stored; no legacy config-file reads
 
 import json
+import logging
 import os
 import threading
 import urllib.request
@@ -31,10 +32,13 @@ class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
                     del result.unredirected_hdrs["authorization"]
         return result
 
-from utils.config import get_config_file
 
-DEFAULT_BASE_URL = "https://api.minimax.io/v1/text/chatcompletion_v2"
-DEFAULT_MODEL = "MiniMax-M2.5-Lightning"
+_logger = logging.getLogger(__name__)
+
+# SPEC-55: the fixed structural name of the Improve Model card. The Settings
+# dialog pre-names its card with this; the general Providers list and agent-
+# provider dropdowns filter it out (it is not a chat model).
+IMPROVE_MODEL_PROVIDER = "ImproveModel"
 
 # Template marker — replaced with user input text before sending to the API.
 # Placed in improve-system-prompt.md to control where the user's text lands
@@ -63,28 +67,27 @@ Output format:
 
 **Output:** Return the improved version with all linguistic issues resolved, maintaining the original meaning and intent."""
 
-_config = None
-_config_lock = threading.Lock()
 
+def load_improve_card(destination: object | None = None) -> object | None:
+    """Return the ProviderConfig named IMPROVE_MODEL_PROVIDER, or None.
 
-def _load_config():
-    """Load config from ~/.config/develcakes/config.json (cached)."""
-    global _config
-    with _config_lock:
-        if _config is not None:
-            return _config
-        path = get_config_file()
-        try:
-            with open(path) as f:
-                _config = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            _config = {}
-        return _config
+    Lazy import of the store. Never raises — a malformed store degrades to
+    None (the deterministic floor), never to an exception in the caller.
+    """
+    del destination  # reserved for a future cache slot; lookup is cheap here
+    try:
+        from utils.providers_store import load_providers
+        for provider in load_providers():
+            if getattr(provider, "name", "") == IMPROVE_MODEL_PROVIDER:
+                return provider
+    except Exception:  # a bad store must not crash improvement
+        _logger.debug("ImproveModel card lookup failed", exc_info=True)
+    return None
 
 
 def improve_prompt(raw_text, callback, GLib=None):
     """
-    Improve a prompt by sending it to the MiniMax API.
+    Improve a prompt by sending it to the configured Improve Model card.
 
     Runs in a background thread. Calls callback(improved_text, error) when done.
     If GLib is provided, callback is dispatched via GLib.idle_add (thread-safe).
@@ -94,14 +97,26 @@ def improve_prompt(raw_text, callback, GLib=None):
         callback:   Function(improved_text, error). error is None on success.
         GLib:       Optional GLib module for GTK main thread dispatch.
     """
-    cfg = _load_config()
-
-    api_key = cfg.get("apiKey", "").strip()
-    if not api_key:
-        _dispatch(callback, None, "MINIMAX_API_KEY not set in ~/.config/develcakes/config.json", GLib)
+    card = load_improve_card()
+    if card is None:
+        _dispatch(
+            callback, None, "Improve model not configured — Settings → Improve Model", GLib
+        )
         return
 
-    base_url = cfg.get("baseUrl", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+    missing: list[str] = []
+    api_key = (getattr(card, "api_key", "") or "").strip()
+    if not api_key:
+        missing.append("api_key")
+    base_url = (getattr(card, "base_url", "") or "").strip()
+    if not base_url:
+        missing.append("base_url")
+    model = (getattr(card, "default_model", "") or "").strip()
+    if not model:
+        missing.append("default_model")
+    if missing:
+        _dispatch(callback, None, f"Improve model missing: {', '.join(missing)}", GLib)
+        return
 
     # MED-5: Validate non-loopback provider URL must use https://
     try:
@@ -113,20 +128,18 @@ def improve_prompt(raw_text, callback, GLib=None):
         _dispatch(callback, None, str(e), GLib)
         return
 
-    model = cfg.get("model", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-
-    # MED-6: Validate config file permissions
+    # MED-6: Validate the providers-store file permissions (it holds API keys)
     try:
-        path = get_config_file()
+        from utils.providers_store import get_providers_path
+        path = get_providers_path()
         if os.path.isfile(path):
             from utils.file_security import assert_secure_file
             assert_secure_file(path)
     except (ImportError, FileNotFoundError):
         pass  # Skip if security module is unavailable
     except PermissionError as e:
-        # Warn but proceed; config.json API keys are used at runtime
-        import logging
-        logging.getLogger(__name__).warning("MED-6: %s", e)
+        # Warn but proceed; card API keys are used at runtime
+        _logger.warning("MED-6: %s", e)
 
     # Load system prompt from file
     prompts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts", "system")
@@ -163,8 +176,13 @@ def improve_prompt(raw_text, callback, GLib=None):
 
     def _thread():
         try:
+            # SPEC-55 fix round (BUG #1): same convention as every other
+            # OpenAI-compatible consumer (utils/provider_test.py,
+            # agent/llm/openai_provider.py): POST to <base_url>/chat/completions,
+            # never the bare base_url verbatim.
+            endpoint = f"{base_url.rstrip('/')}/chat/completions"
             req = urllib.request.Request(
-                base_url,
+                endpoint,
                 data=payload,
                 headers={
                     "Content-Type": "application/json",

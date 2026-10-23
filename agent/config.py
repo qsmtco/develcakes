@@ -196,8 +196,18 @@ def _load_providers_from_yaml(
             # wins across zai/* cards was the provider-card bug (all zai-
             # prefixed agents resolved to one card's context_window).
             from collections import Counter
+            # SPEC-22 §2.8 / SPEC-55 (BUG #2): fixed-name non-chat cards
+            # (DecisionModel, ImproveModel) never own a vendor prefix. They
+            # must not suppress a chat card's bare-prefix key when they share
+            # the same model prefix (e.g. an openrouter/* improve card), nor
+            # be the owner that keeps an ambiguous prefix key alive.
+            from agent.llm.jev_client import DECISION_MODEL_PROVIDER
+            from utils.improve import IMPROVE_MODEL_PROVIDER
+            _non_chat_fixed = frozenset({DECISION_MODEL_PROVIDER, IMPROVE_MODEL_PROVIDER})
             prefix_counts = Counter()
             for p in yaml_providers:
+                if p.name in _non_chat_fixed:
+                    continue
                 if p.default_model and "/" in p.default_model:
                     prefix_counts[p.default_model.split("/")[0]] += 1
 
@@ -213,7 +223,8 @@ def _load_providers_from_yaml(
                     result[dm] = cfg
                 # Bare prefix — only when unambiguous (single owner). Kept for
                 # backward compat with consumers that still do providers['zai'].
-                if dm and "/" in dm:
+                # Non-chat fixed-name cards never register a bare prefix.
+                if dm and "/" in dm and p.name not in _non_chat_fixed:
                     prefix = dm.split("/")[0]
                     if prefix_counts[prefix] == 1:
                         result.setdefault(prefix, cfg)

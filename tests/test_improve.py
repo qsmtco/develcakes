@@ -1,5 +1,6 @@
 # tests/test_improve.py
-# Tests for utils/improve.py — prompt improvement via MiniMax API.
+# Tests for utils/improve.py — prompt improvement via the configured Improve
+# Model provider card (SPEC-55). No MiniMax, no config.json.
 #
 # Principle: test the failure modes that would break callers.
 # Mock urllib at the network layer to simulate API errors and malformed responses.
@@ -8,10 +9,9 @@ import json
 import time
 import urllib.error
 import urllib.request
-from unittest.mock import patch, MagicMock
 
 import pytest
-from utils.improve import improve_prompt
+from utils.improve import improve_prompt, load_improve_card
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -36,6 +36,22 @@ class FakeResponse:
         pass
 
 
+class FakeCard:
+    """A minimal stand-in for the ImproveModel ProviderConfig."""
+
+    def __init__(self, *, api_key="test-key",
+                 base_url="https://api.example.com/v1",
+                 default_model="openai/gpt-4o-mini"):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.default_model = default_model
+
+
+def _use_card(monkeypatch, card=FakeCard()):
+    """Point utils.improve.load_improve_card at a fake card (or None)."""
+    monkeypatch.setattr("utils.improve.load_improve_card", lambda *a, **k: card)
+
+
 @pytest.fixture(autouse=True)
 def _route_http_through_urlopen(monkeypatch):
     """Make the per-test `urlopen` patches actually intercept the HTTP call.
@@ -43,8 +59,7 @@ def _route_http_through_urlopen(monkeypatch):
     improve_prompt performs its request via `urllib.request.build_opener(...)
     .open(...)` (the MED-5 redirect handler), NOT via the module-level
     `urlopen`. Patching only `urlopen` therefore left the real opener live and
-    these tests talked to the REAL MiniMax API using the apiKey from
-    ~/.config/crabcakes/config.json.
+    these tests talked to the REAL provider API using the key from providers.yaml.
 
     This fixture swaps the opener for one that delegates to
     `urllib.request.urlopen` at call time — the boundary each test fakes — so
@@ -86,36 +101,72 @@ def call_improve(raw_text: str, callback_store: list, timeout: float = 5.0):
     )
 
 
-# ── API Key Tests ───────────────────────────────────────────────────────────────
+# ── Card Configuration Tests ───────────────────────────────────────────────────
 
-class TestApiKeyValidation:
-    """API key is required — missing key must call callback with error, not crash."""
+class TestCardConfiguration:
+    """The Improve Model card drives the request; missing card / fields error."""
 
-    def test_missing_api_key_calls_callback_with_error(self, monkeypatch):
-        """When config has no apiKey, callback receives an error string."""
+    def test_no_card_calls_callback_with_error(self, monkeypatch):
+        """No ImproveModel card → callback receives the 'not configured' hint."""
         callback_store: list = []
-
-        # Override config to have empty apiKey
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": ""})
+        _use_card(monkeypatch, card=None)
 
         call_improve("test prompt", callback_store)
 
         assert len(callback_store) == 1
         text, error = callback_store[0]
+        assert text is None
         assert error is not None
-        assert "MINIMAX_API_KEY" in error
+        assert "not configured" in error
+
+    def test_missing_api_key_calls_callback_with_error(self, monkeypatch):
+        """Card with blank api_key → error names the field."""
+        callback_store: list = []
+        _use_card(monkeypatch, FakeCard(api_key=""))
+
+        call_improve("test prompt", callback_store)
+
+        assert len(callback_store) == 1
+        text, error = callback_store[0]
+        assert text is None
+        assert error is not None
+        assert "api_key" in error
 
     def test_whitespace_only_api_key_calls_callback_with_error(self, monkeypatch):
-        """apiKey that is all whitespace must be treated as missing."""
+        """api_key that is all whitespace must be treated as missing."""
         callback_store: list = []
-
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "   "})
+        _use_card(monkeypatch, FakeCard(api_key="   "))
 
         call_improve("test prompt", callback_store)
 
         assert len(callback_store) == 1
         _, error = callback_store[0]
         assert error is not None
+        assert "api_key" in error
+
+    def test_missing_base_url_calls_callback_with_error(self, monkeypatch):
+        """Card with blank base_url → error names the field."""
+        callback_store: list = []
+        _use_card(monkeypatch, FakeCard(base_url=""))
+
+        call_improve("test prompt", callback_store)
+
+        assert len(callback_store) == 1
+        _, error = callback_store[0]
+        assert error is not None
+        assert "base_url" in error
+
+    def test_missing_default_model_calls_callback_with_error(self, monkeypatch):
+        """Card with blank default_model → error names the field."""
+        callback_store: list = []
+        _use_card(monkeypatch, FakeCard(default_model=""))
+
+        call_improve("test prompt", callback_store)
+
+        assert len(callback_store) == 1
+        _, error = callback_store[0]
+        assert error is not None
+        assert "default_model" in error
 
 
 # ── HTTP Error Tests ───────────────────────────────────────────────────────────
@@ -130,7 +181,7 @@ class TestHttpErrors:
         def raise_urlerror(*args, **kwargs):
             raise urllib.error.URLError("connection refused")
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", raise_urlerror)
 
         call_improve("test prompt", callback_store)
@@ -149,7 +200,7 @@ class TestHttpErrors:
                 req.full_url, 403, "Forbidden", {}, None
             )
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -167,7 +218,7 @@ class TestHttpErrors:
                 req.full_url, 500, "Internal Server Error", {}, None
             )
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -189,7 +240,7 @@ class TestMalformedResponses:
         def fake_open(req, timeout=None):
             return FakeResponse({"id": "abc", "choices": None})
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -206,7 +257,7 @@ class TestMalformedResponses:
         def fake_open(req, timeout=None):
             return FakeResponse({"id": "abc", "choices": []})
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -222,7 +273,7 @@ class TestMalformedResponses:
         def fake_open(req, timeout=None):
             return FakeResponse({"id": "abc", "choices": [{"no": "message here"}]})
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -241,7 +292,7 @@ class TestMalformedResponses:
                 "choices": [{"message": {"role": "assistant"}}]
             })
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -261,7 +312,7 @@ class TestMalformedResponses:
                 "choices": [{"message": {"content": None}}]
             })
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -281,7 +332,7 @@ class TestMalformedResponses:
                 "choices": [{"message": {"content": 12345}}]
             })
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("test prompt", callback_store)
@@ -307,7 +358,7 @@ class TestHappyPath:
                 "choices": [{"message": {"content": "This is the improved prompt."}}]
             })
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("improve this", callback_store)
@@ -316,6 +367,85 @@ class TestHappyPath:
         text, error = callback_store[0]
         assert error is None
         assert text == "This is the improved prompt."
+
+    def test_request_comes_from_card_and_has_no_minimax(self, monkeypatch):
+        """URL/headers/model come from the card; zero MiniMax anywhere."""
+        callback_store: list = []
+        captured = {}
+
+        def fake_open(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["authorization"] = req.get_header("Authorization")
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({
+                "id": "abc",
+                "choices": [{"message": {"content": "improved"}}]
+            })
+
+        _use_card(
+            monkeypatch,
+            FakeCard(
+                api_key="card-key-123",
+                base_url="https://my.provider.example/v1",
+                default_model="my-vendor/my-model-7b",
+            ),
+        )
+        monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
+
+        call_improve("improve this", callback_store)
+
+        assert callback_store[0][1] is None
+        # SPEC-55 BUG #1: the POST goes to <base_url>/chat/completions (the
+        # OpenAI-compatible chat endpoint), never the bare base_url verbatim.
+        assert captured["url"] == "https://my.provider.example/v1/chat/completions"
+        assert captured["authorization"] == "Bearer card-key-123"
+        assert captured["body"]["model"] == "my-vendor/my-model-7b"
+        # No MiniMax reference anywhere in the request.
+        assert "minimax" not in json.dumps(captured).lower()
+
+    def test_trailing_slash_base_url_is_normalized(self, monkeypatch):
+        """A base_url ending in '/' must not produce a double slash."""
+        callback_store: list = []
+        captured = {}
+
+        def fake_open(req, timeout=None):
+            captured["url"] = req.full_url
+            return FakeResponse({
+                "choices": [{"message": {"content": "improved"}}]
+            })
+
+        _use_card(
+            monkeypatch,
+            FakeCard(base_url="https://my.provider.example/v1/"),
+        )
+        monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
+
+        call_improve("improve this", callback_store)
+
+        assert callback_store[0][1] is None
+        assert captured["url"] == "https://my.provider.example/v1/chat/completions"
+
+    def test_unprefixed_model_still_posts_to_chat_endpoint(self, monkeypatch):
+        """Improve cards with unprefixed models (e.g. gpt-4o) work — no
+        caller-prefix logic is involved (SPEC-55 BUG #3 shape)."""
+        callback_store: list = []
+        captured = {}
+
+        def fake_open(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({
+                "choices": [{"message": {"content": "improved"}}]
+            })
+
+        _use_card(monkeypatch, FakeCard(default_model="gpt-4o"))
+        monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
+
+        call_improve("improve this", callback_store)
+
+        assert callback_store[0][1] is None
+        assert captured["url"] == "https://api.example.com/v1/chat/completions"
+        assert captured["body"]["model"] == "gpt-4o"
 
     def test_multiline_improved_text_preserved(self, monkeypatch):
         """Multiline improved output must be preserved exactly."""
@@ -328,10 +458,59 @@ class TestHappyPath:
                 "choices": [{"message": {"content": multiline}}]
             })
 
-        monkeypatch.setattr("utils.improve._load_config", lambda: {"apiKey": "valid-key"})
+        _use_card(monkeypatch)
         monkeypatch.setattr("utils.improve.urllib.request.urlopen", fake_open)
 
         call_improve("improve this", callback_store)
 
         text, _ = callback_store[0]
         assert text == multiline
+
+
+# ── load_improve_card ──────────────────────────────────────────────────────────
+
+class TestLoadImproveCard:
+    """load_improve_card never raises — a bad store degrades to None."""
+
+    def test_corrupt_store_returns_none(self, tmp_config_dir):
+        (tmp_config_dir / "providers.yaml").write_text("{{{ not: yaml ][")
+        assert load_improve_card() is None
+
+    def test_store_that_raises_returns_none(self, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("store exploded")
+
+        monkeypatch.setattr("utils.providers_store.load_providers", boom)
+        assert load_improve_card() is None
+
+    def test_missing_store_returns_none(self):
+        # No providers.yaml at all (isolated config dir) — deterministic floor.
+        assert load_improve_card() is None
+
+    def test_finds_named_card(self, tmp_config_dir):
+        from utils.providers_store import save_providers
+        from models.providers import ProviderConfig
+        save_providers([
+            ProviderConfig(name="Chat", base_url="https://c/v1",
+                           api_key="k", default_model="m"),
+            ProviderConfig(name="ImproveModel", base_url="https://i/v1",
+                           api_key="ik", default_model="im"),
+        ])
+        card = load_improve_card()
+        assert card is not None
+        assert card.name == "ImproveModel"
+        assert card.base_url == "https://i/v1"
+
+
+# ── Source-level residuals ─────────────────────────────────────────────────────
+
+class TestNoMiniMaxOrConfigJsonResiduals:
+    """SPEC-55: improve source has zero MiniMax / config.json references."""
+
+    def test_source_has_no_minimax_or_get_config_file(self):
+        import pathlib
+        src = pathlib.Path(__file__).resolve().parent.parent / "utils" / "improve.py"
+        text = src.read_text(encoding="utf-8").lower()
+        assert "minimax" not in text
+        assert "get_config_file" not in text
+        assert "config.json" not in text
