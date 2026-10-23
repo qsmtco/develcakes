@@ -37,6 +37,29 @@ def test_resolver_confident_member_choice(monkeypatch):
     assert captured["questions"]["addressee"]["selection"] == "multi"
 
 
+def test_resolver_named_subject_prefers_participant_over_all(monkeypatch):
+    captured = {}
+
+    def post(state, questions):
+        captured["questions"] = questions
+        return _resolver_answer("special:debugger", 0.91)
+
+    monkeypatch.setattr("agent.llm.jev_client.post_decision", post)
+    result = jev_client.resolve_room_addressee(
+        "supervisor app restarted what should i test first", ROSTER
+    )
+    assert result == ["special:debugger"]
+    addressee = captured["questions"]["addressee"]
+    instructions = addressee["instructions"]
+    assert 'prefer that participant over "all"' in instructions
+    assert "explicit room-wide greeting" in instructions
+    assert "names no participant" in instructions
+    assert "may select multiple" in instructions
+    assert "never a single string" in instructions
+    assert "explicit room-wide greeting" in addressee["criteria"]["all"]
+    assert "names no participant" in addressee["criteria"]["all"]
+
+
 def test_resolver_all_choice(monkeypatch):
     def post(state, questions):
         return _resolver_answer("all", 0.91)
@@ -154,6 +177,184 @@ def test_resolver_empty_roster_does_not_call(monkeypatch):
     assert jev_client.resolve_room_addressee("hi", ()) == []
     assert jev_client.resolve_room_addressee("hi", None) == []
     assert jev_client.resolve_room_addressee(None, ROSTER) == []
+
+
+# ── V7 hybrid router: per-member noul fallback ────────────────────────────────
+
+
+def _fallback_post(calls, primary, noul_map):
+    """Record every call; return primary first, then per-probe noul answers."""
+
+    def post(state, questions):
+        calls.append(questions)
+        if len(calls) == 1:
+            return primary
+        instructions = questions["addr"]["instructions"]
+        for label, prob in noul_map.items():
+            if label.lower() in instructions.lower():
+                return ({"addr": {"type": "noul", "noul": prob}}, "")
+        raise AssertionError(f"no noul stub for instructions: {instructions!r}")
+
+    return post
+
+
+def _assert_fallback_shape(calls):
+    # primary + one noul per member + one all-probe
+    assert len(calls) == len(ROSTER) + 2
+    noul_calls = [q for q in calls if "addr" in q]
+    assert len(noul_calls) == len(ROSTER) + 1
+    assert "Debugger" in noul_calls[0]["addr"]["instructions"]
+    assert "Coder" in noul_calls[1]["addr"]["instructions"]
+    assert "whole room" in noul_calls[2]["addr"]["instructions"]
+
+
+def test_v7_fallback_fires_on_low_confidence(monkeypatch):
+    calls = []
+    primary = _resolver_answer("special:debugger", 0.65)
+    noul = {
+        "Debugger": 0.91,
+        "Coder": 0.2,
+        "the whole room / everyone": 0.1,
+    }
+    monkeypatch.setattr(
+        "agent.llm.jev_client.post_decision",
+        _fallback_post(calls, primary, noul),
+    )
+    result = jev_client.resolve_room_addressee("hi debugger", ROSTER)
+    assert result == ["special:debugger"]
+    _assert_fallback_shape(calls)
+
+
+def test_v7_fallback_fires_on_probability_split(monkeypatch):
+    calls = []
+    primary = (
+        {
+            "addressee": {
+                "type": "choice",
+                "choice": "special:debugger",
+                "confidence": 0.9,
+                "probabilities": {
+                    "special:debugger": 0.45,
+                    "special:coder": 0.35,
+                    "all": 0.1,
+                },
+            }
+        },
+        "",
+    )
+    noul = {
+        "Debugger": 0.91,
+        "Coder": 0.2,
+        "the whole room / everyone": 0.1,
+    }
+    monkeypatch.setattr(
+        "agent.llm.jev_client.post_decision",
+        _fallback_post(calls, primary, noul),
+    )
+    result = jev_client.resolve_room_addressee(
+        "hi debugger and coder", ROSTER
+    )
+    assert result == ["special:debugger"]
+    _assert_fallback_shape(calls)
+
+
+def test_v7_no_fallback_clean_primary_single_call(monkeypatch):
+    calls = []
+
+    def post(state, questions):
+        calls.append(questions)
+        return _resolver_answer("special:debugger", 0.91)
+
+    monkeypatch.setattr("agent.llm.jev_client.post_decision", post)
+    result = jev_client.resolve_room_addressee("hi debugger", ROSTER)
+    assert result == ["special:debugger"]
+    assert len(calls) == 1
+
+
+def test_v7_no_fallback_when_below_min_confidence(monkeypatch):
+    calls = []
+
+    def post(state, questions):
+        calls.append(questions)
+        return _resolver_answer("special:debugger", 0.55)
+
+    monkeypatch.setattr("agent.llm.jev_client.post_decision", post)
+    result = jev_client.resolve_room_addressee("hi debugger", ROSTER)
+    assert result == []
+    assert len(calls) == 1
+
+
+def test_v7_fallback_returns_multi_addressee_in_roster_order(monkeypatch):
+    calls = []
+    primary = _resolver_answer("special:debugger", 0.65)
+    noul = {
+        "Debugger": 0.87,
+        "Coder": 0.8,
+        "the whole room / everyone": 0.36,
+    }
+    monkeypatch.setattr(
+        "agent.llm.jev_client.post_decision",
+        _fallback_post(calls, primary, noul),
+    )
+    result = jev_client.resolve_room_addressee(
+        "hi debugger and coder", ROSTER
+    )
+    assert result == ["special:debugger", "special:coder"]
+    _assert_fallback_shape(calls)
+
+
+def test_v7_fallback_all_probe_wins(monkeypatch):
+    calls = []
+    primary = _resolver_answer("all", 0.65)
+    noul = {
+        "Debugger": 0.4,
+        "Coder": 0.3,
+        "the whole room / everyone": 0.94,
+    }
+    monkeypatch.setattr(
+        "agent.llm.jev_client.post_decision",
+        _fallback_post(calls, primary, noul),
+    )
+    result = jev_client.resolve_room_addressee("hi everyone", ROSTER)
+    assert result == ["all"]
+    _assert_fallback_shape(calls)
+
+
+def test_v7_fallback_undecided_fails_closed(monkeypatch):
+    calls = []
+    primary = _resolver_answer("special:debugger", 0.65)
+    noul = {
+        "Debugger": 0.4,
+        "Coder": 0.3,
+        "the whole room / everyone": 0.2,
+    }
+    monkeypatch.setattr(
+        "agent.llm.jev_client.post_decision",
+        _fallback_post(calls, primary, noul),
+    )
+    result = jev_client.resolve_room_addressee("hi debugger", ROSTER)
+    assert result == []
+    _assert_fallback_shape(calls)
+
+
+def test_v7_fallback_malformed_noul_fails_closed(monkeypatch):
+    calls = []
+    primary = _resolver_answer("special:debugger", 0.65)
+
+    def post(state, questions):
+        calls.append(questions)
+        if len(calls) == 1:
+            return primary
+        instructions = questions["addr"]["instructions"]
+        if "debugger" in instructions.lower():
+            return ({"addr": {"type": "noul", "noul": "high"}}, "")
+        return ({"addr": {"type": "noul", "noul": 0.1}}, "")
+
+    monkeypatch.setattr("agent.llm.jev_client.post_decision", post)
+    result = jev_client.resolve_room_addressee("hi debugger", ROSTER)
+    assert result == []
+    # primary + the first (malformed) noul probe — fail closed immediately
+    assert len(calls) == 2
 
 
 # ── SPEC-39 §2.2/§2.6: note_room_line runtime queue ────────────────────────────

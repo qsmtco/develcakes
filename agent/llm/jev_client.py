@@ -361,12 +361,28 @@ def probe_decision_model(provider: object, timeout: float = 4.0):
 _ROOM_INSTRUCTIONS = (
     "The human just spoke in a group chat. Decide who should answer. "
     "Choose one or more participants when the message addresses them by "
-    "name or role. Choose \"all\" when the message names nobody, greets "
-    "the room, or addresses the whole room. For example, \"hi debugger\" "
-    "addresses only the participant named Debugger, while \"hi debugger "
-    "and coder\" addresses both. You may select multiple participants — "
-    "return them as a JSON array of keys, e.g. "
-    "[\"special:debugger\", \"special:coder\"] — never a single string."
+    "name or role — including when a participant is merely mentioned as "
+    "the subject of a question (e.g. \"supervisor app restarted what "
+    "should i test first\" addresses Supervisor); prefer that participant "
+    "over \"all\". Choose \"all\" only for an explicit room-wide greeting "
+    "(\"everyone\", \"team\", \"hey room\") or a question that names no "
+    "participant at all. For example, \"hi debugger\" addresses only the "
+    "participant named Debugger, while \"hi debugger and coder\" addresses "
+    "both. You may select multiple participants — return them as a JSON "
+    "array of keys, e.g. [\"special:debugger\", \"special:coder\"] — "
+    "never a single string."
+)
+
+# V7 hybrid router: primary multi-select ask + per-member noul fallback.
+# Constants mirror tools/bench_decisions.py (do not retune).
+_V7_CONF_FALLBACK = 0.7
+_V7_SPLIT_THRESHOLD = 0.3
+_V7_MEMBER_THRESHOLD = 0.6
+_V7_MEMBER_INSTRUCTIONS = (
+    "Is this group-chat message addressed to {member}? Reply true or false. "
+    "Direct address, indirect reference, and questions about {member} all "
+    "count as addressing. Be strict: if the message is not about {member}, "
+    "answer false."
 )
 
 
@@ -381,14 +397,16 @@ def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> list[str
     A genuine whole-room pick returns ``["all"]``. On success the return is
     the (possibly multi-select) list of session keys to wake; hallucinated
     keys are dropped — a fully invalid selection collapses to ``[]``.
-    Fallback routing is the caller's responsibility. The human text is not
+    The V7 hybrid first tries one multi-select ask; when its confidence is
+    soft or probability mass splits across members, it falls back to a
+    per-member binary probe before giving up. The human text is not
     modified.
     """
     if not isinstance(roster, list) or not roster or not isinstance(text, str):
         return []
     criteria: dict[str, str] = {
-        "all": "The message addresses the whole room, or names nobody, or "
-               "greets the room."
+        "all": "Only an explicit room-wide greeting (\"everyone\", \"team\", "
+               "\"hey room\"), or a question that names no participant."
     }
     kept: list[tuple[str, str]] = []
     for session_key, display_name in roster:
@@ -443,13 +461,98 @@ def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> list[str
             return []
     except (KeyError, TypeError, AttributeError):
         return []
-    # Validate: keep only known criterion keys (drop hallucinated/duplicate).
-    seen: set[str] = set()
-    validated: list[str] = []
-    for key in selected:
-        if isinstance(key, str) and key in criteria and key not in seen:
-            seen.add(key)
-            validated.append(key)
-    if "all" in seen:  # a genuine whole-room pick dominates member picks
-        return ["all"]
-    return validated
+
+    def _validate_selected(selected_keys: list) -> list[str]:
+        """Keep only known criterion keys; ``all`` dominates member picks."""
+        seen: set[str] = set()
+        validated: list[str] = []
+        for key in selected_keys:
+            if isinstance(key, str) and key in criteria and key not in seen:
+                seen.add(key)
+                validated.append(key)
+        if "all" in seen:  # a genuine whole-room pick dominates member picks
+            return ["all"]
+        return validated
+
+    # V7 hybrid: the primary single-ask is suspect when confidence is soft or
+    # probability mass is split across several members.
+    probabilities = answer.get("probabilities") or {}
+    if not isinstance(probabilities, dict):
+        probabilities = {}
+    split = sorted(
+        (
+            (key, prob) for key, prob in probabilities.items()
+            if key != "all" and isinstance(prob, (int, float))
+            and not isinstance(prob, bool) and prob > _V7_SPLIT_THRESHOLD
+        ),
+        key=lambda kv: -kv[1],
+    )
+    if confidence < _V7_CONF_FALLBACK or len(split) >= 2:
+        if len(split) >= 2:
+            detail = " ".join(f"{key}={prob:.2f}" for key, prob in split)
+            reason = f"conf={confidence:.2f} split {detail}"
+        else:
+            reason = f"conf={confidence:.2f}<{_V7_CONF_FALLBACK:.1f}"
+        _logger.debug("resolve_room_addressee: v7 fallback fired: %s", reason)
+
+        # Per-member binary loop + an ``all`` broadcast probe, one fresh
+        # ``post_decision`` call per probe (mirrors bench V6).
+        try:
+            fb_state = (
+                "message:\n" + text[:4000]
+                + "\n\nparticipants:\n"
+                + "\n".join(f"- {display_name} ({session_key})"
+                            for session_key, display_name in kept)
+            )
+            probes: list[tuple[str, str]] = list(kept) + [
+                ("all", "the whole room / everyone")
+            ]
+            noul_scores: dict[str, float] = {}
+            for session_key, display_name in probes:
+                fb_answers, _fb_error = post_decision(
+                    fb_state,
+                    {
+                        "addr": {
+                            "type": "noul",
+                            "instructions": _V7_MEMBER_INSTRUCTIONS.format(
+                                member=display_name
+                            ),
+                            "criteria": {
+                                "true": f"The message is addressed to "
+                                        f"{display_name}.",
+                                "false": f"The message is NOT about "
+                                         f"{display_name}.",
+                            },
+                        }
+                    },
+                )
+                if fb_answers is None:
+                    return []
+                fb_answer = fb_answers.get("addr") or {}
+                prob = fb_answer.get("noul")
+                if not isinstance(prob, (int, float)) or isinstance(prob, bool):
+                    return []
+                noul_scores[session_key] = float(prob)
+        except (KeyError, TypeError, AttributeError, ValueError):
+            return []
+
+        derived = [
+            session_key for session_key, _display_name in kept
+            if noul_scores.get(session_key, 0.0) >= _V7_MEMBER_THRESHOLD
+        ]
+        if derived:
+            _logger.debug(
+                "resolve_room_addressee: v7 fallback result=%r", derived
+            )
+            return derived
+        if noul_scores.get("all", 0.0) >= _V7_MEMBER_THRESHOLD:
+            _logger.debug(
+                "resolve_room_addressee: v7 fallback result=%r", ["all"]
+            )
+            return ["all"]
+        _logger.debug("resolve_room_addressee: v7 fallback result=%r", [])
+        return []
+
+    result = _validate_selected(selected)
+    _logger.debug("resolve_room_addressee: v7 primary result=%r", result)
+    return result
