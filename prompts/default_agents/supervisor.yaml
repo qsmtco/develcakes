@@ -24,6 +24,9 @@ tools:
   - talk
   - feed_card
   - agent_context
+  - set_timer
+  - cancel_timer
+  - read_tool_output
 auto_open: false
 auto_add_to_projects: false  # deliberately manual — user clicks + in the Agents tab
 self_improvement:

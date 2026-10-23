@@ -106,9 +106,84 @@ def test_seed_defaults_adds_feed_card_to_all_installed_agents(tmp_path, monkeypa
 def test_migration_tuple_contains_feed_card():
     """Direct pin on the migration tuple: if feed_card is dropped from the
     tuple at the migration site, this test goes RED immediately."""
-    import inspect
+    from utils.agent_defs import _BUILTIN_TOOL_MIGRATION
 
-    from utils import agent_defs
+    assert "feed_card" in _BUILTIN_TOOL_MIGRATION
 
-    src = inspect.getsource(agent_defs._seed_defaults)
-    assert '"feed_card"' in src
+
+def test_migration_tuple_covers_every_group_tool():
+    """Drift guard: every group tool registered in agent/group_tools.py must be
+    covered by the built-in migration tuple in utils/agent_defs.py, so a future
+    group tool cannot ship ungranted again."""
+    import re
+    from pathlib import Path
+
+    from utils.agent_defs import _BUILTIN_TOOL_MIGRATION
+
+    src = (Path(__file__).resolve().parents[1] / "agent" / "group_tools.py").read_text(
+        encoding="utf-8"
+    )
+
+    group_tools = set()
+    for line in src.splitlines():
+        m = re.match(r"^def ([a-z_][a-z0-9_]*)\(", line)
+        if m is None:
+            continue
+        name = m.group(1)
+        if name.startswith("_") or (
+            name.startswith("set_") and name.endswith("_callback")
+        ):
+            continue
+        group_tools.add(name)
+
+    assert group_tools, "no group tools found in agent/group_tools.py"
+    missing = sorted(group_tools - set(_BUILTIN_TOOL_MIGRATION))
+    assert not missing, f"group tools missing from migration tuple: {missing}"
+
+
+def test_new_tools_pinned_in_shipped_default_agents():
+    """GAP A + GAP B direct pin: set_timer, cancel_timer, and read_tool_output
+    each appear exactly once in every shipped default agent YAML's tools list,
+    and in the migration tuple."""
+    from pathlib import Path
+
+    from utils.agent_defs import _BUILTIN_TOOL_MIGRATION
+    from utils.yaml_load import safe_load_yaml
+
+    required = ("set_timer", "cancel_timer", "read_tool_output")
+
+    for tool in required:
+        assert _BUILTIN_TOOL_MIGRATION.count(tool) == 1, (
+            f"{tool} not in migration tuple (or duplicated)"
+        )
+
+    defaults_dir = Path(__file__).resolve().parents[1] / "prompts" / "default_agents"
+    for fname in ("coder.yaml", "debugger.yaml", "supervisor.yaml"):
+        data = safe_load_yaml((defaults_dir / fname).read_text(encoding="utf-8"))
+        tools = data["tools"]
+        for tool in required:
+            assert tools.count(tool) == 1, (
+                f"{fname}: {tool} appears {tools.count(tool)} times (want exactly 1)"
+            )
+
+
+def test_seed_defaults_fresh_install_grants_new_tools(tmp_path, monkeypatch):
+    """Fresh-install simulation: seeding into an empty config agents dir copies
+    the shipped default YAMLs, so set_timer/cancel_timer/read_tool_output land
+    in all three built-in agents."""
+    agents = tmp_path / "agents"
+    monkeypatch.setattr("utils.agent_defs._get_agents_dir", lambda: str(agents))
+
+    from utils.agent_defs import _seed_defaults
+    from utils.yaml_load import safe_load_yaml
+
+    _seed_defaults()
+
+    for fname in ("coder.yaml", "debugger.yaml", "supervisor.yaml"):
+        path = agents / fname
+        assert path.is_file(), f"{fname} was not seeded"
+        tools = safe_load_yaml(path.read_text(encoding="utf-8"))["tools"]
+        for tool in ("set_timer", "cancel_timer", "read_tool_output"):
+            assert tools.count(tool) == 1, (
+                f"{fname}: {tool} appears {tools.count(tool)} times (want exactly 1)"
+            )

@@ -153,6 +153,24 @@ BUILTIN_SESSION_KEYS: tuple[str, ...] = (
 
 # ── Default seeding ──────────────────────────────────────────────────────────
 
+# Tools granted to every built-in agent (Coder/Debugger/Supervisor) whenever
+# they are missing from the installed agent YAML. Mirrors the group tools in
+# agent/group_tools.py plus read_tool_output; tests/test_builtin_tool_migration.py
+# drift-guards this against newly added group tools.
+
+_BUILTIN_TOOL_MIGRATION = (
+    "diary",
+    "project_memory",
+    "jev_ask",
+    "canvas",
+    "talk",
+    "agent_context",
+    "feed_card",
+    "set_timer",
+    "cancel_timer",
+    "read_tool_output",
+)
+
 
 def _seed_defaults() -> None:
     """Copy any missing built-in default agent YAML files to the agents dir.
@@ -188,15 +206,7 @@ def _seed_defaults() -> None:
                 except OSError as e:
                     logger.warning("Failed to seed default agent %s: %s", fname, e)
 
-    for tool in (
-        "diary",
-        "project_memory",
-        "jev_ask",
-        "canvas",
-        "talk",
-        "agent_context",
-        "feed_card",
-    ):
+    for tool in _BUILTIN_TOOL_MIGRATION:
         for agent_name in ("Coder", "Debugger", "Supervisor"):
             ensure_builtin_tool(agent_name, tool)
 

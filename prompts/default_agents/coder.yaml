@@ -24,6 +24,9 @@ tools:
   - talk
   - agent_context
   - feed_card
+  - set_timer
+  - cancel_timer
+  - read_tool_output
 self_improvement:
   bug_journal: true
   project_rules: true
