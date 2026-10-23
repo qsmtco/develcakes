@@ -59,6 +59,7 @@ class AgentDashboard(Gtk.Box):
         self._summary_lbl.set_halign(Gtk.Align.START)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.add_css_class("agent-dashboard-header")  # SPEC §2.2
         header.append(self._toggle_btn)
         header.append(self._summary_lbl)
         self.append(header)
@@ -112,6 +113,7 @@ class AgentDashboard(Gtk.Box):
         busy = bool(row.get("busy"))
 
         row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_box.add_css_class("agent-dashboard-row")  # SPEC §2.2
 
         name_lbl = Gtk.Label(label=name, xalign=0)
         name_lbl.set_size_request(120, -1)
@@ -130,17 +132,18 @@ class AgentDashboard(Gtk.Box):
             progress.add_css_class(zone)
         row_box.append(progress)
 
-        state = row.get("state")
+        # SPEC §2.2: state derives from `busy`, never a row key.
         state_lbl = Gtk.Label(
-            label=state if state in ("working", "idle") else "", xalign=0
+            label="working" if busy else "idle", xalign=0
         )
         state_lbl.set_size_request(64, -1)
         row_box.append(state_lbl)
 
+        # SPEC §2.2: Compact stays clickable while busy — the window's
+        # handler derives protect_open_turn from the loop state.
         compact_btn = Gtk.Button(label="Compact")
         compact_btn.add_css_class("flat")
         compact_btn.set_focus_on_click(False)
-        compact_btn.set_sensitive(not busy)
         compact_btn.connect(
             "clicked",
             lambda _b: self._emit_cb(self._on_compact, session_key),

@@ -136,6 +136,7 @@ develcakes/
 │   ├── styles.py              # All CSS — single source of truth (APP_CSS + apply_styles)
 │   ├── window.py              # MainWindow — assembles all components, wires callbacks
 │   ├── wiring.py              # Stateless wiring helpers (SettingsHandler callbacks, LOW-7 project path)
+│   ├── agent_dashboard_model.py # Pure row helpers — local_member_keys, collapsed_summary (no GTK; SPEC-AGENT-DASHBOARD)
 │   ├── handlers/              # Handler modules (extracted from window.py)
 │   │   ├── __init__.py
 │   │   ├── prompts_handler.py  # PromptsHandler — favorites, search, last-used
@@ -165,7 +166,8 @@ develcakes/
 │   │   └── file_tree_handler.py   # Sort prefs + git status cache (no GTK) — FileTree enhancements Phase 4
 │   └── views/                 # View widgets
 │       ├── __init__.py
-│       ├── activity_drawer.py  # NEW (SPEC-activity-drawer) — collapsible activity event panel
+│       ├── activity_drawer.py  # collapsible activity event panel — NO LONGER MOUNTED from window.py (SPEC-AGENT-DASHBOARD); class + tests remain
+│       ├── agent_dashboard.py  # AgentDashboard — per-agent rows in the paned end child (SPEC-AGENT-DASHBOARD)
 │       ├── chat_bubble.py      # build_role_bubble() — chat bubble widget factories (Phase 1)
 │       ├── chat_surface.py     # ChatSurface/TextViewFallback — WebKit chat surface + activity pill (SPEC-06/07; FeedBar deleted in R4)
 │       ├── feed_card.py        # ~581 lines — feed_card widget factory (Phase 5)
@@ -4166,6 +4168,31 @@ The `ui/handlers/` directory contains self-contained logic modules extracted fro
 | Adding logic directly to `window.py` | Extract into a handler in `ui/handlers/` |
 | A handler importing another handler | Use callbacks wired through `window.py` |
 | New UI behavior without a handler file | Create one first, then implement |
+
+### 8.8 Agent Dashboard (SPEC-AGENT-DASHBOARD)
+
+The activity drawer's paned slot now hosts an agent dashboard. The paned end
+child is `AgentDashboard` (`ui/views/agent_dashboard.py`); `ActivityDrawer`
+still exists in `ui/views/activity_drawer.py` with its tests, but `window.py`
+no longer constructs it. `ActivityWiringHandler` is not started from `_build`,
+so `wire()` never runs and never calls `append_event` on a missing drawer.
+
+- Directory tree: `ui/views/agent_dashboard.py` (view) and
+  `ui/agent_dashboard_model.py` (pure helpers, no GTK).
+- The view lists one row per local project member: name, context meter,
+  working/idle state, Compact and Clear. It paints rows only — it never calls
+  `compact_conversation` or `clear_conversation`.
+- `window.py` owns the row data (`_refresh_agent_dashboard`), the button
+  actions (`_on_dashboard_compact`, `_on_dashboard_clear`), and the confirmed
+  Clear dialog (`_confirm_clear_agent`).
+- `AgentRuntimeHandler.forget_breakdown(session_key)` drops the cached meter
+  report so a row shows an em dash after compact or clear instead of the stale
+  pre-action percent. `compact_conversation` / `clear_conversation` stay the
+  only context mutators.
+- Refresh sources are composed, never replaced: project open, members changed
+  (still updates the feed-bar count), agent start/end (still updates the
+  activity pill), and the token-breakdown callback (the button-bar meter rule
+  is unchanged).
 
 ---
 

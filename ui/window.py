@@ -81,6 +81,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._input_toolbar_handler = None
         # AgentRuntime handler — owns special agent runtimes (Phase 1.4)
         self._agent_runtime_handler = None
+        # Agent Dashboard (SPEC-AGENT-DASHBOARD) — constructed in _build();
+        # the confirm dialog ref keeps the Clear dialog alive while open.
+        self._agent_dashboard = None
+        self._clear_agent_dialog = None
         # Agent-to-project routing table — shared between ProjectHandler (writes) and ChatHandler (reads)
         from models import AgentRoutingTable
         self._agent_to_project = AgentRoutingTable()
@@ -650,6 +654,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._chat_render_handler.set_project_name(""),
                 self._agent_runtime_handler.clear_active_project(),
                 self._on_feed_bar_update(None, 0),
+                # SPEC-AGENT-DASHBOARD §7 ("no project open"): with the active
+                # project cleared, the refresh falls back to list(registered)
+                # instead of leaving the closed project's members on screen.
+                self._refresh_agent_dashboard(),
                 # LOW-7 wiring: clear the env var when no project is active so
                 # the viewer falls back to home + /tmp only.
                 clear_active_project_path(),
@@ -743,11 +751,20 @@ class MainWindow(Gtk.ApplicationWindow):
             lambda sk: self._clear_chat_box(sk)
         )
         # Wire local agent lifecycle → ActivityHandler (offline mode progress bar)
+        # SPEC-AGENT-DASHBOARD §2.3: COMPOSE both lifecycle callbacks — the
+        # activity pill still updates AND the dashboard refreshes so the row's
+        # state label and Clear sensitivity follow is_loop_active.
         self._agent_runtime_handler.set_on_agent_start(
-            lambda sk: self._activity_handler.on_agent_start(sk)
+            lambda sk: (
+                self._activity_handler.on_agent_start(sk),
+                self._refresh_agent_dashboard(),
+            )
         )
         self._agent_runtime_handler.set_on_agent_end(
-            lambda sk: self._activity_handler.on_agent_end(sk)
+            lambda sk: (
+                self._activity_handler.on_agent_end(sk),
+                self._refresh_agent_dashboard(),
+            )
         )
         # SPEC-16 SP2: local text slices and tool starts drive the pill.
         # on_chat_delta(delta_text, session_key); on_tool_use(tool_name, session_key).
@@ -811,11 +828,15 @@ class MainWindow(Gtk.ApplicationWindow):
             # Paint the bar only when this breakdown's session is the visible
             # tab. The agent name stays with the tab (SPEC-WIRE-CONTEXT-
             # PRESSURE §2.5).
+            # SPEC-AGENT-DASHBOARD §2.3: the dashboard refresh runs on EVERY
+            # breakdown, including when the early return fires because the
+            # visible tab is not the reporting agent. The button-bar rule above
+            # is unchanged — a project: tab still does not paint agent reports.
             visible = self._main_content.get_current_session_key()
-            if sk != visible:
-                return
-            usage_pct = breakdown.get("usage_percent", 0.0)
-            self._main_content.set_context_meter(sk, usage_pct)
+            if sk == visible:
+                usage_pct = breakdown.get("usage_percent", 0.0)
+                self._main_content.set_context_meter(sk, usage_pct)
+            self._refresh_agent_dashboard()
         self._agent_runtime_handler.set_on_token_breakdown_extra(_on_context_meter)
 
         # Update avatar/name on tab switch
@@ -858,11 +879,15 @@ class MainWindow(Gtk.ApplicationWindow):
         # slot the event drawer used to occupy. The dashboard widget is a
         # lightweight Gtk.Box shell; the actual re-parenting of main_content
         # into the vertical Paned happens in the paned block at the end of
-        # _build(). ActivityDrawer and ActivityWiringHandler are no longer
-        # mounted — wire() must not run, it calls append_event.
+        # _build(). The old event drawer shell and its wiring handler are no
+        # longer mounted — that wiring must not run; it appends to a drawer.
         self._agent_dashboard = AgentDashboard()
         self._agent_dashboard.set_on_compact(self._on_dashboard_compact)
         self._agent_dashboard.set_on_clear(self._on_dashboard_clear)
+        # SPEC-AGENT-DASHBOARD §6: populate immediately so a fresh app with no
+        # open project already shows every registered local agent in the header
+        # summary (not a blank "No agents" until the first event/project open).
+        self._refresh_agent_dashboard()
 
         # Wire project lifecycle → ReviewHandler
         self._project_handler.set_on_project_opened(
@@ -911,13 +936,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.set_child(main_box)
 
-        # ── Activity Drawer (SPEC-activity-drawer Phase 1) ───────────────
-        # Wrap main_content in a vertical Paned with the drawer below.
-        # The drawer is global (one per window), not per-tab.
-        # NOTE: self._activity_drawer is constructed earlier in _build();
+        # ── Agent Dashboard (SPEC-AGENT-DASHBOARD) ───────────────────────
+        # Wrap main_content in a vertical Paned with the dashboard below.
+        # The dashboard is global (one per window), not per-tab.
+        # NOTE: self._agent_dashboard is constructed earlier in _build();
         # this block only handles the re-parenting of main_content into the Paned.
+        # Position, shrink and resize flags are unchanged from the drawer shell.
         self._activity_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
-        self._activity_paned.set_end_child(self._activity_drawer)
+        self._activity_paned.set_end_child(self._agent_dashboard)
         # Default: most space to chat (chat ~600px of ~800px window)
         self._activity_paned.set_position(600)
         self._activity_paned.set_shrink_end_child(True)
@@ -1740,6 +1766,141 @@ class MainWindow(Gtk.ApplicationWindow):
         # Keep a ref so the dialog stays up, and present() so it comes
         # forward over the chat surface.
         self._stop_all_dialog = dialog
+        dialog.present()
+
+    # ── Agent Dashboard actions (SPEC-AGENT-DASHBOARD §2.3) ───────────────
+
+    def _refresh_agent_dashboard(self) -> None:
+        """Rebuild the dashboard rows from the active project's local members.
+
+        Row data only — the view paints. One agent, one row, keyed by
+        `agent:<slug>`. A missing breakdown is an em dash, never 0%.
+        No open project: every registered local agent gets a row.
+        """
+        dash = getattr(self, "_agent_dashboard", None)
+        if dash is None or self._agent_runtime_handler is None:
+            return
+        from ui.agent_dashboard_model import local_member_keys
+        from models.colors import color_for_special_agent
+        handler = self._agent_runtime_handler
+        registered = handler.get_special_agents()
+        project = None
+        if self._project_handler is not None:
+            project = self._project_handler.get_active_project_name()
+        if project:
+            keys = local_member_keys(
+                self._project_handler.get_project_members(project),
+                registered,
+            )
+        else:
+            keys = list(registered)
+        rows = []
+        for sk in keys:
+            name = registered.get(sk) or sk
+            agent_def = handler.get_special_agent_def(sk)
+            role = getattr(agent_def, "role", "") if agent_def is not None else ""
+            rt = handler.runtime_for(sk)
+            busy = rt is not None and rt.is_loop_active(sk)
+            bd = handler.get_last_breakdown(sk)
+            pct = None if not isinstance(bd, dict) else bd.get("usage_percent")
+            rows.append({
+                "session_key": sk,
+                "name": name,
+                "usage_percent": pct,
+                "busy": busy,
+                "color": color_for_special_agent(role if isinstance(role, str) else ""),
+            })
+        dash.set_rows(rows)
+
+    def _on_dashboard_compact(self, session_key: str) -> None:
+        """Compact one agent's conversation from its dashboard row.
+
+        Synchronous on the GTK thread — the same call `/compact` makes. A
+        busy loop passes protect_open_turn=True so the open turn is kept.
+        The cached breakdown is ALWAYS dropped afterwards: the pre-action
+        percent would lie, so the row shows an em dash until the next model
+        call. The returned dict is not inspected (a no-op compact still
+        leaves the honest em dash).
+        """
+        handler = self._agent_runtime_handler
+        if handler is None:
+            return
+        rt = handler.runtime_for(session_key)
+        busy = rt is not None and rt.is_loop_active(session_key)
+        handler.compact_conversation(
+            session_key, "", protect_open_turn=busy,
+        )
+        handler.forget_breakdown(session_key)
+        self._refresh_agent_dashboard()
+
+    def _on_dashboard_clear(self, session_key: str) -> None:
+        """Ask before wiping one agent's conversation from its dashboard row.
+
+        Clear while the loop is active does not call clear_conversation — the
+        row's button is insensitive, and this method also refuses.
+        """
+        handler = self._agent_runtime_handler
+        if handler is None:
+            return
+        rt = handler.runtime_for(session_key)
+        if rt is not None and rt.is_loop_active(session_key):
+            self._refresh_agent_dashboard()
+            return
+        name = handler.get_special_agents().get(session_key, session_key)
+        self._confirm_clear_agent(session_key, name)
+
+    def _confirm_clear_agent(self, session_key: str, name: str) -> None:
+        """Clear-confirm dialog — mirrors _on_stop_all_clicked's pattern.
+
+        One-shot `_dispatched` guard against the close-triggered second
+        response, WARNING type, default CANCEL. OK is the only path into
+        clear_conversation. clear_conversation returns False when the loop
+        became active between the insensitive check and the confirm; in that
+        case the cached breakdown is kept (the wipe did not happen) and the
+        refresh still runs so the row shows working and Clear goes
+        insensitive.
+        """
+        import gi
+        gi.require_version('Gtk', '4.0')
+        from gi.repository import Gtk
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Clear {name}'s context?",
+            secondary_text="The conversation is wiped. This cannot be undone.",
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Clear", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+
+        _dispatched = [False]
+
+        def _on_response(_dialog, response):
+            if _dispatched[0]:
+                return
+            _dispatched[0] = True
+            if response == Gtk.ResponseType.OK:
+                handler = self._agent_runtime_handler
+                if handler is not None:
+                    ok = handler.clear_conversation(session_key)
+                    if ok:
+                        handler.forget_breakdown(session_key)
+                else:
+                    logger.warning(
+                        "Clear confirmed but no AgentRuntimeHandler — no-op"
+                    )
+            self._clear_agent_dialog = None
+            _dialog.close()
+            # Refresh either way: a refused clear leaves the row on "working".
+            self._refresh_agent_dashboard()
+
+        dialog.connect("response", _on_response)
+        # Keep a ref so the dialog stays up while open, and present() so it
+        # comes forward over the chat surface.
+        self._clear_agent_dialog = dialog
         dialog.present()
 
     def _confirm_batch_accept(self, project_name: str, n: int,

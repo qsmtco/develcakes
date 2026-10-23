@@ -510,6 +510,14 @@ button.lib-fav-star {
     font-size: 9px;
     color: #707088;
 }
+/* Agent dashboard (SPEC-AGENT-DASHBOARD §2.5) — padding only.
+   The bar reuses .context-meter-low/medium/high; those are NOT redefined. */
+.agent-dashboard-header {
+    padding: 4px 8px;
+}
+.agent-dashboard-row {
+    padding: 2px 8px;
+}
 .agent-context-box {
     margin-right: 4px;
 }
