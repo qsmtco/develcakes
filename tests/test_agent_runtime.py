@@ -3538,15 +3538,18 @@ class TestAllowedToolsFallback:
             "would be a no-op — letting write_file/edit_file through."
         )
 
-    def test_persisted_list_wins_over_fallback(
+    def test_live_agent_def_refreshes_persisted_list(
         self, tmp_path, monkeypatch
     ):
-        """Happy path: persisted allowed_tools is a real list — fallback
-        does NOT override it. The persisted list is the source of
-        truth when present (e.g., the Coder agent's conversation has
-        the correct list persisted).
+        """SPEC-52 follow-up: the persisted allowed_tools list is a
+        creation-time cache of the agent def's tool list — no UI ever
+        customizes it per conversation. On load, a live agent def with a
+        non-empty tool list ALWAYS refreshes it. Without this, a tool
+        added to the agent yaml (e.g. set_timer/cancel_timer) could never
+        reach an existing conversation: the enforcement gate
+        (execute_tool allowed_tools check) would reject it forever.
         """
-        # Arrange: write a conversation with a real list
+        # Arrange: write a conversation with a real (now stale) list
         d = tmp_path / "conversations"
         d.mkdir()
         monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
@@ -3563,24 +3566,22 @@ class TestAllowedToolsFallback:
             "total_tokens": 100,
             "total_cost": 0.01,
             "step_count": 1,
-            "allowed_tools": persisted_tools,  # real list, not None
+            "allowed_tools": persisted_tools,  # stale creation-time cache
         }
         (d / "agent:coder.json").write_text(_json.dumps(persisted))
 
-        # Patch get_special_agent to return a DIFFERENT live list.
-        # If the fallback fires, conv.allowed_tools would be overwritten
-        # with this list. The persisted list must win.
+        # Patch get_special_agent to return the LIVE list — what the
+        # agent yaml says today. This must win over the cache.
         live_def = SpecialAgentDef(
             conv_id_prefix="agent:coder",
             display_name="Coder",
             role="coder",
             emoji="🛠️",
-            tools=["read_file"],  # different from persisted
+            tools=["read_file", "write_file", "set_timer", "cancel_timer"],
             can_write=True,
         )
-        fallback_called = MagicMock(return_value=live_def)
         monkeypatch.setattr(
-            "agent.special_agents.get_special_agent", fallback_called
+            "agent.special_agents.get_special_agent", MagicMock(return_value=live_def)
         )
 
         # Act
@@ -3589,14 +3590,50 @@ class TestAllowedToolsFallback:
         assert result is not None
         conv, _ = result
 
-        # Assert: persisted list is preserved
-        assert conv.allowed_tools == persisted_tools, (
-            f"persisted allowed_tools was overwritten by fallback: "
-            f"got {conv.allowed_tools!r}, expected {persisted_tools!r}"
+        # Assert: the live def refreshed the stale cache
+        assert conv.allowed_tools == ["read_file", "write_file", "set_timer", "cancel_timer"], (
+            f"live agent def did not refresh persisted allowed_tools: "
+            f"got {conv.allowed_tools!r}"
         )
-        # The fallback lookup was NOT called (the early return at
-        # `if conv.allowed_tools is None:` skipped it).
-        fallback_called.assert_not_called()
+
+    def test_no_agent_def_preserves_persisted_list(
+        self, tmp_path, monkeypatch
+    ):
+        """No live agent def (plain session key, no yaml): the persisted
+        allowed_tools list survives the load untouched.
+        """
+        # Arrange
+        d = tmp_path / "conversations"
+        d.mkdir()
+        monkeypatch.setattr("utils.config.get_config_dir", lambda: str(tmp_path))
+        persisted_tools = ["read_file", "write_file"]
+        persisted = {
+            "session_key": "adhoc:session",
+            "agent_name": "Adhoc",
+            "agent_role": "",
+            "project_path": None,
+            "model": "openai/gpt-4o",
+            "provider": "openai",
+            "messages": [],
+            "system_prompt": "",
+            "total_tokens": 0,
+            "total_cost": 0.0,
+            "step_count": 0,
+            "allowed_tools": persisted_tools,
+        }
+        (d / "adhoc:session.json").write_text(_json.dumps(persisted))
+        monkeypatch.setattr(
+            "agent.special_agents.get_special_agent", MagicMock(return_value=None)
+        )
+
+        # Act
+        from agent.persistence import load_conversation_from_disk
+        result = load_conversation_from_disk("adhoc:session")
+        assert result is not None
+        conv, _ = result
+
+        # Assert: no def -> persisted list preserved
+        assert conv.allowed_tools == persisted_tools
 
     def test_persisted_none_with_unregistered_agent_leaves_none(
         self, tmp_path, monkeypatch

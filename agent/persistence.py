@@ -188,14 +188,18 @@ def _apply_loaded_fallbacks(
 ) -> None:
     """Re-resolve api_key and fill allowed_tools from the live agent def."""
     conv.api_key = resolve_api_key_for_conversation(data)
-    if conv.allowed_tools is None:
-        try:
-            from agent.special_agents import get_special_agent
-            agent_def = get_special_agent(session_key)
-            if agent_def is not None and agent_def.tools:
-                conv.allowed_tools = list(agent_def.tools)
-        except Exception:
-            pass
+    # Always refresh allowed_tools from the live agent def when one exists.
+    # The saved list is a creation-time cache; without this refresh a tool
+    # added to the agent yaml (e.g. set_timer/cancel_timer in SPEC-52) can
+    # never reach an existing conversation — the enforcement gate
+    # (agent/tools.py allowed_tools check) would reject it forever.
+    try:
+        from agent.special_agents import get_special_agent
+        agent_def = get_special_agent(session_key)
+        if agent_def is not None and agent_def.tools:
+            conv.allowed_tools = list(agent_def.tools)
+    except Exception:
+        pass
 
 
 def resolve_api_key_for_conversation(data: dict) -> str | None:
