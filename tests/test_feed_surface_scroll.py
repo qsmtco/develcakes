@@ -13,8 +13,13 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk
 
 from models.feed_card import FeedCardData
-from render.feed_html import FEED_SCRIPT
-from ui.views.feed_surface import _BOTTOM_SCRIPT, FeedSurface, _restore_script
+from render.feed_html import FEED_SCRIPT, render_feed_card
+from ui.views.feed_surface import (
+    _BOTTOM_SCRIPT,
+    FeedSurface,
+    _ops_script,
+    _restore_script,
+)
 
 try:
     from ui.views.feed_surface import WebKit
@@ -74,6 +79,17 @@ def _surface(near_bottom=True, y=None) -> FeedSurface:
     surface._doc_near_bottom = near_bottom
     surface._doc_y = y
     surface._scroll_after = False
+    # SPEC-57 §2f patch state. `_load_epoch` starts equal to `_epoch` so a
+    # `_finish()` in the legacy scroll tests is not mistaken for a stale load.
+    surface._dom_ready = False
+    surface._dom_ids = []
+    surface._dom_html = {}
+    surface._patch_in_flight = False
+    surface._epoch = 0
+    surface._load_epoch = 0
+    surface._queued_reload = False
+    surface._last_ops = None
+    surface._patch_count = 0
     surface._webview = _FakeView()
     return surface
 
@@ -315,3 +331,227 @@ class TestSetCardsResetsScrollState:
         assert surface._scroll_after is True
         _finish(surface)
         assert surface._webview.evals == [_BOTTOM_SCRIPT]
+
+
+class TestFeedPatchFlush:
+    """SPEC-57 §2h items 2–6 — the DOM patch path."""
+
+    def _ready(self, dom, order):
+        """A surface whose DOM is loaded and whose `_dom_html` beliefs match
+        the fragments `_flush` will render (so the plan is additive)."""
+        surface = _surface()
+        surface._dom_ready = True
+        surface._dom_ids = list(dom)
+        cards = {cid: _card(cid) for cid in order}
+        surface._cards = cards
+        surface._order = list(order)
+        surface._html = {}
+        surface._dom_html = {
+            cid: render_feed_card(cards[cid]) for cid in dom
+        }
+        return surface
+
+    def test_flush_patches_when_dom_ready_emits_one_eval_not_load(self):
+        surface = self._ready(["card-1"], ["card-1", "card-2"])
+        surface._flush()
+        assert surface._webview.loads == []
+        assert len(surface._webview.evals) == 1
+        assert surface._patch_in_flight is True
+        # The reader was following; the patch script handles the scroll inside
+        # the same single eval. Commit the reported DOM ids now.
+        surface._on_patch_finished(
+            surface._webview,
+            _FakeValue('[["card-1","card-2"],"followed"]'),
+            surface._epoch,
+        )
+        assert surface._dom_ids == ["card-1", "card-2"]
+        assert surface._patch_in_flight is False
+
+    def test_flush_noop_when_dom_already_matches(self):
+        surface = self._ready(["card-1"], ["card-1"])
+        surface._flush()
+        assert surface._webview.evals == []
+        assert surface._webview.loads == []
+        assert surface._dirty is False
+
+    def test_flush_falls_back_to_load_when_plan_returns_none(self):
+        # prepend+append mix -> plan returns None -> full document load
+        surface = self._ready(
+            ["card-1"], ["card-0", "card-1", "card-2"]
+        )
+        surface._flush()
+        assert surface._webview.evals == []
+        assert len(surface._webview.loads) == 1
+        assert surface._load_in_flight is True
+
+    def test_patch_callback_missing_recovers_with_full_reload(self):
+        surface = self._ready(["card-1"], ["card-1", "card-2"])
+        surface._flush()
+        assert surface._patch_in_flight is True
+        surface._on_patch_finished(
+            surface._webview, _FakeValue("null"), surface._epoch
+        )
+        assert surface._dom_ready is False
+        assert surface._dirty is True
+        assert surface._patch_in_flight is False
+        assert surface._queued_reload is True
+
+    def test_stale_epoch_patch_callback_is_ignored(self):
+        surface = self._ready(["card-1"], ["card-1", "card-2"])
+        surface._flush()
+        before = list(surface._dom_ids)
+        surface._on_patch_finished(
+            surface._webview,
+            _FakeValue('[["card-1","card-2"],"followed"]'),
+            surface._epoch + 1,
+        )
+        assert surface._dom_ids == before
+        assert surface._patch_in_flight is True
+
+    def test_set_cards_bumps_epoch_and_clears_in_flight_patch(self):
+        surface = self._ready(["card-1"], ["card-1", "card-2"])
+        surface._flush()
+        assert surface._patch_in_flight is True
+        surface.set_cards([_card("card-3")])
+        assert surface._epoch == 1
+        assert surface._patch_in_flight is False
+        assert surface._dom_ready is False
+        assert surface._dom_ids == []
+        assert surface.card_ids() == ["card-3"]
+
+    def test_set_cards_bumps_epoch_and_clears_in_flight_load(self):
+        surface = _surface()
+        surface._load_in_flight = True
+        surface._load_epoch = 0
+        surface.set_cards([_card("card-3")])
+        assert surface._epoch == 1
+        assert surface._load_in_flight is False
+        assert surface._load_epoch is None
+        assert surface._dom_ready is False
+
+    def test_stale_patch_callback_after_set_cards_leaves_new_state(self):
+        surface = self._ready(["card-1"], ["card-1", "card-2"])
+        surface._flush()
+        surface.set_cards([_card("card-3")])
+        surface._on_patch_finished(
+            surface._webview,
+            _FakeValue('[["card-1","card-2"],"held"]'),
+            0,
+        )
+        assert surface._dom_ids == []
+        assert surface.card_ids() == ["card-3"]
+
+
+class TestPlanFeedOps:
+    """SPEC-57 §2f `_plan_feed_ops` traced cases."""
+
+    def _surface_with(self, dom, order, html_ids=None):
+        surface = _surface()
+        surface._dom_ready = True
+        surface._dom_ids = list(dom)
+        surface._order = list(order)
+        surface._html = {
+            cid: f"<article data-card-id={cid}></article>"
+            for cid in (html_ids if html_ids is not None else order)
+        }
+        surface._dom_html = {
+            cid: surface._html[cid]
+            for cid in dom
+            if cid in surface._html
+        }
+        return surface
+
+    def test_identical_returns_empty_list(self):
+        assert self._surface_with(["a", "b"], ["a", "b"])._plan_feed_ops() == []
+
+    def test_prepend_only(self):
+        ops = self._surface_with(["b", "c"], ["a", "b", "c"])._plan_feed_ops()
+        assert ops is not None and len(ops) == 1
+        assert ops[0]["op"] == "prepend"
+        assert ops[0]["id"] == "a"
+
+    def test_append_only(self):
+        ops = self._surface_with(["a", "b"], ["a", "b", "c"])._plan_feed_ops()
+        assert ops is not None and len(ops) == 1
+        assert ops[0]["op"] == "append"
+        assert ops[0]["id"] == "c"
+
+    def test_mixed_prepend_and_append_returns_none(self):
+        assert self._surface_with(["b"], ["a", "b", "c"])._plan_feed_ops() is None
+
+    def test_reorder_returns_none(self):
+        assert self._surface_with(["a", "b"], ["b", "a"])._plan_feed_ops() is None
+
+    def test_duplicate_ids_return_none(self):
+        assert self._surface_with(["a"], ["a", "a"])._plan_feed_ops() is None
+
+    def test_all_gone_plus_new_returns_none(self):
+        assert self._surface_with(["a"], ["b"])._plan_feed_ops() is None
+
+    def test_missing_html_returns_none(self):
+        surface = self._surface_with(["a"], ["a", "b"], html_ids=["a"])
+        assert surface._plan_feed_ops() is None
+
+
+class TestOpsScript:
+    """SPEC-57 §2f `_ops_script` constraints."""
+
+    def test_uses_removechild_replacechild_not_dot_methods(self):
+        script = _ops_script([
+            {"op": "remove", "id": "a"},
+            {
+                "op": "replace",
+                "id": "b",
+                "html": "<article data-card-id=b></article>",
+            },
+        ])
+        assert "removeChild" in script
+        assert ".remove(" not in script
+        assert "replaceChild" in script
+        assert ".replaceWith(" not in script
+
+    def test_inserts_get_feed_card_enter_replacements_do_not(self):
+        script = _ops_script([
+            {
+                "op": "prepend",
+                "id": "a",
+                "html": "<article data-card-id=a></article>",
+            },
+            {
+                "op": "replace",
+                "id": "b",
+                "html": "<article data-card-id=b></article>",
+            },
+        ])
+        assert script.count("feed-card-enter") == 1
+
+    def test_near_bottom_slack_matches_feed_script(self):
+        assert "<= 80" in _ops_script([])
+
+    def test_id_with_quote_never_builds_a_css_selector(self):
+        # SPEC: never build a CSS selector from a card id — a quote or `]`
+        # would make querySelector throw (SyntaxError), not return null.
+        script = _ops_script([
+            {"op": "remove", "id": 'a"b'},
+            {
+                "op": "replace",
+                "id": 'c]d',
+                "html": "<article data-card-id=x></article>",
+            },
+        ])
+        assert "querySelectorAll('article[data-card-id]')" in script
+        assert "querySelector(" not in script
+        assert '[data-card-id="a\"b"]' not in script
+        assert '[data-card-id="c]d"]' not in script
+
+    def test_prepend_generates_scroll_height_delta_correction_and_held_outcome(self):
+        script = _ops_script([
+            {
+                "op": "prepend",
+                "id": "a",
+                "html": "<article data-card-id=a></article>",
+            },
+        ])
+        assert "y + grew" in script
+        assert "'held'" in script
+        assert "'followed'" in script

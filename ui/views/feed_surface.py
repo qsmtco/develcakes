@@ -72,6 +72,109 @@ def _apply_canvas_color(webview) -> None:
         logger.exception("set_background_color failed")
 
 
+# The patch script reuses the document's own near-bottom slack. FEED_SCRIPT's
+# `nearBottom()` compares against 80px; this constant must stay in lockstep.
+_NEAR_BOTTOM_PX = 80
+
+
+def _ops_script(ops: list[dict]) -> str:
+    """One JavaScript program that applies the DOM patch `ops`.
+
+    Returns ``[out, outcome]`` where ``out`` is the array of resulting
+    ``data-card-id`` strings (so the eval callback can commit ``_dom_ids``)
+    and ``outcome`` is ``'followed'`` when the reader was near the bottom or
+    ``'held'`` otherwise. Removal uses ``removeChild`` and replacement uses
+    ``replaceChild`` (never ``.remove`` / ``.replaceWith``). Inserted
+    articles get the ``feed-card-enter`` class; replacements do not.
+
+    Nodes are found with ``find()``: it scans ``feed.querySelectorAll(
+    'article[data-card-id]')`` and compares the DECODED ``getAttribute``
+    value against the (JSON-escaped, decoded) op id. A CSS attribute selector
+    is never built from a card id — a quote or ``]`` in an id would make
+    ``querySelector`` throw. The prepend anchor is captured AFTER removals.
+
+    Scroll: ``y`` and ``before`` are captured before mutating. Following
+    readers (near bottom) land on the bottom. While NOT following, a prepend
+    shifts the content above the viewport, so ``scrollTop`` is corrected by
+    the ``scrollHeight`` delta; replace/append does not touch scroll when not
+    following. The 80px slack matches FEED_SCRIPT.
+    """
+    lines = [
+        "(function () {",
+        "  var feed = document.getElementById('feed');",
+        "  if (!feed) return [[], 'held'];",
+        "  function find(id) {",
+        "    var all = feed.querySelectorAll('article[data-card-id]');",
+        "    for (var i = 0; i < all.length; i++) {",
+        "      if (all[i].getAttribute('data-card-id') === id) return all[i];",
+        "    }",
+        "    return null;",
+        "  }",
+        "  var doc = document.documentElement;",
+        "  var y = window.scrollY || doc.scrollTop || 0;",
+        "  var viewport = window.innerHeight || doc.clientHeight || 0;",
+        f"  var wasBottom = (doc.scrollHeight - viewport - y) <= {_NEAR_BOTTOM_PX};",
+        "  var before = doc.scrollHeight;",
+        "  var prepended = false;",
+    ]
+    for op in ops:
+        if op.get("op") == "remove":
+            lines.append(
+                "  var el = find("
+                + json.dumps(op["id"], ensure_ascii=True)
+                + ");"
+            )
+            lines.append(
+                "  if (el && el.parentNode === feed) feed.removeChild(el);"
+            )
+    lines.append("  var anchor = feed.firstChild;")
+    for op in ops:
+        kind = op.get("op")
+        if kind not in ("append", "prepend", "replace"):
+            continue
+        lines.append("  var wrap = document.createElement('div');")
+        lines.append(
+            "  wrap.innerHTML = "
+            + json.dumps(op["html"], ensure_ascii=True)
+            + ";"
+        )
+        lines.append("  var node = wrap.firstChild;")
+        if kind in ("append", "prepend"):
+            lines.append(
+                "  if (node) node.className = (node.className ? "
+                "node.className + ' ' : '') + 'feed-card-enter';"
+            )
+        if kind == "append":
+            lines.append("  if (node) feed.appendChild(node);")
+        elif kind == "prepend":
+            lines.append("  prepended = true;")
+            lines.append("  if (node) feed.insertBefore(node, anchor);")
+        else:
+            lines.append(
+                "  var old = find("
+                + json.dumps(op["id"], ensure_ascii=True)
+                + ");"
+            )
+            lines.append(
+                "  if (old && old.parentNode === feed) "
+                "feed.replaceChild(node, old);"
+            )
+    lines.extend([
+        "  if (wasBottom) {",
+        "    window.scrollTo(0, doc.scrollHeight);",
+        "  } else if (prepended) {",
+        "    var grew = doc.scrollHeight - before;",
+        "    if (grew > 0) window.scrollTo(0, y + grew);",
+        "  }",
+        "  var out = []; var kids = feed.children;",
+        "  for (var i = 0; i < kids.length; i++) "
+        "out.push(kids[i].getAttribute('data-card-id'));",
+        "  return [out, wasBottom ? 'followed' : 'held'];",
+        "})();",
+    ])
+    return "\n".join(lines)
+
+
 def create_feed_surface(on_action, *, is_near_bottom=None, on_load_finished=None):
     """A feed document, or None when WebKit is off or the click channel fails.
 
@@ -115,6 +218,19 @@ class FeedSurface:
         self._doc_near_bottom = True
         self._doc_y: float | None = None
         self._scroll_after = False
+        # Feed patch state (SPEC-57 §2f). `_dom_ready` / `_dom_ids` track what
+        # the live document actually contains so `_flush` can patch it instead
+        # of reloading. `_epoch` bumps on every `set_cards`; async callbacks
+        # carry the epoch they were issued under and ignore newer generations.
+        self._dom_ready = False
+        self._dom_ids: list[str] = []
+        self._dom_html: dict[str, str] = {}
+        self._patch_in_flight = False
+        self._epoch = 0
+        self._load_epoch: int | None = None
+        self._queued_reload = False
+        self._last_ops: list | None = None
+        self._patch_count = 0
         self._webview = WebKit.WebView()
         _apply_canvas_color(self._webview)
         # The document scrolls ITSELF: the host ScrolledWindow runs with
@@ -149,7 +265,19 @@ class FeedSurface:
         project's pixel offset AND its follow-off state (it opens mid-page and
         its new cards land below the fold forever). A fresh project starts at
         the top and follows.
+
+        SPEC-57 §2f: the epoch bumps FIRST so any async patch/load callback
+        issued under the previous document is stale, and the in-flight gates
+        are cleared so the next schedule takes a fresh full load.
         """
+        self._epoch += 1
+        self._patch_in_flight = False
+        self._load_in_flight = False
+        self._dom_ready = False
+        self._dom_ids = []
+        self._dom_html = {}
+        self._queued_reload = False
+        self._load_epoch = None
         self._order = []
         self._cards = {}
         self._html = {}
@@ -227,19 +355,57 @@ class FeedSurface:
 
     def _schedule(self) -> None:
         self._dirty = True
-        if self._render_source is not None or self._load_in_flight:
+        if (
+            self._render_source is not None
+            or self._load_in_flight
+            or self._patch_in_flight
+        ):
             return
         self._render_source = GLib.idle_add(self._flush)
 
     def _flush(self) -> bool:
         self._render_source = None
-        if self._load_in_flight:
+        if self._load_in_flight or self._patch_in_flight:
             return False
+        if self._queued_reload:
+            self._queued_reload = False
+            self._dom_ready = False
+            self._dom_ids = []
+            self._dom_html = {}
+        # Patch path: the document is loaded and we know what it contains.
+        if self._dom_ready and self._dom_ids and self._order:
+            self._fragments()
+            ops = self._plan_feed_ops()
+            if ops == []:
+                self._dirty = False
+                return False
+            if ops is not None:
+                self._dirty = False
+                self._patch_in_flight = True
+                self._last_ops = ops
+                self._patch_count += 1
+                script = _ops_script(ops)
+                epoch = self._epoch
+
+                def _after(view, result, _data, _epoch=epoch):
+                    self._on_patch_finished(view, result, _epoch)
+
+                try:
+                    self._webview.evaluate_javascript(
+                        script, len(script.encode("utf-8")),
+                        None, None, None, _after, None,
+                    )
+                except Exception:
+                    logger.exception("feed patch eval failed")
+                    self._recover_missing()
+                return False
+        # Full-document load. Follow decision comes from the DOCUMENT's own
+        # scroll_state reports (see `_on_script_message`), never from a GTK
+        # adjustment probe — the host ScrolledWindow does not scroll this
+        # content at all.
         self._dirty = False
-        # Follow decision comes from the DOCUMENT's own scroll_state reports
-        # (see `_on_script_message`), never from a GTK adjustment probe — the
-        # host ScrolledWindow does not scroll this content at all.
         self._scroll_after = bool(self._doc_near_bottom)
+        self._load_epoch = self._epoch
         document = render_feed_document(self._fragments())
         self._load_in_flight = True
         try:
@@ -248,6 +414,122 @@ class FeedSurface:
             logger.exception("feed load_html failed")
             self._load_in_flight = False
         return False
+
+    def _plan_feed_ops(self) -> list[dict] | None:
+        """Diff the live DOM against the desired ``_order``.
+
+        Returns ``[]`` when the DOM already matches, a list of DOM patch ops
+        (``remove`` / ``replace`` / ``prepend`` / ``append``) when the change
+        is expressible as edge-only inserts, and ``None`` when the change
+        needs a full-document reload (duplicate ids, reorder, a prepend+
+        append mix, all-old-gone-plus-new, or a missing rendered fragment).
+        """
+        order = self._order
+        dom = self._dom_ids
+        if len(order) != len(set(order)):
+            return None
+        if any(cid not in self._html for cid in order):
+            return None
+        wanted = set(order)
+        dom_set = set(dom)
+        replacements = [
+            cid
+            for cid in order
+            if cid in dom_set and self._html.get(cid) != self._dom_html.get(cid)
+        ]
+        if order == dom:
+            return replacements if replacements else []
+        if dom and wanted and not (dom_set & wanted):
+            return None
+        keep = [cid for cid in dom if cid in wanted]
+        pos = {cid: i for i, cid in enumerate(order)}
+        prev = -1
+        for cid in keep:
+            p = pos[cid]
+            if p < prev:
+                return None
+            prev = p
+        removals = [cid for cid in dom if cid not in wanted]
+        additions = [cid for cid in order if cid not in dom_set]
+        mode = None
+        if additions and keep:
+            first_keep = pos[keep[0]]
+            last_keep = pos[keep[-1]]
+            a_min = min(pos[a] for a in additions)
+            a_max = max(pos[a] for a in additions)
+            if a_min > last_keep:
+                mode = "append"
+            elif a_max < first_keep:
+                mode = "prepend"
+            else:
+                return None
+        elif additions and not keep:
+            return None
+        ops: list[dict] = []
+        for cid in removals:
+            ops.append({"op": "remove", "id": cid})
+        for cid in replacements:
+            ops.append({"op": "replace", "id": cid, "html": self._html[cid]})
+        if mode == "prepend":
+            for cid in additions:
+                ops.append({"op": "prepend", "id": cid, "html": self._html[cid]})
+        elif mode == "append":
+            for cid in additions:
+                ops.append({"op": "append", "id": cid, "html": self._html[cid]})
+        return ops
+
+    def _recover_missing(self) -> None:
+        """The DOM no longer reflects our model — fall back to a full load.
+
+        Clears the patch gate and the DOM model, marks the surface dirty, and
+        schedules. The next flush takes the load branch (``_dom_ready`` is
+        False again). There is deliberately NO patch retry loop.
+        """
+        self._patch_in_flight = False
+        self._dom_ready = False
+        self._dom_ids = []
+        self._dom_html = {}
+        self._queued_reload = True
+        self._dirty = True
+        self._schedule()
+
+    def _on_patch_finished(self, view, result, epoch) -> None:
+        """Eval callback for a patch. `epoch` is the generation issued at eval.
+
+        A stale epoch (a newer ``set_cards`` or patch superseded this one) is
+        ignored: it must NOT write the DOM model and must NOT clear a newer
+        ``_patch_in_flight``. A missing / unparseable id list means the DOM is
+        gone or inconsistent — recover with a full load.
+        """
+        if epoch != self._epoch:
+            return
+        self._patch_in_flight = False
+        try:
+            raw = result.to_json(0) if hasattr(result, "to_json") else None
+            payload = json.loads(raw) if isinstance(raw, str) else None
+        except Exception:
+            logger.exception("feed patch result was not JSON")
+            payload = None
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 2
+            or not isinstance(payload[0], list)
+            or not all(isinstance(i, str) for i in payload[0])
+        ):
+            self._recover_missing()
+            return
+        ids, outcome = payload
+        if not ids and self._order:
+            self._recover_missing()
+            return
+        logger.debug("feed patch applied: %s", outcome)
+        self._dom_ids = ids
+        self._dom_html = {
+            cid: self._html.get(cid, self._dom_html.get(cid, ""))
+            for cid in ids
+        }
+        if self._dirty:
+            self._schedule()
 
     def _eval_document_scroll(self, script: str) -> None:
         """Fire-and-forget document scroll in the page's own world.
@@ -274,6 +556,19 @@ class FeedSurface:
         if WebKit is None or event != WebKit.LoadEvent.FINISHED:
             return
         self._load_in_flight = False
+        # Epoch check: a set_cards that landed while this document loaded made
+        # it stale. Do not adopt its DOM and do not restore scroll on it —
+        # schedule a fresh load instead.
+        if self._epoch != self._load_epoch:
+            self._dom_ready = False
+            self._dom_ids = []
+            self._dom_html = {}
+            self._dirty = True
+            self._schedule()
+            return
+        self._dom_ready = True
+        self._dom_ids = list(self._order)
+        self._dom_html = {cid: self._html.get(cid, "") for cid in self._order}
         follow = self._scroll_after
         self._scroll_after = False
         if follow:
@@ -288,6 +583,9 @@ class FeedSurface:
     def _on_load_failed(self, view, event, uri, error) -> bool:
         logger.error("feed document load failed: %s", error)
         self._load_in_flight = False
+        self._dom_ready = False
+        self._dom_ids = []
+        self._dom_html = {}
         if self._dirty:
             self._schedule()
         return False
@@ -295,6 +593,9 @@ class FeedSurface:
     def _on_web_process_terminated(self, view, reason) -> None:
         logger.error("feed web process terminated: %s", reason)
         self._load_in_flight = False
+        self._dom_ready = False
+        self._dom_ids = []
+        self._dom_html = {}
         if self._dirty:
             self._schedule()
 
