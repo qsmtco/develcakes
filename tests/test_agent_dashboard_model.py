@@ -20,6 +20,11 @@ def test_multiple_rows_summary():
     assert collapsed_summary(rows) == "Coder 40% · Debugger 70%"
 
 
+def test_bool_percent_renders_em_dash():
+    assert collapsed_summary([{"name": "Coder", "usage_percent": True}]) == "Coder —"
+    assert collapsed_summary([{"name": "Coder", "usage_percent": False}]) == "Coder —"
+
+
 def test_nan_percent_renders_em_dash():
     assert collapsed_summary([{"name": "Coder", "usage_percent": math.nan}]) == "Coder —"
 
