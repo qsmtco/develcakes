@@ -167,8 +167,10 @@ def _ops_script(ops: list[dict]) -> str:
         "    if (grew > 0) window.scrollTo(0, y + grew);",
         "  }",
         "  var out = []; var kids = feed.children;",
-        "  for (var i = 0; i < kids.length; i++) "
-        "out.push(kids[i].getAttribute('data-card-id'));",
+        (
+            "  for (var i = 0; i < kids.length; i++) "
+            "out.push(kids[i].getAttribute('data-card-id'));"
+        ),
         "  return [out, wasBottom ? 'followed' : 'held'];",
         "})();",
     ])
