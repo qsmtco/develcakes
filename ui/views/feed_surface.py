@@ -22,7 +22,8 @@ import logging
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib
 
 from render.feed_html import render_feed_card, render_feed_document
 from utils.config import get_env
@@ -46,6 +47,29 @@ _BOTTOM_SCRIPT = "window.scrollTo(0, document.documentElement.scrollHeight);"
 
 def _restore_script(y: float) -> str:
     return f"window.scrollTo(0, {float(y)!r});"
+
+
+# SPEC-57 §2a: WebKit's default clear color is opaque white. Paint the
+# canvas #1a1b26 before the first load_html; do not call again after a load.
+_CANVAS = "#1a1b26"
+
+
+def _apply_canvas_color(webview) -> None:
+    """Draw #1a1b26 before the page paints.
+
+    WebKit's default is opaque white. The call has to happen before the
+    first load_html. set_background_color returns None. A later call does
+    not refresh the accelerated-compositing clear color, so do not call
+    this again after a load.
+    """
+    rgba = Gdk.RGBA()
+    if not rgba.parse(_CANVAS):
+        logger.error("canvas color %s did not parse", _CANVAS)
+        return
+    try:
+        webview.set_background_color(rgba)
+    except Exception:
+        logger.exception("set_background_color failed")
 
 
 def create_feed_surface(on_action, *, is_near_bottom=None, on_load_finished=None):
@@ -92,6 +116,7 @@ class FeedSurface:
         self._doc_y: float | None = None
         self._scroll_after = False
         self._webview = WebKit.WebView()
+        _apply_canvas_color(self._webview)
         # The document scrolls ITSELF: the host ScrolledWindow runs with
         # PolicyType.NEVER vertical (feed_tab.attach_html_surface) and the
         # webview fills the viewport, so its own scrollbars move the page.

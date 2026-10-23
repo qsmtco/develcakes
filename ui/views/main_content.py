@@ -673,6 +673,7 @@ class MainContent(Gtk.Box):
         chat_scroll.set_vexpand(True)
         chat_scroll.set_hexpand(True)
         chat_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        chat_scroll.add_css_class("web-surface-host")
 
         chat_overlay = Gtk.Overlay()
         chat_overlay.set_vexpand(True)

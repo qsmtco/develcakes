@@ -1307,7 +1307,8 @@ notebook > header > tabs > tab {
 .feed-tab-bar { background: rgba(30, 30, 40, 0.5); border-radius: 6px; margin: 4px 8px; }
 .feed-tab-bar button { padding: 6px 16px; }
 .feed-tab-bar button:checked { background: rgba(99, 102, 241, 0.3); color: #c7d2fe; border-radius: 4px; }
-.feed-scroll { background: transparent; }
+.feed-scroll { background: #1a1b26; }
+.web-surface-host { background: #1a1b26; }
 .feed-card-list { padding: 8px; }
 .feed-empty { padding: 48px; color: alpha(@theme_fg_color, 0.4); }
 

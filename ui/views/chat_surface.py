@@ -47,7 +47,8 @@ from html.parser import HTMLParser
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib, Gtk
 
 # SPEC-19 SP2 §2.1: the whole-message ```live fence detector (pure — no
 # rendering, no sanitizer changes). Imported here because the SURFACE owns the
@@ -85,6 +86,28 @@ else:
         # "4.1") import here; unsupported until one matters.
         WebKit = None
         _WEBKIT_VERSION = None
+
+# SPEC-57 §2a: WebKit's default clear color is opaque white. Paint the
+# canvas #1a1b26 before the first load_html; do not call again after a load.
+_CANVAS = "#1a1b26"
+
+
+def _apply_canvas_color(webview) -> None:
+    """Draw #1a1b26 before the page paints.
+
+    WebKit's default is opaque white. The call has to happen before the
+    first load_html. set_background_color returns None. A later call does
+    not refresh the accelerated-compositing clear color, so do not call
+    this again after a load.
+    """
+    rgba = Gdk.RGBA()
+    if not rgba.parse(_CANVAS):
+        logger.error("canvas color %s did not parse", _CANVAS)
+        return
+    try:
+        webview.set_background_color(rgba)
+    except Exception:
+        logger.exception("set_background_color failed")
 
 # DEVELCAKES_LIVE_JS kill-switch (SPEC-19 SP2 — DEFAULT ON; =0 disables).
 # When ON: the transcript view runs with JS enabled + the LiveGuard enforcement
@@ -596,8 +619,10 @@ _MAX_ROW_BYTES = 512 * 1024
 _TRUNCATION_MARKER = " [truncated]"
 
 _BASE_CSS = """
+html { background: #1a1b26; height: 100%; }
 body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
-       font-size: 14px; margin: 8px; }
+       font-size: 14px; margin: 0; min-height: 100%; }
+#transcript { padding: 8px; }
 .message-row { margin-bottom: 10px; }
 .agent-name { color: #7aa2f7; font-weight: bold; font-size: 12px; }
 .role-user .agent-name { color: #9ece6a; }
@@ -768,8 +793,6 @@ def _fmt_stamp(ts_value) -> str:
 
 def _copy_text_to_clipboard(text: str) -> None:
     """Copy ``text`` to the system clipboard (GTK4 API). Main-thread only."""
-    from gi.repository import Gdk
-
     display = Gdk.Display.get_default()
     if display is None:
         return
@@ -904,6 +927,7 @@ def _make_owned_scroll() -> Gtk.ScrolledWindow:
     scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_vexpand(True)
     scroll.set_hexpand(True)
+    scroll.add_css_class("web-surface-host")
     return scroll
 
 
@@ -1039,6 +1063,7 @@ class ChatSurface(Gtk.Box):
         """Lazy: the webview is created on the first append."""
         if self._webview is None:
             self._webview = WebKit.WebView()
+            _apply_canvas_color(self._webview)
             settings = self._webview.get_settings()
             # SPEC-19 SP1 (F1): with the live-JS flag ON the transcript runs
             # with JS enabled + the enforcement boundary attached; OFF keeps

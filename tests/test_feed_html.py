@@ -228,6 +228,17 @@ class TestPizzazzPins:
         assert "opacity: 1" in keyframes
         assert "transform" not in keyframes  # never fights :hover
 
+    def test_canvas_and_entrance_animation_css_pins(self):
+        # SPEC-57 §2b: html canvas rule; the entrance animation moved off
+        # .feed-card onto .feed-card-enter (name unchanged).
+        assert "html { background: #1a1b26; height: 100%; }" in FEED_CSS
+        card_start = FEED_CSS.index(".feed-card {")
+        card_block = FEED_CSS[card_start:FEED_CSS.index("}", card_start)]
+        assert "animation: feed-card-in" not in card_block
+        enter_start = FEED_CSS.index(".feed-card-enter {")
+        enter_block = FEED_CSS[enter_start:FEED_CSS.index("}", enter_start)]
+        assert "animation: feed-card-in" in enter_block
+
     def test_script_gates_copied_state_on_bridge_after_post(self):
         script = FEED_SCRIPT
         # Copy feedback must only run when a live bridge received the message.

@@ -521,6 +521,8 @@ class FeedTab(Gtk.Box):
         was caught up, settle on the newest card. If they were reading
         higher up, put the viewport back at the saved offset.
         """
+        if self._html_surface is not None:
+            return False
         if self._was_near_bottom:
             self.schedule_scroll_to_bottom()
             return False

@@ -166,6 +166,30 @@ class TestDocumentAssembly:
         assert "&lt;b&gt;evil&lt;/b&gt;" in doc
 
 
+class TestCanvasColorAndBaseCss:
+    """SPEC-57 §2a/§2c: paint pins — fake webview, no real WebKit widget."""
+
+    def test_apply_canvas_color_sets_opaque_background(self):
+        from ui.views.chat_surface import _apply_canvas_color
+
+        received = {}
+
+        class _FakeView:
+            def set_background_color(self, rgba):
+                received["rgba"] = rgba
+
+        _apply_canvas_color(_FakeView())
+        assert received["rgba"].alpha == 1.0
+        assert received["rgba"].red > 0  # parse was not skipped
+
+    def test_base_css_canvas_pins(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert "margin: 0" in _BASE_CSS
+        assert "#transcript { padding: 8px; }" in _BASE_CSS
+        assert "html { background: #1a1b26; height: 100%; }" in _BASE_CSS
+
+
 # ── SP2-discovery pin: classes survive the composed render ───────────────
 
 class TestClassSurvival:

@@ -39,8 +39,10 @@ _CHECK_SVG = (
 )
 
 FEED_CSS = """
+html { background: #1a1b26; height: 100%; }
 body { margin: 0; background: #1a1b26; color: #c0caf5;
-       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+       min-height: 100%; }
 #feed { display: flex; flex-direction: column; gap: 8px; padding: 12px;
         max-width: 760px; margin: 0 auto; }
 
@@ -49,8 +51,8 @@ body { margin: 0; background: #1a1b26; color: #c0caf5;
              border-left: 3px solid #3b4261; border-radius: 8px;
              padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.35);
              overflow-wrap: anywhere; position: relative;
-             transition: transform .15s ease, box-shadow .15s ease;
-             animation: feed-card-in .25s ease-out; }
+             transition: transform .15s ease, box-shadow .15s ease; }
+.feed-card-enter { animation: feed-card-in .25s ease-out; }
 .feed-card:hover { transform: translateY(-1px);
                    box-shadow: 0 4px 14px rgba(0,0,0,.42); }
 @keyframes feed-card-in {

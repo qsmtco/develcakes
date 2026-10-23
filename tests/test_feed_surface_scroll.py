@@ -260,6 +260,15 @@ class TestAttachHtmlSurfaceIntegration:
         assert tab._scroll_timeout_id is None
         assert tab._settle_source is None
 
+    def test_map_handler_does_not_arm_settle_with_a_surface(self, monkeypatch):
+        """SPEC-57 §2g: with an HTML surface attached the map handler no-ops
+        instead of arming the GTK scroll settle."""
+        stub = _StubSurface()
+        tab = _attached_tab(monkeypatch, stub)
+        tab._was_near_bottom = True
+        tab._on_scroll_mapped(tab._feed_scroll)
+        assert tab._scroll_handler_id is None
+
 
 class TestSetCardsResetsScrollState:
     """SPEC-41 P3 (a): a new document is a new reading context.
