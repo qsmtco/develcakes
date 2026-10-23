@@ -175,3 +175,45 @@ class TestUserIdWireUp:
         os.chmod(agent_json, 0o600)
         config = load_agent_config(str(agent_json))
         assert config.user_id == ""
+
+
+class TestLoadProvidersFromYamlPrefixKeys:
+    """Provider-card fix: _load_providers_from_yaml must not let a bare prefix
+    key override all same-prefix cards (last-writer-wins was the bug)."""
+
+    @staticmethod
+    def _load(monkeypatch, cards):
+        from agent.config import _load_providers_from_yaml
+        monkeypatch.setattr("utils.providers_store.load_providers", lambda: cards)
+        return _load_providers_from_yaml("ignored-path", {})
+
+    def test_two_shared_prefix_cards_register_by_display_and_full_model(self, monkeypatch):
+        cards = [
+            ProviderConfig(name="GLM 5.3", base_url="x", api_key="k",
+                           default_model="zai/glm-5.3", caller="zai",
+                           context_window=262_144),
+            ProviderConfig(name="GLM 5.3 Flash", base_url="x", api_key="k",
+                           default_model="zai/glm-5.3-flash", caller="zai",
+                           context_window=32_768),
+        ]
+        result = self._load(monkeypatch, cards)
+        assert "GLM 5.3" in result
+        assert "GLM 5.3 Flash" in result
+        assert "zai/glm-5.3" in result
+        assert "zai/glm-5.3-flash" in result
+        # Ambiguous bare prefix is NOT written — no last-writer-wins key.
+        assert "zai" not in result
+        assert result["GLM 5.3"].context_window == 262_144
+        assert result["GLM 5.3 Flash"].context_window == 32_768
+        assert result["zai/glm-5.3"].context_window == 262_144
+        assert result["zai/glm-5.3-flash"].context_window == 32_768
+
+    def test_single_owner_prefix_key_kept_for_backward_compat(self, monkeypatch):
+        cards = [
+            ProviderConfig(name="GLM 5.3", base_url="x", api_key="k",
+                           default_model="zai/glm-5.3", caller="zai"),
+        ]
+        result = self._load(monkeypatch, cards)
+        assert "zai" in result
+        assert result["zai"] is result["GLM 5.3"]
+        assert "zai/glm-5.3" in result

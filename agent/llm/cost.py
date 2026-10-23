@@ -35,6 +35,13 @@ def model_id(model: str) -> str:
 def cost_for_model(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Compute cost in USD for a model call."""
     provider = model.split("/")[0] if "/" in model else model
-    costs = PROVIDER_COSTS.get(provider, OPENAI_COST)
+    # Prefer a per-card (full model string) cost entry — two cards sharing a
+    # provider prefix may have different pricing. Falls back to the prefix
+    # table, then the openai default.
+    costs = (
+        PROVIDER_COSTS.get(model)
+        or PROVIDER_COSTS.get(provider)
+        or OPENAI_COST
+    )
     return (prompt_tokens / 1_000_000 * costs["prompt"] +
             completion_tokens / 1_000_000 * costs["completion"])
