@@ -267,7 +267,10 @@ def test_agent_prompts_document_the_live_protocol():
     import pathlib
     src = pathlib.Path("prompts/system", "crabcakes-context.md").read_text()
     assert "SPEC-19" in src, "no SPEC-19 section"
-    assert "```live" in src, "live fence not documented"
+    # 898aaa54 dropped the literal ```live token from the prompt (printing a
+    # triple-backtick run inside prompt text is itself a fence-discipline
+    # hazard). The protocol is documented in prose now: assert that.
+    assert "live-tagged fenced block" in src, "live fence not documented"
     assert "develcakes.call" in src, "bridge not documented"
     assert "<script src>" in src, "no-src rule not documented"
     # Role files must NOT duplicate it (single-copy rule).
@@ -299,6 +302,8 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
         total_cost=1.0,
         _token_estimate_cache=None,
         task_card="notes",
+        # SPEC-48 Phase 3 API: session reset invalidates the estimate cache.
+        invalidate_token_estimate=lambda: None,
     )
     dropped: list[str] = []
     rt = types.SimpleNamespace(
