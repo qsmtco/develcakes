@@ -713,7 +713,10 @@ class TestChromeDom:
         doc = _document(rows)
         assert 'style="background-color:#16a34a"' in doc  # avatar
         assert 'style="color:#16a34a"' in doc             # name
-        assert 'style="border-bottom-color:#16a34a"' in doc  # card frame
+        # SPEC-56 §3b: the inline color paints the FULL frame (border-color),
+        # not just the old bottom edge; the 4px left rail is CSS-only.
+        assert 'style="border-color:#16a34a"' in doc  # card frame
+        assert "border-bottom-color" not in doc
 
     def test_no_color_no_inline_style(self):
         doc = _document([{"role": "agent", "html": "<p>x</p>", "agent": "Coder", "color": ""}])
@@ -792,9 +795,26 @@ class TestChromeGroupingAndRoles:
         # clip at the card's rounded corners (cosmetic leak, auditor-fixed).
         assert "overflow: hidden" in _BASE_CSS
         assert ".agent-box.role-user .agent-avatar { background: #9ece6a; }" in _BASE_CSS
-        assert ".agent-box { border-left: none; margin-bottom: 14px; }" in _BASE_CSS
+        assert ".agent-box { border-left: none; margin-bottom: 14px;" in _BASE_CSS
         # The SPEC-12 border-left rule is gone (replaced by the card frame).
         assert "border-left: 2px solid #3b4261" not in _BASE_CSS
+        # SPEC-56 §3b: frame + lift + shy copy CSS all live in _BASE_CSS.
+        assert ".agent-card { border: 1px solid #3b4261; border-left-width: 4px;" in _BASE_CSS
+        assert "border-radius: 8px" in _BASE_CSS
+        assert "transition: transform .15s ease, box-shadow .15s ease" in _BASE_CSS
+        assert ".agent-box:hover { transform: translateY(-1px);" in _BASE_CSS
+        assert "box-shadow: 0 3px 10px rgba(0,0,0,.35)" in _BASE_CSS
+        # No keyframes: transform appears only on :hover / transition, never
+        # inside an @keyframes block (nothing can outrank the hover rule).
+        assert "@keyframes" not in _BASE_CSS
+        assert ".chat-copy-btn" in _BASE_CSS
+        assert ".agent-box:hover .chat-copy-btn { opacity: .45; }" in _BASE_CSS
+        assert ".agent-box:hover .chat-copy-btn:hover { opacity: 1;" in _BASE_CSS
+        assert ".chat-copy-btn.copied" in _BASE_CSS
+        assert ".agent-stamp { color: #9b9bab; font-size: 10.5px; margin-left: auto;" in _BASE_CSS
+        assert ".agent-box.role-user { max-width: 78%; margin-left: auto; }" in _BASE_CSS
+        assert ".agent-box.role-user .agent-card { border-color: #9ece6a;" in _BASE_CSS
+        assert "background: rgba(158,206,106,.08)" in _BASE_CSS
 
 
 class TestColorFrozenAtAppend:
@@ -2687,3 +2707,212 @@ class TestSurfaceClear:
         surface.clear()
         assert len(loads) == 1
         assert "old" not in loads[0]
+
+
+# ── SPEC-56: chat bubble polish ─────────────────────────────────────────
+#
+# §4 test surface: _blocks_html markup pins (frame inline style, stamp
+# present/omitted, copy button present when live-flag on / absent when off,
+# user classes, CSS rule pins), bridge gate token order, clipboard handler
+# with fake, append/end_stream stamping.
+
+class TestBubblePolishMarkup:
+    def test_card_inline_style_is_full_frame(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder",
+                 "color": "#16a34a"}]
+        doc = _document(rows)
+        assert '<div class="agent-card" style="border-color:#16a34a">' in doc
+        # The 4px left rail is a CSS rule — never an inline style.
+        from ui.views.chat_surface import _BASE_CSS
+        assert "border-left-width: 4px" in _BASE_CSS
+
+    def test_stamp_present_when_ts(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder",
+                 "ts": "2026-10-23T14:02:00"}]
+        doc = _document(rows)
+        assert '<span class="agent-stamp">Oct 23 · 14:02</span>' in doc
+
+    def test_stamp_omitted_without_ts(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder"}]
+        doc = _document(rows)
+        assert '<span class="agent-stamp">' not in doc
+
+    def test_stamp_omitted_on_malformed_ts(self):
+        # Old persisted / pending rows must never crash rendering.
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder",
+                 "ts": "not-a-date"}]
+        doc = _document(rows)
+        assert '<span class="agent-stamp">' not in doc
+
+    def test_copy_button_emitted_when_live_flag_on(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder"}]
+        doc = _document(rows, live=True)
+        assert 'class="chat-copy-btn"' in doc
+
+    def test_copy_button_omitted_when_live_flag_off(self):
+        rows = [{"role": "agent", "html": "<p>x</p>", "agent": "Coder"}]
+        doc = _document(rows, live=False)
+        assert 'class="chat-copy-btn"' not in doc
+
+    def test_no_copy_button_on_user_bubbles(self):
+        rows = [{"role": "user", "html": "<p>u</p>", "agent": "You"}]
+        doc = _document(rows, live=True)
+        assert 'class="agent-box role-user"' in doc
+        assert 'class="chat-copy-btn"' not in doc
+
+    def test_user_bubble_stamp_renders(self):
+        rows = [{"role": "user", "html": "<p>u</p>", "agent": "You",
+                 "ts": "2026-10-23T14:02:00"}]
+        doc = _document(rows, live=True)
+        assert '<span class="agent-stamp">Oct 23 · 14:02</span>' in doc
+        assert 'class="chat-copy-btn"' not in doc
+
+    def test_frame_hover_and_shy_css_pins(self):
+        from ui.views.chat_surface import _BASE_CSS
+
+        assert ".agent-card { border: 1px solid #3b4261; border-left-width: 4px;" in _BASE_CSS
+        assert "border-radius: 8px" in _BASE_CSS
+        assert "transition: transform .15s ease, box-shadow .15s ease" in _BASE_CSS
+        assert ".agent-box:hover { transform: translateY(-1px);" in _BASE_CSS
+        assert "box-shadow: 0 3px 10px rgba(0,0,0,.35)" in _BASE_CSS
+        assert "@keyframes" not in _BASE_CSS  # transform only on :hover
+        assert ".chat-copy-btn" in _BASE_CSS
+        assert ".agent-box:hover .chat-copy-btn { opacity: .45; }" in _BASE_CSS
+        assert ".agent-box:hover .chat-copy-btn:hover { opacity: 1;" in _BASE_CSS
+        assert ".chat-copy-btn.copied" in _BASE_CSS
+        assert ".agent-stamp { color: #9b9bab; font-size: 10.5px; margin-left: auto;" in _BASE_CSS
+        assert ".agent-box.role-user { max-width: 78%; margin-left: auto; }" in _BASE_CSS
+        assert ".agent-box.role-user .agent-card { border-color: #9ece6a;" in _BASE_CSS
+        assert "background: rgba(158,206,106,.08)" in _BASE_CSS
+
+
+class TestChatCopyBridge:
+    def test_script_is_iife_install_once_delegated(self):
+        from ui.views.chat_surface import _CHAT_COPY_JS as js
+
+        assert js.startswith("(function () {")
+        assert "window.__dcChatCopyInstalled" in js  # install-once latch
+        assert "document.addEventListener('click'" in js  # ONE delegated listener
+        assert "closest('.agent-box')" in js
+        assert "querySelector('.msg-body')" in js
+
+    def test_bridge_gate_precedes_copied_class_swap(self):
+        from ui.views.chat_surface import _CHAT_COPY_JS as js
+
+        # Gate token order: the messageHandler existence check must come
+        # BEFORE the `.copied` class swap (the feed-audit lesson).
+        gate = js.index("window.webkit.messageHandlers.chat")
+        post = js.index("bridge.postMessage({action: 'copy', text: text})")
+        swap = js.index("btn.classList.add('copied')")
+        timer = js.index("1200")
+        assert gate < post < swap < timer
+        assert "btn.classList.remove('copied')" in js
+
+    def test_python_handler_copies_with_fake_clipboard(self, monkeypatch):
+        import ui.views.chat_surface as chat_mod
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        copied = []
+
+        def _fake_copy(text):
+            copied.append(text)
+
+        monkeypatch.setattr(chat_mod, "_copy_text_to_clipboard", _fake_copy)
+        s = chat_mod.ChatSurface()
+
+        class _FakeValue:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def to_json(self, flags):
+                return json.dumps(self._payload)
+
+        try:
+            s._on_chat_script_message(None, _FakeValue(
+                {"action": "copy", "text": "select me"}))
+            assert copied == ["select me"]
+        finally:
+            s.destroy()
+
+    def test_python_handler_ignores_unknown_and_bad_actions(self, monkeypatch):
+        import ui.views.chat_surface as chat_mod
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        copied = []
+
+        def _fake_copy(text):
+            copied.append(text)
+
+        monkeypatch.setattr(chat_mod, "_copy_text_to_clipboard", _fake_copy)
+        s = chat_mod.ChatSurface()
+
+        class _FakeValue:
+            def __init__(self, payload, raises=False):
+                self._payload = payload
+                self._raises = raises
+
+            def to_json(self, flags):
+                if self._raises:
+                    raise RuntimeError("bad json")
+                return json.dumps(self._payload)
+
+        try:
+            s._on_chat_script_message(None, _FakeValue({"action": "scroll"}))
+            s._on_chat_script_message(None, _FakeValue({"action": "copy"}))
+            s._on_chat_script_message(None, _FakeValue(
+                {"action": "copy", "text": 42}))
+            s._on_chat_script_message(None, _FakeValue("just a string"))
+            s._on_chat_script_message(None, _FakeValue(None, raises=True))
+            assert copied == []  # nothing copied
+        finally:
+            s.destroy()
+
+
+class TestTimestampStamping:
+    def test_append_message_default_stamps(self):
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        try:
+            s.append_message("agent", "<p>x</p>", "Coder")
+            ts = s._rows[-1]["ts"]
+            assert isinstance(ts, str) and ts
+            from datetime import datetime
+            datetime.fromisoformat(ts)  # parseable isoformat
+        finally:
+            s.destroy()
+
+    def test_append_message_accepts_explicit_ts(self):
+        from datetime import UTC, datetime
+
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        try:
+            s.append_message("agent", "<p>x</p>", "Coder",
+                             ts=datetime(2026, 10, 23, 14, 2, tzinfo=UTC))
+            assert s._rows[-1]["ts"] == "2026-10-23T14:02:00+00:00"
+        finally:
+            s.destroy()
+
+    def test_end_stream_stamps_flush_time(self):
+        from ui.views.chat_surface import ChatSurface
+
+        if WebKit is None:
+            pytest.skip("WebKit unavailable")
+        s = ChatSurface()
+        try:
+            s.stream_delta("sk", "hel")
+            s.stream_delta("sk", "lo")
+            s.end_stream("sk", "Coder")
+            assert s._rows[-1]["role"] == "agent"
+            ts = s._rows[-1]["ts"]
+            assert isinstance(ts, str) and ts
+        finally:
+            s.destroy()

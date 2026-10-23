@@ -41,6 +41,7 @@ import json
 import logging
 import re
 from collections import deque
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 
 import gi
@@ -463,6 +464,43 @@ def _live_flatten_js(ids) -> str:
     return _LIVE_FLATTEN_JS.replace("__IDS__", _live_ids_js(ids))
 
 
+# SPEC-56 §3c: the chat copy bridge's document script. Installed ONCE per
+# document (window-guarded) from the live init slot at load-FINISHED — an
+# IIFE, no globals, one delegated click listener for `.chat-copy-btn`.
+#
+# BRIDGE-GATED (the feed-audit lesson): the `.copied` class swap happens ONLY
+# when `window.webkit.messageHandlers.chat` exists — a copy that didn't ship
+# never asserts success. The text posted is the owning group's own body text
+# (user-visible content). The only timer is the 1.2s ✓ (cleared on re-click).
+_CHAT_COPY_JS = (
+    "(function () {"
+    "  if (window.__dcChatCopyInstalled) { return; }"
+    "  window.__dcChatCopyInstalled = true;"
+    "  function copyToChatBridge(btn) {"
+    "    var bridge = window.webkit && window.webkit.messageHandlers"
+    "      && window.webkit.messageHandlers.chat;"
+    "    if (!bridge || !btn) { return; }"
+    "    var box = btn.closest('.agent-box');"
+    "    if (!box) { return; }"
+    "    var body = box.querySelector('.msg-body');"
+    "    var text = body ? (body.textContent || '') : '';"
+    "    bridge.postMessage({action: 'copy', text: text});"
+    "    btn.classList.add('copied');"
+    "    clearTimeout(btn._chatCopyTimer);"
+    "    btn._chatCopyTimer = setTimeout(function () {"
+    "      btn.classList.remove('copied');"
+    "    }, 1200);"
+    "  }"
+    "  document.addEventListener('click', function (ev) {"
+    "    var node = ev.target;"
+    "    if (!node || !node.closest) { return; }"
+    "    var btn = node.closest('button.chat-copy-btn');"
+    "    if (btn) { copyToChatBridge(btn); }"
+    "  });"
+    "})();"
+)
+
+
 def _live_section_island_html(live_id: int, payload_html: str) -> str:
     """The section markup used by the rebuild/inject path: the payload in an
     inert JSON data island (never executes; resurrected explicitly).
@@ -566,24 +604,48 @@ body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
 /* SPEC-14 §2a.4: the card frame replaces SPEC-12 SP1's border-left (now the
    chrome + card border carry the visual identity). The old SPEC-12 comment
    ("border-left becomes the card frame") is superseded here. */
-.agent-box { border-left: none; margin-bottom: 14px; }
+.agent-box { border-left: none; margin-bottom: 14px;
+             transition: transform .15s ease, box-shadow .15s ease; }
+.agent-box:hover { transform: translateY(-1px);
+                   box-shadow: 0 3px 10px rgba(0,0,0,.35); }
 /* SP1-audit BUG#3 correction (SPEC-12): the box element ITSELF carries
    role-user, so the header span.agent-name is still a DESCENDANT of a
    .role-user element and the OLD `.role-user .agent-name` rule STILL matches.
    This box-level rule is therefore REDUNDANT (kept for explicitness/intent;
    either rule styles the user header green). */
 .agent-box.role-user .agent-name { color: #9ece6a; }
-/* SPEC-14 §2a.4 chrome defaults; an agent color overrides via inline style. */
-.agent-chrome { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-                background: #16161e; border-radius: 8px 8px 0 0; }
+/* SPEC-14 §2a.4 chrome defaults; an agent color overrides via inline style.
+   SPEC-56 §1: the chrome/card seam is FLATTENED to one visual card — chrome
+   bg is transparent, the card carries the full border + radius (mock-up A). */
+.agent-chrome { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .agent-avatar { width: 24px; height: 24px; border-radius: 50%;
                 background: #3b4261; color: #1a1b26; font-weight: bold;
                 font-size: 12px; text-align: center; line-height: 24px;
                 flex: none; }
-.agent-card { border: 1px solid #3b4261; border-top: none;
-              border-radius: 0 0 8px 8px; padding: 4px 10px 8px;
+.agent-card { border: 1px solid #3b4261; border-left-width: 4px;
+              border-radius: 8px; padding: 4px 10px 8px;
               overflow: hidden; } /* SP1 audit: full-bleed payload bgs clip at the corners */
 .agent-box.role-user .agent-avatar { background: #9ece6a; }
+/* SPEC-56 §1: timestamps (header right) + shy copy button + user bubbles. */
+.agent-stamp { color: #9b9bab; font-size: 10.5px; margin-left: auto;
+               white-space: nowrap; }
+.chat-copy-btn {
+  background: transparent; border: 1px solid transparent; padding: 2px;
+  border-radius: 6px; opacity: 0; display: inline-flex;
+  align-items: center; justify-content: center; cursor: pointer;
+  color: #c0caf5;
+  transition: opacity .12s ease, background .12s ease, border-color .12s ease; }
+.agent-box:hover .chat-copy-btn { opacity: .45; }
+.agent-box:hover .chat-copy-btn:hover { opacity: 1; background: #2f334d;
+                                         border-color: #3b4261; }
+.chat-copy-btn svg { display: block; }
+.chat-copy-check { display: none; }
+.chat-copy-btn.copied { opacity: 1; color: #9ece6a; }
+.chat-copy-btn.copied .chat-copy-icon { display: none; }
+.chat-copy-btn.copied .chat-copy-check { display: block; }
+.agent-box.role-user { max-width: 78%; margin-left: auto; }
+.agent-box.role-user .agent-card { border-color: #9ece6a;
+                                    background: rgba(158,206,106,.08); }
 pre { background: #16161e; padding: 6px; border-radius: 4px; }
 code { font-family: monospace; }
 pre.terminal { color: #c0caf5; }
@@ -656,10 +718,75 @@ def _sanitize_color(value) -> str:
     return ""
 
 
-def _blocks_html(rows: list[dict]) -> str:
+# SPEC-56 §3b: the shy copy button's inline SVGs — same visual language as
+# the feed's copy icon (13px, stroke="currentColor").
+_CHAT_COPY_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" '
+    'viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<rect x="4.5" y="3" width="7.5" height="10" rx="1"/>'
+    '<rect x="2" y="1" width="7.5" height="10" rx="1"/></svg>'
+)
+_CHAT_CHECK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" '
+    'viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<polyline points="3 8.5 6.5 12 13 4.5"/></svg>'
+)
+
+
+def _chat_copy_button_html() -> str:
+    """The header copy button markup (agent bubbles only — see `_blocks_html`)."""
+    return (
+        '<button type="button" class="chat-copy-btn" title="Copy" aria-label="Copy">'
+        f'<span class="chat-copy-icon">{_CHAT_COPY_SVG}</span>'
+        f'<span class="chat-copy-check">{_CHAT_CHECK_SVG}</span>'
+        "</button>"
+    )
+
+
+def _fmt_stamp(ts_value) -> str:
+    """Format a row timestamp as ``Oct 23 · 14:02`` (local time).
+
+    Rows are append-stamped with an ``isoformat()`` string; old persisted /
+    pending rows may lack one, and a malformed value must never crash a
+    render — any unparseable/missing input returns ``""`` (stamp omitted).
+    """
+    if not ts_value:
+        return ""
+    if isinstance(ts_value, str):
+        try:
+            parsed = datetime.fromisoformat(ts_value)
+        except ValueError:
+            return ""
+    elif isinstance(ts_value, datetime):
+        parsed = ts_value
+    else:
+        return ""
+    return parsed.strftime("%b %d · %H:%M")
+
+
+def _copy_text_to_clipboard(text: str) -> None:
+    """Copy ``text`` to the system clipboard (GTK4 API). Main-thread only."""
+    from gi.repository import Gdk
+
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    display.get_clipboard().set(text)
+
+
+def _blocks_html(rows: list[dict], live: bool = False) -> str:
     """Render a row list to grouped agent-box HTML (the inner DOM of
     #transcript). Shared by the full document build (`_document`) and the
-    SPEC-19 incremental injection path — one markup source, no fork."""
+    SPEC-19 incremental injection path — one markup source, no fork.
+
+    ``live`` is the surface's live-tier flag: when on, an agent bubble's
+    header gains the copy button. When off the button is OMITTED entirely
+    (a dead button on a non-scriptable document would be a false affordance).
+    Stamps render whenever a row carries a ts; rows without one (old
+    persisted/pending rows) simply omit the span — never a crash.
+    """
     blocks = []
     i = 0
     n = len(rows)
@@ -710,14 +837,26 @@ def _blocks_html(rows: list[dict]) -> str:
                     color = rows[k]["color"]
                     break
         initial = html.escape((agent[:1] or "?").upper())
-        card_style = f' style="border-bottom-color:{color}"' if color else ""
+        # SPEC-56 §3b: the inline color now paints the FULL card frame
+        # (border-color), with the 4px left rail coming from CSS — never
+        # inline. `_sanitize_color` gate untouched.
+        card_style = f' style="border-color:{color}"' if color else ""
         avatar_style = f' style="background-color:{color}"' if color else ""
         name_style = f' style="color:{color}"' if color else ""
+        # SPEC-56 §3a: stamp (right side of header) from the group's first
+        # row ts; omitted gracefully when absent. Copy button only on agent
+        # bubbles and only when the live tier is on.
+        stamp_html = ""
+        stamp = _fmt_stamp(rows[i].get("ts"))
+        if stamp:
+            stamp_html = f'<span class="agent-stamp">{stamp}</span>'
+        copy_html = _chat_copy_button_html() if (live and role != "user") else ""
         blocks.append(
             f'<div class="agent-box {box_class}">'
             f'<div class="agent-chrome">'
             f'<span class="agent-avatar"{avatar_style}>{initial}</span>'
             f'<span class="agent-name"{name_style}>{name}</span>'
+            f"{stamp_html}{copy_html}"
             f'</div>'
             f'<div class="agent-card"{card_style}>{body}</div></div>'
         )
@@ -725,13 +864,15 @@ def _blocks_html(rows: list[dict]) -> str:
     return "".join(blocks)
 
 
-def _document(rows: list[dict]) -> str:
+def _document(rows: list[dict], live: bool = False) -> str:
     """Render rows as one full HTML document (the full-load path). The inner
-    DOM is shared with the SPEC-19 injection path via `_blocks_html`."""
+    DOM is shared with the SPEC-19 injection path via `_blocks_html`.
+    ``live`` is the surface's live-tier flag (passes through to the copy
+    button emission)."""
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<style>{_BASE_CSS}</style></head><body>"
-        "<div id=\"transcript\">" + _blocks_html(rows) + "</div></body></html>"
+        "<div id=\"transcript\">" + _blocks_html(rows, live=live) + "</div></body></html>"
     )
 
 
@@ -907,6 +1048,24 @@ class ChatSurface(Gtk.Box):
             if live:
                 self._live_guard = LiveGuard()
                 self._live_guard.compile(self._on_live_guard_compiled)
+                # SPEC-56 §3c: mirror the feed surface's script-message bridge —
+                # register the 'chat' handler on THIS webview's
+                # UserContentManager. The bridge is what the page's copy button
+                # talks to (window.webkit.messageHandlers.chat).
+                try:
+                    manager = self._webview.get_user_content_manager()
+                    if manager.register_script_message_handler("chat"):
+                        manager.connect(
+                            "script-message-received::chat",
+                            self._on_chat_script_message,
+                        )
+                    else:
+                        logger.warning(
+                            "chat surface: register_script_message_handler('chat') "
+                            "returned False — copy button will not ship"
+                        )
+                except Exception:  # copy is optional; never wedge the surface
+                    logger.exception("chat surface: could not register 'chat' message handler")
             # SPEC-17 SP1.2: connect `load-changed` ONCE, on this web view.
             # FINISHED is when the document is laid out and the post-load
             # scroll can be issued (SP1.2).
@@ -950,6 +1109,31 @@ class ChatSurface(Gtk.Box):
             return
         if self._live_guard is not None and self._webview is not None:
             self._live_guard.attach(self._webview)
+
+    def _on_chat_script_message(self, manager, value) -> None:
+        """SPEC-56 §3c: page-initiated copy bridge. Runs on the GTK main
+        thread (the WebKit script-message signal). Unknown actions are
+        ignored; copy/parse failures are logged, never raised (the bridge is
+        a convenience, not a critical path)."""
+        try:
+            raw = value.to_json(0)
+            data = json.loads(raw) if isinstance(raw, str) else None
+        except Exception:  # bad payload must never wedge the surface
+            logger.exception("chat copy payload was not JSON")
+            return
+        if not isinstance(data, dict):
+            return
+        action = data.get("action")
+        if action != "copy":
+            logger.debug("chat surface: ignoring unknown message action %r", action)
+            return
+        text = data.get("text")
+        if not isinstance(text, str) or not text:
+            return
+        try:
+            _copy_text_to_clipboard(text)
+        except Exception:  # clipboard is best-effort
+            logger.exception("chat surface: clipboard copy failed")
 
     def _load_html(self, doc: str) -> None:
         """The single load path (monkeypatch target for tests)."""
@@ -1128,7 +1312,7 @@ class ChatSurface(Gtk.Box):
             self._pending_scroll = (True, 0.0)
             self._injected_seq = self._row_seq
             self._dom_row_count = len(self._rows)
-            self._issue_load(_document(list(self._rows)))
+            self._issue_load(_document(list(self._rows), live=self._live_js))
             return GLib.SOURCE_REMOVE
         # A document is already loaded — read its position FIRST; the read
         # callback stores the intent and THEN loads (spec: do not load until
@@ -1164,7 +1348,7 @@ class ChatSurface(Gtk.Box):
         # No document yet (placeholder churn before the first paint) — a
         # fresh first load lands at the bottom by construction.
         self._pending_scroll = (True, 0.0)
-        self._issue_load(_document(list(self._rows)))
+        self._issue_load(_document(list(self._rows), live=self._live_js))
 
     def _issue_load(self, doc: str) -> None:
         """BUG#1 (audit fix): the ONE place that arms `_load_in_flight` before
@@ -1235,7 +1419,9 @@ class ChatSurface(Gtk.Box):
             self._needs_compact = True
             self._schedule_render()
             return
-        html = _blocks_html(new_rows)
+        # SPEC-56 §3d: injection only runs on the live tier — pass the flag
+        # so injected agent bubbles carry the copy button.
+        html = _blocks_html(new_rows, live=True)
         self._injected_seq = new_rows[-1].get("seq", self._row_seq)
         self._dom_row_count += len(new_rows)
         live_ids = [r["live_id"] for r in new_rows if r.get("live_id") is not None]
@@ -1442,7 +1628,7 @@ class ChatSurface(Gtk.Box):
         if self._destroyed:
             return
         self._dirty = False
-        self._issue_load(_document(list(self._rows)))
+        self._issue_load(_document(list(self._rows), live=self._live_js))
 
     def _on_load_changed(self, view, event) -> None:
         """SP1.2: apply the captured intent when the load FINISHES.
@@ -1459,6 +1645,12 @@ class ChatSurface(Gtk.Box):
         # deferred append can re-render. Cleared BEFORE the dirty-kick so the
         # kicked render is not itself gated.
         self._load_in_flight = False
+        # SPEC-56 §3c: install the ONE delegated copy listener (install-once
+        # per document, bridge-gated inside the script) on the live tier —
+        # independent of whether live sections exist (the button ships on any
+        # live document). The document is laid out and scriptable here.
+        if self._live_js:
+            self._document_eval_main(_CHAT_COPY_JS, lambda _t: None)
         # SPEC-19 SP2: a full-document (re)load re-emits live sections as
         # INERT JSON islands — resurrect every STILL-LIVE section now (the
         # load wiped the previous document's scripts + timer registry). Runs
@@ -1583,20 +1775,28 @@ class ChatSurface(Gtk.Box):
 
     # ── public API ──
     def append_message(self, role: str, html_fragment: str, agent_name: str | None = None,
-                       agent_color: str | None = None) -> None:
+                       agent_color: str | None = None,
+                       ts: datetime | None = None) -> None:
         """Append one rendered (sanitized) HTML row; schedules a re-render.
 
         SPEC-14 §2a.1: `agent_color` is gated + FROZEN into the row at append
         time (deque rows re-render verbatim; `_document` stays pure — no
         color-map lookup at render time).
+
+        SPEC-56 §3a: ``ts`` defaults to local "now" and is frozen into the
+        row as an isoformat string; `_blocks_html` renders it as the header
+        stamp (a caller passing None relies on the default stamp).
         """
         if self._destroyed:
             return
+        if ts is None:
+            ts = datetime.now(UTC).astimezone()
         self._append_row({
             "role": role if role in ("user", "agent", "system") else "system",
             "html": _cap_row_html(html_fragment),
             "agent": agent_name or "",
             "color": _sanitize_color(agent_color),
+            "ts": ts.isoformat(),
         })
 
     def _append_row(self, row: dict) -> None:
@@ -1757,11 +1957,13 @@ class ChatSurface(Gtk.Box):
         if payload is not None:
             self.append_live(payload, agent_name=agent_name)
             return
+        # SPEC-56 §3a: end_stream stamps the flush time on the final row.
         self._append_row({
             "role": "agent",
             "html": _cap_row_html(html.escape(joined).replace("\n", "<br>")),
             "agent": agent_name or "",
             "color": "",
+            "ts": datetime.now(UTC).astimezone().isoformat(),
         })
 
     def clear(self) -> None:
@@ -1799,7 +2001,7 @@ class ChatSurface(Gtk.Box):
         self._dirty = False
         # Fresh empty document (a real load, not an injection — the
         # incremental path can only append; from zero we must rebuild).
-        self._issue_load(_document(list(self._rows)))
+        self._issue_load(_document(list(self._rows), live=self._live_js))
 
     def load_unsanitized_full_document(self, html: str) -> None:
         """Load ``html`` as a full document via the RAW load path.
