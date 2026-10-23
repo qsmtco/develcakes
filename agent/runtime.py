@@ -1208,6 +1208,7 @@ class AgentRuntime:
         session_key: str,
         project_path: str | None = None,
         model: str | None = None,
+        provider: str | None = None,
         allowed_tools: list[str] | None = None,  # NEW
         mcp_servers: list[str] = None,  # NEW: Phase B MCP servers
         agent_role: str = "",
@@ -1259,6 +1260,7 @@ class AgentRuntime:
             allowed_tools=allowed_tools,
             mcp_servers=mcp_servers if mcp_servers else [],
             model=model,
+            provider=provider,
             system_prompt="",
             si_enforcement=si_enforcement,
             api_key=api_key,
@@ -1745,6 +1747,48 @@ class AgentRuntime:
 
     # ── Tool loop ─────────────────────────────────────────────────────────────
 
+    def _resolve_provider_cfg(self, conv: "Conversation") -> "LLMProviderConfig | None":
+        """Resolve the provider card for this conversation, never guessing.
+
+        Resolution order (provider-card bug fix):
+          (a) ``conv.provider`` — the stored card display name (exact hit).
+          (b) ``conv.model`` full-string match against a card's ``default_model``.
+          (c) prefix match ONLY when exactly one card carries that prefix;
+              several → None (no guessing — last-writer-wins was the bug).
+          (d) ``conv.model`` without a '/' → the configured default_provider.
+        """
+        provider_name = getattr(conv, "provider", None)
+        if provider_name:
+            cfg = self._config.providers.get(provider_name)
+            if cfg is not None:
+                return cfg
+        return self._match_provider_cfg_by_model(getattr(conv, "model", "") or "")
+
+    def _match_provider_cfg_by_model(self, model: str) -> "LLMProviderConfig | None":
+        """Resolve a provider card from a model string alone (no stored card
+        identity). Exact ``default_model`` match wins; a prefix match is only
+        trusted when exactly one card carries the prefix (no guessing)."""
+        providers = self._config.providers
+        if "/" in model:
+            for cfg in providers.values():
+                if getattr(cfg, "default_model", "") == model:
+                    return cfg
+            prefix = model.split("/", 1)[0]
+            matches = [
+                cfg for cfg in providers.values()
+                if (
+                    getattr(cfg, "default_model", "").startswith(prefix + "/")
+                    or getattr(cfg, "name", "") == prefix
+                )
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            return None  # ambiguous prefix — no guessing
+        default_provider = self._config.default_provider
+        if default_provider:
+            return providers.get(default_provider)
+        return None
+
     def _budget_window_and_mode(self, conv: "Conversation") -> tuple[int, str]:
         """SPEC-38: one resolution path for the system-prompt budget window.
 
@@ -1755,14 +1799,7 @@ class AgentRuntime:
         _rebuild_conversation_context — must derive its budget here, never
         from a raw max_tokens read off the default provider.
         """
-        provider_name = (
-            conv.model.split("/")[0]
-            if conv.model and "/" in conv.model
-            else self._config.default_provider
-        )
-        provider_cfg = (
-            self._config.providers.get(provider_name) if provider_name else None
-        )
+        provider_cfg = self._resolve_provider_cfg(conv)
         context_mode = getattr(provider_cfg, "context_mode", "auto") or "auto"
         return self._compute_model_max(conv), context_mode
 
@@ -1785,14 +1822,7 @@ class AgentRuntime:
         from models.providers import caller_default_max_tokens
         FALLBACK = 128_000
         try:
-            provider_name = (
-                conv.model.split("/")[0]
-                if conv.model and "/" in conv.model
-                else self._config.default_provider
-            )
-            if not provider_name:
-                return FALLBACK
-            provider_cfg = self._config.providers.get(provider_name)
+            provider_cfg = self._resolve_provider_cfg(conv)
             if provider_cfg is None:
                 return FALLBACK
             window = getattr(provider_cfg, "context_window", 0)
@@ -1828,18 +1858,12 @@ class AgentRuntime:
         """
         DEFAULT_THRESHOLD = 0.80
         try:
-            provider_name = (
-                conv.model.split("/")[0]
-                if conv.model and "/" in conv.model
-                else self._config.default_provider
-            )
             threshold = DEFAULT_THRESHOLD
-            if provider_name:
-                provider_cfg = self._config.providers.get(provider_name)
-                if provider_cfg is not None:
-                    cfg_threshold = getattr(provider_cfg, "compaction_threshold", None)
-                    if cfg_threshold is not None and 0 < cfg_threshold <= 1:
-                        threshold = float(cfg_threshold)
+            provider_cfg = self._resolve_provider_cfg(conv)
+            if provider_cfg is not None:
+                cfg_threshold = getattr(provider_cfg, "compaction_threshold", None)
+                if cfg_threshold is not None and 0 < cfg_threshold <= 1:
+                    threshold = float(cfg_threshold)
         except Exception as e:
             # Defensive coding should not hide programming errors. The default
             # 0.80 is used as fallback. Operators can enable DEBUG logging to
@@ -3210,6 +3234,7 @@ class AgentRuntime:
         self._config.providers[prefix] = card
         self._config.providers[name] = card
         conv.model = model
+        conv.provider = name  # card display name — consumers resolve via it
         return name
 
     def _note_failover(self, session_key: str, failure, fallback_name: str, turn_token) -> None:
@@ -3313,13 +3338,13 @@ class AgentRuntime:
             raise ValueError("No conversation found")
 
         model = conv.model or config.default_model
-        provider_name = model.split("/")[0] if "/" in model else model
+        provider_cfg = self._resolve_provider_cfg(conv)
 
-        provider_cfg = config.providers.get(provider_name)
         if provider_cfg is None:
-            # If the agent specified a provider explicitly (model has a prefix like
-            # "openrouter/"), don't silently fall back to the wrong provider — raise
-            # a clear error so the user knows to configure it.
+            # No card resolved from the conversation identity — derive the
+            # provider name from the model string and require an explicit
+            # configured card (never silently pick a sibling card).
+            provider_name = model.split("/")[0] if "/" in model else model
             if "/" in model and config.providers:
                 raise ValueError(
                     f"Provider '{provider_name}' is not configured. "
@@ -3332,6 +3357,8 @@ class AgentRuntime:
                 provider_cfg = config.providers[provider_name]
             else:
                 raise ValueError(f"No LLM provider configured for {model}")
+        else:
+            provider_name = provider_cfg.name
 
         # Use per-agent API key if set, otherwise fall back to the LIVE
         # providers.yaml store. The frozen self._config snapshot (provider_cfg.api_key)
@@ -4287,19 +4314,13 @@ class AgentRuntime:
         """
         threshold = int(getattr(self._config, "tool_output_offload_chars", 0) or 0)
         try:
-            provider_name = (
-                conv.model.split("/")[0]
-                if conv.model and "/" in conv.model
-                else self._config.default_provider
-            )
-            if provider_name:
-                provider_cfg = self._config.providers.get(provider_name)
-                if provider_cfg is not None:
-                    per_provider = int(
-                        getattr(provider_cfg, "tool_output_offload_chars", 0) or 0
-                    )
-                    if per_provider > 0:
-                        threshold = per_provider
+            provider_cfg = self._resolve_provider_cfg(conv)
+            if provider_cfg is not None:
+                per_provider = int(
+                    getattr(provider_cfg, "tool_output_offload_chars", 0) or 0
+                )
+                if per_provider > 0:
+                    threshold = per_provider
         except Exception:
             logger.debug(
                 "_resolve_offload_threshold: per-provider lookup failed; "
@@ -5014,7 +5035,10 @@ class AgentRuntime:
                 f"got {model_id!r}"
             )
         provider_name, model = model_id.split("/", 1)
-        provider_cfg = self._config.providers.get(provider_name)
+        if conv is not None:
+            provider_cfg = self._resolve_provider_cfg(conv)
+        else:
+            provider_cfg = self._match_provider_cfg_by_model(model_id)
         if provider_cfg is None:
             raise RuntimeError(
                 f"_call_for_summary: provider {provider_name!r} not configured"

@@ -213,6 +213,14 @@ def resolve_api_key_for_conversation(data: dict) -> str | None:
         provider_name = data.get("provider")
         if not provider_name:
             model = data.get("model", "")
+            if model:
+                # Provider card identity is not stored on pre-fix conversations —
+                # prefer an exact default_model match over a prefix split, so
+                # two cards sharing a prefix resolve to the RIGHT card (and its
+                # API key).
+                for p in providers:
+                    if getattr(p, "default_model", "") == model:
+                        return p.api_key
             if "/" in model:
                 provider_name = model.split("/")[0]
         if not provider_name:

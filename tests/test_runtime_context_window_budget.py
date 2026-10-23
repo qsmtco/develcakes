@@ -114,3 +114,68 @@ def test_disk_round_trip_post_save_state(tmp_config_dir):
 def test_unknown_provider_in_model_falls_back_to_128k():
     rt = _make_runtime({"openai": _llm_provider()}, default_provider="openai")
     assert rt._compute_model_max(_conv("ghost/m")) == 128_000
+
+
+# ── Provider-card resolution (provider-card bug fix) ──────────────────────────
+# Cards that share a provider prefix ('zai/…') must resolve to the RIGHT card
+# via conv.provider (display name) or an exact default_model match — never via
+# an ambiguous prefix (last-writer-wins across zai/* cards was the bug).
+
+def _zai_cards() -> dict[str, LLMProviderConfig]:
+    return {
+        "GLM 5.3": LLMProviderConfig(
+            name="GLM 5.3", base_url="x", api_key="k",
+            default_model="zai/glm-5.3", caller="zai",
+            max_tokens=128_000, context_window=262_144,
+        ),
+        "GLM 5.3 Flash": LLMProviderConfig(
+            name="GLM 5.3 Flash", base_url="x", api_key="k",
+            default_model="zai/glm-5.3-flash", caller="zai",
+            max_tokens=128_000, context_window=32_768,
+        ),
+    }
+
+
+class TestProviderCardResolution:
+    def test_stored_card_name_selects_right_card_per_conversation(self):
+        rt = _make_runtime(_zai_cards(), default_provider="zai")
+        conv = _conv("zai/glm-5.3")
+        conv.provider = "GLM 5.3"
+        assert rt._compute_model_max(conv) == 262_144
+        assert rt._budget_window_and_mode(conv)[0] == 262_144
+        flash = _conv("zai/glm-5.3-flash")
+        flash.provider = "GLM 5.3 Flash"
+        assert rt._compute_model_max(flash) == 32_768
+
+    def test_full_string_fallback_finds_card_after_display_name_deleted(self):
+        # The stored card display name no longer resolves (card deleted /
+        # renamed between save and load) — the exact default_model match must
+        # still find the right card.
+        rt = _make_runtime(_zai_cards(), default_provider="zai")
+        conv = _conv("zai/glm-5.3")
+        conv.provider = "GLM 9.9"  # not a configured display name
+        assert rt._compute_model_max(conv) == 262_144
+
+    def test_ambiguous_prefix_never_guesses(self):
+        # Two cards share the 'zai' prefix, neither default_model equals the
+        # conversation's model, and no card name is stored → prefix alone
+        # cannot identify the card → resolver must return None (no guess) and
+        # the meter falls back to 128_000.
+        rt = _make_runtime(_zai_cards(), default_provider="zai")
+        ambiguous = _conv("zai/glm-5.3-lite")  # no exact card, shared prefix
+        assert rt._resolve_provider_cfg(ambiguous) is None
+        assert rt._compute_model_max(ambiguous) == 128_000
+
+    def test_create_conversation_stores_card_name(self):
+        import threading
+        rt = _make_runtime(_zai_cards(), default_provider="zai")
+        rt._lock = threading.Lock()
+        rt._conversations = {}
+        sk = "agent:zai-test"
+        rt.create_conversation(
+            "Coder", sk, model="zai/glm-5.3",
+            provider="GLM 5.3", defer_prompt_build=True,
+        )
+        conv = rt.get_conversation(sk)
+        assert conv.provider == "GLM 5.3"
+        assert conv.model == "zai/glm-5.3"

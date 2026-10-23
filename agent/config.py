@@ -190,15 +190,33 @@ def _load_providers_from_yaml(
         from utils.providers_store import load_providers
         yaml_providers = load_providers()
         if yaml_providers:
-            result = {}
+            # Prefix ownership count: a bare-prefix key ('zai') is written ONLY
+            # when exactly one card carries that prefix. When several cards
+            # share a prefix, the ambiguous prefix key is omitted — last-writer-
+            # wins across zai/* cards was the provider-card bug (all zai-
+            # prefixed agents resolved to one card's context_window).
+            from collections import Counter
+            prefix_counts = Counter()
             for p in yaml_providers:
-                # Key by provider ID (derived from default_model prefix)
-                # e.g. "minimax/MiniMax-M2.7" → "minimax"
-                # Falls back to display name if no slash in default_model.
-                pid = p.default_model.split("/")[0] if p.default_model and "/" in p.default_model else p.name
-                result[pid] = _to_llm_provider(p)
-                # Also register by display name for UI lookups
-                result[p.name] = _to_llm_provider(p)
+                if p.default_model and "/" in p.default_model:
+                    prefix_counts[p.default_model.split("/")[0]] += 1
+
+            result: dict[str, LLMProviderConfig] = {}
+            for p in yaml_providers:
+                cfg = _to_llm_provider(p)
+                # Display name — the canonical card identity (UI, agent llm_name).
+                result[p.name] = cfg
+                # Full model string — second key so a conversation's conv.model
+                # resolves to its exact card without relying on a prefix.
+                dm = p.default_model
+                if dm and dm != p.name and dm not in result:
+                    result[dm] = cfg
+                # Bare prefix — only when unambiguous (single owner). Kept for
+                # backward compat with consumers that still do providers['zai'].
+                if dm and "/" in dm:
+                    prefix = dm.split("/")[0]
+                    if prefix_counts[prefix] == 1:
+                        result.setdefault(prefix, cfg)
             return result
     except Exception as e:
         logger.debug("providers.yaml load failed: %s", e)

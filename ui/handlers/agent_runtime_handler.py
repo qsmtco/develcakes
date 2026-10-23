@@ -1077,6 +1077,7 @@ class AgentRuntimeHandler(
                     session_key=session_key,
                     project_path=effective_project_path,
                     model=agent_model,               # Per-agent provider/model override
+                    provider=getattr(agent_def, "llm_name", None),  # card display name
                     allowed_tools=agent_def.tools,   # Phase A: filtered tool set per agent
                     mcp_servers=agent_def.mcp_servers, # Phase B: MCP servers
                     agent_role=agent_def.role,        # §7: explicit role from definition
@@ -1125,6 +1126,8 @@ class AgentRuntimeHandler(
                         conv.api_key = agent_def.api_key
                     if agent_model:
                         conv.model = agent_model
+                        if getattr(agent_def, "llm_name", None):
+                            conv.provider = agent_def.llm_name  # card display name
                     if agent_def.app_title:
                         conv.app_title = agent_def.app_title
                     # Sync fallback config (in case agent was edited)
@@ -1201,6 +1204,7 @@ class AgentRuntimeHandler(
                         session_key=session_key,
                         project_path=project_path,
                         model=self._resolve_agent_model(agent_def),
+                        provider=getattr(agent_def, "llm_name", None),
                         allowed_tools=agent_def.tools,
                         mcp_servers=agent_def.mcp_servers,
                         agent_role=agent_def.role,
@@ -1912,6 +1916,15 @@ class AgentRuntimeHandler(
         Used by the chat-panel context meter to render a live progress bar.
         """
         return self._last_breakdown.get(session_key)
+
+    def forget_breakdown(self, session_key: str) -> None:
+        """Drop the cached token breakdown for ``session_key``.
+
+        SPEC-AGENT-DASHBOARD §2.4: the agent dashboard calls this when a
+        local agent session is removed, so its stale meter data does not
+        linger in the per-session cache. Missing key is a no-op.
+        """
+        self._last_breakdown.pop(session_key, None)
 
     def set_on_token_breakdown_extra(
         self, cb: Callable[[str, dict], None] | None
