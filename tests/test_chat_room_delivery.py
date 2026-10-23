@@ -172,6 +172,45 @@ def _force_resolver_empty(monkeypatch):
     )
 
 
+FOUR_MEMBERS = [
+    "special:supervisor",
+    "special:coder",
+    "special:debugger",
+    "special:alphacoder",
+]
+FOUR_NAMES = {
+    "special:supervisor": "Supervisor",
+    "special:coder": "Coder",
+    "special:debugger": "Debugger",
+    "special:alphacoder": "AlphaCoder",
+}
+
+
+def test_all_branch_resolver_multi_select_two_of_four(monkeypatch):
+    """SPEC-53 §1 list path: a 2-of-4 selection wakes exactly the two chosen
+    members with the raw text + project reply_target; the other two get the
+    human line as a room PM (and not the raw text)."""
+    monkeypatch.setattr(
+        "agent.llm.jev_client.resolve_room_addressee",
+        lambda text, roster: ["special:supervisor", "special:debugger"],
+    )
+    rt = FakeRuntimeHandler()
+    _, handler = _make_fallback_handler(
+        rt, members=FOUR_MEMBERS, names=FOUR_NAMES)
+
+    handler.on_send()
+
+    assert rt.sent == [
+        ("special:supervisor", "hi debugger", "project:foo"),
+        ("special:debugger", "hi debugger", "project:foo"),
+    ]
+    assert rt.room_marks == ["special:supervisor", "special:debugger"]
+    assert rt.room_lines == [
+        ("special:coder", "[room] PM: hi debugger"),
+        ("special:alphacoder", "[room] PM: hi debugger"),
+    ]
+
+
 def test_all_branch_fallback_supervisor_default_routes_to_supervisor(monkeypatch):
     """SPEC-53 acceptance: JEV returns [] → fallback (default supervisor) wakes
     ONLY the Supervisor member and a visible [room] note appears on its session.

@@ -364,7 +364,9 @@ _ROOM_INSTRUCTIONS = (
     "name or role. Choose \"all\" when the message names nobody, greets "
     "the room, or addresses the whole room. For example, \"hi debugger\" "
     "addresses only the participant named Debugger, while \"hi debugger "
-    "and coder\" addresses both. You may select multiple participants."
+    "and coder\" addresses both. You may select multiple participants — "
+    "return them as a JSON array of keys, e.g. "
+    "[\"special:debugger\", \"special:coder\"] — never a single string."
 )
 
 
@@ -417,6 +419,9 @@ def resolve_room_addressee(text: str, roster: list[tuple[str, str]]) -> list[str
                 "criteria": criteria,
             }
         },
+    )
+    _logger.debug(
+        "resolve_room_addressee: raw addressee answer=%r error=%r", answers, _error
     )
     if answers is None:
         return []

@@ -1551,6 +1551,10 @@ class AgentRuntime:
                 return "queued"
             conv = self._conversations.get(session_key)
             if conv is None:
+                logger.warning(
+                    "note_room_line: no conversation for %s; skipping room line",
+                    session_key,
+                )
                 return "skipped"
             conv.add_user_message(line)
             try:
