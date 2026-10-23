@@ -21,6 +21,23 @@ FEED_RENDERED_BODY_LIMIT = 2000
 REVEAL_TITLE_APPROVAL = "Full command text — view before approving"
 REVEAL_TITLE_DEFAULT = "Show the full text"
 
+# Inline SVG icons (inlined as markup — no external files/urls). Strokes use
+# currentColor so CSS can tint them (e.g. the copy button's low-contrast
+# resting state brightening on hover).
+_COPY_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" '
+    'viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<rect x="4.5" y="3" width="7.5" height="10" rx="1"/>'
+    '<rect x="2" y="1" width="7.5" height="10" rx="1"/></svg>'
+)
+_CHECK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" '
+    'viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<polyline points="3 8.5 6.5 12 13 4.5"/></svg>'
+)
+
 FEED_CSS = """
 body { margin: 0; background: #1a1b26; color: #c0caf5;
        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -31,7 +48,15 @@ body { margin: 0; background: #1a1b26; color: #c0caf5;
 .feed-card { background: #1f2335; border: 1px solid #3b4261;
              border-left: 3px solid #3b4261; border-radius: 8px;
              padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.35);
-             overflow-wrap: anywhere; }
+             overflow-wrap: anywhere; position: relative;
+             transition: transform .15s ease, box-shadow .15s ease;
+             animation: feed-card-in .25s ease-out; }
+.feed-card:hover { transform: translateY(-1px);
+                   box-shadow: 0 4px 14px rgba(0,0,0,.42); }
+@keyframes feed-card-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 
 /* Type accent palette (git=blue, diff=teal, agent=purple,
    system=gray, audit=amber). Unlisted types keep the neutral gray. */
@@ -43,15 +68,31 @@ body { margin: 0; background: #1a1b26; color: #c0caf5;
 .feed-card-file-new { border-left-color: #9ece6a; }
 .feed-card-file-del { border-left-color: #f7768e; }
 
-.feed-card-header, .feed-card-footer, .feed-card-actions {
+/* Approval-pending cards get a gradient top hairline to draw the eye. */
+.feed-card-approval::before {
+  content: ""; position: absolute; top: 0; left: 12px; right: 12px;
+  height: 2px; border-radius: 0 0 2px 2px;
+  background: linear-gradient(90deg, #e0af68, #bb9af7, #7aa2f7);
+}
+
+/* Header band — distinct treatment: a tinted band with rounded top corners
+   matching the card. */
+.feed-card-header {
+  display: flex; gap: 8px; align-items: center; justify-content: space-between;
+  margin: -12px -12px 8px; padding: 10px 12px;
+  background: linear-gradient(180deg, #242945, #1f2335);
+  border-radius: 7px 7px 0 0;
+  border-bottom: 1px solid rgba(59, 66, 97, .55);
+}
+.feed-card-footer, .feed-card-actions {
   display: flex; gap: 8px; align-items: center; }
-.feed-card-header { justify-content: space-between; }
 .feed-card-footer { justify-content: space-between; color: #9b9bab;
                     font-size: 12px; }
 .feed-card-title { font-weight: 600; flex: 1 1 auto; }
 .feed-card-seq { color: #9b9bab; }
+.feed-card-type-icon { font-size: 13px; line-height: 1; }
 
-.feed-card-body { margin: 6px 0; }
+.feed-card-body { margin: 6px 0; font-size: 12.5px; color: #a9b1d6; }
 .feed-body-mono, .feed-diff { white-space: pre-wrap;
                               font-family: ui-monospace, monospace;
                               background: #16161e; padding: 8px;
@@ -60,14 +101,60 @@ body { margin: 0; background: #1a1b26; color: #c0caf5;
 .feed-diff-add { color: #6a9955; }
 .feed-diff-del { color: #f44747; }
 .feed-task-id { color: #9b9bab; }
-.feed-accepted-badge { color: #9ece6a; }
-.feed-rejected-badge { color: #f7768e; }
+
+/* Verdict badges — real pills: tinted background + border, uppercase, inline-flex. */
+.feed-accepted-badge, .feed-rejected-badge {
+  display: inline-flex; align-items: center;
+  font-size: 10px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; padding: 2px 8px;
+  border-radius: 999px; border: 1px solid transparent; }
+.feed-accepted-badge {
+  color: #9ece6a; background: rgba(158, 206, 106, .12);
+  border-color: rgba(158, 206, 106, .4); }
+.feed-rejected-badge {
+  color: #f7768e; background: rgba(247, 118, 142, .12);
+  border-color: rgba(247, 118, 142, .4); }
+
 .feed-context-panel { margin-top: 8px; border-top: 1px solid #3b4261;
                       padding-top: 8px; }
 .feed-empty { text-align: center; padding: 24px; color: #9b9bab; }
+
 button { background: #2f334d; color: #c0caf5; border: 1px solid #3b4261;
          border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 button:hover { background: #3b4261; border-color: #565f89; color: #c0caf5; }
+
+/* Action buttons — distinct tints: Review neutral/blue, Accept green, Reject red. */
+button.feed-btn-review {
+  background: rgba(122, 162, 247, .13); border-color: rgba(122, 162, 247, .42);
+  color: #a3b8ef; }
+button.feed-btn-review:hover {
+  background: rgba(122, 162, 247, .24); border-color: rgba(122, 162, 247, .7);
+  color: #c0caf5; }
+button.feed-btn-accept {
+  background: rgba(158, 206, 106, .13); border-color: rgba(158, 206, 106, .42);
+  color: #9ece6a; }
+button.feed-btn-accept:hover {
+  background: rgba(158, 206, 106, .24); border-color: rgba(158, 206, 106, .7);
+  color: #c0caf5; }
+button.feed-btn-reject {
+  background: rgba(247, 118, 142, .13); border-color: rgba(247, 118, 142, .42);
+  color: #f7768e; }
+button.feed-btn-reject:hover {
+  background: rgba(247, 118, 142, .24); border-color: rgba(247, 118, 142, .7);
+  color: #c0caf5; }
+
+/* Copy button — icon-only, subtle until hover. Check icon swaps in on copy. */
+button.feed-copy-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent;
+  padding: 4px; border-radius: 6px; opacity: .45;
+  transition: opacity .12s ease, background .12s ease, border-color .12s ease; }
+button.feed-copy-btn:hover { opacity: 1; background: #2f334d; border-color: #3b4261; }
+.feed-copy-btn svg { display: block; }
+.feed-copy-check { display: none; }
+.feed-copy-btn.copied { opacity: 1; color: #9ece6a; }
+.feed-copy-btn.copied .feed-copy-icon { display: none; }
+.feed-copy-btn.copied .feed-copy-check { display: block; }
 """
 
 # Static. Not formatted with card data.
@@ -89,6 +176,17 @@ FEED_SCRIPT = """
       action: btn.getAttribute("data-feed-action"),
       card_id: btn.getAttribute("data-feed-card")
     });
+    // Copy feedback: brief 'copied ✓' state — only when a live bridge is
+    // present (post() is a silent no-op otherwise, so a checkmark would
+    // assert a copy that never happened). Upsert reloads replace the whole
+    // document, so this state is best-effort and may be cut short.
+    if (bridge && btn.classList.contains("feed-copy-btn")) {
+      btn.classList.add("copied");
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(function () {
+        btn.classList.remove("copied");
+      }, 1200);
+    }
   });
 
   var doc = document.documentElement;
@@ -137,6 +235,21 @@ _FILE_TYPES = frozenset({
     "file_created", "file_modified", "file_deleted", "dir_created", "dir_deleted",
 })
 
+# Per-type header icon (emoji — small, tasteful, no external assets).
+_TYPE_ICONS = {
+    "git_commit": "🌿",
+    "diff": "📎",
+    "agent_action": "🤖",
+    "system": "⚙️",
+    "audit_report": "🛡️",
+    "file_created": "📄",
+    "file_modified": "✏️",
+    "file_deleted": "🗑️",
+    "dir_created": "📁",
+    "dir_deleted": "🗂️",
+    "task": "📋",
+}
+
 
 def _esc(value) -> str:
     if value is None:
@@ -152,11 +265,29 @@ def _body_text(card: FeedCardData) -> str:
     return card.body if isinstance(card.body, str) else ""
 
 
-def _button(action: str, label: str, card_id: str, title: str | None = None) -> str:
+def _button(
+    action: str,
+    label: str,
+    card_id: str,
+    title: str | None = None,
+    css_class: str | None = None,
+) -> str:
     extra = f' title="{_esc(title)}"' if title else ""
+    cls = f' class="{css_class}"' if css_class else ""
     return (
-        f'<button type="button" data-feed-action="{action}" '
+        f'<button type="button"{cls} data-feed-action="{action}" '
         f'data-feed-card="{_esc(card_id)}"{extra}>{_esc(label)}</button>'
+    )
+
+
+def _copy_button(card_id: str) -> str:
+    """Icon-only copy button: inline SVG, title tooltip, data-feed-action intact."""
+    return (
+        '<button type="button" class="feed-copy-btn" data-feed-action="copy" '
+        f'data-feed-card="{_esc(card_id)}" title="Copy" aria-label="Copy">'
+        f'<span class="feed-copy-icon">{_COPY_SVG}</span>'
+        f'<span class="feed-copy-check">{_CHECK_SVG}</span>'
+        "</button>"
     )
 
 
@@ -193,15 +324,15 @@ def _classes(card: FeedCardData, meta: dict) -> str:
 def _actions(card: FeedCardData, meta: dict, card_id: str) -> str:
     if not FeedCardData.is_actionable(card.card_type, meta):
         return ""
-    review = _button("review", "Review", card_id)
+    review = _button("review", "Review", card_id, css_class="feed-btn-review")
     if card.accepted is not None:
         return f'<div class="feed-card-actions">{review}</div>'
     if meta.get("needs_approval"):
-        accept = _button("accept", "Approve", card_id)
-        reject = _button("reject", "Deny", card_id)
+        accept = _button("accept", "Approve", card_id, css_class="feed-btn-accept")
+        reject = _button("reject", "Deny", card_id, css_class="feed-btn-reject")
     else:
-        accept = _button("accept", "Accept", card_id)
-        reject = _button("reject", "Reject", card_id)
+        accept = _button("accept", "Accept", card_id, css_class="feed-btn-accept")
+        reject = _button("reject", "Reject", card_id, css_class="feed-btn-reject")
     return f'<div class="feed-card-actions">{review}{accept}{reject}</div>'
 
 
@@ -271,6 +402,8 @@ def render_feed_card(
     meta = _meta(card)
     card_id = card.card_id or ""
     seq = f'<span class="feed-card-seq">#{card.seq_num}</span>' if card.seq_num is not None else ""
+    icon = _TYPE_ICONS.get(card.card_type, "")
+    icon_html = f'<span class="feed-card-type-icon">{icon}</span>' if icon else ""
     badge = ""
     if card.accepted is True:
         badge = '<span class="feed-accepted-badge">ACCEPTED</span>'
@@ -278,8 +411,8 @@ def render_feed_card(
         badge = '<span class="feed-rejected-badge">REJECTED</span>'
     header = (
         '<div class="feed-card-header">'
-        f'{seq}<span class="feed-card-title">{_esc(card.title)}</span>'
-        f'{_button("copy", "Copy", card_id)}'
+        f'{seq}{icon_html}<span class="feed-card-title">{_esc(card.title)}</span>'
+        f'{_copy_button(card_id)}'
         "</div>"
     )
     footer = (

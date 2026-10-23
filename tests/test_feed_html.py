@@ -1,11 +1,18 @@
 # tests/test_feed_html.py — SPEC-FEED-HTML-SURFACE.
 # The renderer is pure. Handler tests use a fake document, not WebKit.
+#
+# Headless-safe: this suite never constructs a GTK widget — it reads
+# RENDERED_BODY_LIMIT from the view module and drives FeedHandler with stub
+# GLib/surfaces. Opt out of the conftest display guard (same marker as
+# tests/test_perf_feed.py) so these pins run in the headless battery.
+GTK_HEADLESS_SAFE = True
 
 from datetime import UTC, datetime
 
 from models.conversation_snapshot import ConversationSnapshot, SnapshotMessage
 from models.feed_card import FeedCardData
 from render.feed_html import (
+    FEED_CSS,
     FEED_RENDERED_BODY_LIMIT,
     FEED_SCRIPT,
     render_feed_card,
@@ -159,6 +166,83 @@ class TestRenderFeedCard:
         ])
         assert doc.index("Old") < doc.index("New")
         assert 'id="feed"' in doc
+
+
+class TestPizzazzPins:
+    """String-level pins for the feed-card presentation contract (audit round).
+
+    No browser: these pin the exact markup/CSS/script tokens the WebKit
+    surface and the copy-feedback path depend on.
+    """
+
+    def test_copy_button_is_icon_svg_with_action_attributes(self):
+        out = render_feed_card(_card())
+        assert 'class="feed-copy-btn"' in out
+        assert 'data-feed-action="copy"' in out
+        assert 'data-feed-card="card-1"' in out
+        assert 'aria-label="Copy"' in out
+        assert 'title="Copy"' in out
+        assert "<svg" in out
+        assert ">Copy<" not in out  # icon-only: no visible word label
+
+    def test_verdict_badges_are_pills_inside_inline_flex_rule(self):
+        accepted = render_feed_card(_card(
+            card_type="diff", body="patch", accepted=True
+        ))
+        rejected = render_feed_card(_card(
+            card_type="diff", body="patch", accepted=False
+        ))
+        assert '<span class="feed-accepted-badge">ACCEPTED</span>' in accepted
+        assert '<span class="feed-rejected-badge">REJECTED</span>' in rejected
+        # The shared pill rule is inline-flex — a real pill, not a text label.
+        start = FEED_CSS.index(".feed-accepted-badge, .feed-rejected-badge")
+        block = FEED_CSS[start:FEED_CSS.index("}", start)]
+        assert "inline-flex" in block
+
+    def test_action_buttons_carry_tint_classes(self):
+        out = render_feed_card(_card(card_type="diff", body="patch"))
+        assert 'class="feed-btn-review"' in out
+        assert 'class="feed-btn-accept"' in out
+        assert 'class="feed-btn-reject"' in out
+
+    def test_approval_card_carries_class(self):
+        out = render_feed_card(_card(
+            card_type="agent_action",
+            metadata={"needs_approval": True},
+        ))
+        assert "feed-card-approval" in out
+
+    def test_header_band_and_body_typography_css_pins(self):
+        header_start = FEED_CSS.index(".feed-card-header {")
+        header_block = FEED_CSS[header_start:FEED_CSS.index("}", header_start)]
+        assert "linear-gradient" in header_block
+        body_start = FEED_CSS.index(".feed-card-body {")
+        body_block = FEED_CSS[body_start:FEED_CSS.index("}", body_start)]
+        assert "font-size: 12.5px" in body_block
+
+    def test_keyframes_are_opacity_only(self):
+        start = FEED_CSS.index("@keyframes feed-card-in")
+        to_start = FEED_CSS.index("to {", start)
+        keyframes = FEED_CSS[start:FEED_CSS.index("}", to_start) + 1]
+        assert "opacity: 0" in keyframes
+        assert "opacity: 1" in keyframes
+        assert "transform" not in keyframes  # never fights :hover
+
+    def test_script_gates_copied_state_on_bridge_after_post(self):
+        script = FEED_SCRIPT
+        # Copy feedback must only run when a live bridge received the message.
+        assert 'if (bridge && btn.classList.contains("feed-copy-btn")) {' in script
+        # The toggle must happen after the post() call ships the message.
+        assert script.index("post({") < script.index('classList.add("copied")')
+        assert "clearTimeout(btn._copyTimer)" in script
+        assert 'btn._copyTimer = setTimeout(function () {' in script
+        assert '}, 1200);' in script
+
+    def test_full_document_contains_svg_and_keyframes(self):
+        doc = render_feed_document([render_feed_card(_card())])
+        assert "<svg" in doc
+        assert "@keyframes feed-card-in" in doc
+        assert FEED_CSS in doc
 
 
 class _GLib:
