@@ -11,12 +11,16 @@ stall class being the regression this row exists to catch):
 The test is marked ``slow`` (pytest.ini) so it is excluded from fast suites.
 
 Import note: FeedHandler is imported dynamically via importlib rather than at
-module top. tests/conftest.py's display-skip detector follows the STATIC
-import graph and would otherwise flag this file (feed_handler → ui.feed.load
-→ Gtk widget constructors), skipping it on headless CI — and R-7 runs under
-the plain runner, where a skip is a failure.
+module top. tests/conftest.py's GTK guard now detects dynamic ui imports too,
+so this module opts out with the top-level ``GTK_HEADLESS_SAFE = True``
+marker: the benchmarks build no widgets (feed_handler is driven with a stub
+GLib), so the suite runs headless — and R-7 runs under the plain runner,
+where a skip is a failure.
 """
+
 from __future__ import annotations
+
+GTK_HEADLESS_SAFE = True
 
 import importlib
 import os

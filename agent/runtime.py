@@ -2744,7 +2744,17 @@ class AgentRuntime:
             # mark_completed sets status and completed_at. The tool message
             # is the copy that is kept; tc.result is cleared before
             # add_tool_result so the body is not stored twice.
-            tc.mark_completed(result.output if result.success else result.error or "")
+            # On failure keep the error, and when the tool still captured
+            # output (exec_command stdout/stderr) append it — otherwise a
+            # failed pytest run reads back as a silent 'Exit 1' with the
+            # captured output lost. The success path is unchanged.
+            if result.success:
+                tool_body = result.output
+            elif result.output:
+                tool_body = (result.error or "") + "\n" + result.output
+            else:
+                tool_body = result.error or ""
+            tc.mark_completed(tool_body)
             tool_result_text = tc.result or ""
             if tool_name == "read_file" and result.success:
                 tool_result_text = self._dedup_read_output(

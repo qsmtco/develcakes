@@ -304,6 +304,48 @@ class TestToolLoop:
         assert complete == ["The result is 42."], f"Got: {complete}"
         rt.stop()
 
+    def test_failed_tool_keeps_captured_output_in_conversation(self, tmp_path):
+        """Regression: exec_command exiting 1 must not swallow its stdout/stderr.
+
+        The tool-result message recorded into the conversation used to carry
+        only ``result.error`` (e.g. ``'Exit 1'``), dropping the captured output
+        in ``result.output`` — a failed pytest run looked like a silent
+        segfault. The failure path now appends non-empty captured output.
+        """
+        rt = AgentRuntime(_make_cfg())
+        rt.start()
+        sk = _uniq()
+        rt.create_conversation("Coder", sk, str(tmp_path))
+
+        responses = [
+            _resp(tool_calls=[{
+                "id": "call_list",
+                "function": {"name": "list_files", "arguments": '{"path": "."}'}
+            }]),
+            _resp("Done."),
+        ]
+        from agent.tools import ToolResult
+        with unittest.mock.patch.object(
+            rt, "_call_llm",
+            lambda sk2, msgs, tools, **kwargs: responses.pop(0),
+        ), unittest.mock.patch(
+            "agent.tools.execute_tool",
+            return_value=ToolResult(
+                success=False, error="Exit 1", output="captured stdout text",
+            ),
+        ):
+            rt._run_loop(sk, "list files")
+
+        conv = rt.get_conversation(sk)
+        tool_msgs = [m.content for m in conv.messages if m.role.value == "tool"]
+        assert tool_msgs, f"Expected a tool-result message; got: {conv.messages}"
+        combined = "\n".join(tool_msgs)
+        assert "Exit 1" in combined, f"Error missing from tool message: {combined!r}"
+        assert "captured stdout text" in combined, (
+            f"Captured output missing from tool message: {combined!r}"
+        )
+        rt.stop()
+
     def test_empty_text_content_with_choices_placeholder_saved_and_no_crash(self, caplog, tmp_path):
         """Regression: nemotron-3-ultra returns finish_reason='stop' with empty content after tool execution.
 

@@ -115,6 +115,7 @@ class AgentDashboard(Gtk.Box):
 
         row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         row_box.add_css_class("agent-dashboard-row")  # SPEC §2.2
+        row_box.set_margin_start(50)  # PM request 2026-10-22: indent agent rows
 
         # Colored dot matching the agent's tab color (SPEC §2.5). The row's
         # 'color' key is a #rrggbb string from color_for_special_agent(role);

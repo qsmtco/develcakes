@@ -22,6 +22,7 @@
 # Responses from agents are routed back to the project tab via _agent_to_project lookup.
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -103,6 +104,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._branch_request_token: int = 0           # monotonic request id (BUG #7)
         self._branch_active_token: int | None = None  # token of in-flight worker (BUG #2)
         self._branch_request_path: str | None = None  # project path captured at schedule time (BUG #2)
+
+        # SPEC-52 timer scheduler state — armed GLib source id per timer id.
+        self._timer_sources: dict[str, object] = {}
+        self._timer_lock = threading.Lock()
 
         self._build()
         self._setup_keyboard_shortcuts()
@@ -476,6 +481,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Wire feed bar — updates when project opens or members change
         self._main_content.set_on_project_settings_update(self._on_feed_bar_update)
+
+        # SPEC-52: timer boot sweep runs when a project is opened (not at
+        # window boot — the PM opens projects). _project_handler exists here,
+        # so registering the hook now is safe.
+        self._project_handler.set_on_project_opened(self._boot_sweep_timers)
 
 
     def _wire_feed(self, left_panel):
@@ -1075,6 +1085,7 @@ class MainWindow(Gtk.ApplicationWindow):
             set_canvas_callback,
             set_feed_card_callback,
             set_talk_callback,
+            set_timer_callback,
         )
 
         def _peer_label(session_key: str) -> str:
@@ -1344,6 +1355,7 @@ class MainWindow(Gtk.ApplicationWindow):
         set_canvas_callback(_canvas)
         set_talk_callback(_talk)
         set_feed_card_callback(self._post_feed_card)
+        set_timer_callback(self._schedule_timer)
 
     def _post_feed_card(self, session_key: str, fields: dict) -> "ToolResult":
         """feed_card tool callback — build a FeedCardData and add it to the feed.
@@ -1405,6 +1417,179 @@ class MainWindow(Gtk.ApplicationWindow):
             success=True,
             output=f"posted {card.card_type} card {card_id}",
         )
+
+    # ── Timer tool scheduler (SPEC-52) ────────────────────────────────────
+    # Contract: agent/group_tools.py set_timer/cancel_timer handlers validate
+    # and call _timer_cb → self._schedule_timer. Scheduling state is
+    # per-project UI/session state; the agent layer only sees a fire-payload
+    # callback (same split as feed_card).
+
+    def _arm_timer(self, timer: dict) -> object:
+        """Arm a GLib source for a persisted timer (caller must be on a
+        thread safe for GLib scheduling — the main loop for fires, the
+        idle-hop for tool-loop calls). Returns the GLib source id."""
+        from datetime import datetime
+        try:
+            fires_at = datetime.fromisoformat(timer["fires_at"])
+            delay_ms = max(0, int((fires_at - datetime.now()).total_seconds() * 1000))
+        except (KeyError, TypeError, ValueError):
+            delay_ms = 0
+        src = GLib.timeout_add(delay_ms, lambda: self._fire(timer))
+        with self._timer_lock:
+            self._timer_sources[timer["id"]] = src
+        return src
+
+    def _schedule_timer(self, caller_sk: str, target_sk, timer: dict) -> "ToolResult":
+        """set_timer/cancel_timer callback. May run on a tool-loop thread;
+        arm via an idle_add hop (the _canvas pattern)."""
+        from datetime import datetime
+        from agent.tools import ToolResult
+        from utils.timer_store import add_timer, remove_timer
+        project_path = self._project_handler.get_active_project_path()
+        if not project_path:
+            return ToolResult(success=False, error="no project open")
+        if target_sk is None:
+            timer_id = timer.get("timer_id")
+            if not timer_id:
+                return ToolResult(success=False, error="cancel_timer needs a timer id")
+            with self._timer_lock:
+                src = self._timer_sources.pop(timer_id, None)
+            if src is not None:
+                GLib.source_remove(src)
+            if not remove_timer(project_path, timer_id):
+                return ToolResult(
+                    success=False, error="cancel_timer: timer not found in store",
+                )
+            return ToolResult(success=True, output=f"cancelled timer {timer_id}")
+        saved = add_timer(
+            project_path,
+            target=target_sk,
+            prompt=timer.get("prompt", ""),
+            fires_at=timer.get("fires_at", ""),
+            repeat=timer.get("repeat", ""),
+        )
+        if saved is None:
+            return ToolResult(success=False, error="set_timer: could not persist timer")
+        done = threading.Event()
+        box: dict = {}
+
+        def _ui():
+            try:
+                box["source"] = self._arm_timer(saved)
+            except Exception as exc:  # noqa: BLE001
+                box["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                done.set()
+            return False
+
+        GLib.idle_add(_ui)
+        if not done.wait(2.0):
+            remove_timer(project_path, saved["id"])
+            return ToolResult(success=False, error="set_timer UI did not arm")
+        if box.get("error"):
+            remove_timer(project_path, saved["id"])
+            return ToolResult(success=False, error=str(box["error"]))
+        return ToolResult(success=True, output=f"scheduled timer {saved['id']}")
+
+    def _deliver_timer(self, timer: dict) -> None:
+        """Deliver a timer payload as a normal agent turn."""
+        target = timer.get("target", "")
+        if not target:
+            return
+        self._agent_runtime_handler.send_to_special_agent(
+            target, f"[timer {timer['id']}]: {timer.get('prompt', '')}",
+        )
+
+    def _fire(self, timer: dict) -> bool:
+        """GLib timeout source callback — runs ON the main loop. Returns
+        False (source removed); daily timers re-arm a fresh source."""
+        from datetime import datetime, timedelta
+        from utils.timer_store import load_timers, remove_timer, save_timers
+        timer_id = timer.get("id")
+        project_path = self._project_handler.get_active_project_path()
+        if timer.get("repeat") == "daily":
+            try:
+                next_fires = datetime.fromisoformat(timer["fires_at"]) + timedelta(days=1)
+            except (KeyError, TypeError, ValueError):
+                next_fires = datetime.now() + timedelta(days=1)
+            timer["fires_at"] = next_fires.isoformat()
+            if project_path:
+                timers = load_timers(project_path)
+                updated = [
+                    t if t.get("id") != timer_id else dict(timer) for t in timers
+                ]
+                save_timers(project_path, updated)
+            self._arm_timer(timer)
+            self._deliver_timer(timer)
+            return False
+        # one-shot
+        if project_path and timer_id:
+            remove_timer(project_path, timer_id)
+        if timer_id:
+            with self._timer_lock:
+                self._timer_sources.pop(timer_id, None)
+        self._deliver_timer(timer)
+        return False
+
+    def _post_expired_card(self, timer: dict) -> None:
+        """Post an agent_action card for a one-shot that expired offline."""
+        from datetime import UTC, datetime
+        from agent.special_agents import get_special_agent
+        from models.feed_card import FeedCardData
+        project_name = self._project_handler.get_active_project_name() or ""
+        card = FeedCardData(
+            card_type="agent_action",
+            source="agent",
+            title=f"Timer {timer['id']} expired offline",
+            body=(
+                f"A timer scheduled for {timer.get('fires_at')} targeting "
+                f"{timer.get('target')} expired while the app was closed. "
+                f"Prompt: {timer.get('prompt', '')[:500]}"
+            ),
+            author="system",
+            timestamp=datetime.now(UTC),
+            project_name=project_name,
+            file_path=None,
+            additions=None,
+            deletions=None,
+            task_id=None,
+            metadata={"session_key": "system", "tab_key": None},
+        )
+        self._feed_handler.add_card(card)
+
+    def _boot_sweep_timers(self, project_name: str, project_path: str) -> None:
+        """Called on project open (set_on_project_opened). Arm future timers,
+        re-arm past daily timers for the next day, and turn stale one-shots
+        into 'expired offline' feed cards."""
+        from datetime import datetime, timedelta
+        from utils.timer_store import STALE_GRACE, load_timers, remove_timer, save_timers
+        now = datetime.now()
+        for timer in load_timers(project_path or ""):
+            try:
+                fires_at = datetime.fromisoformat(timer.get("fires_at", ""))
+            except (TypeError, ValueError):
+                continue
+            if fires_at > now:
+                self._arm_timer(timer)
+            elif timer.get("repeat") == "daily":
+                next_fires = fires_at
+                while next_fires <= now:
+                    next_fires += timedelta(days=1)
+                timer["fires_at"] = next_fires.isoformat()
+                timers = load_timers(project_path)
+                updated = [
+                    t if t.get("id") != timer.get("id") else dict(timer)
+                    for t in timers
+                ]
+                save_timers(project_path, updated)
+                self._arm_timer(timer)
+            elif (now - fires_at).total_seconds() > STALE_GRACE:
+                self._post_expired_card(timer)
+                remove_timer(project_path, timer.get("id"))
+            else:
+                # within the grace window — fire immediately
+                remove_timer(project_path, timer.get("id"))
+                self._deliver_timer(timer)
 
     def _clear_chat_box(self, session_key: str) -> None:
         """Empty the chat surface for a session. /clear UI side effect.

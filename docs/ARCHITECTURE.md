@@ -248,6 +248,7 @@ develcakes/
     ├── speech_config.py         # speech.yaml — endpoint, model, token, mode 0o600
     ├── stt.py                   # STTEngine — OpenRouter cloud STT (model from stt_config, SPEC-37); arecord 16kHz mono capture + STT_PHRASES keyword biasing
     ├── stt_config.py            # STT model setting store — stt.yaml, env STT_MODEL override, per-model bias gating (SPEC-37)
+    ├── timer_store.py           # Scheduled-timer persistence — .crabcakes/timers.json (SPEC-52); stdlib only
     ├── syntax_highlight.py      # highlight() — Pygments → Pango markup (Tokyo Night color scheme)
     └── workflow_state.py        # Workflow state tracker — manages .develcakes/workflow.md per project
 ```
@@ -1941,6 +1942,8 @@ authorization mechanism.
 
 **Group tools (SPEC-GROUP-AGENT-TOOLS).** `diary`, `project_memory`, `jev_ask`, `canvas`, and `talk` are registered beside the file tools. Handlers live in `agent/group_tools.py`. `agent_context` lets any special agent inspect or surgically edit its own conversation: the running tool call stays, and the in-memory messages are written back to the conversation file. `clear` and `compact` on a peer, and `project_memory` actions `promote` and `supersede`, succeed only when `SpecialAgentDef.role == "supervisor"`. `ui/window.py` installs the three callbacks. `AgentRuntime.cancel_peer` marks one session in `_cancelled` and does not set `_cancel_requested`. A canvas tab's session key is `canvas:<slug>`: `create_chat_tab` skips `render_welcome`, and `ChatHandler.on_send` returns before it reads the input buffer. `talk` reads `<config_dir>/speech.yaml`. `{{MEMORY_INDEX}}` is filled from `.crabcakes/memory/INDEX.md` by `prompts/system/agent-tools.md`.
 
+**Timer tools (SPEC-52).** `set_timer` and `cancel_timer` are registered beside the group tools; handlers live in `agent/group_tools.py` (no GTK). `set_timer(delay, prompt, agent="", repeat="")` parses a wall-clock delay (`90s`/`45m`/`2h`/`1h30m`/`at HH:MM(:SS)`), validates prompt/repeat/target, and calls the window-installed callback; `cancel_timer(timer_id)` calls the same callback with `target=None`. Callback contract: `(caller_session_key, target_session_key, timer: dict) -> ToolResult`, installed by `ui/window.py` in `_wire_group_tool_callbacks()` → `MainWindow._schedule_timer` (persist to `.crabcakes/timers.json`, then arm a GLib timeout via the `idle_add` + `threading.Event` hop — the caller runs on its tool-loop thread). Fires run ON the main loop (`MainWindow._fire`): one-shots deliver via `send_to_special_agent` and are removed; `daily` timers advance `fires_at` by one day, re-persist, re-arm, and return `False` (a fresh source is armed). On project open, `_boot_sweep_timers` arms future timers, re-arms past daily timers, and posts an `agent_action` card titled `Timer {id} expired offline` for stale one-shots. **Honest limitation:** a GLib timer only fires while the app runs; `timers.json` exists so restart does not silently lose pending timers.
+
 ### 3.21o `agent/config.py` — LLM Provider Config (Phase 1.1)
 
 **Public API:**
@@ -3130,6 +3133,47 @@ filter not a sandbox), `additions`, `deletions`, `task_id`. Required: `type`,
   tab) come from DIFFERENT sources BY DESIGN — do not unify them.
 - `_post_feed_card` runs on the tool-loop thread, not the main thread.
 
+### 3.22f `set_timer` / `cancel_timer` tools — agent → scheduled prompts (SPEC-52)
+
+**Responsibility:** Schedule a prompt to be delivered to an agent after a
+wall-clock delay, and cancel it by id. The store (`utils/timer_store.py`,
+stdlib-only) persists pending timers under `<project>/.crabcakes/timers.json`
+with atomic tmp+`os.replace` writes; the scheduler is window-side GLib.
+
+**Chain:** `agent/tools.py` `_TOOLS["set_timer"]` →
+`agent/group_tools.py:set_timer()` (parses `delay`, validates prompt/repeat/
+target via `_resolve_peer`, never raises) → `MainWindow._schedule_timer`
+(persists, then arms a GLib source) → fire: `MainWindow._fire` →
+`send_to_special_agent` → normal agent turn. `cancel_timer(timer_id)` →
+same callback with `target=None` → `GLib.source_remove` + `remove_timer`.
+
+**Tool schema:** `set_timer` — `delay` (string: `90s`/`45m`/`2h`/
+`1h30m`/`at HH:MM(:SS)`; past time-of-day fires immediately, `prompt`
+(1–2000 chars), `agent` (display name, role, `agent:<role>` key, or `self`;
+default self), `repeat` (`""` one-shot or `"daily"`). Required: `delay`,
+`prompt`. `cancel_timer` — `timer_id` (required). Both
+`requires_approval=False`.
+
+**Architecture rules:**
+- Handlers live in `agent/group_tools.py` beside the other group tools; the
+  callback is installed from `ui/window.py` (`set_timer_callback` → `_wire_group_tool_callbacks`). No GTK in the agent layer.
+- Threading: the handler's call (schedule/cancel) runs on the caller's
+  tool-loop thread; arming hops to the main loop via `GLib.idle_add` + a
+  `threading.Event` (the `_canvas` pattern). Fires (`_fire`) run ON the main
+  loop as GLib timeout sources.
+- `daily` timers advance `fires_at` by one day, re-persist, re-arm a fresh
+  source, and return `False` from `_fire` (the old source is gone). One-shots
+  return `False` and are removed from the store after delivery.
+- Persistence and sweep: `timers.json` survives restarts. On project open,
+  `_boot_sweep_timers` (registered via `set_on_project_opened`, after
+  `_project_handler` exists) arms future timers, re-arms past daily timers for
+  the next day, and turns stale one-shots (older than `STALE_GRACE` = 120s)
+  into `agent_action` cards titled `Timer {id} expired offline`. A past
+  one-shot within the grace window fires immediately.
+- **Honest limitation:** a GLib timer only fires while the app runs. `timers.json`
+  exists so a restart does not silently lose pending timers — stale one-shots
+  surface as expired-offline cards; pending daily timers re-arm.
+
 ---
 
 ## 3.24 `ui/handlers/crabwatch_handler.py` — CrabWatch Filesystem Watcher (Phase 5)
@@ -4082,6 +4126,7 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_context.py` — system prompt builder, file context, .gitignore parsing
 - `tests/test_conversation.py` — Conversation, Message, ToolCall data models + token estimation
 - `tests/test_feed_card_tool.py` — the `feed_card` tool callback + project_name/tab_key divergence pin (SPEC-45)
+- `tests/test_timer_tool.py` — the `set_timer`/`cancel_timer` tools, timer store, and window-side GLib scheduler + boot sweep (SPEC-52)
 - `tests/test_crabwatch_handler.py` — CrabWatchHandler: filesystem event debouncing
 - `tests/test_create_project.py` — project creation workflow
 - `tests/test_diff_parser.py` — unified diff parsing → FileDiff/ParsedDiff
@@ -4513,6 +4558,7 @@ develcakes/
     ├── speech_config.py          # speech.yaml credential store (mode 0o600)
     ├── stt.py                    # ~286 lines — STTEngine (OpenRouter cloud STT; GTK carve-out: lazy GLib import)
     ├── stt_config.py             # STT model setting store — stt.yaml + env override (SPEC-37; pure Python)
+    ├── timer_store.py            # ~120 lines — scheduled-timer persistence (.crabcakes/timers.json, SPEC-52; stdlib only)
     ├── syntax_highlight.py       # ~164 lines — Pygments → Pango (Tokyo Night)
     ├── workflow_state.py         # ~226 lines — workflow state tracker
 

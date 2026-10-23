@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timedelta
 
 from agent.tools import ToolResult
 
@@ -15,6 +17,7 @@ _agent_context_cb = None
 _canvas_cb = None
 _talk_cb = None
 _feed_card_cb = None
+_timer_cb = None
 
 
 def set_agent_context_callback(cb) -> None:
@@ -56,6 +59,13 @@ def set_feed_card_callback(cb) -> None:
     """
     global _feed_card_cb
     _feed_card_cb = cb
+
+
+def set_timer_callback(cb) -> None:
+    """Install the timer scheduling callback. Signature:
+    (caller_session_key, target_session_key, timer: dict) -> ToolResult."""
+    global _timer_cb
+    _timer_cb = cb
 
 
 def _caller_role(session_key: str):
@@ -453,4 +463,104 @@ def feed_card(
         )
     if not isinstance(result, ToolResult):
         return ToolResult(success=False, error="feed_card callback returned nothing")
+    return result
+
+
+_DELAY_MSG = "delay must be like '90s', '45m', '2h', or 'at 14:30'"
+_DELAY_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def _compute_fires_at(delay: str) -> tuple[str | None, str | None]:
+    """Parse a wall-clock delay into an ISO fires_at. Returns (iso, error).
+
+    Accepts "90s", "45m", "2h", "1h30m", or "at HH:MM(:SS)" (24h,
+    system-local). A past time-of-day fires immediately (within 1s).
+    """
+    if not isinstance(delay, str) or not delay.strip():
+        return None, _DELAY_MSG
+    text = delay.strip().lower()
+    if text.startswith("at "):
+        hm = text[3:].strip()
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", hm)
+        if m is None:
+            return None, _DELAY_MSG
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        second = int(m.group(3) or 0)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+            return None, _DELAY_MSG
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+        if target <= now:
+            target = now  # past time-of-day fires immediately
+        return target.isoformat(), None
+    m = _DELAY_RE.fullmatch(text)
+    if m is None or not any(m.groups()):
+        return None, _DELAY_MSG
+    hours = int(m.group(1) or 0)
+    minutes = int(m.group(2) or 0)
+    seconds = int(m.group(3) or 0)
+    if hours + minutes + seconds <= 0:
+        return None, _DELAY_MSG
+    return (datetime.now() + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat(), None
+
+
+def set_timer(delay: str, prompt: str, agent: str = "", repeat: str = "", **kwargs) -> ToolResult:
+    session_key = kwargs.get("session_key", "")
+    project_path = kwargs.get("project_path") or ""
+    from utils.timer_store import PROMPT_MAX, REPEATS
+    if not isinstance(project_path, str) or not project_path:
+        return ToolResult(success=False, error="no project open")
+    fires_at, err = _compute_fires_at(delay)
+    if err is not None:
+        return ToolResult(success=False, error=err)
+    if not isinstance(prompt, str) or not prompt.strip():
+        return ToolResult(
+            success=False, error=f"prompt must be 1–{PROMPT_MAX} characters",
+        )
+    if len(prompt.strip()) > PROMPT_MAX:
+        return ToolResult(success=False, error=f"prompt exceeds {PROMPT_MAX} characters")
+    if repeat not in REPEATS:
+        return ToolResult(success=False, error="repeat must be '' or 'daily'")
+    if not isinstance(agent, str) or not agent.strip() or agent.strip().casefold() == "self":
+        target_key = session_key
+    else:
+        peer, perr = _resolve_peer(agent, session_key)
+        if perr is not None:
+            return ToolResult(success=False, error=perr)
+        target_key = peer.conv_id_prefix
+    timer = {
+        "target": target_key,
+        "prompt": prompt.strip(),
+        "fires_at": fires_at,
+        "repeat": repeat,
+    }
+    if _timer_cb is None:
+        return ToolResult(success=False, error="set_timer is not wired")
+    try:
+        result = _timer_cb(session_key, target_key, timer)
+    except Exception as exc:
+        _logger.exception("set_timer callback failed")
+        return ToolResult(success=False, error=f"set_timer failed: {type(exc).__name__}")
+    if not isinstance(result, ToolResult):
+        return ToolResult(success=False, error="set_timer callback returned nothing")
+    return result
+
+
+def cancel_timer(timer_id: str, **kwargs) -> ToolResult:
+    session_key = kwargs.get("session_key", "")
+    project_path = kwargs.get("project_path") or ""
+    if not isinstance(project_path, str) or not project_path:
+        return ToolResult(success=False, error="no project open")
+    if not isinstance(timer_id, str) or not timer_id.strip():
+        return ToolResult(success=False, error="cancel_timer needs a timer id")
+    if _timer_cb is None:
+        return ToolResult(success=False, error="cancel_timer is not wired")
+    try:
+        result = _timer_cb(session_key, None, {"timer_id": timer_id.strip()})
+    except Exception as exc:
+        _logger.exception("cancel_timer callback failed")
+        return ToolResult(success=False, error=f"cancel_timer failed: {type(exc).__name__}")
+    if not isinstance(result, ToolResult):
+        return ToolResult(success=False, error="cancel_timer callback returned nothing")
     return result

@@ -52,7 +52,32 @@ def _imports_widget_construction(path: str) -> bool:
     hand-maintained list is not sufficient — it silently missed
     tests/test_activity_bubbles.py, whose widget is reached through
     ``ui.views.event_cards.build_role_bubble``.
+
+    Dynamic ui imports are treated like a direct ui import: an ``ast.Call``
+    to ``importlib.import_module(...)`` or ``__import__(...)`` whose first
+    argument is a literal string starting with ``ui``/``ui.`` can pull widget
+    constructors into the process invisibly to the static scan (that is how
+    a naive copy of the timer-tool pattern could segfault the headless suite).
+
+    Opt-out: a test module that is genuinely headless-safe may set
+    ``GTK_HEADLESS_SAFE = True`` at module top. The guard then skips the
+    widget-scan for that module entirely (pytest still collects it).
     """
+    # Parse the module's own source once up-front so the opt-out can be
+    # honored before anything else is scanned.
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            root_tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError):
+        return False
+    for node in root_tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "GTK_HEADLESS_SAFE"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is True):
+            return False
+
     seen: set[str] = set()
 
     def resolve(module: str) -> str | None:
@@ -84,6 +109,23 @@ def _imports_widget_construction(path: str) -> bool:
                     and node.func.value.id == "Gtk"
                     and node.func.attr[:1].isupper()):
                 return True
+            # A dynamic ui import (importlib.import_module / __import__ with a
+            # literal "ui" argument) can pull widget constructors in invisibly
+            # to the static import scan — treat it as constructs-widgets too.
+            if isinstance(node, ast.Call):
+                func = node.func
+                is_dynamic_ui_import = (
+                    (isinstance(func, ast.Attribute)
+                     and isinstance(func.value, ast.Name)
+                     and func.value.id == "importlib"
+                     and func.attr == "import_module")
+                    or (isinstance(func, ast.Name) and func.id == "__import__")
+                )
+                if is_dynamic_ui_import and node.args:
+                    arg = node.args[0]
+                    if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                            and (arg.value == "ui" or arg.value.startswith("ui."))):
+                        return True
             # Follow intra-project imports out of this file.
             targets: list[str] = []
             if isinstance(node, ast.ImportFrom) and node.module:

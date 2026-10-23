@@ -128,6 +128,17 @@ def set_feed_card_callback(cb) -> None:
     _set(cb)
 
 
+def set_timer_callback(cb) -> None:
+    """Install the timer scheduling callback.
+
+    Trigger: the ``set_timer`` / ``cancel_timer`` tool handlers, after every
+    field is validated. Signature ``(caller_session_key, target_session_key,
+    timer: dict) -> ToolResult``; ``target_session_key=None`` cancels.
+    """
+    from agent.group_tools import set_timer_callback as _set
+    _set(cb)
+
+
 def _get_approval(session_key: str, tool_name: str, arguments: dict, *, approval_callback=None) -> bool:
     """Return True if exec_command is approved, False otherwise.
 
@@ -2360,6 +2371,66 @@ def _register_tools() -> None:
                task_id="", **kwargs: _group.feed_card(
             type, title, body, file, additions, deletions, task_id, **kwargs
         ),
+    )
+
+    _TOOLS["set_timer"] = (
+        ToolDefinition(
+            name="set_timer",
+            description=(
+                "Schedule a prompt to be delivered to an agent after a "
+                "wall-clock delay. delay is '90s'/'45m'/'2h'/'at 14:30'. "
+                "agent defaults to self. repeat 'daily' re-arms. Returns "
+                "the timer id. Timers only fire while the app is running."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "delay": {
+                        "type": "string",
+                        "description": (
+                            "Wall-clock delay: '90s', '45m', '2h', "
+                            "'1h30m', or 'at HH:MM(:SS)' (24h, system-local)"
+                        ),
+                    },
+                    "prompt": {"type": "string", "description": "Prompt to deliver"},
+                    "agent": {
+                        "type": "string",
+                        "description": "Target agent (display name, role, or agent:<role> key); defaults to self",
+                    },
+                    "repeat": {
+                        "type": "string",
+                        "enum": ["", "daily"],
+                        "description": "'' = one-shot, 'daily' re-arms after firing",
+                    },
+                },
+                "required": ["delay", "prompt"],
+            },
+            requires_approval=False,
+        ),
+        lambda delay, prompt, agent="", repeat="", **kwargs: _group.set_timer(  # type: ignore
+            delay, prompt, agent, repeat, **kwargs
+        ),
+    )
+
+    _TOOLS["cancel_timer"] = (
+        ToolDefinition(
+            name="cancel_timer",
+            description=(
+                "Cancel a scheduled timer by its id (returned by set_timer)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "timer_id": {
+                        "type": "string",
+                        "description": "Timer id to cancel",
+                    },
+                },
+                "required": ["timer_id"],
+            },
+            requires_approval=False,
+        ),
+        lambda timer_id, **kwargs: _group.cancel_timer(timer_id, **kwargs),  # type: ignore
     )
 
 
