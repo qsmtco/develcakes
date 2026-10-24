@@ -367,12 +367,12 @@ class TestRemoteStatusSummary:
         win._project_handler = None
         assert "no project data" in win._remote_status_summary().lower()
 
-    def test_summary_includes_project_and_review(self, win):
+    def test_summary_includes_project_and_members(self, win):
         win._project_handler.get_project_members.return_value = ["agent:coder"]
         out = win._remote_status_summary()
         assert "Proj" in out
         assert "Members: 1" in out
-        assert "Review:" in out
+        assert "Review:" not in out
 
 
 # ── SP4 B5: documentation presence (source-shape guards) ─────────────────

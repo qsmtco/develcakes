@@ -448,6 +448,8 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib_module=GLib,
             awareness_module=self._awareness,
         )
+        # Revert-failure toast → project chat (same surface ReviewHandler used).
+        self._project_handler.set_on_revert_status(self._on_command_text)
         # Wire left_panel project events → ProjectHandler
         # Project list handler — provides project cards with colors and data
         from ui.handlers.project_list_handler import ProjectListHandler
@@ -1771,18 +1773,11 @@ class MainWindow(Gtk.ApplicationWindow):
             return "No active project."
         try:
             members = ph.get_project_members(name)
-            review_status = "not started"
-            rh = getattr(self, "_review_handler", None)
-            if rh is not None:
-                state = rh.get_state(name)
-                if state is not None and state.is_active():
-                    review_status = "active"
         except Exception:
             logger.exception("remote status summary failed")
             return f"Project: {name} (status unavailable)"
         return (f"Project: {name}\n"
-                f"Members: {len(members)}\n"
-                f"Review: {review_status}")
+                f"Members: {len(members)}")
 
     def _on_bridge_state_change(self, state: str) -> None:
         """Drive the toolbar + honesty feed card from bridge state.

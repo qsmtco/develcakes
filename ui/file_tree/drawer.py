@@ -334,22 +334,11 @@ class FileTreeDrawerMixin:
         self._update_column_visibility_for_drawers()
 
     def _trigger_diff_load(self, file_path: str, drawer_box: Gtk.Box) -> None:
-        """Trigger lazy load of diff content for a file's drawer.
-
-        Resolves checkpoint SHA from active review if ProjectHandler is available.
-        """
+        """Trigger lazy load of diff content for a file's drawer (diff vs HEAD)."""
         if not isinstance(drawer_box, Gtk.Box):
             return
         project_path = self._project_path or ""
         checkpoint_sha = None
-        if self._project_handler and self._project_name:
-            try:
-                from models.review_state import ReviewState
-                review_state = self._project_handler.get_review_state(self._project_name)
-                if review_state and review_state.is_active():
-                    checkpoint_sha = review_state.checkpoint_sha
-            except Exception:
-                pass  # Non-fatal — fall back to HEAD
         self._load_drawer_diff(file_path, drawer_box, project_path, checkpoint_sha)
 
     @staticmethod
@@ -673,10 +662,36 @@ class FileTreeDrawerMixin:
         if current_drawer_box is not drawer_box:
             return  # Stale drawer_box
 
-        # BUG #1: Wrap revert in try/except — show error in diff_box on failure
+        # BUG #1: Wrap revert in try/except — show error in diff_box on failure.
+        # The async checkout result is handled by ProjectHandler: on success it
+        # fires on_complete (below) on the main thread; on failure it logs a
+        # WARNING and lands a toast in chat via on_revert_status — the post-
+        # success UI below must NOT run in that case.
         if self._project_name:
+            def _on_revert_complete():
+                # Runs only after a successful checkout, on the main thread.
+                # Switch back to Diff tab
+                diff_tab = getattr(drawer_box, '_diff_tab', None)
+                if diff_tab is not None:
+                    diff_tab.set_active(True)
+
+                # BUG #4: Reset state to prevent accidental double-revert
+                drawer_row.props.history_selected_sha = None
+                revert_btn = getattr(drawer_box, '_revert_btn', None)
+                if revert_btn is not None:
+                    revert_btn.set_visible(False)
+
+                # Reset history tab so it can be re-fetched after revert
+                drawer_row.props.history_loaded = False
+
+                # Reload current diff content
+                self._load_current_diff(file_path)
+
             try:
-                self._project_handler.revert_file_to_sha(self._project_name, file_path, target_sha)
+                self._project_handler.revert_file_to_sha(
+                    self._project_name, file_path, target_sha,
+                    on_complete=_on_revert_complete,
+                )
             except Exception as e:
                 diff_box = getattr(drawer_box, '_diff_box', None)
                 if diff_box is not None:
@@ -688,23 +703,6 @@ class FileTreeDrawerMixin:
                     error_lbl.set_margin_bottom(12)
                     diff_box.append(error_lbl)
                 return
-
-        # Switch back to Diff tab
-        diff_tab = getattr(drawer_box, '_diff_tab', None)
-        if diff_tab is not None:
-            diff_tab.set_active(True)
-
-        # BUG #4: Reset state to prevent accidental double-revert
-        drawer_row.props.history_selected_sha = None
-        revert_btn = getattr(drawer_box, '_revert_btn', None)
-        if revert_btn is not None:
-            revert_btn.set_visible(False)
-
-        # Reset history tab so it can be re-fetched after revert
-        drawer_row.props.history_loaded = False
-
-        # Reload current diff content
-        self._load_current_diff(file_path)
 
     def _load_current_diff(self, file_path: str) -> None:
         """Reload the current working-tree diff for a file (e.g. after revert)."""
@@ -726,17 +724,9 @@ class FileTreeDrawerMixin:
             while diff_box.get_first_child() is not None:
                 diff_box.remove(diff_box.get_first_child())
 
-        # Resolve checkpoint SHA
+        # Diff against HEAD (review was removed — no checkpoint SHA)
         project_path = self._project_path or ""
         checkpoint_sha = None
-        if self._project_handler and self._project_name:
-            try:
-                from models.review_state import ReviewState
-                review_state = self._project_handler.get_review_state(self._project_name)
-                if review_state and review_state.is_active():
-                    checkpoint_sha = review_state.checkpoint_sha
-            except Exception:
-                pass
 
         self._load_drawer_diff(file_path, drawer_box, project_path, checkpoint_sha)
 

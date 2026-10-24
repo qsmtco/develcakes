@@ -39,6 +39,9 @@ class FakeProjects:
     def save_members(self, project_name, members):
         self._members[project_name] = list(members)
 
+    def load_projects(self):
+        return []
+
 
 @pytest.fixture
 def fake_glib():
@@ -256,8 +259,8 @@ class TestCmdStatus:
     """Spec: docs/specs/SPEC-AUDIT-CLEANUP-2-DEAD-CODE-SWEEP.md §Phase 2a.
 
     After SPEC-49 (work-system removal) /status reports Project / Members /
-    Review / Solo DM (plus provider-failure lines when present) — it no
-    longer counts work units.
+    Solo DM (plus provider-failure lines when present) — it no longer
+    counts work units, and after SPEC-58 H1 it has no Review line.
     """
 
     def test_non_project_session_returns_hint(self, handler, fake_projects):
@@ -275,9 +278,122 @@ class TestCmdStatus:
         lines = result.response_text.splitlines()
         assert lines[0] == "Project: myproj"
         assert lines[1] == "Members: 1"
-        assert lines[2] == "Review: not started"
-        assert lines[3] == "Solo DM: @coder"
+        assert lines[2] == "Solo DM: @coder"
         assert not any(ln.startswith("Work units:") for ln in lines)
+        assert not any(ln.startswith("Review:") for ln in lines)
+
+
+# ── revert_file_to_sha (SPEC-58 H1 — standalone revert) ─────────────────────
+
+class TestRevertFileToSha:
+    """SPEC-58 H1: ProjectHandler.revert_file_to_sha is standalone — no review
+    session and no ReviewHandler; failures surface via set_on_revert_status."""
+
+    @staticmethod
+    def _make_git_result(success=True, error=""):
+        from utils.git_ops import GitResult
+        return GitResult(
+            success=success,
+            stdout="",
+            error=error if not success else "",
+            sha="abc123" if success else None,
+        )
+
+    @staticmethod
+    def _run_worker_sync(monkeypatch):
+        """Patch threading.Thread so the daemon worker runs synchronously."""
+        class _SyncThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=False):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+
+            def start(self):
+                self._target(*self._args, **self._kwargs)
+
+        monkeypatch.setattr("threading.Thread", _SyncThread)
+
+    def _patch_checkout(self, monkeypatch, result):
+        calls = []
+        monkeypatch.setattr(
+            "ui.handlers.project_handler.checkout_paths",
+            lambda *a, **k: calls.append((a, k)) or result,
+        )
+        return calls
+
+    def test_noop_when_file_path_not_str(self, handler, fake_projects, monkeypatch):
+        fake_projects.save_members("proj", ["agent:x"])
+        handler.open_project("proj", "/p")
+        calls = self._patch_checkout(monkeypatch, self._make_git_result())
+        handler.revert_file_to_sha("proj", ["file.py"], "abc123")
+        assert calls == []
+
+    def test_noop_when_file_path_starts_with_dash(self, handler, fake_projects, monkeypatch):
+        fake_projects.save_members("proj", ["agent:x"])
+        handler.open_project("proj", "/p")
+        calls = self._patch_checkout(monkeypatch, self._make_git_result())
+        handler.revert_file_to_sha("proj", "--output=file.py", "abc123")
+        assert calls == []
+
+    def test_noop_when_project_path_unresolved(self, handler, monkeypatch):
+        # No open project → _get_project_path returns None → no checkout.
+        calls = self._patch_checkout(monkeypatch, self._make_git_result())
+        handler.revert_file_to_sha("nope", "file.py", "abc123")
+        assert calls == []
+
+    def test_success_checkout_and_on_complete(self, handler, fake_projects, fake_glib, monkeypatch):
+        fake_projects.save_members("proj", ["agent:x"])
+        handler.open_project("proj", "/p")
+        self._run_worker_sync(monkeypatch)
+        calls = self._patch_checkout(monkeypatch, self._make_git_result(success=True))
+        completed = MagicMock()
+        handler.revert_file_to_sha(
+            "proj", "file.py", "abc123", on_complete=completed
+        )
+        fake_glib.dispatch_all()
+        # checkout_paths(project_path, sha, [file_path])
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args[0] == "/p"          # resolved project path
+        assert args[1] == "abc123"      # target sha
+        assert args[2] == ["file.py"]   # single-file path list
+        completed.assert_called_once_with()
+
+    def test_failure_logs_warning_and_dispatches_toast(
+        self, handler, fake_projects, fake_glib, monkeypatch
+    ):
+        fake_projects.save_members("proj", ["agent:x"])
+        handler.open_project("proj", "/p")
+        self._run_worker_sync(monkeypatch)
+        self._patch_checkout(
+            monkeypatch,
+            self._make_git_result(success=False, error="boom"),
+        )
+        status_cb = MagicMock()
+        handler.set_on_revert_status(status_cb)
+        completed = MagicMock()
+        handler.revert_file_to_sha(
+            "proj", "file.py", "badsha", on_complete=completed
+        )
+        fake_glib.dispatch_all()
+        completed.assert_not_called()
+        status_cb.assert_called_once_with(
+            "project:proj", "⚠ Failed to revert file.py: boom"
+        )
+
+    def test_no_review_dependency(self, handler, fake_projects, fake_glib, monkeypatch):
+        # Never wired a review handler — revert still runs checkout.
+        fake_projects.save_members("proj", ["agent:x"])
+        handler.open_project("proj", "/p")
+        self._run_worker_sync(monkeypatch)
+        calls = self._patch_checkout(monkeypatch, self._make_git_result(success=True))
+        completed = MagicMock()
+        handler.revert_file_to_sha(
+            "proj", "file.py", "abc123", on_complete=completed
+        )
+        fake_glib.dispatch_all()
+        assert len(calls) == 1
+        completed.assert_called_once_with()
 
 
 # ── /cost command (Phase 2 — token tracking) ────────────────────────────────

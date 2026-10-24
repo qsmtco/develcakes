@@ -8,15 +8,17 @@
 # communication via callbacks.
 #
 # Thread safety: all GTK operations are dispatched via GLib.idle_add().
-# This handler has no background threads of its own — all entry points
-# (open_project, toggle_agent) are called from the GTK main thread.
+# This handler's entry points (open_project, toggle_agent) run on the GTK
+# main thread; the one background thread (revert_file_to_sha) only calls
+# git_ops.checkout_paths and dispatches results back via GLib.idle_add().
 
 from typing import Callable
 import os
 import logging
+import threading
 
 from models.command import Command, CommandResult
-from utils.git_ops import init_repo, stage_all, commit
+from utils.git_ops import init_repo, stage_all, commit, checkout_paths
 from utils.workflow_state import init_workflow
 from utils.project_awareness import seed_project_prompts
 
@@ -69,6 +71,9 @@ class ProjectHandler:
         # Round 2 BUG #4: fired after a solo-target change so the settings bar
         # can refresh immediately on right-click member selection.
         self._on_solo_target_changed: Callable[[str], None] | None = None
+        # Revert-failure toast callback — injected by window.py via
+        # set_on_revert_status; receives (session_key, toast_text).
+        self._on_revert_status: Callable[[str, str], None] | None = None
 
         # ── Cross-handler callbacks (set by window) ───────────────────────
         self._on_project_opened: list[Callable] = []   # window's callbacks
@@ -624,9 +629,8 @@ class ProjectHandler:
     def cmd_status(self, cmd: Command, session_key: str | None = None) -> CommandResult:
         """/status → project status summary
 
-        Reports Project / Members / Review / Solo DM and provider-failure
-        lines. Work-unit counts were removed with the work system
-        (SPEC-49).
+        Reports Project / Members / Solo DM and provider-failure lines.
+        Work-unit counts were removed with the work system (SPEC-49).
         """
         sk = cmd.source_session_key
         if not sk.startswith("project:"):
@@ -634,13 +638,10 @@ class ProjectHandler:
         project_name = sk.split(":", 1)[1]
         members = self.get_project_members(project_name)
         solo_target = self.get_solo_target(project_name)
-        review_state = self._review_handler.get_state(project_name) if hasattr(self, '_review_handler') and self._review_handler else None
-        review_status = "active" if (review_state and review_state.is_active()) else "not started"
         solo_str = f"@{((self._agent_mgr.get_name(solo_target) if self._agent_mgr else "") or self._extract_display_name(solo_target))}" if solo_target else "none"
         lines = [
             f"Project: {project_name}",
             f"Members: {len(members)}",
-            f"Review: {review_status}",
             f"Solo DM: {solo_str}",
         ]
         try:
@@ -936,36 +937,66 @@ class ProjectHandler:
         """
         self._compact_chat_callback = fn
 
-    def set_review_handler(self, review_handler) -> None:
-        """"Inject ReviewHandler for review state queries in cmd_status."""
-        self._review_handler = review_handler
+    def set_on_revert_status(self, cb: Callable[[str, str], None] | None) -> None:
+        """Inject a callback for revert-failure toasts (session_key, text).
 
-    def get_review_state(self, project_name: str):
-        """Get the ReviewState for a project, or None if no active review.
-
-        Delegates to ReviewHandler.get_state(). Returns None if the review
-        handler hasn't been wired yet (e.g. during startup or in tests).
+        Wired by window.py to ``_on_command_text`` so a failed checkout
+        surfaces the ``⚠ Failed to revert …`` toast in the project chat.
         """
-        if not hasattr(self, '_review_handler') or self._review_handler is None:
-            return None
-        return self._review_handler.get_state(project_name)
+        self._on_revert_status = cb
 
     def revert_file_to_sha(self, project_name: str, file_path: str, target_sha: str,
                            on_complete: Callable[[], None] | None = None) -> None:
-        """Delegate file revert to ReviewHandler.
+        """Revert a single file to a historical commit, standalone.
 
-        Requires a wired review handler; no-op otherwise.
-        on_complete: Forwarded to ReviewHandler.revert_file_to_sha().
+        Runs the git checkout on a background daemon thread and dispatches
+        the result back to the GTK main thread via GLib.idle_add(). No
+        review session is required. ``on_complete`` fires only on success,
+        after the checkout has finished.
 
         BUG #12: Reject file paths starting with '--' to prevent argument
         injection in GitPython's git.checkout() subprocess call.
         """
-        if not hasattr(self, '_review_handler') or self._review_handler is None:
-            return
         if not isinstance(file_path, str) or file_path.startswith("-"):
             return
-        self._review_handler.revert_file_to_sha(project_name, file_path, target_sha,
-                                                  on_complete=on_complete)
+        project_path = self._get_project_path(project_name)
+        if project_path is None:
+            return
+
+        def _dispatch(fn: Callable[[], None]) -> None:
+            """Run fn on the GTK main thread; direct call if no GLib."""
+            if self._GLib is not None:
+                def _wrap():
+                    fn()
+                    return False
+                self._GLib.idle_add(_wrap)
+            else:
+                fn()
+
+        def _revert_worker() -> None:
+            # checkout_paths returns a GitResult and does NOT raise on git
+            # failure — failure is result.success is False, so branch on the
+            # flag explicitly.
+            result = checkout_paths(project_path, target_sha, [file_path])
+            if result.success:
+                if on_complete is not None:
+                    _dispatch(on_complete)
+            else:
+                error = result.error
+                _logger.warning(
+                    "revert_file_to_sha failed for %s: %s", file_path, error
+                )
+                cb = self._on_revert_status
+                if cb is not None:
+                    _dispatch(
+                        lambda: cb(
+                            f"project:{project_name}",
+                            f"⚠ Failed to revert {file_path}: {error}",
+                        )
+                    )
+
+        t = threading.Thread(target=_revert_worker, daemon=True)
+        t.start()
 
     # ── Git commit helper ───────────────────────────────────────────────
 
