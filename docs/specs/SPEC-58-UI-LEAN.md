@@ -96,7 +96,7 @@ Delete `set_project_settings_text` and `set_feed_bar_text`, and the tests that o
 
 ### 2b. Transcript — `ui/views/chat_surface.py`
 
-Delete `TextViewFallback` and both `ChatSurface = TextViewFallback` assignments. `create_chat_surface` returns `ChatSurface(...)`. When `WebKit is None`, raise `RuntimeError("chat requires WebKit")` instead of building a text view. The feed already refuses to run without WebKit (`FeedTab._show_no_webkit`). Match that: do not invent a third UI.
+Delete `TextViewFallback` and both `ChatSurface = TextViewFallback` assignments. `create_chat_surface` returns `ChatSurface(...)`. When `WebKit is None`, raise `RuntimeError("chat requires WebKit")` instead of building a text view. Do not invent a third UI. **Honest framing of the trade-off (PM sign-off required):** the feed does NOT hard-fail without WebKit — it degrades to the `_show_no_webkit` label and keeps running. Chat raising means, because the first chat tab mounts during window construction, a hard boot failure on WebKit-less systems. That is a deliberate product decision this spec makes; if the PM prefers degraded-over-dead, the correct shape is a `_show_no_webkit`-style label in the chat page, never a text-view transcript.
 
 Delete `_make_owned_scroll` and `self._scroll`. In `_ensure_webview`, after `WebKit.WebView()` and `_apply_canvas_color` (SPEC-57, keep that call), `set_vexpand(True)`, `set_hexpand(True)`, and `self.append(self._webview)`. Do not put a `Gtk.ScrolledWindow` around it. The document scrolls (`scroll_to_latest`, `_pending_scroll`, `_BOTTOM_SCRIPT`). That path stays.
 
@@ -130,7 +130,7 @@ Delete those three modules. Delete `models/review_state.py` and its import/expor
 2. Keep the existing input guards: `file_path` must be a `str` and must not start with `"-"` (BUG #12 argument-injection guard); resolve the project path via `self._get_project_path(project_name)` and return early if `None`.
 3. Body: on a background daemon thread, call `git_ops.checkout_paths(project_path, target_sha, [file_path])` (import `checkout_paths` from `utils.git_ops`; `is_repo`/`init_repo`/`stage_all`/`commit` already imported in that file).
 4. On success, dispatch via `self._GLib.idle_add` when `self._GLib` is set (tests may pass None — then call directly): the drawer needs no success toast (it re-renders its diff as it does today); fire `on_complete()` if it is not None.
-5. On failure, log a warning with the module-level `_logger` (the file's existing pattern) and return; the drawer's existing try/except already renders "Revert failed: {e}" into `diff_box` — keep that as the user-facing failure surface.
+5. On failure, log a WARNING with the module-level `_logger` AND surface it — the drawer's try/except only catches synchronous errors and must NOT be relied on: the old ReviewHandler surfaced git failures as a `⚠ Failed to revert …` toast fired from inside its worker thread, never as an exception to the drawer. Keep that toast: add `ProjectHandler.set_on_revert_status(cb)` (house setter pattern; `self._on_revert_status = None` initialized in `__init__`), wire it in `window._build` with `self._project_handler.set_on_revert_status(self._on_command_text)` (the same callback ReviewHandler got as `on_display_text`, window.py:716), and on failure dispatch `cb(f"project:{project_name}", "⚠ Failed to revert {file_path}: {error}")` via `self._GLib.idle_add` (direct call when `self._GLib` is None). Without this, checkout failures are silent.
 6. No review session, no `ReviewState`, no project lock. The pre-existing per-project lock family lived on ReviewHandler and is deleted with it; a single checkout of one file path is not a concurrent-accept hazard.
 
 The drawer call site (`ui/file_tree/drawer.py:679`) is unchanged — it already calls `self._project_handler.revert_file_to_sha(...)`. Do not edit `drawer.py`'s revert wiring. The `checkpoint_sha` blocks at drawer.py:347-350 and 734-737 read `get_review_state` — with the handler gone they always take the `except`/None path and fall back to HEAD. Simplify those two blocks to a direct `checkpoint_sha = None` (the diff shows against HEAD, exactly as it does today outside a review session). `_diff_view` display, `_toggle_drawer`, `_on_history_key_pressed`, revert error label — unchanged.
@@ -300,6 +300,8 @@ This is a deletion. `chat_surface.py` loses the fallback class (about 200 lines)
 
 ## 5. Implementation Order
 
+Start from a clean checkpoint: commit or accept all pending work before step 0. This spec deletes thousands of lines across dozens of files; it must land as one reviewable, bisectable unit on top of a known state.
+
 Do these in order. After each step, run the tests named there. A step that deletes a module will fail import until the tests that import it are deleted in the same step. Land the test delete with the code delete.
 
 0. **The revert cutover, first and alone.** Re-implement `ProjectHandler.revert_file_to_sha` as the standalone checkout (§2d), drop ProjectHandler's review plumbing (§2d-note-2), simplify the two drawer `checkpoint_sha` blocks, delete the `Review:` lines from `cmd_status` and `_remote_status_summary`, and update `tests/test_project_handler.py` (revert case + status pin). The old ReviewHandler is still present but unwired from this path. Run `tests/test_project_handler.py`. This lands the behavior change on its own so a later step cannot entangle it with deletions.
@@ -312,7 +314,7 @@ Do these in order. After each step, run the tests named there. A step that delet
 
 4. **Review, DiffViewer, forward, activity drawer, checkpoint path.** Delete `review_handler.py`, `review_bar.py`, `diff_viewer.py`, `forward_handler.py`, `activity_drawer.py`, `activity_wiring_handler.py`, `models/review_state.py`, the ARH checkpoint path (§2d-note-1), the window wiring, and the command registrations together. `tests/test_review_queues.py`, `tests/test_review_bar_queues.py`, `tests/test_review_handler_feed_card.py`, `tests/test_forward_handler.py`, `tests/test_diff_viewer.py`, `tests/test_activity_drawer.py`, `tests/test_activity_wiring_handler.py` go in this step; the review/checkpoint classes in `tests/test_agent_runtime.py`, `tests/test_stop_all.py` (Test 7), `tests/test_mvp_integration.py`, and the `REPOINTED_FILES` entries in `tests/test_no_gateway_residuals.py` are cut down in this step. Run a grep for `ReviewHandler`, `DiffViewer`, `ForwardHandler`, `ActivityDrawer`, `render_event_card`, `TextViewFallback` and expect zero hits under `ui/`. Tests may still be mid-delete. Finish those imports in this step.
 
-5. **Chat page structure and the surface scrollbar, plus the GTK restore.** This is the layout change. Run `tests/test_chat_surface.py` and `tests/test_chat_render_handler.py`. `TextViewFallback` is gone in this step, not before, so step 4's grep is re-run here and must be clean.
+5. **Chat page structure and the surface scrollbar, plus the GTK restore.** This is the layout change. Run `tests/test_chat_surface.py` and `tests/test_chat_render_handler.py`. `TextViewFallback` is gone in this step, not before, so step 4's grep is re-run here and must be clean. No pytest certifies layout: after the gate, the PM does a visual pass before step 6 — resize the window small and large, switch between tabs, scroll a long transcript to the top and back, open a canvas tab, confirm the project bar never moves.
 
 6. **GTK feed widget leftovers** (`build_context_panel`, dead CSS, the compat card methods). Run `tests/test_feed_html.py`.
 
@@ -331,6 +333,8 @@ grep -RIn --include='*.py' -E 'TextViewFallback|ReviewHandler|DiffViewer|Activit
 Zero hits under `ui/`. In `tests/`, the only allowed survivors are the inlined-revert tests themselves: `revert_file_to_sha` may appear in `tests/test_project_handler.py` only. The `set_review_handler` / `get_review_state` / `_review_handler` strings must be gone everywhere (they have no surviving owner; the comment cleanups that make this true are in §2d). `note_stop_all_aborted` is NOT in the pattern — it survives on ARH with its test. A hit in a deleted-file path means the file is still there.
 
 Also run `python3 -m py_compile` on every touched `ui/` and `models/` file, and `grep -RIn review_state ui models` must be empty.
+
+Finally, a collection sweep over the whole suite — the named gate covers 12 files and cannot see an orphaned import in the other ~240: `python3 -m pytest tests/ --collect-only -q > /dev/null` must exit 0. Paste the exit code with the pytest summary.
 
 Do not "fix" a failure by reintroducing a deleted widget.
 
@@ -366,7 +370,7 @@ Do not "fix" a failure by reintroducing a deleted widget.
 | Last chat tab closes | The project bar stays on `_top_box`. It is not unparented onto a deleted overlay. |
 | Solo target is set | `Chat:` and the project right-click menu still set it. Send still uses it. |
 | Drawer revert, session never started | The checkout still runs — no session gate, no "run /review first" toast. |
-| Drawer revert, checkout fails | The drawer's existing try/except renders "Revert failed: {e}" into `diff_box`. A background-thread log line is written. |
+| Drawer revert, checkout fails | A ⚠ "Failed to revert …" message lands in the project chat via the wired `on_revert_status` callback, and a WARNING is logged. The drawer's try/except remains only for synchronous errors (e.g. a `None` handler). |
 | Drawer revert, file_path starts with `-` | Early return, no checkout, no raise (the BUG #12 guard stays). |
 | Live section button | Still posts through `LiveBridge`. Exec still raises the feed approval card. |
 | Canvas tool | Still `create_chat_tab("canvas:…")` and `append_live` / `load_unsanitized_full_document`. |
