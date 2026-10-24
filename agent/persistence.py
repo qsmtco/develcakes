@@ -186,8 +186,13 @@ def _conversation_from_data(data: dict) -> "Conversation":
 def _apply_loaded_fallbacks(
     conv: "Conversation", session_key: str, data: dict
 ) -> None:
-    """Re-resolve api_key and fill allowed_tools from the live agent def."""
+    """Re-resolve api_key and fill allowed_tools from the live agent def.
+
+    The resolved value is the saved card's key, not an agent-level override.
+    A later card change must be free to replace it.
+    """
     conv.api_key = resolve_api_key_for_conversation(data)
+    conv.api_key_override = False
     # Always refresh allowed_tools from the live agent def when one exists.
     # The saved list is a creation-time cache; without this refresh a tool
     # added to the agent yaml (e.g. set_timer/cancel_timer in SPEC-52) can

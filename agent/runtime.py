@@ -1264,6 +1264,7 @@ class AgentRuntime:
             system_prompt="",
             si_enforcement=si_enforcement,
             api_key=api_key,
+            api_key_override=bool((api_key or "").strip()) if isinstance(api_key, str) else bool(api_key),
             app_title=app_title,
             fallback_provider=fallback_provider or self._config.fallback_provider,
             fallback_model=fallback_model or self._config.fallback_model,
@@ -3249,6 +3250,12 @@ class AgentRuntime:
         self._config.providers[name] = card
         conv.model = model
         conv.provider = name  # card display name — consumers resolve via it
+        # The fallback is a different service. Keep an explicit agent override,
+        # but do not carry the previous card's key onto this one.
+        if not getattr(conv, "api_key_override", False):
+            switched_key = (getattr(card, "api_key", "") or "").strip()
+            if switched_key:
+                conv.api_key = switched_key
         return name
 
     def _note_failover(self, session_key: str, failure, fallback_name: str, turn_token) -> None:
@@ -3304,6 +3311,71 @@ class AgentRuntime:
         # the JEV-refined class into `decide()` (SPEC-46 §4.5).
         self._jev_refine_unknown(failure)
         return ClassifiedProviderError(str(err), failure)
+
+    def _effective_api_key(self, conv, provider_cfg, live_card) -> str:
+        """Return the key for the card this call is about to use.
+
+        An explicit agent override (``api_key_override``) is sent unchanged.
+        Every other key on the conversation is only a cache of whichever card
+        was selected last. Switching cards mid-session must not keep sending
+        that cache: the live card's key wins, then the frozen snapshot.
+        The chosen card key is written back so the cache matches the card.
+        """
+        if getattr(conv, "api_key_override", False):
+            override = getattr(conv, "api_key", None) or ""
+            if isinstance(override, str):
+                override = override.strip()
+            else:
+                override = ""
+            if override:
+                return override
+
+        if live_card is None and provider_cfg is not None:
+            live_card = self._live_provider_card(getattr(provider_cfg, "name", "") or "")
+
+        card_key = ""
+        if live_card is not None:
+            card_key = (getattr(live_card, "api_key", "") or "").strip()
+        if not card_key and provider_cfg is not None:
+            card_key = (getattr(provider_cfg, "api_key", "") or "").strip()
+
+        previous = getattr(conv, "api_key", None) or ""
+        if isinstance(previous, str):
+            previous = previous.strip()
+        else:
+            previous = ""
+        if card_key and previous and previous != card_key:
+            logger.info(
+                "[call-llm] using %s key; conversation still held a key from another card",
+                getattr(provider_cfg, "name", "") or "provider",
+            )
+        if card_key:
+            try:
+                conv.api_key = card_key
+                conv.api_key_override = False
+            except Exception:
+                logger.debug("[call-llm] could not cache the card key on the conversation")
+        return card_key
+
+    def _live_provider_card(self, provider_name: str):
+        """Return the providers.yaml card for this name or model prefix, or None."""
+        if not provider_name:
+            return None
+        try:
+            from utils.providers_store import load_providers
+            live_providers = load_providers()
+        except Exception as e:
+            logger.warning("Cannot load providers.yaml for %s: %s", provider_name, e)
+            return None
+        for p in live_providers:
+            if p.name == provider_name:
+                return p
+        for p in live_providers:
+            pm = (p.default_model or "")
+            live_prefix = pm.split("/")[0] if "/" in pm else pm
+            if live_prefix == provider_name:
+                return p
+        return None
 
     def _call_llm_once(
         self,
@@ -3374,18 +3446,11 @@ class AgentRuntime:
         else:
             provider_name = provider_cfg.name
 
-        # Use per-agent API key if set, otherwise fall back to the LIVE
-        # providers.yaml store. The frozen self._config snapshot (provider_cfg.api_key)
-        # can hold a stale token if the user edited providers in Settings after the
-        # runtime was created (runtimes are cached and never reconfigured on
-        # provider change). Re-reading providers.yaml on every call means a token
-        # update takes effect immediately without requiring an app restart.
-        # (See BUG-fix: "token expired or incorrect" 401 despite a valid key.)
-        effective_api_key = conv.api_key  # per-agent key wins (authoritative)
         # SPEC-01 Phase 2: resolve the live provider CARD once — base_url/caller
         # refresh must run even when a per-agent key is set (the old block was gated
         # on `not effective_api_key`, so a corrected base_url never reached agents
-        # with per-agent keys). api_key precedence is UNCHANGED.
+        # with per-agent keys). The key itself is chosen after this lookup:
+        # an explicit agent override, else the card actually being called.
         live_card = None
         try:
             from utils.providers_store import load_providers
@@ -3413,8 +3478,8 @@ class AgentRuntime:
             # runtime's OWN clone (Phase 1 BUG 6 fix), so in-place mutation
             # cannot leak across runtimes. Invalid or empty live values never
             # clobber the snapshot (caller validated against _PROVIDER_CALLERS;
-            # base_url stripped before compare); api_key precedence is
-            # untouched (per-agent key > live card key > frozen snapshot key).
+            # base_url stripped before compare). The key is chosen after this
+            # block, from the card being called.
             live_base_url = live_card.base_url.strip()
             if live_base_url and live_base_url != provider_cfg.base_url:
                 logger.info("[call-llm] live base_url override for %s: %s -> %s",
@@ -3438,8 +3503,6 @@ class AgentRuntime:
                     live_card.caller, provider_name,
                     sorted(_PROVIDER_CALLERS), provider_cfg.caller,
                 )
-            if not effective_api_key and live_card.api_key:
-                effective_api_key = live_card.api_key
             # Reasoning: a Settings save must affect the next message without
             # restarting the agent. Valid levels (incl. "off") apply; a
             # non-empty invalid string warns and keeps the frozen level.
@@ -3465,9 +3528,7 @@ class AgentRuntime:
                     live_flag, provider_name,
                     getattr(provider_cfg, "supports_reasoning", False),
                 )
-        if not effective_api_key:
-            # Last resort: the (possibly stale) frozen runtime snapshot.
-            effective_api_key = provider_cfg.api_key
+        effective_api_key = self._effective_api_key(conv, provider_cfg, live_card)
         # Use app_title as X-Title header for OpenRouter attribution
         x_title = conv.app_title or ""
         effective_effort = (
@@ -5070,11 +5131,10 @@ class AgentRuntime:
                 f"_call_for_summary: no caller for {caller_key!r}"
             )
 
-        api_key = ""
-        if conv is not None and getattr(conv, "api_key", None):
-            api_key = conv.api_key
-        if not api_key:
-            api_key = getattr(provider_cfg, "api_key", "") or ""
+        if conv is not None:
+            api_key = self._effective_api_key(conv, provider_cfg, None)
+        else:
+            api_key = (getattr(provider_cfg, "api_key", "") or "").strip()
         if not api_key:
             logger.warning(
                 "_call_for_summary: empty api_key for %s; check Settings",

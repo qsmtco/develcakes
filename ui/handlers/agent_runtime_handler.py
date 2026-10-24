@@ -1124,6 +1124,11 @@ class AgentRuntimeHandler(
                             conv.project_path = project_path
                     if agent_def.api_key:
                         conv.api_key = agent_def.api_key
+                        conv.api_key_override = True
+                    elif getattr(conv, "api_key_override", False):
+                        # The agent definition no longer carries its own key.
+                        # The next call takes the key from the card it uses.
+                        conv.api_key_override = False
                     if agent_model:
                         conv.model = agent_model
                         if getattr(agent_def, "llm_name", None):

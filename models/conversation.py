@@ -330,7 +330,11 @@ class Conversation:
     messages: list[Message] = field(default_factory=list)
     model: str = ""                      # e.g. "openai/gpt-4o"
     provider: str | None = None           # provider name for api_key re-resolution (HIGH-3)
-    api_key: str | None = None           # per-agent API key override (from agent def)
+    api_key: str | None = None           # explicit per-agent override, or a cache of the card last called
+    # True only when api_key was set on the agent itself. A key copied from
+    # the previously selected card is not an override: the next call must
+    # use the card it is actually calling.
+    api_key_override: bool = False
     si_enforcement: bool | None = None     # per-agent enforcement override (None → use global)
     app_title: str = ""                   # OpenRouter X-Title header value (e.g. "Coder:develcakes")
     fallback_provider: str | None = None   # plain provider fallback (user-set)

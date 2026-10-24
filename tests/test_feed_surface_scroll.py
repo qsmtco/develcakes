@@ -10,7 +10,7 @@ import gi
 import pytest
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
 
 from models.feed_card import FeedCardData
 from render.feed_html import FEED_SCRIPT, render_feed_card
@@ -37,17 +37,28 @@ class _FakeView:
     def evaluate_javascript(self, script, *args):
         self.evals.append(script)
 
+    def evaluate_javascript_finish(self, result):
+        """The async result of evaluate_javascript resolves to the JSC value.
+
+        `_FakeValue` stands in for that value, so the finished value is the
+        result object itself (a real WebKit view would unwrap the task).
+        """
+        return result
+
     def load_html(self, document, base_uri):
         self.loads.append(document)
 
 
 class _FakeValue:
-    """Stands in for a JSC Value (the message handler's first argument)."""
+    """Stands in for a JSC Value (script-message payload and eval result)."""
 
     def __init__(self, payload: str) -> None:
         self._payload = payload
 
     def to_json(self, _indent) -> str:
+        return self._payload
+
+    def to_string(self) -> str:
         return self._payload
 
 
@@ -84,6 +95,8 @@ def _surface(near_bottom=True, y=None) -> FeedSurface:
     surface._dom_ready = False
     surface._dom_ids = []
     surface._dom_html = {}
+    surface._pending_dom_ids = []
+    surface._pending_dom_html = {}
     surface._patch_in_flight = False
     surface._epoch = 0
     surface._load_epoch = 0
@@ -492,6 +505,18 @@ class TestPlanFeedOps:
         surface = self._surface_with(["a"], ["a", "b"], html_ids=["a"])
         assert surface._plan_feed_ops() is None
 
+    def test_same_order_changed_html_emits_replace_op(self):
+        """FIX 2 (SPEC-57): `order == dom` with changed content must return a
+        replace DICT (not a bare card-id string, which would crash
+        `_ops_script`'s `op.get("op")`)."""
+        surface = self._surface_with(["a", "b"], ["a", "b"])
+        surface._dom_html = {
+            "a": "<article data-card-id=a>old</article>",
+            "b": surface._html["b"],
+        }
+        ops = surface._plan_feed_ops()
+        assert ops == [{"op": "replace", "id": "a", "html": surface._html["a"]}]
+
 
 class TestOpsScript:
     """SPEC-57 §2f `_ops_script` constraints."""
@@ -555,3 +580,162 @@ class TestOpsScript:
         assert "y + grew" in script
         assert "'held'" in script
         assert "'followed'" in script
+
+    def test_replace_before_prepend_in_planner_order_cannot_detach_anchor(self):
+        """FIX 3 (SPEC-57 §2f): `_ops_script` is four ordered phases —
+        removals, anchor capture, inserts (prepends before appends), replaces
+        LAST. The planner may emit `[replace c1, prepend c3]` (replace first)
+        where `c1` could be the anchor `feed.firstChild`; the program must
+        still run the prepend's `insertBefore` before the replace's
+        `replaceChild`. If the replace fired first it would detach the anchor
+        and `insertBefore(node, anchor)` would throw NotFoundError."""
+        script = _ops_script([
+            {
+                "op": "replace",
+                "id": "c1",
+                "html": "<article data-card-id=c1></article>",
+            },
+            {
+                "op": "prepend",
+                "id": "c3",
+                "html": "<article data-card-id=c3></article>",
+            },
+        ])
+        anchor = script.index("var anchor = feed.firstChild;")
+        insert_before = script.index("feed.insertBefore(nodeP, anchor);")
+        replace_child = script.index("feed.replaceChild(nodeR, old);")
+        assert anchor < insert_before < replace_child
+
+
+@pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
+class TestRealWebViewPatchEndToEnd:
+    """FIX 1 (SPEC-57): the production patch callback shape on a REAL WebKit
+    view (not the `__new__` fakes elsewhere in this module).
+
+    The e2e proof: seed one card via `load_html`, then upsert a second card.
+    The second card must be applied by exactly one `evaluate_javascript` (the
+    patch) with NO second `load_html` — proven by a page-global marker that a
+    full-document reload would destroy. The DOM must match `_dom_ids`.
+
+    Needs a display (run under `xvfb-run -a`); conftest skips the module
+    headless because this class constructs a `Gtk.Window` / web view.
+    """
+
+    @staticmethod
+    def _present(surface):
+        win = Gtk.Window()
+        # D1 (round-3 audit): FeedSurface is a controller, not a Gtk.Widget —
+        # mount the webview it owns (FeedTab does the same via attach).
+        win.set_child(surface.webview)
+        win.set_default_size(640, 480)
+        win.present()
+        return win
+
+    @staticmethod
+    def _pump(sec):
+        ctx = GLib.MainContext.default()
+        import time
+
+        end = time.time() + sec
+        while time.time() < end:
+            while ctx.pending():
+                ctx.iteration(False)
+            time.sleep(0.02)
+
+    def _await_ready(self, surface, timeout=10):
+        import time
+
+        end = time.time() + timeout
+        while time.time() < end and not surface._dom_ready:
+            self._pump(0.05)
+        assert surface._dom_ready, "feed document never reached FINISHED commit"
+
+    def _eval_main(self, surface, code, timeout=6):
+        # D2: the WebKitGTK eval callback is (view, result, user_data).
+        # D3: the timeout guard is REMOVED after the loop so a later eval's
+        # MainLoop cannot be quit early by an earlier eval's stale timeout.
+        box = {}
+        loop = GLib.MainLoop()
+
+        def cb(v, r, _data):
+            try:
+                box["v"] = v.evaluate_javascript_finish(r).to_string()
+            except Exception:  # noqa: BLE001
+                box["v"] = None
+            loop.quit()
+
+        tid = GLib.timeout_add_seconds(timeout, lambda: (loop.quit(), False)[1])
+        try:
+            surface._webview.evaluate_javascript(code, -1, None, None, None, cb, None)
+            loop.run()
+        finally:
+            GLib.source_remove(tid)
+        return box.get("v")
+
+    def test_new_card_patches_in_place_no_reload(self):
+        actions = []
+        s = FeedSurface(
+            lambda cid, action: actions.append((cid, action)),
+            is_near_bottom=None,
+            on_load_finished=None,
+        )
+        win = self._present(s)
+        try:
+            # Initial document: a real load_html -> FINISHED commit.
+            s.set_cards([_card("card-1", "one")])
+            self._await_ready(s)
+            assert s._dom_ids == ["card-1"]
+            assert s._dom_ready is True
+
+            # Plant a page-global marker. A second `load_html` (a reload)
+            # would replace the document and lose it — this is the proof that
+            # the upcoming card change patches the SAME page.
+            assert self._eval_main(s, "window.__alive = 1; 'ok'") == "ok"
+
+            evals_before = s._patch_count
+            s.upsert(_card("card-2", "two"))
+
+            import time
+
+            end = time.time() + 8
+            while time.time() < end and len(s._dom_ids) < 2:
+                self._pump(0.05)
+
+            # Exactly one patch eval, no recovery, no reload.
+            assert s._patch_count == evals_before + 1, "expected exactly one patch eval"
+            assert s._dom_ids == ["card-1", "card-2"]
+            assert s._dom_ready is True
+            assert s._load_in_flight is False
+            assert s._queued_reload is False
+
+            # Live document agrees: the marker survived (no reload) and the
+            # DOM now holds both cards in order.
+            got = self._eval_main(
+                s,
+                "JSON.stringify({alive: window.__alive || 0, "
+                "ids: Array.prototype.map.call("
+                "document.querySelectorAll('article[data-card-id]'), "
+                "function (n) { return n.getAttribute('data-card-id'); })})",
+            )
+            assert got == '{"alive":1,"ids":["card-1","card-2"]}'
+        finally:
+            win.close()
+            win.destroy()
+
+
+class TestCanvasColor:
+    """FIX 5a (SPEC-57 §2h item 1): `_apply_canvas_color` applies a parsed,
+    opaque background to a web view — it must not be a no-op."""
+
+    def test_apply_canvas_color_sets_opaque_background(self):
+        from ui.views.feed_surface import _apply_canvas_color
+
+        seen = {}
+
+        class _FakeView:
+            def set_background_color(self, rgba):
+                seen["rgba"] = rgba
+
+        _apply_canvas_color(_FakeView())
+        assert seen["rgba"].alpha == 1.0
+        assert seen["rgba"].red > 0

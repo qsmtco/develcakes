@@ -80,18 +80,30 @@ _NEAR_BOTTOM_PX = 80
 def _ops_script(ops: list[dict]) -> str:
     """One JavaScript program that applies the DOM patch `ops`.
 
-    Returns ``[out, outcome]`` where ``out`` is the array of resulting
-    ``data-card-id`` strings (so the eval callback can commit ``_dom_ids``)
-    and ``outcome`` is ``'followed'`` when the reader was near the bottom or
-    ``'held'`` otherwise. Removal uses ``removeChild`` and replacement uses
-    ``replaceChild`` (never ``.remove`` / ``.replaceWith``). Inserted
-    articles get the ``feed-card-enter`` class; replacements do not.
+    Returns a JSON string encoding ``[out, outcome]`` where ``out`` is the
+    array of resulting ``data-card-id`` strings (so the eval callback can
+    commit ``_dom_ids``) and ``outcome`` is ``'followed'`` when the reader
+    was near the bottom or ``'held'`` otherwise. The string is produced by
+    ``JSON.stringify`` so ``JSC.Value.to_string()`` in
+    ``_on_patch_finished`` yields the exact JSON the Python side parses
+    (an array value stringifies comma-joined, not as JSON). Removal uses
+    ``removeChild`` and replacement uses ``replaceChild`` (never
+    ``.remove`` / ``.replaceWith``). Inserted articles get the
+    ``feed-card-enter`` class; replacements do not.
 
     Nodes are found with ``find()``: it scans ``feed.querySelectorAll(
     'article[data-card-id]')`` and compares the DECODED ``getAttribute``
     value against the (JSON-escaped, decoded) op id. A CSS attribute selector
     is never built from a card id — a quote or ``]`` in an id would make
-    ``querySelector`` throw. The prepend anchor is captured AFTER removals.
+    ``querySelector`` throw.
+
+    The program is four ordered phases, so it is immune to the order of
+    ``ops`` as emitted by the planner: (1) ALL removals, (2) capture the
+    prepend anchor ``feed.firstChild`` AFTER removals, (3) inserts —
+    prepends before the anchor, then appends — each carrying
+    ``feed-card-enter``, and (4) replaces LAST. Running replaces last means a
+    replace of the anchor node can never detach it before an ``insertBefore``
+    uses it (a detached anchor would throw ``NotFoundError``).
 
     Scroll: ``y`` and ``before`` are captured before mutating. Following
     readers (near bottom) land on the bottom. While NOT following, a prepend
@@ -102,7 +114,7 @@ def _ops_script(ops: list[dict]) -> str:
     lines = [
         "(function () {",
         "  var feed = document.getElementById('feed');",
-        "  if (!feed) return [[], 'held'];",
+        "  if (!feed) return JSON.stringify([[], 'held']);",
         "  function find(id) {",
         "    var all = feed.querySelectorAll('article[data-card-id]');",
         "    for (var i = 0; i < all.length; i++) {",
@@ -117,6 +129,7 @@ def _ops_script(ops: list[dict]) -> str:
         "  var before = doc.scrollHeight;",
         "  var prepended = false;",
     ]
+    # Phase 1 — ALL removals first (find + removeChild).
     for op in ops:
         if op.get("op") == "remove":
             lines.append(
@@ -127,38 +140,63 @@ def _ops_script(ops: list[dict]) -> str:
             lines.append(
                 "  if (el && el.parentNode === feed) feed.removeChild(el);"
             )
+    # Phase 2 — capture the prepend anchor AFTER removals. Because replaces
+    # run last (phase 4), no later op can detach this anchor, so every
+    # insertBefore below targets a node still attached to `#feed`.
     lines.append("  var anchor = feed.firstChild;")
+    # Phase 3 — inserts only: prepends (before the anchor) then appends.
+    # Both inserted cards carry `feed-card-enter`; replacements do not.
     for op in ops:
-        kind = op.get("op")
-        if kind not in ("append", "prepend", "replace"):
+        if op.get("op") != "prepend":
             continue
-        lines.append("  var wrap = document.createElement('div');")
+        lines.append("  var wrapP = document.createElement('div');")
         lines.append(
-            "  wrap.innerHTML = "
+            "  wrapP.innerHTML = "
             + json.dumps(op["html"], ensure_ascii=True)
             + ";"
         )
-        lines.append("  var node = wrap.firstChild;")
-        if kind in ("append", "prepend"):
-            lines.append(
-                "  if (node) node.className = (node.className ? "
-                "node.className + ' ' : '') + 'feed-card-enter';"
-            )
-        if kind == "append":
-            lines.append("  if (node) feed.appendChild(node);")
-        elif kind == "prepend":
-            lines.append("  prepended = true;")
-            lines.append("  if (node) feed.insertBefore(node, anchor);")
-        else:
-            lines.append(
-                "  var old = find("
-                + json.dumps(op["id"], ensure_ascii=True)
-                + ");"
-            )
-            lines.append(
-                "  if (old && old.parentNode === feed) "
-                "feed.replaceChild(node, old);"
-            )
+        lines.append("  var nodeP = wrapP.firstChild;")
+        lines.append(
+            "  if (nodeP) nodeP.className = (nodeP.className ? "
+            "nodeP.className + ' ' : '') + 'feed-card-enter';"
+        )
+        lines.append("  prepended = true;")
+        lines.append("  if (nodeP) feed.insertBefore(nodeP, anchor);")
+    for op in ops:
+        if op.get("op") != "append":
+            continue
+        lines.append("  var wrapA = document.createElement('div');")
+        lines.append(
+            "  wrapA.innerHTML = "
+            + json.dumps(op["html"], ensure_ascii=True)
+            + ";"
+        )
+        lines.append("  var nodeA = wrapA.firstChild;")
+        lines.append(
+            "  if (nodeA) nodeA.className = (nodeA.className ? "
+            "nodeA.className + ' ' : '') + 'feed-card-enter';"
+        )
+        lines.append("  if (nodeA) feed.appendChild(nodeA);")
+    # Phase 4 — replaces LAST (find old + replaceChild).
+    for op in ops:
+        if op.get("op") != "replace":
+            continue
+        lines.append("  var wrapR = document.createElement('div');")
+        lines.append(
+            "  wrapR.innerHTML = "
+            + json.dumps(op["html"], ensure_ascii=True)
+            + ";"
+        )
+        lines.append("  var nodeR = wrapR.firstChild;")
+        lines.append(
+            "  var old = find("
+            + json.dumps(op["id"], ensure_ascii=True)
+            + ");"
+        )
+        lines.append(
+            "  if (old && old.parentNode === feed) "
+            "feed.replaceChild(nodeR, old);"
+        )
     lines.extend([
         "  if (wasBottom) {",
         "    window.scrollTo(0, doc.scrollHeight);",
@@ -171,7 +209,7 @@ def _ops_script(ops: list[dict]) -> str:
             "  for (var i = 0; i < kids.length; i++) "
             "out.push(kids[i].getAttribute('data-card-id'));"
         ),
-        "  return [out, wasBottom ? 'followed' : 'held'];",
+        "  return JSON.stringify([out, wasBottom ? 'followed' : 'held']);",
         "})();",
     ])
     return "\n".join(lines)
@@ -227,6 +265,13 @@ class FeedSurface:
         self._dom_ready = False
         self._dom_ids: list[str] = []
         self._dom_html: dict[str, str] = {}
+        # `_pending_dom_ids` / `_pending_dom_html` snapshot exactly what the
+        # CURRENT in-flight `load_html` is rendering (captured in `_flush`).
+        # They are adopted on FINISHED instead of the live `_order`/`_html`,
+        # so cards removed between `load_html` and FINISHED never leak into the
+        # DOM model (SPEC-57 §3, first feed paint).
+        self._pending_dom_ids: list[str] = []
+        self._pending_dom_html: dict[str, str] = {}
         self._patch_in_flight = False
         self._epoch = 0
         self._load_epoch: int | None = None
@@ -278,6 +323,8 @@ class FeedSurface:
         self._dom_ready = False
         self._dom_ids = []
         self._dom_html = {}
+        self._pending_dom_ids = []
+        self._pending_dom_html = {}
         self._queued_reload = False
         self._load_epoch = None
         self._order = []
@@ -374,6 +421,8 @@ class FeedSurface:
             self._dom_ready = False
             self._dom_ids = []
             self._dom_html = {}
+            self._pending_dom_ids = []
+            self._pending_dom_html = {}
         # Patch path: the document is loaded and we know what it contains.
         if self._dom_ready and self._dom_ids and self._order:
             self._fragments()
@@ -409,6 +458,15 @@ class FeedSurface:
         self._scroll_after = bool(self._doc_near_bottom)
         self._load_epoch = self._epoch
         document = render_feed_document(self._fragments())
+        # Snapshot the ids+html ACTUALLY being rendered by this load. The
+        # live `_order`/`_html` may change before FINISHED (a `set_cards`
+        # or removal between `load_html` and FINISHED); adopting the live
+        # model would teach the DOM about cards that never painted. Adopt
+        # this snapshot in `_on_load_changed` instead (SPEC-57 §3).
+        self._pending_dom_ids = list(self._order)
+        self._pending_dom_html = {
+            cid: self._html[cid] for cid in self._order if cid in self._html
+        }
         self._load_in_flight = True
         try:
             self._webview.load_html(document, "about:blank")
@@ -440,7 +498,13 @@ class FeedSurface:
             if cid in dom_set and self._html.get(cid) != self._dom_html.get(cid)
         ]
         if order == dom:
-            return replacements if replacements else []
+            # Same id order: the only possible change is card content, so a
+            # replace op per changed id (never bare id strings — `_ops_script`
+            # expects dict ops).
+            return [
+                {"op": "replace", "id": cid, "html": self._html[cid]}
+                for cid in replacements
+            ]
         if dom and wanted and not (dom_set & wanted):
             return None
         keep = [cid for cid in dom if cid in wanted]
@@ -491,6 +555,8 @@ class FeedSurface:
         self._dom_ready = False
         self._dom_ids = []
         self._dom_html = {}
+        self._pending_dom_ids = []
+        self._pending_dom_html = {}
         self._queued_reload = True
         self._dirty = True
         self._schedule()
@@ -502,12 +568,20 @@ class FeedSurface:
         ignored: it must NOT write the DOM model and must NOT clear a newer
         ``_patch_in_flight``. A missing / unparseable id list means the DOM is
         gone or inconsistent — recover with a full load.
+
+        Production shape only: ``result`` is the GAsyncResult of
+        ``evaluate_javascript``, and the finished ``JSC.Value`` is read out
+        through ``view.evaluate_javascript_finish(result)``. ``_ops_script``
+        returns a JSON string, so ``to_string()`` yields the exact text
+        ``json.loads`` expects. There is deliberately no JSC-value fallback:
+        the message-handler path (``_on_script_message``) is the only place a
+        JSC Value appears.
         """
         if epoch != self._epoch:
             return
         self._patch_in_flight = False
         try:
-            raw = result.to_json(0) if hasattr(result, "to_json") else None
+            raw = view.evaluate_javascript_finish(result).to_string()
             payload = json.loads(raw) if isinstance(raw, str) else None
         except Exception:
             logger.exception("feed patch result was not JSON")
@@ -565,12 +639,18 @@ class FeedSurface:
             self._dom_ready = False
             self._dom_ids = []
             self._dom_html = {}
+            self._pending_dom_ids = []
+            self._pending_dom_html = {}
             self._dirty = True
             self._schedule()
             return
         self._dom_ready = True
-        self._dom_ids = list(self._order)
-        self._dom_html = {cid: self._html.get(cid, "") for cid in self._order}
+        # Adopt the snapshot taken in `_flush` (the ids+html that THIS load
+        # actually rendered), not the live `_order`/`_html` — cards removed
+        # between `load_html` and FINISHED never painted and must not enter
+        # the DOM model (SPEC-57 §3 first feed paint).
+        self._dom_ids = list(self._pending_dom_ids)
+        self._dom_html = dict(self._pending_dom_html)
         follow = self._scroll_after
         self._scroll_after = False
         if follow:
@@ -588,6 +668,8 @@ class FeedSurface:
         self._dom_ready = False
         self._dom_ids = []
         self._dom_html = {}
+        self._pending_dom_ids = []
+        self._pending_dom_html = {}
         if self._dirty:
             self._schedule()
         return False
@@ -598,6 +680,8 @@ class FeedSurface:
         self._dom_ready = False
         self._dom_ids = []
         self._dom_html = {}
+        self._pending_dom_ids = []
+        self._pending_dom_html = {}
         if self._dirty:
             self._schedule()
 

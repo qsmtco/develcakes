@@ -669,6 +669,9 @@ body { background: #1a1b26; color: #a9b1d6; font-family: sans-serif;
 .chat-copy-btn.copied .chat-copy-icon { display: none; }
 .chat-copy-btn.copied .chat-copy-check { display: block; }
 .agent-box.role-user { max-width: 78%; margin-left: auto; }
+/* PM tweak 2026-10-24: mirror the user bubble's inset on the agent side so
+   the two column-edges interweave instead of both hugging the pane edge. */
+.agent-box:not(.role-user) { max-width: 92%; margin-right: 6%; }
 .agent-box.role-user .agent-card { border-color: #9ece6a;
                                     background: rgba(158,206,106,.08); }
 pre { background: #16161e; padding: 6px; border-radius: 4px; }

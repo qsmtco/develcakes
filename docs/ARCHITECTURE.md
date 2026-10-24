@@ -2811,6 +2811,8 @@ set_progress_opacity(opacity)      # Set bar opacity 0.0..1.0 (for subtle idle p
 
 ### 3.22a `ui/views/feed_card.py` — Project Feed Card Widgets (Phase 5)
 
+The live feed is one `WebKit.WebView` in `ui/views/feed_surface.py`. The first paint and any structural reset use `load_html`. Later inserts, deletes, and in-place card updates patch `#feed` with `evaluate_javascript`. The view background and the `.feed-scroll` host are `#1a1b26`. Chat uses the same view background from `ChatSurface._ensure_webview`.
+
 **Responsibility:** GTK widget factories for individual feed cards in the project tab. Pure view — no business logic. This is the `NO_WEBKIT` fallback. When WebKit is available the feed document is `render/feed_html.py` plus `ui/views/feed_surface.py`; bodies stay escaped text.
 
 **Owns:** Card widget layout and CSS class application. State comes from `FeedCardData` dicts passed at construction.

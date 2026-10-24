@@ -504,11 +504,21 @@ def _make_runtime(providers: dict[str, LLMProviderConfig]) -> AgentRuntime:
     return AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
 
 
-def _inject_conversation(rt: AgentRuntime, api_key: str | None = None) -> None:
+def _inject_conversation(
+    rt: AgentRuntime,
+    api_key: str | None = None,
+    *,
+    api_key_override: bool = False,
+    provider: str | None = None,
+) -> None:
     """_call_llm needs self._conversations[session_key] with .api_key, .model,
     .app_title — inject directly (Phase 2 instructions, verified facts)."""
     rt._conversations["s1"] = SimpleNamespace(
-        api_key=api_key, model="p1/m1", app_title="t"
+        api_key=api_key,
+        api_key_override=api_key_override,
+        model="p1/m1",
+        provider=provider,
+        app_title="t",
     )
 
 
@@ -541,7 +551,7 @@ class TestCallLlmLiveRefresh:
         # AND the per-agent key must still beat the live card's key.
         frozen = _make_provider("p1", base_url=_OLD_URL, caller="zai")
         rt = _make_runtime(providers={"p1": frozen})
-        _inject_conversation(rt, api_key="sk-override")
+        _inject_conversation(rt, api_key="sk-override", api_key_override=True)
         save_providers(
             [_make_provider("p1", base_url=_LIVE_URL, api_key="sk-live-key")]
         )
@@ -552,7 +562,7 @@ class TestCallLlmLiveRefresh:
         assert result == {"content": "captured"}
         assert cap.calls, "provider.call never reached — refresh untestable"
         assert cap.calls[0]["base_url"] == _LIVE_URL  # refresh ran despite override
-        assert cap.calls[0]["api_key"] == "sk-override"  # precedence unchanged
+        assert cap.calls[0]["api_key"] == "sk-override"  # explicit override still wins
 
     def test_caller_refreshed_lowercased(self, tmp_config_dir, monkeypatch):
         # Caller assignment lowercases (matches _resolve_caller_key at :2053).
@@ -754,3 +764,24 @@ class TestCallLlmLiveRefresh:
             rt._config.providers["p1"].base_url == "https://name-match.example.com/v1"
         )
         assert cap.calls[0]["base_url"] == "https://name-match.example.com/v1"
+
+    def test_stale_conversation_key_follows_the_card_being_called(
+        self, tmp_config_dir, monkeypatch
+    ):
+        # The conversation was loaded against another card, so conv.api_key
+        # is that card's token. The call is now for p1. The cached token
+        # must not be sent, and a key edited in Settings must win over both
+        # the cache and the frozen snapshot.
+        frozen = _make_provider("p1", base_url=_OLD_URL, caller="openrouter")
+        rt = _make_runtime(providers={"p1": frozen})
+        _inject_conversation(rt, api_key="sk-from-the-previous-card", provider="p1")
+        save_providers(
+            [_make_provider("p1", base_url=_LIVE_URL, api_key="sk-live-key", caller="openrouter")]
+        )
+        cap = _patch_provider(monkeypatch)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert cap.calls[0]["api_key"] == "sk-live-key"
+        assert rt._conversations["s1"].api_key == "sk-live-key"
+        assert rt._conversations["s1"].api_key_override is False

@@ -106,6 +106,21 @@ class TestFailoverChain:
         assert rt._conversations["s1"].model == "zai/glm"
         assert notices and "M3" in notices[0][1]
 
+    def test_failover_sends_the_fallback_cards_key(self, monkeypatch):
+        # A key cached from the primary card must not be sent to the fallback.
+        rt = _runtime(_cfg())
+        _conv(rt, api_key="sk-from-zai", api_key_override=False)
+        provider = _Provider([
+            _http(401, "unauthorized"),
+            {"choices": [{"message": {"content": "from fallback"}}]},
+        ])
+        monkeypatch.setattr("agent.runtime._get_provider", lambda _key: provider)
+
+        rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
+
+        assert [call["api_key"] for call in provider.calls] == ["sk-a", "sk-b"]
+        assert rt._conversations["s1"].api_key == "sk-b"
+
     def test_schema_400_does_not_fail_over(self, monkeypatch):
         rt = _runtime(_cfg())
         _conv(rt)
