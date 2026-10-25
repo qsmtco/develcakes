@@ -24,7 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.handlers.chat_handler import ChatHandler
 from ui.handlers.chat_render_handler import ChatRenderHandler
-from ui.views.chat_surface import TextViewFallback
 from ui.views.left_panel import LeftPanel
 from ui.views.main_content import MainContent
 
@@ -61,15 +60,41 @@ def _find_button(widget, label: str):
     return None
 
 
-class _SpySurface(TextViewFallback):
-    """Records raw full-document loads — no WebKit required."""
+class _SpySurface(Gtk.Box):
+    """Local stand-in for the chat surface (no WebKit). Records raw full-
+    document loads and keeps the same ``_rows`` row list the render handler
+    reads, so welcome rows can be inspected without a WebView."""
 
     def __init__(self, *a, **k):
-        super().__init__(*a, **k)
+        super().__init__()
         self.loaded: list[str] = []
+        self._rows: list[dict] = []
+        self.appended: list[dict] = []
 
     def load_unsanitized_full_document(self, html: str) -> None:
         self.loaded.append(html)
+
+    def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
+        self._rows.append(
+            {"role": role, "html": html_fragment, "agent": agent_name or "",
+             "color": agent_color}
+        )
+        self.appended.append({"role": role, "html": html_fragment, "agent": agent_name})
+
+    def stream_delta(self, session_key, text, agent_name=None):
+        pass
+
+    def end_stream(self, session_key, agent_name=None):
+        pass
+
+    def append_live(self, payload_html, agent_name=None, agent_color=None):
+        pass
+
+    def clear(self):
+        self._rows.clear()
+
+    def destroy(self):
+        self._rows.clear()
 
 
 @pytest.fixture

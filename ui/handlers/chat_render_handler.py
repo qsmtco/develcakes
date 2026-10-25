@@ -364,7 +364,7 @@ class ChatRenderHandler:
             return False
         clear = getattr(surface, "clear", None)
         if not callable(clear):
-            return False  # TextViewFallback or a legacy surface without clear
+            return False  # a legacy surface without a clear() method
         clear()
         return True
 

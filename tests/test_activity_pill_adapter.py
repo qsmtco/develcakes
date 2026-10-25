@@ -2,8 +2,9 @@
 #
 # This file runs BARE — no display, no xvfb (proven: env -u DISPLAY green).
 # Every surface is a pure fake. (UI-PILLBAR P2: SP1's test 7 — the real
-# set_activity_status driven via TextViewFallback.__new__ — retired with the
-# per-surface pill; its contract lives in tests/test_activity_pill_label.py.
+# set_activity_status driven via the retired text-view surface's __new__ —
+# retired with the per-surface pill; its contract lives in
+# tests/test_activity_pill_label.py.
 # test 8's ChatRenderHandler imports gi but only calls pure-Python code
 # (render_document/markdown → nh3 — no GTK calls on this path).
 #
@@ -196,10 +197,10 @@ def test_app_css_pill_rules_complete_and_distinct():
 
 # ── SP1 coverage 7: retired in UI-PILLBAR P2 ──────────────────────────────
 # test_set_activity_status_unknown_state_keeps_class RETIRED with its
-# subject: it drove TextViewFallback.set_activity_status via __new__, and
-# that method no longer exists (per-surface pill retired; the shared bar
-# pill owns the logic). The contract it pinned (known state → swap dance;
-# unknown/None → text lands, class kept) is pinned VERBATIM by
+# subject: it drove the retired text-view surface's set_activity_status
+# via __new__, and that method no longer exists (per-surface pill retired;
+# the shared bar pill owns the logic). The contract it pinned (known state →
+# swap dance; unknown/None → text lands, class kept) is pinned VERBATIM by
 # tests/test_activity_pill_label.py TestSetActivityStatus — same recorder
 # pattern, same assertions, against ActivityPillLabel. Nothing lost.
 
@@ -210,10 +211,10 @@ def test_app_css_pill_rules_complete_and_distinct():
 class RegisteredFakeSurface:
     """Pure fake standing in for a surface entry — no gi, no display.
 
-    Replaces SP1's SpySurface(TextViewFallback): a real TextViewFallback
-    instantiates real GTK widgets, which segfaults under `env -u DISPLAY`
-    (fix round BUG #2). The render path only needs the surface to accept
-    append_message; this records the same evidence bare.
+    Replaces SP1's SpySurface (a subclass of the retired text-view surface):
+    a real surface instantiates real GTK widgets, which segfaults under
+    `env -u DISPLAY` (fix round BUG #2). The render path only needs the
+    surface to accept append_message; this records the same evidence bare.
     """
 
     def __init__(self):

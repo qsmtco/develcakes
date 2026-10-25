@@ -2,7 +2,7 @@
 # (UI-PILLBAR Phase 1 Edit 2; adapter relocated here in Phase 2).
 #
 # SPEC-07 SP1 placed the status pill PER-CHAT-SURFACE (a private Gtk.Label in
-# ChatSurface/TextViewFallback, resolved per tab by ActivityPillAdapter's
+# the chat surface class, resolved per tab by ActivityPillAdapter's
 # surface resolver). PM relocation 2026-10-02: the pill moves to a single
 # shared widget hosted at the RIGHT END of the project feed bar
 # (main_content.py) — one pill, visible on every tab including project-less

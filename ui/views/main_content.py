@@ -16,7 +16,7 @@ _logger = logging.getLogger(__name__)
 
 from ui.views.activity_pill import ActivityPillLabel
 from ui.views.chat_input_toolbar import ChatInputToolbar
-from ui.views.session_menu import show_session_menu, show_project_menu
+from ui.views.session_menu import show_project_menu
 from utils.config import get_project_root
 
 _PIP_CLASSES = (
@@ -104,19 +104,12 @@ class MainContent(Gtk.Box):
         self._tab_sessions = {}  # page_index -> session_key
         # Track chat boxes per page_index so we can append to them
         self._tab_chat_boxes = {}  # page_index -> chat_box widget
-        self._tab_scrolls = {}   # page_index -> ScrolledWindow widget
-        self._tab_overlays = {}  # page_index -> chat_overlay widget (top-level page widget)
-        # Phase 5b: scroll-to-bottom button — single floating button overlay on current tab
-        self._scroll_to_bottom_btn = None
-        self._scroll_to_bottom_overlay = None  # per-tab overlay holding the button
         self._chat_render_handler = None  # injected via set_chat_render_handler()
         self._project_handler = None   # injected via set_project_handler()
         self._on_project_tab_closed = None  # callback(name) — set by window.py
         self._on_session_changed = None  # callback(session_key) — set by window.py for context meter update
         # Bulk-close guard: skip reindex until all removals are done
         self._bulk_closing = False
-        # Unread tab tracking — session_keys with unseen messages
-        self._unread_tabs: set[str] = set()
         # One-shot Welcome splash tab — created on fresh launch; once closed
         # it stays closed for the session (never respawns on project switch
         # or new tabs).
@@ -125,17 +118,6 @@ class MainContent(Gtk.Box):
         # per session — a duplicate create_welcome_tab call must not re-issue
         # the load (which would re-render over the live splash).
         self._welcome_loaded = False
-
-        # Agent avatar + name display (left of the prompt button in the bar)
-        self._context_avatar = Gtk.Picture()
-        self._context_avatar.set_size_request(28, 28)
-        self._context_avatar.add_css_class("context-avatar")
-        self._context_name_label = Gtk.Label(label="")
-        self._context_name_label.add_css_class("context-agent-name")
-        self._agent_context_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        self._agent_context_box.append(self._context_avatar)
-        self._agent_context_box.append(self._context_name_label)
-        self._agent_context_box.add_css_class("agent-context-box")
 
         self._toolbar = ChatInputToolbar()
 
@@ -168,19 +150,6 @@ class MainContent(Gtk.Box):
         self._on_connect_clicked = None
         self._on_stop_all_clicked = None
         self._build_transport_cluster()
-
-        # Phase 5b: scroll-to-bottom floating button
-        self._scroll_btn = Gtk.Button(label="↓")
-        self._scroll_btn.add_css_class("scroll-to-bottom-btn")
-        self._scroll_btn.set_opacity(0)  # hidden by default
-        self._scroll_btn.connect("clicked", self._on_scroll_to_bottom_clicked)
-        self._scroll_btn_box = Gtk.Box()
-        self._scroll_btn_box.set_halign(Gtk.Align.END)
-        self._scroll_btn_box.set_valign(Gtk.Align.END)
-        self._scroll_btn_box.set_hexpand(False)
-        self._scroll_btn_box.set_vexpand(False)
-        self._scroll_btn_box.append(self._scroll_btn)
-        self._scroll_btn_box.set_size_request(48, 36)
 
         # --- BOTTOM: User input area + button bar ---
         bottom_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -252,7 +221,6 @@ class MainContent(Gtk.Box):
         self._send_button.add_css_class("suggested-action")
 
         button_bar.set_spacing(6)
-        button_bar.append(self._agent_context_box)
         button_bar.append(self._prompt_button)
         button_bar.append(self._improve_button)
         button_bar.append(self._send_button)
@@ -534,31 +502,6 @@ class MainContent(Gtk.Box):
     def set_on_autoaccept_cycle(self, callback):
         self._on_autoaccept_cycle = callback
 
-    def set_project_settings_text(self, text: str):
-        # No production caller; test-only preservation contract (auditor note, P2).
-        # Delete with its tests when the bar rebuild unifies.
-        """Set text or markup on the project settings bar. Handles Pango markup correctly.
-
-        Backward compat: still clears the bar, appends the label, then
-        re-appends the shared activity pill so it is never lost. Uses the
-        sibling-walk _clear_settings_bar() helper (not
-        `for child in list(box)`). A later update_project_settings() call
-        fully rebuilds the row.
-        """
-        self._clear_settings_bar()
-        self._detach(self._transport_cluster)
-        lbl = Gtk.Label()
-        lbl.set_halign(Gtk.Align.END)
-        lbl.set_margin_start(8)
-        lbl.set_margin_end(8)
-        if text.startswith("<"):
-            lbl.set_markup(text)
-        else:
-            lbl.set_text(text)
-        self._project_settings.append(lbl)
-        self._project_settings.append(self._transport_cluster)
-        self._project_settings.append(self._activity_pill)
-
     def set_on_buffer_changed(self, cb: callable) -> None:
         """Register callback for input buffer 'changed' events. cb(buffer)."""
         self._on_buffer_changed = cb
@@ -616,30 +559,6 @@ class MainContent(Gtk.Box):
         """Set callback for project settings updates. cb(project_name, member_count)."""
         self._on_feed_bar_update = cb
 
-    def set_feed_bar_text(self, text):
-        # No production caller; test-only preservation contract (auditor note, P2).
-        # Delete with its tests when the bar rebuild unifies.
-        """Update the project feed bar with a status message (legacy).
-
-        Same pill-preservation as set_project_settings_text(): uses the
-        sibling-walk _clear_settings_bar() helper and re-appends the shared
-        activity pill so it is never lost.
-        """
-        self._clear_settings_bar()
-        self._detach(self._transport_cluster)
-        if text:
-            lbl = Gtk.Label()
-            lbl.set_halign(Gtk.Align.END)
-            lbl.set_margin_start(8)
-            lbl.set_margin_end(8)
-            if text.startswith("<"):
-                lbl.set_markup(text)
-            else:
-                lbl.set_text(text)
-            self._project_settings.append(lbl)
-        self._project_settings.append(self._transport_cluster)
-        self._project_settings.append(self._activity_pill)
-
     # ── Tab management ──────────────────────────────────────────────────────
 
     def create_chat_tab(self, session_key, agent_name):
@@ -661,45 +580,15 @@ class MainContent(Gtk.Box):
                 self._chat_notebook.set_current_page(page_idx)
                 return page_idx
 
-        # Scrollable container for the chat content — wrapped in Overlay so the
-        # project settings bar can float over it (below the tab row).
-        # REGISTER (#12, SP5a round 2) — TWO-SCROLLER CONTRACT, Phase-A shape:
-        # this page-level chat_scroll scrolls Pango children appended to the
-        # chat box (welcome bubble, event/task cards); the HTML surface owns
-        # its OWN internal ScrolledWindow (single-scroll ruling). Cards render
-        # OUTSIDE the surface today; Phase-B direction is cards-inside-surface
-        # (one scroller per tab) — revisit when the card pipeline converts.
-        chat_scroll = Gtk.ScrolledWindow()
-        chat_scroll.set_vexpand(True)
-        chat_scroll.set_hexpand(True)
-        chat_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        chat_scroll.add_css_class("web-surface-host")
-
-        chat_overlay = Gtk.Overlay()
-        chat_overlay.set_vexpand(True)
-        chat_overlay.set_child(chat_scroll)
-        # Only add singleton overlays to the FIRST tab.
-        # On subsequent tabs, they'll be moved via _on_notebook_switch_page.
-        if len(self._tab_sessions) == 0:
-            for widget in (self._project_settings, self._scroll_btn_box):
-                if widget.get_parent() is not None:
-                    widget.unparent()
-                chat_overlay.add_overlay(widget)
-
-        # Vertical box for chat messages
+        # The notebook page IS the chat box itself — no Gtk.Overlay, no
+        # page-level ScrolledWindow (SPEC-58 §2a). The HTML surface owns its
+        # document scroll; the project bar is a permanent _top_box row (it
+        # never overlays tabs). The box EXPANDS (hexpand+vexpand) so the
+        # mounted surface fills the pane.
         chat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         chat_box.set_halign(Gtk.Align.FILL)
-        # FIX 9 (SP5a round 2): valign stays FILL and the box EXPANDS — END
-        # shrink-wrapped the box to its minimum content height (a 69px
-        # sliver at the bottom of the 317px scroll viewport), defeating the
-        # mounted surface's vexpand. vexpand is REQUIRED, not just FILL: a
-        # ScrolledWindow allocates its child the MINIMUM size unless the
-        # child expands (probe-verified — FILL alone still measured 81px).
-        # The old END alignment shrink-wrapped v1 PANGO BUBBLES to the
-        # bottom — load-bearing only for that retired layout.
         chat_box.set_hexpand(True)
         chat_box.set_vexpand(True)
-        chat_scroll.set_child(chat_box)
 
         # Tab label = [dot] [agent name bold] [•] [session name] [spacer] [×]
         tab_label_box = Gtk.Box(spacing=4)
@@ -742,7 +631,6 @@ class MainContent(Gtk.Box):
         close_btn.set_hexpand(False)
 
         tab_label_box.append(tab_dot)
-        tab_label_box._dot = tab_dot  # explicit reference avoids GTK4 get_first_child() ordering issue
         tab_label_box.append(tab_name)
         if not bare_label:
             tab_label_box.append(tab_sep)
@@ -750,13 +638,12 @@ class MainContent(Gtk.Box):
         tab_label_box.append(close_btn)
 
         # Append the new tab FIRST to get page_idx, then wire handlers
-        page_idx = self._chat_notebook.append_page(chat_overlay, tab_label_box)
+        page_idx = self._chat_notebook.append_page(chat_box, tab_label_box)
 
         # Store session_key on the tab label box so close handlers can look up
         # the CURRENT page index dynamically (avoids stale captured page_idx bug
         # when tabs are closed out of order and reindexing shifts pages).
         tab_label_box._session_key = session_key
-        chat_scroll._session_key = session_key
 
         close_btn.connect("clicked", self._on_tab_close_clicked)
 
@@ -773,12 +660,6 @@ class MainContent(Gtk.Box):
         tab_label_box.add_controller(right_ctrl)
         self._tab_sessions[page_idx] = session_key
         self._tab_chat_boxes[page_idx] = chat_box
-        self._tab_scrolls[page_idx] = chat_scroll
-        self._tab_overlays[page_idx] = chat_overlay
-        # Phase 5b: wire scroll adjustment callback for scroll-to-bottom button
-        vadj = chat_scroll.get_vadjustment()
-        if vadj is not None:
-            vadj.connect("value-changed", self._on_vadjustment_changed, page_idx)
         self._chat_notebook.set_show_tabs(True)
         self._chat_notebook.set_current_page(page_idx)
         # SPEC-06 SP5c-1 — the welcome is now the FIRST HTML-native surface
@@ -883,25 +764,9 @@ class MainContent(Gtk.Box):
         return idx
 
     def _on_notebook_switch_page(self, notebook, _page, page_num):
-        """Handle tab switch: move overlays, scroll to bottom, clear unread."""
-        # Move singleton overlays (project settings, scroll btn) to the new tab.
-        # Detach them from whatever overlay they're currently on first to avoid
-        # GTK4 "Can't set new parent" warnings when the widget already has a parent.
-        overlay = self._tab_overlays.get(page_num)
-        if overlay is not None:
-            for widget in (self._project_settings, self._scroll_btn_box):
-                # Gtk.Overlay has no .remove() method (it is not a Gtk.Container).
-                # Use Gtk.Widget.unparent() — works regardless of parent type.
-                # See session_menu.py, left_panel.py for the same pattern.
-                if widget.get_parent() is not None:
-                    widget.unparent()
-                overlay.add_overlay(widget)
+        """Handle tab switch: scroll to bottom, notify session-change listeners."""
         self.scroll_chat_to_bottom(page_num)
-        # Clear unread state for the tab being switched to
-        tab_label = self._chat_notebook.get_tab_label(notebook.get_nth_page(page_num))
-        if tab_label and hasattr(tab_label, '_session_key'):
-            self.clear_unread(tab_label._session_key)
-        # Notify listeners of the session change (for context meter avatar/name update)
+        # Notify listeners of the session change.
         new_sk = self._tab_sessions.get(page_num)
         if new_sk and self._on_session_changed:
             self._on_session_changed(new_sk)
@@ -930,67 +795,6 @@ class MainContent(Gtk.Box):
             }
             return channel_map.get(channel, channel.title())
         return session_key
-
-    def increment_unread(self, session_key: str) -> None:
-        """Mark a tab as having unread messages; update dot to yellow."""
-        _logger.debug("[tab-dot] increment_unread(%r), currently unread=%r", session_key, self._unread_tabs)
-        self._unread_tabs.add(session_key)
-        self._update_tab_dot(session_key)
-
-    def clear_unread(self, session_key: str) -> None:
-        """Clear unread state when user switches to a tab; update dot to green."""
-        _logger.debug("[tab-dot] clear_unread(%r), currently unread=%r", session_key, self._unread_tabs)
-        self._unread_tabs.discard(session_key)
-        self._update_tab_dot(session_key)
-
-    def _update_tab_dot(self, session_key: str) -> None:
-        """Update the dot color on a tab label based on unread state."""
-        _logger.debug("[tab-dot] _update_tab_dot called with session_key=%r, _unread_tabs=%r", session_key, self._unread_tabs)
-        page_idx = self._find_page_by_session(session_key)
-        _logger.debug("[tab-dot] _find_page_by_session(%r) -> page_idx=%r", session_key, page_idx)
-        if page_idx is None:
-            _logger.warning("[tab-dot] No tab found for session_key=%r — cannot update dot", session_key)
-            return
-        tab_label_box = self._chat_notebook.get_tab_label(
-            self._chat_notebook.get_nth_page(page_idx)
-        )
-        if tab_label_box is None:
-            return
-        # Dot stored directly on tab_label_box at creation time — avoids GTK4
-        # get_first_child() ordering ambiguity (TabLabelBox children may not be
-        # in insertion order after layout).
-        dot = getattr(tab_label_box, '_dot', None)
-        if dot is None:
-            return
-        has_unread = session_key in self._unread_tabs
-        if has_unread:
-            dot.remove_css_class("tab-dot-idle")
-            dot.add_css_class("tab-dot-unread")
-        else:
-            dot.remove_css_class("tab-dot-unread")
-            dot.add_css_class("tab-dot-idle")
-
-    def _update_tab_session_label(self, page_idx: int, new_session_key: str) -> None:
-        """Update the session/channel label in the tab for a given page.
-
-        Traversal: dot(0) → name(1) → sep(2) → session_label(3).
-        Called from _switch_tab_session() after updating _tab_sessions.
-        """
-        page = self._chat_notebook.get_nth_page(page_idx)
-        if page is None:
-            return
-        tab_label_box = self._chat_notebook.get_tab_label(page)
-        if tab_label_box is None:
-            return
-        dot = getattr(tab_label_box, '_dot', None)
-        if dot is None:
-            return
-        name = dot.get_next_sibling()
-        sep = name.get_next_sibling() if name else None
-        session_label = sep.get_next_sibling() if sep else None
-        if session_label is None:
-            return
-        session_label.set_label(self._extract_session_display_name(new_session_key))
 
     def _find_page_by_session(self, session_key):
         """Return the current page index for a session_key by scanning notebook tab labels.
@@ -1031,8 +835,6 @@ class MainContent(Gtk.Box):
         self._chat_notebook.remove_page(page_idx)
         self._tab_sessions.pop(page_idx, None)
         self._tab_chat_boxes.pop(page_idx, None)
-        self._tab_scrolls.pop(page_idx, None)
-        self._tab_overlays.pop(page_idx, None)
         # SPEC-06 SP5a (R2): release the session's chat surface — the SP3
         # destroy contract (pending-render cancel + guards) handles the rest.
         # Fires even during bulk close (stop-all spirit). Project tabs go
@@ -1042,11 +844,11 @@ class MainContent(Gtk.Box):
             self._chat_render_handler.close_session(
                 session_key, box=closing_box
             )
-        # Hide tab bar when empty to prevent GtkGizmo min-height < 0 warning
+        # Hide tab bar when empty to prevent GtkGizmo min-height < 0 warning.
+        # The project bar never leaves _top_box — it is a permanent row
+        # (SPEC-58 §2a), so no detach/prepend is needed here.
         if self._chat_notebook.get_n_pages() == 0:
             self._chat_notebook.set_show_tabs(False)
-            self._detach(self._project_settings)
-            self._top_box.prepend(self._project_settings)
             self._project_settings.set_visible(True)
         if not self._bulk_closing:
             self._reindex_tabs()
@@ -1056,41 +858,32 @@ class MainContent(Gtk.Box):
         Rebuild _tab_sessions and _tab_chat_boxes to reflect current notebook page order.
 
         Correct algorithm: iterate current GTK pages (which are the authoritative order),
-        look up each page's widget (the GtkOverlay), then find the matching session_key
-        by scanning the saved snapshot. Uses _tab_overlays (page widget = GtkOverlay)
-        for the lookup, NOT _tab_chat_boxes (child of ScrolledWindow inside the overlay).
+        look up each page's widget (the chat box itself — the notebook page IS the
+        box, SPEC-58 §2a), then find the matching session_key by scanning the saved
+        snapshot. Keys the identity map on saved_chat_boxes (NOT an overlay/scroll
+        map — those are gone).
         """
         # Snapshot current state before rebuilding
         saved_sessions = dict(self._tab_sessions)
         saved_chat_boxes = dict(self._tab_chat_boxes)
-        saved_scrolls = dict(self._tab_scrolls)
-        saved_overlays = dict(self._tab_overlays)
 
-        # Build overlay widget -> old_page_idx map from snapshot
-        # get_nth_page() returns the GtkOverlay (top-level page widget),
-        # so we must key by overlay, not by chat_box.
-        overlay_to_idx = {}
-        for old_idx, overlay in saved_overlays.items():
-            overlay_to_idx[overlay] = old_idx
+        # Build chat-box widget -> old_page_idx map from snapshot
+        box_to_idx = {}
+        for old_idx, box in saved_chat_boxes.items():
+            box_to_idx[box] = old_idx
 
         new_sessions = {}
         new_chat_boxes = {}
-        new_scrolls = {}
-        new_overlays = {}
         n_pages = self._chat_notebook.get_n_pages()
         for new_idx in range(n_pages):
-            page_widget = self._chat_notebook.get_nth_page(new_idx)  # GtkOverlay
-            old_idx = overlay_to_idx.get(page_widget)
+            page_widget = self._chat_notebook.get_nth_page(new_idx)  # chat box
+            old_idx = box_to_idx.get(page_widget)
             if old_idx is not None:
                 new_sessions[new_idx] = saved_sessions[old_idx]
                 new_chat_boxes[new_idx] = saved_chat_boxes[old_idx]
-                new_scrolls[new_idx] = saved_scrolls[old_idx]
-                new_overlays[new_idx] = page_widget
 
         self._tab_sessions = new_sessions
         self._tab_chat_boxes = new_chat_boxes
-        self._tab_scrolls = new_scrolls
-        self._tab_overlays = new_overlays
 
     def close_tabs(self, page_indices):
         """
@@ -1187,51 +980,12 @@ class MainContent(Gtk.Box):
             )
             return
 
-        # Agent tab — show session switcher (requires _agent_mgr, gateway-only)
-        if self._agent_mgr is None:
-            return
-        agent_name = self._agent_mgr.get_name(session_key)
-        if not agent_name:
-            return
-        sessions = self._agent_mgr.get_sessions(agent_name)
-        page_idx = self._find_page_by_session(session_key)
-        if page_idx is None:
-            return
-        show_session_menu(
-            tab_widget,
-            agent_name,
-            sessions,
-            lambda sk: self._switch_tab_session(page_idx, sk),
-            current_session_key=self._tab_sessions.get(page_idx, session_key),
-        )
-
     def _on_project_solo_selected(self, session_key, project_name, target_sk):
         """
         Handle project tab solo-DM target selection.
         target_sk = session_key of selected member, or None = All (group broadcast).
         """
         self._project_handler.set_solo_target(project_name, target_sk)
-
-    def _switch_tab_session(self, page_idx, new_session_key):
-        """Switch an existing tab to a new session key.
-
-        Note: this only updates _tab_sessions — it does NOT create a new tab,
-        switch to it, or change the visible label. The tab keeps showing its
-        original agent_name. The session_key used for routing incoming messages
-        is what changes. Designed for switching between sessions of the same agent.
-
-        The tab label box._session_key is also kept in sync so that
-        _find_page_by_session (which reads the widget attribute) finds the
-        correct tab on subsequent gateway events."""
-        self._tab_sessions[page_idx] = new_session_key
-        self._update_tab_session_label(page_idx, new_session_key)
-        # Keep tab_label_box._session_key in sync so _find_page_by_session
-        # (which reads the widget attribute) finds this tab on subsequent events.
-        page = self._chat_notebook.get_nth_page(page_idx)
-        if page is not None:
-            tab_label_box = self._chat_notebook.get_tab_label(page)
-            if tab_label_box is not None:
-                tab_label_box._session_key = new_session_key
 
     def get_current_session_key(self):
         """Return the session_key for the currently active tab, or None."""
@@ -1304,19 +1058,16 @@ class MainContent(Gtk.Box):
             self._close_tab(page_idx)
 
     def scroll_chat_to_bottom(self, page_index=None):
-        """Scroll the active chat to the bottom.
+        """Scroll the active chat document to the bottom.
 
         SPEC-17 SP1.3: an HTML chat surface scrolls its DOCUMENT (the page
-        scrolls inside the web view, not the outer ScrolledWindow). When the
-        page's child is a surface, delegate to `surface.scroll_to_latest()`
-        and RETURN — do NOT also set the outer adjustment for that page.
-
-        Non-surface children (plain Pango boxes) keep the existing deferred
-        `vadj.set_value(upper - page_size)` path.
+        scrolls inside the web view — there is no outer ScrolledWindow
+        anymore, SPEC-58 §2a). Resolve the page's chat box, ask the render
+        handler for the surface, and delegate to
+        `surface.scroll_to_latest()`; nothing else to do.
         """
         if page_index is None:
             page_index = self._chat_notebook.get_current_page()
-        # SPEC-17 SP1.3: the surface is the authority for an HTML tab's scroll.
         chat_box = self._tab_chat_boxes.get(page_index)
         crh = self._chat_render_handler
         if chat_box is not None and crh is not None:
@@ -1324,68 +1075,6 @@ class MainContent(Gtk.Box):
             if surface is not None:
                 surface.scroll_to_latest()
                 return
-        # Non-surface children: the legacy deferred outer-adjustment path.
-        scroll = self._tab_scrolls.get(page_index)
-        if scroll is None:
-            return
-        vadj = scroll.get_vadjustment()
-        if vadj is None:
-            return
-        # Defer scroll to next frame — widget layout must recalculate first
-        def _do_scroll():
-            vadj.set_value(vadj.get_upper() - vadj.get_page_size())
-            return False  # don't repeat
-        from gi.repository import GLib
-        # Use timeout_add(16) to wait one frame (~16ms at 60fps) — this gives GTK
-        # time to allocate the new child widget and update vadjustment values before
-        # we read them. idle_add/timeout_add(0) can race with the layout phase.
-        GLib.timeout_add(16, _do_scroll)
-
-    def _on_scroll_to_bottom_clicked(self, *args):
-        """Handle scroll-to-bottom button click — scroll current tab to bottom."""
-        self.scroll_chat_to_bottom()
-        self._scroll_btn.set_opacity(0)
-
-    def _on_vadjustment_changed(self, adjustment, page_index):
-        """
-        Show scroll-to-bottom button when user scrolls up away from bottom.
-        Hide it when user is at or near the bottom of the chat.
-        """
-        current_page = self._chat_notebook.get_current_page()
-        if page_index != current_page:
-            return  # only track current page
-        upper = adjustment.get_upper()
-        page_size = adjustment.get_page_size()
-        current_value = adjustment.get_value()
-        # distance_from_bottom: how far the scroll is from the bottom
-        distance_from_bottom = upper - page_size - current_value
-        if distance_from_bottom > 80:
-            self._scroll_btn.set_opacity(1)
-        else:
-            self._scroll_btn.set_opacity(0)
-
-    # ── Context meter (Phase A) ──────────────────────────────────────────
-
-    def update_agent_context_display(self, agent_name: str, agent_color: str) -> None:
-        """Update the small avatar + name display next to the context meter.
-
-        Args:
-            agent_name: Display name of the active agent (e.g. "Coder").
-            agent_color: Hex color string (e.g. "#6366f1").
-        """
-        from utils.icons import render_agent_icon
-        # Compute initials from name
-        parts = agent_name.split() if agent_name else []
-        if len(parts) >= 2:
-            initials = (parts[0][0] + parts[1][0]).upper()
-        elif agent_name:
-            initials = agent_name[:2].upper()
-        else:
-            initials = "??"
-        texture = render_agent_icon(agent_color or "#6366f1", initials, size=28)
-        if texture is not None:
-            self._context_avatar.set_paintable(texture)
-        self._context_name_label.set_text(agent_name or "")
 
     # ── STT (Speech-to-Text) ───────────────────────────────────────────────
     # State machine: idle → click → recording → click → idle.
@@ -1465,90 +1154,4 @@ class MainContent(Gtk.Box):
         buf.place_cursor(end_iter)
         self.user_input.grab_focus()
 
-    def set_review_bar(self, bar: Gtk.Widget | None):
-        """
-        Add or remove a review bar widget above the chat area.
 
-        Called by ReviewHandler when a review session starts or ends.
-        """
-        # Remove existing review bar if any
-        if hasattr(self, '_review_bar') and self._review_bar is not None:
-            old_bar = self._review_bar
-            old_bar.unparent()
-            self._review_bar = None
-
-        self._review_bar = bar
-        if bar is None:
-            return
-
-        # Insert the bar at the top of the top_box (above the notebook).
-        # MainContent's direct child is a vertical Gtk.Paned.
-        # The paned's start child is the top_box containing the notebook.
-        paned = self.get_first_child()
-        if paned is None:
-            return
-        top_box = paned.get_start_child()
-        if top_box is None:
-            return
-        # Insert at the very top of top_box (above the notebook).
-        # GTK4: use prepend() — pack_start() was removed in GTK4.
-        top_box.prepend(bar)
-
-    def get_review_bar(self) -> Gtk.Widget | None:
-        """Return the current review bar widget, or None.
-
-
-        Used by ReviewHandler and ActivityHandler to read the current bar
-        without accessing MainContent internal state.
-        """
-        return getattr(self, '_review_bar', None)
-
-    # ── Diff Viewer Slot (Phase 2a) ─────────────────────────────────────────
-
-    def show_diff_viewer(self, viewer_widget: Gtk.Widget) -> None:
-        """Insert diff viewer above the chat notebook, below the review bar.
-
-        Follows the same insert/remove pattern as set_review_bar().
-        The diff viewer sits between the review bar (if present) and the chat notebook.
-        Chat notebook remains visible — PM can see both diff and chat.
-        """
-        # Remove existing diff viewer if any (M21 fix: dispose old viewer)
-        self.hide_diff_viewer()
-
-        self._diff_viewer = viewer_widget
-
-        paned = self.get_first_child()
-        if paned is None:
-            return
-        top_box = paned.get_start_child()
-        if top_box is None:
-            return
-
-        # Insert after review bar (if present), before chat notebook
-        review_bar = getattr(self, '_review_bar', None)
-        if review_bar is not None:
-            # L1 sanity: verify review_bar is actually in top_box
-            if review_bar.get_parent() == top_box:
-                top_box.insert_after(viewer_widget, review_bar)
-            else:
-                top_box.prepend(viewer_widget)
-        else:
-            top_box.prepend(viewer_widget)
-
-    def hide_diff_viewer(self) -> None:
-        """Remove diff viewer from main_content if present.
-
-        M21 fix: marks the old viewer as disposed before unparenting,
-        so its background threads' idle_add callbacks become no-ops.
-        """
-        viewer = getattr(self, '_diff_viewer', None)
-        if viewer is not None:
-            # H3/M21 fix: mark disposed before removing from widget tree
-            if hasattr(viewer, '_disposed'):
-                viewer._disposed = True
-            viewer.unparent()
-            self._diff_viewer = None
-
-    def get_diff_viewer(self) -> Gtk.Widget | None:
-        """Return the current diff viewer widget, or None."""
-        return getattr(self, '_diff_viewer', None)

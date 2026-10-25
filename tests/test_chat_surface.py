@@ -1,5 +1,6 @@
-# tests/test_chat_surface.py — SPEC-06 SP3 battery (xvfb; WebKit 6.0 present
-# on this box, TextViewFallback is the environment-independent path).
+# tests/test_chat_surface.py — SPEC-06 SP3 battery (xvfb; WebKit 6.0
+# present on this box). The text-view fallback path was retired in SPEC-58
+# §2b — chat requires WebKit.
 
 import json
 
@@ -12,7 +13,6 @@ GLib = pytest.importorskip("gi.repository.GLib")
 
 from ui.views.chat_surface import (
     _BOTTOM_SCRIPT,
-    TextViewFallback,
     _cap_row_html,
     _document,
 )
@@ -31,44 +31,13 @@ xvfb_required = pytest.mark.usefixtures()
 
 @pytest.fixture
 def surface():
-    """TextViewFallback drives the API-contract tests (env-independent)."""
-    s = TextViewFallback()
+    """A real ChatSurface drives the API-contract tests (its webview is
+    lazy, so no WebKit is needed for construction/destroy)."""
+    from ui.views.chat_surface import ChatSurface
+
+    s = ChatSurface()
     yield s
     s.destroy()
-
-
-# ── Tests 1-3: fallback API contract (append / stream) ────────────────────
-
-class TestFallbackPath:
-    def test_append_message_renders_plain_text(self, surface):
-        surface.append_message("agent", "<p>hello <strong>world</strong></p>", "Coder")
-        text = surface._text()
-        assert "hello" in text and "world" in text
-        assert "[Coder]" in text
-        assert "<p>" not in text  # tags stripped in the raw-text view
-
-    def test_stream_buffers_then_flushes_atomically(self, surface):
-        surface.stream_delta("sk", "hel")
-        surface.stream_delta("sk", "lo w")
-        surface.stream_delta("sk", "orld")
-        assert surface._text().strip() == ""  # nothing rendered while streaming
-        surface.end_stream("sk", "Coder")
-        assert "hello world" in surface._text()
-
-    def test_end_stream_empty_is_noop(self, surface):
-        surface.end_stream("never-started")
-        assert surface._text().strip() == ""
-
-    # UI-PILLBAR P2: test_pill_cycles_text_and_class RETIRED with its
-    # subject — the per-surface pill (set_activity_pill/_pill_label) was
-    # deleted from both surface classes. Disposition: the shared bar pill
-    # (ui/views/activity_pill.ActivityPillLabel) owns that logic now; its
-    # swap contract is pinned in tests/test_activity_pill_label.py and the
-    # retirement contract in test_bar_pill_is_sole_pill (same file).
-
-    def test_destroy_twice_safe(self, surface):
-        surface.destroy()
-        surface.destroy()  # must not raise
 
 
 # ── Windowing (spec §6) ──────────────────────────────────────────────────
@@ -76,9 +45,10 @@ class TestFallbackPath:
 class TestWindowing:
     def test_window_is_fifo(self):
         """Bounded FIFO eviction, deque-level: maxlen drops the OLDEST rows.
-        (The fallback's text view is append-only by design — the deque IS
-        the window; this pins the window itself.)"""
-        s = TextViewFallback(window_max=3)
+        (The `_rows` deque IS the window; this pins the window itself.)"""
+        from ui.views.chat_surface import ChatSurface
+
+        s = ChatSurface(window_max=3)
         for i in range(7):
             s.append_message("agent", f"<p>m{i}</p>")
         roles = [row["html"] for row in s._rows]
@@ -330,19 +300,6 @@ class TestDestroyCancelsPendingRender:
         assert loads == []
 
 
-class TestWebKitlessBox:
-    def test_fallback_is_the_surface_when_webkit_none(self, monkeypatch):
-        """FIX 3+4 (BUGs #3/#4): WebKit=None → the fallback IS the surface;
-        append+drain must not raise and text must land."""
-        import ui.views.chat_surface as cs
-
-        monkeypatch.setattr(cs, "WebKit", None)
-        s = cs.create_chat_surface()
-        s.append_message("agent", "<p>hello</p>", "Coder")
-        assert "hello" in s._text()
-        s.destroy()
-
-
 class TestByteBudgetCap:
     def test_multibyte_cap_is_byte_exact(self):
         """FIX 5 (BUG #5): the cap is a BYTE budget — multi-byte rows are
@@ -351,55 +308,6 @@ class TestByteBudgetCap:
         capped = _cap_row_html(row)
         assert len(capped.encode("utf-8")) <= 512 * 1024
         assert capped.endswith("[truncated]")
-
-
-class TestFallbackBufferBound:
-    def test_text_buffer_bounded_under_load(self):
-        """FIX 7 (BUG #7, P11): the fallback TextBuffer trims from the top —
-        bounded memory after heavy appends."""
-        s = TextViewFallback(window_max=50)
-        for i in range(1000):
-            s.append_message("agent", f"<p>line {i}</p>")
-        buf = s._view.get_buffer()
-        assert buf.get_line_count() <= 55  # window_max + small slack
-        assert "line 999" in s._text()  # newest content present
-        s.destroy()
-
-
-class TestImportTimeAlias:
-    def test_module_source_aliases_chat_surface_when_webkit_none(self):
-        """FIX 4 mechanism pin: the module's import block BINDS the alias —
-        on a genuinely WebKit-less box, ChatSurface IS TextViewFallback.
-        Source-structure pin (import-once semantics make exec/reload pins
-        untestable here; falsifier = remove the alias line)."""
-        import ui.views.chat_surface as cs
-
-        with open(cs.__file__, encoding="utf-8") as f:
-            src = f.read()
-        # The alias lives at the module BOTTOM (after all class defs) — pin
-        # the full source: the guarded alias + factory must both exist, and
-        # the alias must be the module-level ChatSurface binding for
-        # WebKit-less imports (import-once semantics keep this untestable
-        # at runtime; falsifier = delete either line).
-        # FIX E / rider-a (SP3 audit r2): EXACT-INDENT match — the alias is
-        # a top-level statement and must match exactly 4 spaces. A dead-def
-        # 8-space binding or a commented-out line both FAIL this pin (no
-        # lstrip — stripping is what made the old pin evadable).
-        code_lines = [
-            ln.split("#", 1)[0].rstrip() for ln in src.splitlines()
-        ]
-        alias_lines = [
-            ln for ln in code_lines
-            if ln == "    ChatSurface = TextViewFallback"
-        ]
-        assert len(alias_lines) == 1, f"alias must appear exactly once uncommented: {alias_lines!r}"
-        assert "def create_chat_surface" in src
-        # And the factory (runtime path) resolves the fallback for real.
-        monkey = __import__("unittest.mock", fromlist=["patch"])
-        with monkey.patch(f"{cs.__name__}.WebKit", None):
-            s = cs.create_chat_surface()
-            assert type(s) is cs.TextViewFallback
-            s.destroy()
 
 
 # ── SPEC-12 SP1: grouped agent boxes (spec §2a) ──────────────────────────
@@ -625,54 +533,6 @@ class TestAgentPayloadCss:
         _ = ChatSurface  # keep the import honest (surface class owns _BASE_CSS)
 
 
-class TestTextViewFallbackPayloadTagStrip:
-    """SPEC-13 §2c degradation contract: an agent HTML PAYLOAD (sanitized
-    rich HTML — <div>/<span style>/<button>) fed to the WebKit-less
-    TextViewFallback must degrade to READABLE TEXT: the existing
-    `_TAG_STRIP_RE` path strips tags, html.unescape restores entities, and
-    no '<' survives into the buffer. No code change is required — this pins
-    the contract so a future tag-strip change cannot silently show source.
-    """
-
-    def test_sanitized_payload_strips_to_readable_text(self):
-        from render.html import render_message
-        from ui.views.chat_surface import TextViewFallback
-
-        # A whole-message ```html fence → the real sanitized payload an
-        # agent turn produces (exactly what append_message receives).
-        payload = render_message(
-            '```html\n<div class="card"><b>Status</b>: '
-            '<span style="color:red">green</span></div>\n```'
-        )
-        assert "<div" in payload  # precondition: rich HTML, not markdown
-
-        s = TextViewFallback()
-        s.append_message("agent", payload, "Coder")
-        text = s._text()
-        assert "<" not in text, f"tags leaked into fallback text: {text!r}"
-        assert "<div" not in text and "<span" not in text
-        assert "Status" in text and "green" in text  # readable content survives
-        assert "[Coder]" in text
-        s.destroy()
-
-    def test_payload_button_and_img_strip_to_text(self):
-        """The agent-author vocabulary (button/img) also degrades to text —
-        no tags, no leaked attribute source."""
-        from render.sanitize import sanitize_agent_html
-        from ui.views.chat_surface import TextViewFallback
-
-        payload = sanitize_agent_html(
-            '<div><button>Run</button>'
-            '<img src="https://x/y.png" alt="chart"></div>'
-        )
-        s = TextViewFallback()
-        s.append_message("agent", payload, "Coder")
-        text = s._text()
-        assert "<" not in text
-        assert "Run" in text  # button label content survives as text
-        s.destroy()
-
-
 # ── SPEC-14 SP1: system chrome for agent cards (spec §2a / §2d) ──────────
 
 
@@ -865,518 +725,16 @@ class TestColorFrozenAtAppend:
         s.destroy()
 
 
-class TestFallbackAutoscroll:
-    """MICRO-SMART-SCROLL BUG#2 fix: TextViewFallback (the no-WebKit path) must
-    keep the SAME social-feed scroll contract as ChatSurface — follow new rows
-    only when at the bottom, preserve the reading position otherwise. The
-    18-site sweep removed the handler-side force-scroll that used to cover
-    this path; the surface owns its scroll now.
-
-    The fallback appends in place (no reload) so the follow is idle-deferred
-    (GTK updates `upper` a frame later) — tests drain idles with _pump_frame.
-    """
-
-    @staticmethod
-    def _pump_frames(n: int = 6) -> None:
-        ctx = GLib.MainContext.default()
-        for _ in range(n):
-            guard = 0
-            while ctx.pending() and guard < 50:
-                ctx.iteration(False)
-                guard += 1
-
-    def _fallback(self, monkeypatch):
-        """Real TextView surface with real (detached-widget) vadjustment.
-        NOTE: page_size stays 0 in a detached widget, so 'bottom' is
-        value == upper; we assert against the live upper, not a fabricated
-        page_size (the real GTK adjustment rejects made-up heights)."""
-        s = TextViewFallback()
-        vadj = s.get_vadjustment()
-        assert vadj is not None
-        # Seed enough content that the adjustment carries a real height.
-        for i in range(40):
-            s.append_message("agent", f"<p>seed {i} {'x' * 200}</p>", "Coder")
-        self._pump_frames()
-        return s, vadj
-
-    def test_fallback_autoscrolls_at_bottom(self, monkeypatch):
-        """At bottom → append follows the new row (value tracks the new
-        bottom after the deferred follow runs)."""
-        s, vadj = self._fallback(monkeypatch)
-        # Reader is at the bottom.
-        vadj.set_value(vadj.get_upper())
-        self._pump_frames()
-        assert s._was_at_bottom is True
-
-        s.append_message("agent", "<p>NEW ROW " + "y" * 200 + "</p>", "Coder")
-        self._pump_frames()
-        assert vadj.get_value() == vadj.get_upper(), (
-            "fallback must follow to the bottom when the reader was at bottom"
-        )
-        s.destroy()
-
-    def test_fallback_preserves_reading_position(self, monkeypatch):
-        """Scrolled up (not at bottom) → append preserves the reading
-        position: the value is unchanged by the append."""
-        s, vadj = self._fallback(monkeypatch)
-        vadj.set_value(50.0)  # reading, far from bottom
-        self._pump_frames()
-        assert s._was_at_bottom is False
-
-        s.append_message("agent", "<p>ANOTHER ROW " + "z" * 200 + "</p>", "Coder")
-        self._pump_frames()
-        assert vadj.get_value() == 50.0, (
-            "fallback must preserve the reading position when scrolled up"
-        )
-        s.destroy()
-
-    def test_fallback_at_bottom_user_grab_mid_gap_does_not_yank(self, monkeypatch):
-        """BUG#7: the deferred follow races a user grab. The reader was at the
-        bottom → append arms a deferred follow; the user scrolls UP during the
-        idle gap (set_value fires value-changed, re-arming _was_at_bottom=
-        False). The queued follow must NOT run unconditionally and yank them
-        back down — it must RE-READ the tracker right before driving the
-        vadjustment and abort when the at-bottom intent is stale."""
-        s, vadj = self._fallback(monkeypatch)
-        vadj.set_value(vadj.get_upper())  # reader at the bottom
-        self._pump_frames()
-        assert s._was_at_bottom is True
-
-        s.append_message("agent", "<p>NEW ROW " + "y" * 200 + "</p>", "Coder")
-        assert s._follow_source is not None  # follow queued, idle not yet run
-        # USER GRAB mid-gap: scroll up BEFORE the idle follow fires.
-        vadj.set_value(50.0)
-        assert s._was_at_bottom is False  # value-changed re-armed the tracker
-        self._pump_frames()  # the queued follow now runs
-
-        assert vadj.get_value() == 50.0, (
-            "deferred follow yanked the reader down despite a mid-gap grab"
-        )
-        s.destroy()
-
-    def test_fallback_destroy_cancels_pending_follow(self, monkeypatch):
-        """destroy() cancels a queued follow and disconnects the tracker — a
-        late height change must not scroll a dead surface."""
-        s, vadj = self._fallback(monkeypatch)
-        vadj.set_value(vadj.get_upper())  # at bottom
-        self._pump_frames()
-        s.append_message("agent", "<p>x</p>", "Coder")
-        assert s._follow_source is not None  # a follow is queued
-        hid = s._bottom_handler_id
-        s.destroy()
-        assert s._follow_source is None
-        assert not vadj.handler_is_connected(hid)
-
-    def test_fallback_scroll_to_latest_drives_to_bottom(self, monkeypatch):
-        """SPEC-17 SP1.3: the fallback's scroll_to_latest keeps today's
-        behavior — arm the follow intent and drive the adjustment to the
-        bottom, with NO document script (the fallback has no webview)."""
-        s, vadj = self._fallback(monkeypatch)
-        vadj.set_value(50.0)  # reading up top
-        self._pump_frames()
-        assert s._was_at_bottom is False
-        assert not hasattr(s, "_document_eval")  # no script path at all
-        s.scroll_to_latest()
-        assert s._was_at_bottom is True  # follow intent armed
-        self._pump_frames()              # deferred follow runs
-        assert vadj.get_value() == vadj.get_upper()
-        s.destroy()
-
-
-class TestFallbackChromeParity:
-    """SPEC-14 §2a.5: TextViewFallback accepts agent_color for signature
-    parity; the value is stored on the row but INERT in plain-text mode."""
-
-    def test_fallback_prefix_unchanged_and_color_inert(self):
-        s = TextViewFallback()
-        s.append_message("agent", "<p>hi</p>", "Coder", agent_color="#16a34a")
-        text = s._text()
-        assert "[Coder] hi" in text   # [name] prefix unchanged
-        assert "#16a34a" not in text  # color has no text medium
-        assert s._rows[-1]["color"] == "#16a34a"  # stored for symmetry
-        s.destroy()
-
-    def test_fallback_stores_sanitized_color(self):
-        s = TextViewFallback()
-        s.append_message("agent", "<p>hi</p>", "Coder", agent_color="javascript:x")
-        assert s._rows[-1]["color"] == ""
-        s.destroy()
-
-
 # ── MICRO smart-scroll: at-bottom follow / reading-position preserve ─────
 
 
 def _surface_supports_smart_scroll() -> bool:
-    """Runtime gate: on a WebKit-less box the import-time alias binds
-    ChatSurface = TextViewFallback (chat_surface.py module bottom), which has
-    no _load_html / smart-scroll. Gate on the CLASS CAPABILITY, not an env-var
-    name (survives future env renames)."""
+    """Runtime gate: only the real WebKit ChatSurface carries the document
+    scroll machinery (`_load_html` etc.). Gate on the CLASS CAPABILITY, not
+    an env-var name (survives future env renames)."""
     from ui.views.chat_surface import ChatSurface
 
     return hasattr(ChatSurface, "_load_html")
-
-
-@pytest.mark.skipif(WebKit is None, reason="WebKit introspection unavailable")
-class TestGtkRestoreMachinery:
-    """MICRO smart-scroll: the legacy GTK-adjustment capture/restore.
-
-    SPEC-17 SP1 retained this machinery (it is NOT the fix; the DOCUMENT
-    script is — see the TestSmartScroll below). Its contracts (cross-frame
-    settle, collapse guard, stable-frame count) are NOT invalidated by
-    SPEC-17, so these tests stay verbatim and keep pinning the retained
-    GTK path. They no longer constitute the "smart scroll" proof: a green
-    run here says nothing about the document position (the original bug).
-
-    The WebKit full-document reload collapses content height mid-load → the
-    vadjustment clamps → the view snaps to top on EVERY append. This
-    machinery tracks at-bottom on the surface's OWN vadjustment and restores
-    after the new height lands.
-
-    Driving the real WebKit load is non-deterministic; per the established
-    pattern (TestAgentPayloadCss.test_defaults_present_in_loaded_document_
-    after_append) `_load_html` is monkeypatched. The test then simulates the
-    async height landing by `set_upper(...)` — which fires the `changed`
-    signal exactly as a real content-height change does (probe-verified).
-
-    Test fidelity (load-bearing): these tests drive a REAL Gtk.Adjustment
-    from the surface ScrolledWindow — real signal semantics (set_upper fires
-    `changed` and NOT `value-changed`; set_value clamps to [lower, max]).
-    Do not replace with a fake.
-
-    Consumption is idle-deferred (BUG#1): a height change schedules a settle
-    check; `_pump()` drains GLib idles so the deferred restore runs.
-    """
-
-    def _surface(self, monkeypatch, page_size=100.0):
-        if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias (no smart-scroll)")
-        from ui.views.chat_surface import ChatSurface
-
-        s = ChatSurface()
-        s._live_js = False  # SPEC-17/legacy GTK machinery = the NON-live path
-        vadj = s.get_vadjustment()
-        assert vadj is not None  # ScrolledWindow always has an adjustment
-        vadj.set_page_size(page_size)
-        loads: list[str] = []
-
-        def _fake_load(doc):
-            loads.append(doc)
-            # BUG#1 (audit fix): the real load is async — `_issue_load` arms
-            # `_load_in_flight` and it clears on FINISHED/load-failed. These
-            # GTK-machinery tests bypass real WebKit (they monkeypatch
-            # `_load_html` and never drive the document signals), so model the
-            # load as SYNCHRONOUSLY COMPLETE here; otherwise the gate would
-            # never release and later renders would defer. (The document-path
-            # signal lifecycle is covered by TestSmartScroll.)
-            s._load_in_flight = False
-            # Reproduce the REAL failure mode: a full-document load collapses
-            # WebKit content height mid-load → upper drops and the view clamps
-            # to the top. Without this, the monkeypatch would not exercise the
-            # bug the fix targets (steelFramed: reproduce the failure).
-            vadj.set_upper(0.0)
-            vadj.set_value(0.0)
-
-        monkeypatch.setattr(s, "_load_html", _fake_load)
-        s._test_loads = loads  # test-visible record of loaded docs
-        return s, vadj
-
-    @staticmethod
-    def _pump():
-        """Drain pending GLib idle callbacks (the deferred settle restore)."""
-        ctx = GLib.MainContext.default()
-        guard = 0
-        while ctx.pending() and guard < 200:
-            ctx.iteration(False)
-            guard += 1
-
-    @staticmethod
-    def _frame():
-        """Run EXACTLY ONE idle frame (for cross-frame settle tests)."""
-        ctx = GLib.MainContext.default()
-        if ctx.pending():
-            ctx.iteration(False)
-
-    def test_cross_frame_intermediate_does_not_consume(self, monkeypatch):
-        """Finding 1 (priority fix): real WebKit layout lands ACROSS frames —
-        an intermediate scrollable height can be stable for one frame. With
-        N=1 the capture consumes at the intermediate (was_at_bottom=False →
-        set_value(min(300, upper-page=50)) ≈ top); the final height then has
-        nothing to restore. N=2 consecutive stable frames fixes it.
-        """
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        vadj.set_value(300.0)  # reading → capture intent = 300
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()  # capture = (False, 300); _fake_load collapses to 0
-        vadj.set_upper(150.0)   # intermediate: scrollable (max=50), NOT final
-        self._frame()           # ONE idle frame — must NOT consume here
-        vadj.set_upper(1200.0)  # FINAL height lands in a later frame
-        self._pump()
-        assert vadj.get_value() == 300.0, (
-            "capture consumed at the intermediate frame (cross-frame bug)"
-        )
-        s.destroy()
-
-    def test_two_consecutive_stable_frames_consumes(self, monkeypatch):
-        """Finding 1 (N=2) pinned BOTH ways: after ONE stable frame the capture
-        is NOT yet consumed; after the SECOND it is. (N=1 fails the interim
-        assert; N>2 fails the post-second assert.)"""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()  # capture = (True, 0)
-        vadj.set_upper(1000.0)
-        self._frame()  # stable frame #1 — must NOT consume yet
-        assert vadj.get_value() == 0.0, "consumed after only one stable frame"
-        self._frame()  # stable frame #2 — now consume
-        assert vadj.get_value() == 900.0, "did not consume after two stable frames"
-        s.destroy()
-
-    def test_collapse_does_not_rearm_at_bottom(self, monkeypatch):
-        """Finding 2 (priority fix): the load_html collapse clamps value→0 and
-        fires value-changed. Without a guard the tracker derives
-        was_at_bottom=True even when the user was reading up top — poisoning
-        the next render. The guard: upper <= page_size is a layout artifact,
-        not user intent."""
-        s, vadj = self._surface(monkeypatch)
-        vadj.set_upper(1000.0)
-        vadj.set_value(300.0)  # reading: (1000-100-300)=600 > 80 → False
-        assert s._was_at_bottom is False
-        # Collapse: upper shrinks below page_size; value clamps to 0.
-        vadj.set_upper(0.0)
-        vadj.set_value(0.0)  # value-changed fires with upper=0 (not scrollable)
-        assert s._was_at_bottom is False, (
-            "collapse re-armed was_at_bottom — tracker poisoned by layout"
-        )
-        s.destroy()
-
-    def test_first_render_lands_at_bottom(self, monkeypatch):
-        """Edge 4: a fresh surface with no prior content lands at bottom once
-        the first document's height arrives."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        assert s._test_loads  # the render happened
-        vadj.set_upper(500.0)  # content height lands
-        self._pump()  # deferred settle restore runs
-        assert vadj.get_value() == 400.0  # upper - page_size = bottom
-        s.destroy()
-
-    def test_at_bottom_follows_new_message(self, monkeypatch):
-        """At bottom + append → the view follows the new message."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        assert vadj.get_value() == 900.0  # settled at bottom
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1100.0)  # new, taller content
-        self._pump()
-        assert vadj.get_value() == 1000.0  # followed to the new bottom
-        s.destroy()
-
-    def test_reading_position_preserved(self, monkeypatch):
-        """Scrolled-up + append → the reading position is preserved."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-
-        vadj.set_value(300.0)  # user scrolls UP (away from bottom) → re-arms
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1200.0)  # taller content lands
-        self._pump()
-        assert vadj.get_value() == 300.0  # position preserved, not snapped
-        s.destroy()
-
-    def test_intermediate_height_does_not_consume_capture(self, monkeypatch):
-        """BUG#1 (fix round): real WebKit fires MULTIPLE `changed` events as
-        layout settles — the FIRST scrollable height is NOT final. A premature
-        consume would restore to the wrong offset (audit Probe D: captured
-        300 → got 100). Model the burst: set_upper(0) → 200 → 1200 with NO
-        idle between the height events (the main loop is not idle mid-burst),
-        then one drain; the capture must survive to the FINAL 1200.
-        """
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        vadj.set_value(300.0)  # reading → capture intent = 300
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()  # capture = (False, 300); _fake_load collapses to 0
-        # The burst: intermediate scrollable height, then the real one — all
-        # before the loop idles (no _pump between them).
-        vadj.set_upper(200.0)   # intermediate: scrollable, but NOT final
-        vadj.set_upper(1200.0)  # FINAL height lands in the same burst
-        self._pump()            # now the settle check runs
-        assert vadj.get_value() == 300.0  # captured value, not the interim 100
-        s.destroy()
-
-    def test_resize_does_not_scroll(self, monkeypatch):
-        """Edge 2: a pane resize (page_size change) with no render pending
-        must NOT move the view — the restore is gated on a pending capture.
-        Positive witness: the SAME value DOES move on a render+height."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        vadj.set_value(300.0)  # reading
-        # Positive witness: a real render + height lands restores the view.
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1200.0)
-        self._pump()
-        assert vadj.get_value() == 300.0  # restore moved it back from the
-        # collapse-to-0 that _fake_load induced — proving the mechanism runs.
-        vadj.set_page_size(200.0)  # RESIZE — `changed` fires, but no capture
-        self._pump()  # a resize with no capture must not move the view
-        assert vadj.get_value() == 300.0  # no scroll from resize alone
-        s.destroy()
-
-    def test_rapid_coalesced_renders_last_capture_wins(self, monkeypatch):
-        """Edge 1: appends coalesce into ONE render; the capture at drain
-        time reflects the LATEST scroll state (last capture wins)."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-
-        # Two appends before the coalesced render drains.
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s.append_message("agent", "<p>m3</p>", "Coder")
-        vadj.set_value(200.0)  # user is reading when the render drains
-        s._drain_renders()
-        vadj.set_upper(1400.0)
-        self._pump()
-        assert vadj.get_value() == 200.0  # preserve (latest capture), no snap
-        s.destroy()
-
-    def test_deque_shrink_clamps_gracefully(self, monkeypatch):
-        """Edge 3: content SHRINKS (rows dropped from the windowed deque)
-        while reading — position clamps gracefully, no crash, no snap."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(2000.0)
-        self._pump()
-        vadj.set_value(1500.0)  # reading deep in old content
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1800.0)  # content shrank; max = 1700
-        self._pump()
-        assert vadj.get_value() == 1500.0  # preserved within the new range
-
-        # Extreme shrink: the captured value now exceeds the new max.
-        vadj.set_value(1700.0)
-        s.append_message("agent", "<p>m3</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(600.0)  # max = 500 — captured 1700 is out of range
-        self._pump()
-        assert vadj.get_value() == 500.0  # clamped to the new bottom, no crash
-        s.destroy()
-
-    def test_destroy_mid_load_no_restore(self, monkeypatch):
-        """Edge 7: destroy() during an in-flight load disconnects — a later
-        height change must not fire a restore on the dead surface.
-        Positive witness: BEFORE destroy the same height change DOES restore
-        (proving the handler is the thing destroy disconnects)."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        vadj.set_value(400.0)  # reading
-        # Witness: a live surface restores on the height landing.
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1200.0)
-        self._pump()
-        assert vadj.get_value() == 400.0  # live → restore ran
-
-        s.append_message("agent", "<p>m3</p>", "Coder")
-        s._drain_renders()
-        # Capture the handler ids so the DISCONNECT itself is pinned: the
-        # _destroyed guards are defense-in-depth and would mask a missing
-        # disconnect in a pure behavior assert (audit ISSUE#10).
-        hid_bottom = s._bottom_handler_id
-        hid_restore = s._restore_handler_id
-        s.destroy()  # before m3's height lands
-        assert not vadj.handler_is_connected(hid_bottom)
-        assert not vadj.handler_is_connected(hid_restore)
-        vadj.set_upper(1400.0)  # must not restore on the dead surface
-        self._pump()
-        # A capture (400) WAS pending at destroy; if the handlers were not
-        # disconnected, the settle restore would drive the value to 400.
-        assert vadj.get_value() == 0.0  # _fake_load's collapse value remains
-
-    def test_user_grab_mid_load_restore_applies(self, monkeypatch):
-        """Edge 6: the user grabs the scrollbar between capture and restore —
-        the restore still applies the pre-load intent; the NEXT scroll
-        re-arms tracking normally."""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        vadj.set_value(500.0)  # reading → capture intent = 500
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()
-        vadj.set_value(550.0)  # user grabs again mid-load (before height lands)
-        vadj.set_upper(1200.0)  # height lands → restore the pre-load intent
-        self._pump()
-        assert vadj.get_value() == 500.0
-        s.destroy()
-
-    def test_at_bottom_user_grab_during_settle_does_not_yank(self, monkeypatch):
-        """BUG#7 (ChatSurface mirror): the capture said at-bottom, but the user
-        grabs the scrollbar during the CROSS-FRAME settle window (before the
-        restore consumes). The at-bottom restore must RE-READ the live tracker
-        right before set_value and abort when a user-grab moved it off-bottom —
-        the queued restore must not yank the reader back down. (The reading-
-        position preserve path is unaffected: it already respects intent.)"""
-        s, vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        vadj.set_upper(1000.0)
-        self._pump()
-        assert vadj.get_value() == 900.0  # settled at bottom, tracker True
-
-        s.append_message("agent", "<p>m2</p>", "Coder")
-        s._drain_renders()  # capture = (True, 900); _fake_load collapses to 0
-        vadj.set_upper(1200.0)  # height lands → schedules the settle (N=2)
-        vadj.set_value(200.0)   # USER GRAB mid-settle → re-arms _was_at_bottom
-        assert s._was_at_bottom is False
-        self._pump()  # the settle now consumes the capture
-
-        assert vadj.get_value() == 200.0, (
-            "at-bottom restore yanked the reader down despite a mid-settle grab"
-        )
-        s.destroy()
-
-    def test_do_render_captures_before_load(self, monkeypatch):
-        """Structural pin: _do_render installs a pending restore BEFORE
-        calling _load_html (the capture must exist when the height lands)."""
-        s, _vadj = self._surface(monkeypatch)
-        s.append_message("agent", "<p>m1</p>", "Coder")
-        s._drain_renders()
-        # A capture is pending until a `changed` consumes it.
-        assert s._pending_restore is not None
-        assert len(s._pending_restore) == 2  # (was_at_bottom, captured_value)
-        s.destroy()
 
 
 # ── SPEC-17 SP1: document scroll via evaluate_javascript ─────────────────
@@ -1409,7 +767,7 @@ class TestSmartScroll:
         path (the seam is monkeypatched, so no real WebKit call happens).
         """
         if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias (no document scroll)")
+            pytest.skip("ChatSurface lacks the document-scroll machinery")
         from ui.views.chat_surface import ChatSurface
 
         s = ChatSurface()
@@ -1535,7 +893,6 @@ class TestSmartScroll:
         s.scroll_to_latest()
         assert s._test_applies == [_BOTTOM_SCRIPT]  # ran the bottom script now
         assert s._pending_scroll == (True, 0.0)     # armed the follow intent
-        assert s._was_at_bottom is True
         # After the "go to latest" script the document IS at the bottom, so
         # the next read reports it → the next append follows.
         s._test_read["text"] = '{"y": 1100, "atBottom": true}'
@@ -2129,7 +1486,7 @@ class TestInjectionFollowTransaction:
         """A compaction must READ the document position first and restore it
         at FINISHED — never yank a mid-history reader to the bottom."""
         if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias")
+            pytest.skip("ChatSurface lacks the document-scroll machinery")
         s = self._seam_surface(monkeypatch, read='{"y": 150, "atBottom": false}')
         s._dirty = True
         s._needs_compact = True
@@ -2144,7 +1501,7 @@ class TestInjectionFollowTransaction:
 
     def test_rebuild_at_bottom_lands_bottom(self, monkeypatch):
         if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias")
+            pytest.skip("ChatSurface lacks the document-scroll machinery")
         s = self._seam_surface(monkeypatch, read='{"y": 900, "atBottom": true}')
         s._dirty = True
         s._needs_compact = True
@@ -2157,7 +1514,7 @@ class TestInjectionFollowTransaction:
         """Resurrection regrows live-section heights AFTER the FINISHED apply
         (probe R7: 960px drift) — the bottom apply must carry the settle tail."""
         if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias")
+            pytest.skip("ChatSurface lacks the document-scroll machinery")
         from ui.views.chat_surface import _bottom_and_settle_script
 
         s = self._seam_surface(monkeypatch, read='{"y": 900, "atBottom": true}')
@@ -2175,7 +1532,7 @@ class TestInjectionFollowTransaction:
 
     def test_rebuild_without_webview_lands_bottom(self, monkeypatch):
         if not _surface_supports_smart_scroll():
-            pytest.skip("ChatSurface is the TextViewFallback alias")
+            pytest.skip("ChatSurface lacks the document-scroll machinery")
         s = self._seam_surface(monkeypatch, read="unused", webview=False)
         s._dirty = True
         s._needs_compact = True
@@ -2694,8 +2051,8 @@ class TestSurfaceClear:
     itself in place — rows/live sections/stream state reset, empty
     document reloaded, no tombstone (the tab stays renderable).
 
-    Uses the TextViewFallback where the state contract overlaps (rows/
-    buffers) and skips WebKit-only internals headless."""
+    The real ChatSurface drives the state contract; the WebKit-only
+    internals are skipped headless."""
 
     def test_clear_resets_all_content_state(self, surface):
         if not hasattr(surface, "_live_sections"):
@@ -2730,7 +2087,12 @@ class TestSurfaceClear:
         surface._rows.append({"role": "user", "html": "<p>old</p>", "agent": "", "color": ""})
         surface.clear()
         assert len(loads) == 1
-        assert "old" not in loads[0]
+        import re
+        m = re.search(r"<body[^>]*>(.*)</body>", loads[0], re.DOTALL)
+        body = m.group(1) if m else loads[0]
+        assert "old" not in body  # the row must be gone from the document BODY
+        # (the embedded _BASE_CSS legitimately contains the word "old" in a
+        # comment — assert on the body, not the whole document string.)
 
 
 # ── SPEC-56: chat bubble polish ─────────────────────────────────────────
@@ -2940,3 +2302,31 @@ class TestTimestampStamping:
             assert isinstance(ts, str) and ts
         finally:
             s.destroy()
+
+
+# ── SPEC-58 §6/§2b contracts (restored — the old TestWebKitBox /
+#    TestFallbackPath coverage died with the fallback retirement) ───────────
+
+class TestWebKitlessFactory:
+    def test_create_chat_surface_requires_webkit(self, monkeypatch):
+        """SPEC-58 §6 acceptance: create_chat_surface with WebKit=None must
+        raise RuntimeError with the message 'chat requires WebKit' — there is
+        NO text-view fallback any more; the app fails at boot by design."""
+        import ui.views.chat_surface as cs_module
+
+        monkeypatch.setattr(cs_module, "WebKit", None)
+        with pytest.raises(RuntimeError, match=r"^chat requires WebKit$"):
+            cs_module.create_chat_surface()
+
+
+class TestDestroyIdempotence:
+    def test_double_destroy_does_not_raise(self):
+        """SPEC-58 §2b: ChatSurface.destroy() is twice-safe. The old
+        test_destroy_twice_safe died with TestFallbackPath; the contract
+        survived the retirement (destroy() itself is unchanged)."""
+        from ui.views.chat_surface import ChatSurface
+
+        s = ChatSurface()
+        s.destroy()
+        s.destroy()  # must not raise
+        assert s._destroyed is True

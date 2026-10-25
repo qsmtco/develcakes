@@ -71,14 +71,47 @@ class TestTransportCluster:
         tip = mc._stop_all_btn.get_tooltip_text() or ""
         assert "Halt every agent" in tip
 
-    def test_bar_moves_onto_the_first_tab_and_back(self):
+    def test_bar_never_leaves_top_box_across_tab_lifecycle(self):
+        """SPEC-58 §2a: the project bar is a PERMANENT _top_box row — the
+        old overlay reparenting (bar hops onto the active tab, back on last
+        close) is DELETED. Pin the new invariant: the bar never leaves
+        _top_box across create, tab switch, MIDDLE-tab close, and last-tab
+        close; it stays visible after the last close; the tab bar itself
+        hides at 0 pages (GtkGizmo min-height guard)."""
         mc = MainContent()
-        assert mc._project_settings.get_parent() is mc._top_box
-        mc.create_chat_tab("agent:1", "Agent")
-        assert mc._project_settings.get_parent() is not mc._top_box
+        bar = mc._project_settings
+        assert bar.get_parent() is mc._top_box
+
+        # CREATE — three agent tabs; the bar keeps its seat in _top_box.
+        mc.create_chat_tab("agent:1", "One")
+        assert bar.get_parent() is mc._top_box
+        assert mc._chat_notebook.get_show_tabs() is True
+        mc.create_chat_tab("agent:2", "Two")
+        mc.create_chat_tab("agent:3", "Three")
+        assert bar.get_parent() is mc._top_box
+
+        # SWITCH — moving between tabs must not reparent it either.
+        mc._chat_notebook.set_current_page(0)
+        assert bar.get_parent() is mc._top_box
+        mc._chat_notebook.set_current_page(2)
+        assert bar.get_parent() is mc._top_box
+
+        # MIDDLE-TAB CLOSE — page 1 is neither first nor last; the bar is
+        # unmoved and still visible, and the remaining two pages reindex.
+        mc._close_tab(1)
+        assert bar.get_parent() is mc._top_box
+        assert bar.get_visible() is True
+        assert mc._chat_notebook.get_n_pages() == 2
+
+        # LAST-TAB CLOSE — the bar keeps its seat and its visibility; only
+        # the (now empty) tab strip hides.
         mc._close_tab(0)
-        assert mc._project_settings.get_parent() is mc._top_box
-        assert mc._project_settings.get_visible() is True
+        assert bar.get_parent() is mc._top_box
+        mc._close_tab(0)
+        assert bar.get_parent() is mc._top_box
+        assert bar.get_visible() is True
+        assert mc._chat_notebook.get_n_pages() == 0
+        assert mc._chat_notebook.get_show_tabs() is False
 
     def test_connect_tooltip_is_telegram(self):
         mc = MainContent()

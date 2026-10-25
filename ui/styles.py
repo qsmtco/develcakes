@@ -583,9 +583,6 @@ button.agent-dash-clear:disabled {
 .context-avatar {
     border-radius: 50%;
 }
-.tab-dot-unread {
-    background: #facc15;
-}
 /* Tab label typography */
 .tab-label-name {
     font-weight: bold;
@@ -771,29 +768,6 @@ notebook > header > tabs > tab {
     color: #9b9bab;
 }
 .chat-action-btn:hover {
-    color: #a9b1d6;
-}
-/* -- Scroll-to-bottom floating button ------------------------------- */
-.scroll-to-bottom-btn {
-    background: rgba(30, 30, 50, 0.9);
-    border: 1px solid rgba(99, 102, 241, 0.4);
-    border-radius: 20px;
-    padding: 4px 12px;
-    color: #a9b1d6;
-    font-size: 13px;
-    opacity: 0;
-    transition: opacity 0.2s ease;
-}
-.scroll-to-bottom-btn.visible {
-    opacity: 1;
-}
-.scroll-to-bottom-btn:hover {
-    background: rgba(60, 60, 90, 0.95);
-    color: #d8d8e8;
-}
-
-.chat-action-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
     color: #a9b1d6;
 }
 
@@ -1308,7 +1282,6 @@ notebook > header > tabs > tab {
 .feed-tab-bar button { padding: 6px 16px; }
 .feed-tab-bar button:checked { background: rgba(99, 102, 241, 0.3); color: #c7d2fe; border-radius: 4px; }
 .feed-scroll { background: #1a1b26; }
-.web-surface-host { background: #1a1b26; }
 .feed-card-list { padding: 8px; }
 .feed-empty { padding: 48px; color: alpha(@theme_fg_color, 0.4); }
 

@@ -53,11 +53,6 @@ from utils.project_awareness import seed_project_prompts
 
 from utils.config import COMMAND_PREFIX
 
-# Opaque project-feed bar (28px + 4px margin) overlays the top of every
-# notebook page. Canvas documents fill the viewport from y=0; push their
-# content below the bar. 40px = bar (32px) + 8px breathing room.
-_CANVAS_TOP_SPACER_HTML = '<div style="height:40px"></div>'
-
 
 class MainWindow(Gtk.ApplicationWindow):
     """Main window for the develcakes application."""
@@ -791,43 +786,12 @@ class MainWindow(Gtk.ApplicationWindow):
         # set_on_token_breakdown_extra() slot. The existing
         # _on_token_breakdown in agent_runtime_handler.py dispatches to
         # the logger.info (preserved) and to this extra listener.
-        def _resolve_agent_info(sk: str) -> tuple[str | None, str | None]:
-            """Resolve (agent_name, agent_color) for a session key."""
-            agent_name = None
-            agent_color = None
-            if self._main_content._agent_mgr is not None:
-                agent_name = self._main_content._agent_mgr.get_name(sk)
-            if not agent_name:
-                from agent.special_agents import get_special_agents
-                from models.colors import color_for_special_agent
-                for agent_def in get_special_agents():
-                    if sk == agent_def.conv_id_prefix:
-                        agent_name = agent_def.display_name
-                        agent_color = color_for_special_agent(agent_def.role)
-                        break
-            if agent_name and not agent_color:
-                if self._main_content._agent_mgr is not None:
-                    agent_color = self._main_content._agent_mgr.get_color(agent_name)
-            return agent_name, agent_color
-
-        def _update_agent_display(sk: str):
-            """Update the agent avatar/name box and the status-bar agent label."""
-            agent_name, agent_color = _resolve_agent_info(sk)
-            if agent_name:
-                self._main_content.update_agent_context_display(agent_name, agent_color or "#6366f1")
-                self.update_agent_id_display(agent_name)
-            else:
-                self.update_agent_id_display("—")
-
         def _on_context_meter(sk: str, breakdown: dict) -> None:
             # SPEC-AGENT-DASHBOARD §2.3: every breakdown refreshes the agent
             # dashboard rows. The button-bar context meter was removed, so no
             # per-tab meter painting happens here.
             self._refresh_agent_dashboard()
         self._agent_runtime_handler.set_on_token_breakdown_extra(_on_context_meter)
-
-        # Update avatar/name on tab switch
-        self._main_content.set_on_session_changed(_update_agent_display)
 
         # Phase B — Wire /compact data-plane + UI side-effect.
         self._project_handler.set_compact_callback(
@@ -1307,8 +1271,6 @@ class MainWindow(Gtk.ApplicationWindow):
             )
 
         def _canvas(_session_key, slug, html):
-            if not html.startswith(_CANVAS_TOP_SPACER_HTML):
-                html = _CANVAS_TOP_SPACER_HTML + html
             done = threading.Event()
             box: dict = {}
 

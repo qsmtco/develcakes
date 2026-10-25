@@ -12,24 +12,18 @@
 # Known cost (accepted): full-document reload resets scroll; SP-later may
 # add scroll restore if the PM asks.
 #
-# MICRO smart-scroll (2026-10-07): implemented — at-bottom follow / reading-
-# position preserve. The restore is a PERMANENT `changed` handler gated on a
-# pending capture (not a blind one-shot), so a pane RESIZE that fires
-# `changed` with no render pending moves nothing (edge 2 rule); only a
-# genuinely scrollable (upper > page_size) height CONSUMES the capture, which
-# is what makes the mid-load collapse event harmless. Consumption is deferred
-# one idle frame while the height settles (BUG#1: WebKit fires several
-# `changed` events during layout; the first scrollable one is not final).
+# SMART SCROLL (2026-10-07, SPEC-17 SP1): the DOCUMENT scrolls, not a GTK
+# adjustment. Before each full-document load the surface READS the document
+# position (`_read_scroll_script` → `_pending_scroll`); when the load
+# FINISHES it APPLIES the captured intent (bottom, or the reader's y). The
+# WebView is a DIRECT child of ChatSurface — there is no ScrolledWindow
+# around it (SPEC-58 §2a).
 #
-# Test fidelity note: the smart-scroll tests drive a REAL Gtk.Adjustment from
-# the surface ScrolledWindow (real set_upper/set_value signal semantics —
-# fires changed, never value-changed, no auto-clamp of value on set_upper).
-# Do not replace with a fake — the real-semantics divergence is load-bearing.
-#
-# WebKit 6.0 preferred, 4.1 fallback (spec §2 edge table); if neither
-# introspection namespace loads, TextViewFallback (same API, raw text) keeps
-# the app usable (spec §7). Call sites import ChatSurface — it is the WebKit
-# class when WebKit is present.
+# WebKit 6.0 only (spec §2 edge table); if the introspection namespace does
+# not load, chat fails at boot by design (SPEC-58 §2b PM decision Option A —
+# the text-view escape hatch was retired).
+# Call sites import ChatSurface — it is the WebKit class when WebKit is
+# present.
 #
 # CSS: token/color styling lives in _BASE_CSS classes (tok-*/lang-*/terminal/
 # task-*/message-row) — no inline styles (SP2 contract). The classes
@@ -57,35 +51,23 @@ from render.html import live_fence
 
 logger = logging.getLogger(__name__)
 
-# DEVELCAKES_NO_WEBKIT=1 forces the TextViewFallback path (spec §7
-# runtime-failure case). Needed on Ubuntu 24.04 with
-# apparmor_restrict_unprivileged_userns=1: WebKit 6.0 IMPORTS fine but its
-# bwrap sandbox + dbus-proxy cannot launch, so the first page render SIGTRAPs
-# the whole app. The env var makes the import fail deliberately → the alias
-# below routes to the fallback surface. Old CRABCAKES_ name rides the
-# one-release fallback (utils.config.get_env — D2).
 from utils.config import get_env
 from utils.live_bridge import READ_ONLY_METHODS, LiveBridge
 from utils.live_guard import LiveGuard
 from utils.live_reader import read_local_image
 
-if get_env("NO_WEBKIT"):
+try:
+    gi.require_version("WebKit", "6.0")
+    from gi.repository import WebKit
+
+    _WEBKIT_VERSION = "6.0"
+except (ValueError, ImportError):  # pragma: no cover - environment-dependent
+    # No 4.1 fallback branch: the 4.x family's introspection namespace is
+    # "WebKit2", NOT "WebKit". When WebKit is unavailable the app fails at
+    # boot by design (SPEC-58 §2b Option A — the text-view escape hatch
+    # was retired; `create_chat_surface` raises).
     WebKit = None
     _WEBKIT_VERSION = None
-else:
-    try:
-        gi.require_version("WebKit", "6.0")
-        from gi.repository import WebKit
-
-        _WEBKIT_VERSION = "6.0"
-    except (ValueError, ImportError):  # pragma: no cover - environment-dependent
-        # FIX 3 (SP3 audit BUG #3): no 4.1 fallback branch. The 4.x family's
-        # introspection namespace is "WebKit2", NOT "WebKit" — the old branch
-        # requested a nonexistent namespace (dead code). Register: a
-        # WebKit2-4.1-only box would need an explicit `require_version("WebKit2",
-        # "4.1") import here; unsupported until one matters.
-        WebKit = None
-        _WEBKIT_VERSION = None
 
 # SPEC-57 §2a: WebKit's default clear color is opaque white. Paint the
 # canvas #1a1b26 before the first load_html; do not call again after a load.
@@ -919,21 +901,6 @@ def _cap_row_html(fragment: str) -> str:
     return fragment
 
 
-def _make_owned_scroll() -> Gtk.ScrolledWindow:
-    """FIX 3 (SP5a audit): the ONE ScrolledWindow a surface owns.
-
-    Single-scroll ruling: the surface wraps its content widget itself —
-    no mount-time wrapper in the render handler, no second scrollbar.
-    Both surface classes build it here (parity, one place).
-    """
-    scroll = Gtk.ScrolledWindow()
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_vexpand(True)
-    scroll.set_hexpand(True)
-    scroll.add_css_class("web-surface-host")
-    return scroll
-
-
 class ChatSurface(Gtk.Box):
     """WebKit-hosted chat transcript. One per chat tab, lazy webview.
 
@@ -986,45 +953,11 @@ class ChatSurface(Gtk.Box):
         # holds its CURRENT markup (island while live, flattened once evicted).
         self._live_sections: dict[int, dict] = {}
         self._next_live_id = 1
-        # FIX 3 (SP5a audit): the surface owns its scroll — when mounted
-        # (directly, no wrapper) it must fill the pane.
-        self._scroll = _make_owned_scroll()
-        # MICRO smart-scroll: social-feed scroll behavior. Full-document
-        # load_html collapses content height mid-load → the adjustment clamps
-        # → the view snaps to top on EVERY append (PM bug 2026-10-07; this
-        # closes SPEC-06 register #8 without a JS bridge). We track at-bottom
-        # on the surface's OWN adjustment and restore the user's intent once
-        # the new document's height lands.
-        self._was_at_bottom = True  # fresh surface: first render lands at bottom
-        self._pending_restore: tuple[bool, float] | None = None
-        # BUG#1 (fix round): WebKit fires MULTIPLE `changed` events as layout
-        # settles; the restore must wait for a STABLE height, so consumption is
-        # deferred across idle frames. CROSS-FRAME (audit Finding 1): a single
-        # stable frame is NOT enough — WebKit's layout lands across frames, so
-        # an intermediate height can be stable for one frame and consume the
-        # capture prematurely. We require N=2 CONSECUTIVE stable checks.
-        self._restore_settle_source = None
-        self._restore_upper = 0.0
-        self._restore_stable_count = 0
-        vadj = self._scroll.get_vadjustment()
-        if vadj is not None:
-            self._bottom_adj = vadj
-            self._bottom_handler_id = vadj.connect(
-                "value-changed", self._on_scroll_value_changed
-            )
-            self._restore_handler_id = vadj.connect(
-                "changed", self._on_adjustment_changed
-            )
-        else:  # pragma: no cover - Gtk.ScrolledWindow always has an adjustment
-            self._bottom_adj = None
-            self._bottom_handler_id = 0
-            self._restore_handler_id = 0
         # SPEC-17 SP1: the DOCUMENT-scroll pending intent (the fix). SINGLE
         # slot — `(at_bottom: bool, y: float)`. Depends on the DOCUMENT
         # position, captured by a pre-load READ (SP1.1) and consumed by the
-        # FINISHED handler (SP1.2) after each full-document reload. It is
-        # DELIBERATELY separate from `_pending_restore` above (the legacy GTK
-        # machinery, retained but not the fix).
+        # FINISHED handler (SP1.2) after each full-document reload. (The legacy
+        # GTK-adjustment capture/restore was deleted in SPEC-58 §2b.)
         self._pending_scroll: tuple[bool, float] | None = None
         # SPEC-17 SP1.1 coalescing: True between issuing the pre-load READ and
         # its callback. The load is deferred to the callback, so an append
@@ -1059,7 +992,6 @@ class ChatSurface(Gtk.Box):
         self._web_process_handler_id = 0
         self.set_vexpand(True)
         self.set_hexpand(True)
-        self.append(self._scroll)
 
     # ── internals ──
     def _ensure_webview(self):
@@ -1115,7 +1047,11 @@ class ChatSurface(Gtk.Box):
             self._web_process_handler_id = self._webview.connect(
                 "web-process-terminated", self._on_web_process_terminated
             )
-            self._scroll.set_child(self._webview)
+            # SPEC-58 §2b: the WebView mounts DIRECTLY into the surface box
+            # (no ScrolledWindow wrapper — the surface IS the scroll owner).
+            self.set_vexpand(True)
+            self.set_hexpand(True)
+            self.append(self._webview)
         return self._webview
 
     def _on_live_guard_compiled(self, content_filter) -> None:
@@ -1167,130 +1103,15 @@ class ChatSurface(Gtk.Box):
         """The single load path (monkeypatch target for tests)."""
         self._ensure_webview().load_html(doc, "about:blank")
 
-    def get_vadjustment(self) -> Gtk.Adjustment | None:
-        """FIX 3 (SP5a audit): the surface's own scroll adjustment — the
-        seam main_content.scroll_chat_to_bottom drives (single-scroll
-        ruling: one active scroll per pane, owned by the surface)."""
-        return self._scroll.get_vadjustment()
-
-    # ── smart-scroll (MICRO 2026-10-07) ──
-    _BOTTOM_THRESHOLD = 80.0  # px — same threshold as main_content's button
-    # Finding 1: consecutive stable idle checks required before consuming the
-    # capture (WebKit layout lands across frames).
-    _RESTORE_STABLE_FRAMES = 2
-
-    def _on_scroll_value_changed(self, vadj) -> None:
-        """Track whether the user is at/near the bottom (social-feed rule).
-
-        A user-driven value change (scrollbar drag, wheel, the scroll-to-
-        bottom button) re-arms the intent that the next restored render uses.
-        Programmatic set_value from the restore ALSO fires this — idempotent:
-        after a restore the value is at the restored spot, which re-derives
-        the SAME at-bottom verdict.
-
-        Finding 2 guard: when the content is NOT scrollable (upper <= page_size
-        — the mid-load COLLAPSE clamps value→0 and fires value-changed), the
-        clamp is a LAYOUT artifact, NOT user intent. Updating the tracker here
-        would wrongly re-arm was_at_bottom=True while the user reads up top.
-        Early-return: there is nothing to scroll, so there is no intent.
-        """
-        if vadj.get_upper() <= vadj.get_page_size():
-            return  # collapsed / not scrollable — do not touch the tracker
-        self._was_at_bottom = (
-            (vadj.get_upper() - vadj.get_page_size() - vadj.get_value())
-            <= self._BOTTOM_THRESHOLD
-        )
-
-    def _on_adjustment_changed(self, vadj) -> None:
-        """Fired when upper/page_size change — for a real load, this is the
-        new DOM height landing. Schedule the deferred restore.
-
-        BUG#1 + Finding 1: real WebKit fires MULTIPLE `changed` events and the
-        layout lands ACROSS FRAMES — an intermediate height can look stable for
-        one frame and must NOT consume the capture (audit: captured 300 → the
-        premature consume read the intermediate 50 ≈ top). We therefore defer
-        and require N=2 CONSECUTIVE stable idle checks before consuming.
-
-        Guard 1 (edge 2): no pending capture (e.g. a pane resize) → nothing.
-        Guard 2 (load-bearing, kept): `upper <= page_size` is the mid-load
-        COLLAPSE — not scrollable yet, so leave the capture pending and do not
-        even schedule (the real height's own `changed` will).
-        """
-        pending = self._pending_restore
-        if pending is None or self._destroyed:
-            return
-        if vadj.get_upper() <= vadj.get_page_size():
-            return  # collapse / nothing to scroll yet — keep the capture
-        self._schedule_restore(vadj)
-
-    def _schedule_restore(self, vadj) -> None:
-        """Arm a settle check (idempotent — one pending at a time).
-
-        Resets the consecutive-stability counter: any new `changed` means the
-        height moved, so the run of stable frames restarts.
-        """
-        self._restore_stable_count = 0
-        if self._restore_settle_source is not None:
-            return  # already scheduled; the running settle re-reads upper
-        self._restore_upper = vadj.get_upper()
-        self._restore_settle_source = GLib.idle_add(self._settle_restore)
-
-    def _settle_restore(self) -> bool:
-        """Idle callback: consume the capture only after N consecutive stable
-        checks (Finding 1 — cross-frame settle).
-
-        Each call compares the current upper to the last-seen upper. If it
-        moved, restart the stable run and re-arm. If unchanged, increment the
-        counter; consume only when it reaches _RESTORE_STABLE_FRAMES.
-        """
-        self._restore_settle_source = None
-        if self._destroyed:
-            return GLib.SOURCE_REMOVE
-        pending = self._pending_restore
-        vadj = self._bottom_adj
-        if pending is None or vadj is None:
-            return GLib.SOURCE_REMOVE
-        current_upper = vadj.get_upper()
-        if current_upper != self._restore_upper:
-            # Height moved — restart the stable run and re-check next frame.
-            self._restore_upper = current_upper
-            self._restore_stable_count = 0
-            self._restore_settle_source = GLib.idle_add(self._settle_restore)
-            return GLib.SOURCE_REMOVE
-        if vadj.get_upper() <= vadj.get_page_size():
-            return GLib.SOURCE_REMOVE  # collapsed again — leave pending
-        self._restore_stable_count += 1
-        if self._restore_stable_count < self._RESTORE_STABLE_FRAMES:
-            # Stable so far, but not for enough consecutive frames yet.
-            self._restore_settle_source = GLib.idle_add(self._settle_restore)
-            return GLib.SOURCE_REMOVE
-        # N consecutive stable frames — the layout has settled; consume.
-        self._pending_restore = None  # consume BEFORE set_value (see below)
-        was_at_bottom, captured_value = pending
-        if was_at_bottom:
-            # BUG#7: re-read the LIVE tracker immediately before driving the
-            # adjustment. A user-grab during the cross-frame settle window
-            # fires value-changed and re-arms _was_at_bottom=False; that fresh
-            # intent supersedes the stale capture, so abort the at-bottom
-            # action rather than yanking the reader back down. (The reader was
-            # at-bottom so there is no reading position to restore.)
-            if not self._was_at_bottom:
-                return GLib.SOURCE_REMOVE
-            vadj.set_value(vadj.get_upper() - vadj.get_page_size())
-        else:
-            vadj.set_value(captured_value)  # set_value clamps to [lower, max]
-        # NOTE: consume-before-set_value is deliberate — set_value fires
-        # `value-changed` (re-arming _was_at_bottom) but NOT `changed`, so it
-        # cannot re-trigger this handler.
-        return GLib.SOURCE_REMOVE
+    # ── document scroll (SPEC-17 SP1) ──
+    _BOTTOM_THRESHOLD = 80.0  # px — same threshold as the old scroll button
 
     def _do_render(self) -> bool:
         """Coalesced render — runs at most once per idle cycle.
 
         SPEC-17 SP1.1: BEFORE the load, capture the reader's DOCUMENT intent
         (at-bottom + y) into the single pending slot `_pending_scroll`, then
-        load. The legacy GTK capture (`_pending_restore`) is retained
-        unchanged — it is not the fix.
+        load. (The legacy GTK-adjustment capture was deleted in SPEC-58 §2b.)
         """
         self._render_pending = False
         if self._destroyed:
@@ -1328,11 +1149,6 @@ class ChatSurface(Gtk.Box):
                 and self._injected_seq < self._row_seq):
             self._inject_new_rows()
             return GLib.SOURCE_REMOVE
-        # Legacy GTK capture (MICRO smart-scroll, retained, NOT the fix):
-        # capture the adjustment intent before the load collapses the height.
-        vadj = self._scroll.get_vadjustment()
-        if vadj is not None:
-            self._pending_restore = (self._was_at_bottom, vadj.get_value())
         # SPEC-17 SP1.1: capture the DOCUMENT intent.
         if self._webview is None or self._live_js:
             # No web view yet, OR the live path's FIRST load — a fresh
@@ -1362,9 +1178,6 @@ class ChatSurface(Gtk.Box):
         removal, and eviction/orphan compactions — all must honour the
         captured intent, never assume bottom.
         """
-        vadj = self._scroll.get_vadjustment()
-        if vadj is not None:
-            self._pending_restore = (self._was_at_bottom, vadj.get_value())
         self._injected_seq = self._row_seq
         self._dom_row_count = len(self._rows)
         if self._webview is not None:
@@ -1770,7 +1583,6 @@ class ChatSurface(Gtk.Box):
         if a document is loaded; otherwise only stores the intent so the next
         FINISHED lands at the bottom.
         """
-        self._was_at_bottom = True
         self._pending_scroll = (True, 0.0)
         if self._read_in_flight:
             # FIX ROUND 2 (Issue #3): a pre-load READ is in flight and will
@@ -2084,33 +1896,6 @@ class ChatSurface(Gtk.Box):
         self._stream_placeholders.clear()
         self._rows.clear()
         self._live_sections.clear()
-        # MICRO smart-scroll (edge 7): cancel any pending settle idle and
-        # disconnect the adjustment handlers so a height change landing AFTER
-        # destroy cannot restore on a dead surface (and no restore fires from
-        # a stale capture).
-        if self._restore_settle_source is not None:
-            try:
-                GLib.source_remove(self._restore_settle_source)
-            except RuntimeError:
-                logger.debug("settle source already fired — nothing to cancel")
-            self._restore_settle_source = None
-        if self._bottom_adj is not None:
-            try:
-                if self._bottom_handler_id:
-                    self._bottom_adj.disconnect(self._bottom_handler_id)
-                if self._restore_handler_id:
-                    self._bottom_adj.disconnect(self._restore_handler_id)
-            except (TypeError, ValueError):
-                # handler already gone / invalid id — non-fatal (idempotent
-                # destroy contract).
-                logger.debug("adjustment handler already disconnected")
-            self._bottom_adj = None
-            self._bottom_handler_id = 0
-            self._restore_handler_id = 0
-        # NOTE: `_pending_restore` is intentionally NOT cleared here — on a
-        # destroyed surface the capture is inert, and leaving it means the
-        # DISCONNECT is the sole guard (so test_destroy_mid_load_no_restore
-        # isolates disconnection; clearing it would mask a missing disconnect).
         if self._webview is not None:
             # SPEC-19 SP1 audit BUG#1: detach the LiveGuard BEFORE tearing the
             # webview down. detach() removes the content filter + disconnects
@@ -2149,7 +1934,6 @@ class ChatSurface(Gtk.Box):
                 except (TypeError, ValueError):  # already gone — non-fatal
                     logger.debug("web-process-terminated handler already disconnected")
                 self._web_process_handler_id = 0
-            self._scroll.set_child(None)
             self._webview = None
         # SPEC-17 SP1: the pending document intent is inert on a destroyed
         # surface (all its consumers guard on _destroyed) — clear for hygiene.
@@ -2160,215 +1944,20 @@ class ChatSurface(Gtk.Box):
         self._load_retry_pending = False
 
 
-class TextViewFallback(Gtk.Box):
-    """Spec §7: plain-text fallback with the same API — app stays usable
-    without WebKit (raw text, no HTML rendering)."""
-
-    def __init__(self, window_max: int = 500,
-                 live_bridge_approver=None) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self._window_max = window_max
-        self._rows: deque = deque(maxlen=window_max)
-        self._stream_buffers: dict[str, list[str]] = {}
-        # SPEC-19 SP4: signature parity with ChatSurface (the live bridge is a
-        # no-op here — the fallback has no JS/document).
-        self._live_bridge_approver = live_bridge_approver
-        # FIX 3 (SP5a audit): scroll parity with the WebKit class — the
-        # surface owns its ScrolledWindow; TextView goes inside it.
-        self._scroll = _make_owned_scroll()
-        self.set_vexpand(True)
-        self.set_hexpand(True)
-        self.append(self._scroll)
-        self._view = Gtk.TextView()
-        self._view.set_editable(False)
-        self._view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self._scroll.set_child(self._view)
-        # MICRO-SMART-SCROLL BUG#2 fix (2026-10-07): the fallback must keep
-        # the SAME social-feed scroll contract as ChatSurface — follow new
-        # rows only when the reader is already at the bottom, otherwise
-        # preserve their reading position. The 18-site sweep removed the
-        # handler-side force-scroll that used to cover this path; the surface
-        # owns its scroll now, so the tracking lives HERE.
-        #
-        # The fallback appends IN PLACE (no full-document reload), so there
-        # is no mid-load height collapse and NO capture/restore machinery —
-        # just track at-bottom and conditionally scroll after the new line
-        # has been laid out (GTK updates `upper` a frame later, so the follow
-        # is idle-deferred).
-        self._was_at_bottom = True
-        self._follow_source = None
-        vadj = self._scroll.get_vadjustment()
-        if vadj is not None:
-            self._bottom_adj = vadj
-            self._bottom_handler_id = vadj.connect(
-                "value-changed", self._on_scroll_value_changed
-            )
-        else:  # pragma: no cover — ScrolledWindow always has an adjustment
-            self._bottom_adj = None
-            self._bottom_handler_id = 0
-
-    _BOTTOM_THRESHOLD = 80.0  # px — parity with ChatSurface / main_content
-
-    def _on_scroll_value_changed(self, vadj) -> None:
-        """Track at-bottom on the surface's OWN vadjustment (same 80px
-        threshold as ChatSurface). Mirrors ChatSurface's guard: when the
-        content is not scrollable (upper <= page_size) the value change is a
-        layout artifact, not user intent — do not touch the tracker."""
-        if vadj.get_upper() <= vadj.get_page_size():
-            return
-        self._was_at_bottom = (
-            (vadj.get_upper() - vadj.get_page_size() - vadj.get_value())
-            <= self._BOTTOM_THRESHOLD
-        )
-
-    def get_vadjustment(self) -> Gtk.Adjustment | None:
-        """FIX 3 (SP5a audit): scroll seam — see ChatSurface.get_vadjustment."""
-        return self._scroll.get_vadjustment()
-
-    def _text(self) -> str:
-        buf = self._view.get_buffer()
-        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-
-    def _append_line(self, line: str) -> None:
-        """Append one line; trim from the TOP past window_max (FIX 7 —
-        P11: every append-driven surface is bounded-memory; this buffer IS
-        the fallback's window)."""
-        buf = self._view.get_buffer()
-        buf.insert(buf.get_end_iter(), line + "\n")
-        excess = buf.get_line_count() - self._window_max
-        if excess > 0:
-            # GTK4 out-param API: get_iter_at_line returns (ok, iter).
-            start = buf.get_start_iter()
-            _, end = buf.get_iter_at_line(excess)
-            buf.delete(start, end)
-
-    def append_message(self, role: str, html_fragment: str, agent_name: str | None = None,
-                       agent_color: str | None = None) -> None:
-        """SPEC-14 §2a.5: color is accepted for signature parity and stored on
-        the row, but is INERT in plain-text mode (no text medium for color;
-        the `[name]` prefix is the fallback's identity marker)."""
-        self._rows.append(
-            {
-                "role": role,
-                "html": _cap_row_html(html_fragment),
-                "agent": agent_name or "",
-                "color": _sanitize_color(agent_color),
-            }
-        )
-        plain = html.unescape(_TAG_STRIP_RE.sub("", _cap_row_html(html_fragment)))
-        prefix = f"[{agent_name}] " if agent_name else ""
-        self._append_line(f"{prefix}{plain}")
-        # MICRO-SMART-SCROLL BUG#2: only follow if the reader was already at
-        # the bottom. GTK recomputes `upper` one frame after the buffer
-        # change lands, so scroll on the next idle (idempotent — one pending
-        # follow at a time).
-        if self._was_at_bottom:
-            self._schedule_follow_bottom()
-
-    def _schedule_follow_bottom(self) -> None:
-        """Arm a deferred follow-to-bottom (idempotent — one pending at a
-        time). The append already landed, but GTK updates the vadjustment's
-        `upper` on the NEXT frame; scrolling synchronously would read the
-        stale height and stop short of the true bottom."""
-        if self._follow_source is not None:
-            return
-        self._follow_source = GLib.idle_add(self._follow_to_bottom)
-
-    def _follow_to_bottom(self) -> bool:
-        """Idle callback: drive the adjustment to the bottom, once.
-
-        If the height has not landed yet (upper <= page_size) there is
-        nothing to scroll to; we do NOT re-arm — the at-bottom tracker stays
-        True, so the NEXT append arms a fresh follow once layout exists
-        (avoids an unbounded idle spin on a never-allocated surface)."""
-        self._follow_source = None
-        vadj = self._bottom_adj
-        if vadj is None:
-            return GLib.SOURCE_REMOVE
-        if vadj.get_upper() <= vadj.get_page_size():
-            return GLib.SOURCE_REMOVE
-        # BUG#7: re-read the LIVE tracker right before driving the adjustment.
-        # A user-grab during the idle gap fires value-changed and re-arms
-        # _was_at_bottom=False; that fresh intent supersedes the arm-time
-        # capture, so abort the follow instead of yanking them back down.
-        if not self._was_at_bottom:
-            return GLib.SOURCE_REMOVE
-        vadj.set_value(vadj.get_upper() - vadj.get_page_size())
-        return GLib.SOURCE_REMOVE
-
-    def scroll_to_latest(self) -> None:
-        """SPEC-17 SP1.3: parity with ChatSurface.scroll_to_latest.
-
-        The fallback appends in place (no document), so there is no script
-        to run: arm the follow intent and drive the adjustment to the bottom.
-        As with append, the drive is idle-deferred ("today's behavior" — GTK
-        updates `upper` a frame after the layout, so a synchronous read would
-        stop short); `_schedule_follow_bottom` is the existing one-place
-        mechanism and re-reads the (True) intent before moving."""
-        self._was_at_bottom = True
-        self._schedule_follow_bottom()
-
-    def stream_delta(self, session_key: str, text: str, agent_name: str | None = None) -> None:
-        self._stream_buffers.setdefault(session_key, []).append(text)
-
-    def end_stream(self, session_key: str, agent_name: str | None = None) -> None:
-        chunks = self._stream_buffers.pop(session_key, None)
-        if not chunks:
-            return
-        self.append_message("agent", "".join(chunks), agent_name=agent_name)
-
-    def clear(self) -> None:
-        """SPEC-19 SP4 follow-up (the /clear UI plane): parity with
-        ChatSurface.clear — reset rows + stream buffers, keep the surface
-        mounted and renderable. The TextView IS the document; clearing the
-        buffer empties it (no reload step needed). Idempotent post-destroy
-        (same guard contract as ChatSurface.clear)."""
-        if self._destroyed:
-            return
-        self._stream_buffers.clear()
-        self._rows.clear()
-        self._view.get_buffer().set_text("")
-
-    def destroy(self) -> None:
-        self._stream_buffers.clear()
-        self._rows.clear()
-        # MICRO-SMART-SCROLL BUG#2: cancel a pending follow and disconnect the
-        # at-bottom tracker so a late height change cannot scroll a dead
-        # surface (parity with ChatSurface's destroy contract).
-        if self._follow_source is not None:
-            try:
-                GLib.source_remove(self._follow_source)
-            except Exception:  # noqa: BLE001 — already gone: idempotent destroy
-                logger.debug("fallback follow source already removed")
-            self._follow_source = None
-        if self._bottom_adj is not None:
-            try:
-                if self._bottom_handler_id:
-                    self._bottom_adj.disconnect(self._bottom_handler_id)
-            except (TypeError, ValueError):  # handler already gone — non-fatal
-                logger.debug("fallback adjustment handler already disconnected")
-            self._bottom_adj = None
-            self._bottom_handler_id = 0
-
-
-# FIX 4 (SP3 audit BUG #4): on a WebKit-less box the real ChatSurface would
-# crash on first append (WebView is None) — the fallback IS the surface
-# there. Same API, zero call-site branching.
-if WebKit is None:
-    ChatSurface = TextViewFallback  # deliberate module-level alias
-
-
 def create_chat_surface(window_max: int = 500, live_bridge_approver=None):
     """Call-site factory: resolves the surface class at CALL time (tests
-    monkeypatch the module's WebKit binding; the import-time alias above
-    covers genuinely WebKit-less boxes). This is the PRODUCTION entry:
+    monkeypatch the module's WebKit binding). This is the PRODUCTION entry:
     chat_render_handler._finalize mounts a surface through here. It is also
     a supported test monkeypatch seam (tests patch this symbol to inject a
     fake surface).
+
+    SPEC-58 §2b PM decision Option A: when WebKit is unavailable there is
+    NO fallback — the app fails at boot by design (a text-view fallback was
+    retired in this step).
 
     SPEC-19 SP4: `live_bridge_approver` is threaded to the surface's
     LiveBridge (window wires it to the exec-approval card).
     """
     if WebKit is None:
-        return TextViewFallback(window_max, live_bridge_approver=live_bridge_approver)
+        raise RuntimeError("chat requires WebKit")
     return ChatSurface(window_max, live_bridge_approver=live_bridge_approver)

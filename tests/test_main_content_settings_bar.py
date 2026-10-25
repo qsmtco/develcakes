@@ -5,14 +5,16 @@
 # Covers:
 #   - _clear_settings_bar()           (sibling-walk cleanup)
 #   - update_project_settings()       (empty -> PILL-ONLY; non-empty -> info)
-#   - pill-preservation               (set_project_settings_text /
-#                                       set_feed_bar_text re-append the pill;
-#                                       UI-PILLBAR P1 — was the gear, BUG #5)
 #   - settings-gear ABSENCE pin       (UI-PILLBAR P1: gear + setter + click
 #                                       handler deleted; toolbar is sole path)
 #   - xml_escape_text hardening (BUG #6) (project_name / branch literal)
 #   - _resolve_agent_display_name()   (BUG #7 .get() + truthiness fallback)
 #   - click-handler None guards
+#
+# RETIRED (SPEC-58 §2i): the `TestPillPreservation` class — it called only
+# the deleted test-only bar writers `set_project_settings_text` /
+# `set_feed_bar_text`. The live bar builder `update_project_settings` and
+# its pill re-append are still pinned by the classes below.
 #
 # CRITICAL: GTK widget construction segfaults in this sandbox. We swap the
 # module-global `Gtk` for lightweight fakes so the REAL method bodies execute
@@ -249,36 +251,6 @@ class TestUpdateProjectSettings:
         info_box = children[0]
         assert isinstance(info_box, _FakeBox)
         assert info_box.children[-1] is mc._transport_cluster
-
-
-class TestPillPreservation:
-    """UI-PILLBAR P1: the BUG #5 preservation contract transfers from the
-    deleted gear to the shared activity pill — same rebuild paths, same
-    sibling-walk cleanup, same re-append."""
-
-    def test_pill_preserved_in_set_project_settings_text(self, mc):
-        """set_project_settings_text re-appends the pill."""
-        mc.set_project_settings_text("legacy")
-        assert mc._activity_pill.get_parent() is mc._project_settings
-        assert mc._transport_cluster in mc._project_settings.children
-        assert len(mc._project_settings.children) == 3
-        assert mc._project_settings.children[-1] is mc._activity_pill
-
-    def test_pill_preserved_in_set_feed_bar_text(self, mc):
-        """set_feed_bar_text re-appends the pill."""
-        mc.set_feed_bar_text("status")
-        assert mc._activity_pill.get_parent() is mc._project_settings
-        assert mc._transport_cluster in mc._project_settings.children
-        assert len(mc._project_settings.children) == 3
-        assert mc._project_settings.children[-1] is mc._activity_pill
-
-    def test_pill_preserved_through_repeated_calls(self, mc):
-        """Repeated rebuilds never lose the pill."""
-        for _ in range(3):
-            mc.set_project_settings_text("x")
-            assert mc._activity_pill.get_parent() is mc._project_settings
-        mc.set_feed_bar_text("y")
-        assert mc._activity_pill.get_parent() is mc._project_settings
 
 
 class TestXmlEscapeHardening:

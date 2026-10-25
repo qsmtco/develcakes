@@ -24,20 +24,42 @@ from ui.handlers.chat_render_handler import (
     _WELCOME_MARKDOWN,
     ChatRenderHandler,
 )
-from ui.views.chat_surface import TextViewFallback
+class SpySurface(Gtk.Box):
+    """Local stand-in for the chat surface (no WebKit).
 
-
-class SpySurface(TextViewFallback):
-    """Records append_message calls — no WebKit required."""
+    Records append_message calls into ``appended`` and keeps the same
+    ``_rows`` row list the document builders read.
+    """
 
     def __init__(self, *a, **k):
-        super().__init__(*a, **k)
+        super().__init__()
+        self._rows: list[dict] = []
         self.appended: list[dict] = []
 
     def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
+        self._rows.append(
+            {"role": role, "html": html_fragment, "agent": agent_name or "",
+             "color": agent_color}
+        )
         self.appended.append({"role": role, "html": html_fragment, "agent": agent_name})
-        super().append_message(role, html_fragment, agent_name=agent_name,
-                               agent_color=agent_color)
+
+    def stream_delta(self, session_key, text, agent_name=None):
+        pass
+
+    def end_stream(self, session_key, agent_name=None):
+        pass
+
+    def append_live(self, payload_html, agent_name=None, agent_color=None):
+        pass
+
+    def clear(self):
+        self._rows.clear()
+
+    def destroy(self):
+        self._rows.clear()
+
+    def scroll_to_latest(self):
+        pass
 
 
 def _handler_with_spy() -> tuple[ChatRenderHandler, SpySurface]:
@@ -165,13 +187,13 @@ class TestWelcomeReopenSemantics:
         queued GLib idle (load_html) was never drained/destroyed — any
         later context-draining test fired it → real WebKit load_html →
         SIGTRAP (reproduced: welcome_html then chat_surface in one batch).
-        Surface creation is routed through the TextViewFallback factory
+        Surface creation is routed through the local SpySurface factory
         (same pattern as TestCreateChatTabEmitsWelcome._real_tab) — no
         WebKit surface exists to leak."""
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -183,8 +205,8 @@ class TestWelcomeReopenSemantics:
         h.pop_tombstones_for_box("project:alpha")
         assert "agent:x" not in h._welcome_shown
         assert "project:alpha" not in h._welcome_shown
-        # No WebKit surface escaped: the lazily-created surface is a fallback.
-        assert created and isinstance(created[0], TextViewFallback)
+        # No WebKit surface escaped: the lazily-created surface is the local double.
+        assert created and isinstance(created[0], SpySurface)
 
     def test_closed_tombstoned_key_drops_welcome(self):
         """A tombstoned (closed) key's late welcome is DROPPED — same
@@ -259,7 +281,7 @@ class TestWelcomeSanitizerGuard:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -289,7 +311,7 @@ class TestCreateChatTabEmitsWelcome:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -329,5 +351,5 @@ class TestCreateChatTabEmitsWelcome:
         assert "build_welcome_bubble" not in src
 
 
-def _welcome_rows_surface(surface: TextViewFallback) -> list:
+def _welcome_rows_surface(surface: SpySurface) -> list:
     return [r for r in surface._rows if 'class="welcome-row"' in r["html"]]

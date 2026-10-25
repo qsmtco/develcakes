@@ -8,8 +8,8 @@
 # surface owns the widget tree — render_sync returns None and
 # on_bubble_ready fires with None (callers' `if bubble is not None` guards
 # verified at chat_handler :228/:532 and agent_runtime_handler :2101/:2116/
-# :2280/:2316/:2438). Spy surfaces (TextViewFallback instances pre-registered
-# into handler._surfaces) keep these tests environment-independent.
+# :2280/:2316/:2438). Spy surfaces (local doubles pre-registered into
+# handler._surfaces) keep these tests environment-independent.
 
 import time
 
@@ -22,23 +22,64 @@ from gi.repository import GLib, Gtk
 
 import ui.handlers.chat_render_handler as crh_module
 from ui.handlers.chat_render_handler import ChatRenderHandler
-from ui.views.chat_surface import TextViewFallback
 from utils.escaping import escape_for_pango
 
 
-class SpySurface(TextViewFallback):
-    """TextViewFallback that records append_message calls (no WebKit needed)."""
+class SpySurface(Gtk.Box):
+    """Local stand-in for the chat surface (no WebKit).
+
+    Records append_message calls into ``appended`` and keeps the same
+    ``_rows`` row list the document builders read.
+    """
 
     def __init__(self, *a, **k):
-        super().__init__(*a, **k)
+        super().__init__()
+        self._rows: list[dict] = []
         self.appended: list[dict] = []
+        # FIX-9 sliver guard measures the PRODUCT (the mounted surface), not
+        # the double: an empty Gtk.Box has 0px natural height, so a realized
+        # guard test would measure the spy instead. One label gives this
+        # double a real, non-zero natural height like the WebKit surface,
+        # and vexpand mirrors the product's fill-the-pane geometry (the
+        # mounted box EXPANDS — main_content.create_chat_tab sets hexpand+
+        # vexpand on the page box; the real surface's webview fills it).
+        self.append(Gtk.Label(label="spy surface"))
+        self.set_vexpand(True)
 
     def append_message(self, role, html_fragment, agent_name=None, agent_color=None):
+        self._rows.append(
+            {"role": role, "html": html_fragment, "agent": agent_name or "",
+             "color": agent_color}
+        )
         self.appended.append(
             {"role": role, "html": html_fragment, "agent": agent_name,
              "color": agent_color}
         )
-        super().append_message(role, html_fragment, agent_name=agent_name)
+
+    def append_live(self, payload_html, agent_name=None, agent_color=None):
+        self._rows.append(
+            {"role": "agent", "html": payload_html, "agent": agent_name or "",
+             "color": agent_color, "live": True}
+        )
+        self.appended.append(
+            {"role": "agent", "html": payload_html, "agent": agent_name,
+             "color": agent_color}
+        )
+
+    def stream_delta(self, session_key, text, agent_name=None):
+        pass
+
+    def end_stream(self, session_key, agent_name=None):
+        pass
+
+    def clear(self):
+        self._rows.clear()
+
+    def destroy(self):
+        self._rows.clear()
+
+    def scroll_to_latest(self):
+        pass
 
 
 class _SyncPool:
@@ -445,65 +486,6 @@ class TestReentrancyGuard:
         guard.remove("k")  # no-op on missing
 
 
-# ── Event cards: UNCHANGED Pango path (R3 — not transcript sites) ─────────
-
-class TestPhase4EventCards:
-    """render_event_card stays Pango (ruling R2/R3 — cards are not chat
-    transcript sites and are not in the pango catalog)."""
-
-    def setup_method(self):
-        self.handler = ChatRenderHandler(GLib_module=None)
-        self.fake_box = FakeChatBox()
-
-    def test_file_read_card(self):
-        self.handler.render_event_card("file_read", self.fake_box,
-                                      file_path="src/main.py",
-                                      snippet="print('hello')",
-                                      line_range="1-3")
-        assert len(self.fake_box._children) == 1
-        assert self.fake_box._children[0].get_halign() == Gtk.Align.START
-
-    def test_edit_proposal_card(self):
-        self.handler.render_event_card("edit_proposal", self.fake_box,
-                                      file_path="src/main.py",
-                                      diff="- old\n+ new")
-        assert len(self.fake_box._children) == 1
-
-    def test_tool_call_card(self):
-        self.handler.render_event_card("tool_call", self.fake_box,
-                                      tool_name="ReadFile",
-                                      detail="path=README.md")
-        assert len(self.fake_box._children) == 1
-
-    def test_error_bubble(self):
-        self.handler.render_event_card("error", self.fake_box,
-                                      error_msg="File not found")
-        assert len(self.fake_box._children) == 1
-
-    def test_unknown_event_type_silent(self):
-        self.handler.render_event_card("unknown_type", self.fake_box)
-        assert self.fake_box._children == []
-
-
-class FakeChatBox:
-    """Minimal Gtk.Box stand-in for testing card append/remove."""
-
-    def __init__(self):
-        self._children = []
-
-    def append(self, widget):
-        self._children.append(widget)
-
-    def remove(self, widget):
-        self._children.remove(widget)
-
-    def __contains__(self, widget):
-        return widget in self._children
-
-    def get_first_child(self):
-        return self._children[0] if self._children else None
-
-
 # ── Legacy escape semantics (kept: escape util itself unchanged) ──────────
 
 class TestEscapeUtil:
@@ -653,19 +635,6 @@ class TestSurfaceMountLifecycle:
         assert handler.surface_for_box(boxes["sk"]) is created[0]
         assert handler.surface_for_box(Gtk.Box()) is None
 
-    def test_textview_fallback_mounts_identically(self, monkeypatch):
-        """Test 3: WebKit=None → the TextViewFallback mounts through the
-        SAME path (Gtk.Box base — parity)."""
-        import ui.views.chat_surface as cs_module
-
-        monkeypatch.setattr(cs_module, "WebKit", None)
-        boxes = {"sk": Gtk.Box()}
-        handler, created = self._wired_handler(monkeypatch, boxes)
-        handler.render_sync("Agent", "hello", "sk")
-        assert len(created) == 1
-        assert isinstance(created[0], TextViewFallback)
-        assert self._mounted_in(boxes["sk"], created[0])
-
     def test_close_tab_releases_session_surface(self, monkeypatch):
         """Test 4 (R2): main_content._close_tab → close_session(sk) — the
         surfaces dict drains and the surface's destroy contract ran."""
@@ -677,8 +646,6 @@ class TestSurfaceMountLifecycle:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "sk"}
         mc._tab_chat_boxes = {0: Gtk.Box()}
-        mc._tab_scrolls = {}
-        mc._tab_overlays = {}
         mc._bulk_closing = False
         mc._chat_render_handler = handler
 
@@ -704,8 +671,6 @@ class TestSurfaceMountLifecycle:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "project:alpha"}
         mc._tab_chat_boxes = {0: Gtk.Box()}
-        mc._tab_scrolls = {}
-        mc._tab_overlays = {}
         mc._bulk_closing = False
         mc._chat_render_handler = handler
         # Stub the notebook scan (MagicMock notebook has no real pages):
@@ -779,7 +744,7 @@ class TestStreamingMountLifecycle:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -845,7 +810,7 @@ class TestStreamingMountLifecycle:
                             mount_key="project:alpha")
         # Stray second surface mounted DIRECTLY in the same box, cached under
         # its own display key (the shape the loop defends against).
-        stray = TextViewFallback()
+        stray = SpySurface()
         project_box.append(stray)
         handler._surfaces["agent:stray"] = stray
         handler._surfaces_by_parent[id(project_box)] = stray  # index consistency
@@ -934,7 +899,7 @@ class TestSurfaceAllocationAndCaps:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -959,7 +924,7 @@ class TestSurfaceAllocationAndCaps:
         # connect). create_chat_tab consults the wiring to suppress the
         # welcome bubble on surface tabs.
         orig = crh_module.create_chat_surface
-        crh_module.create_chat_surface = TextViewFallback
+        crh_module.create_chat_surface = SpySurface
         try:
             handler = ChatRenderHandler()
             mc.set_chat_render_handler(handler)
@@ -976,7 +941,9 @@ class TestSurfaceAllocationAndCaps:
                 while ctx.pending():
                     ctx.iteration(False)
                 time.sleep(0.005)
-            viewport_h = mc._tab_scrolls[0].get_height()
+            # SPEC-58 §2a: the notebook page IS the chat box — the page's
+            # height is the surface's viewport.
+            viewport_h = mc._chat_notebook.get_nth_page(0).get_height()
             surface_h = surface.get_height()
             assert viewport_h > 100, f"viewport not realized ({viewport_h}px)"
             assert surface_h >= viewport_h * 0.8, (
@@ -999,8 +966,6 @@ class TestSurfaceAllocationAndCaps:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "sk-a", 1: "sk-b", 2: "sk-c"}
         mc._tab_chat_boxes = {0: Gtk.Box(), 1: Gtk.Box(), 2: Gtk.Box()}
-        mc._tab_scrolls = {}
-        mc._tab_overlays = {}
         mc._bulk_closing = False
         mc._chat_render_handler = handler
         for sk in ("sk-a", "sk-b", "sk-c"):
@@ -1031,7 +996,7 @@ class TestRound3Lifecycle:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -1136,7 +1101,7 @@ class TestCloseFanOutProductionPath:
         created: list = []
 
         def factory():
-            s = TextViewFallback()
+            s = SpySurface()
             created.append(s)
             return s
 
@@ -1335,4 +1300,75 @@ class TestEndStreamingDoesNotForceScroll:
         assert not mc.scroll_chat_to_bottom.called, (
             "render_event_card must NOT force-scroll (Finding 3 sibling)"
         )
+
+
+class TestPhase4EventCards:
+    """SPEC-06 SP4: the Pango event-card pipeline is LIVE (render_event_card
+    at chat_render_handler:979, called from window._on_command_card:992) and
+    stays covered until H3 section 2c retires the call sites. The cards are
+    not transcript sites (ruling R2/R3), so these pins target the DISPATCH
+    contract — routing per event_type, GTK-thread dispatch, silent ignore of
+    unknown types, error fallback, and the no-force-scroll rule."""
+
+    def test_error_card_routed_into_container(self):
+        h = ChatRenderHandler()
+        container = Gtk.Box()
+        h.render_event_card("error", container, error_msg="boom")
+
+        def _find_label(w, needle):
+            if hasattr(w, "get_label") and needle in (w.get_label() or ""):
+                return True
+            child = w.get_first_child()
+            while child:
+                if _find_label(child, needle):
+                    return True
+                child = child.get_next_sibling()
+            return False
+
+        card = container.get_first_child()
+        assert card is not None, "error card must be appended synchronously"
+        assert _find_label(card, "boom"), "error text lost in routing"
+
+    def test_unknown_event_type_is_ignored_silently(self):
+        h = ChatRenderHandler()
+        container = Gtk.Box()
+        h.render_event_card("no_such_kind", container)  # must not raise
+        assert container.get_first_child() is None
+
+    def test_each_live_event_type_appends_a_card(self):
+        h = ChatRenderHandler()
+        for kind, kwargs in (
+            ("file_read", {"file_path": "/x.py", "snippet": "a=1",
+                           "line_range": "1-2"}),
+            ("edit_proposal", {"file_path": "/x.py", "diff": "-a\n+b"}),
+            ("tool_call", {"tool_name": "grep", "detail": "needle"}),
+            ("thinking", {"thought_text": "hmm"}),
+        ):
+            container = Gtk.Box()
+            h.render_event_card(kind, container, **kwargs)
+            assert container.get_first_child() is not None, (
+                f"{kind} card missing"
+            )
+
+    def test_task_card_passthrough_builds_widget(self):
+        h = ChatRenderHandler()
+        container = Gtk.Box()
+        h.render_event_card("task", container, action="created", id="t1",
+                            title="Fix thing", status="todo",
+                            priority="high", assigned_to="Coder")
+        assert container.get_first_child() is not None
+
+    def test_card_dispatch_runs_on_gtk_main_thread(self, monkeypatch):
+        """With GLib wired, the append must be queued via idle_add (thread
+        hand-off) rather than appended inline."""
+        h = ChatRenderHandler(GLib_module=GLib)
+        queued: list = []
+        monkeypatch.setattr(GLib, "idle_add", lambda fn: queued.append(fn) or 0)
+        container = Gtk.Box()
+        h.render_event_card("error", container, error_msg="boom")
+        assert queued and container.get_first_child() is None, (
+            "GLib path must DEFER the append to the GTK main loop"
+        )
+        queued.pop()()  # drain the queued callback
+        assert container.get_first_child() is not None
 

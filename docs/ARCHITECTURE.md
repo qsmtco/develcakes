@@ -169,7 +169,7 @@ develcakes/
 │       ├── activity_drawer.py  # collapsible activity event panel — NO LONGER MOUNTED from window.py (SPEC-AGENT-DASHBOARD); class + tests remain
 │       ├── agent_dashboard.py  # AgentDashboard — per-agent rows in the paned end child (SPEC-AGENT-DASHBOARD)
 │       ├── chat_bubble.py      # build_role_bubble() — chat bubble widget factories (Phase 1)
-│       ├── chat_surface.py     # ChatSurface/TextViewFallback — WebKit chat surface + activity pill (SPEC-06/07; FeedBar deleted in R4)
+│       ├── chat_surface.py     # ChatSurface — WebKit chat surface; the WebView is a DIRECT child (no ScrolledWindow, no text-view fallback) (SPEC-06/07/58)
 │       ├── feed_card.py        # ~581 lines — feed_card widget factory (Phase 5)
 │       ├── diff_card.py         # Diff card widget factories — build_file_diff_card, build_diff_summary_card (Phase 7)
 │       ├── review_bar.py        # ReviewBar widget — review mode dropdown + action buttons (Phase 7)
@@ -722,9 +722,6 @@ content.create_chat_tab(session_key, agent_name)   # creates/returns to existing
 content.get_chat_box(page_index=None)  # get the chat box for a tab (used by ChatHandler)
 content.get_current_session_key()  # session_key of active tab, or None (used by ActivityHandler)
 content.set_chat_render_handler(handler)  # inject ChatRenderHandler (called by window.py)
-content.set_feed_bar_text(text)  # update the project feed bar
-content.set_review_bar(bar)     # add/remove ReviewBar widget above chat (used by ReviewHandler)
-content.get_review_bar()      # get current ReviewBar or None (Phase 7)
 content.set_agent_manager(agent_mgr)  # set AgentManager for session switch lookup
 content.close_tabs(page_indices)       # close multiple tabs, reindex once
 content.set_on_stt_click(cb)     # STT button clicked
@@ -747,16 +744,13 @@ def set_on_autoaccept_cycle(cb) -> None   # auto label clicked -> cycle level (o
 # _clear_settings_bar() — sibling-walk child removal (get_first_child()/remove()
 #   loop; NEVER `for child in list(box)` — gtk-container-membership bug class).
 # The transport cluster is nested in info_box, so rebuilds call _detach()
-# before re-appending it. Legacy set_project_settings_text / set_feed_bar_text
-# re-append the cluster and the pill. With no chat tab the bar is prepended
-# to top_box; the first tab unparents it onto the chat overlay.
+# before re-appending it. The bar is a permanent _top_box row (SPEC-58 §2a):
+# it is never unparented onto a tab, so switching tabs does not move it.
 ```
 
 **Tab close:** Each tab has an × button (top-right of tab label) and responds to middle-click. Both call `_close_tab(page_idx)` which removes the page and re-indexes tracking dicts.
 
-**Tab session switch:** Right-click → session switcher menu calls `_switch_tab_session(page_idx, new_session_key)`. This updates both `_tab_sessions[page_idx]` (the internal lookup dict) **and** `tab_label_box._session_key` (the GTK widget attribute). The widget attribute must stay in sync because `_find_page_by_session` reads it — a split-brain causes `_update_tab_dot` to miss the tab, breaking the unread dot indicator.
-
-**Review bar integration (Phase 7):** ReviewHandler calls `set_review_bar(bar)` to insert a `ReviewBar` widget above the notebook, and `get_review_bar()` to retrieve the current bar for state updates without accessing MainContent internal state.
+**Tab session switch:** The gateway session-switcher chain (`show_session_menu` → `_switch_tab_session` → `_update_tab_session_label`) was removed with the gateway in SPEC-58 §2a. `tab_label_box._session_key` stays — `_find_page_by_session` and `close_project_tab` read it.
 
 **Welcome session-key namespace (`welcome:`):** The Welcome tab is a one-shot special tab under the `welcome:` prefix (e.g. `welcome:splash`) — created once on fresh launch, never respawns after close for the session, and `create_welcome_tab` guards (via `_welcome_loaded`) against ever re-issuing the raw load.
 
@@ -1107,30 +1101,22 @@ those same html fences to text and keeps the surrounding prose.
 
 **Message grouping:** Consecutive messages from same role+session get tight spacing (1px top margin instead of 4px). Tracked in `ChatRenderHandler._last_message_key`.
 
-### 3.14f `ui/views/main_content.py` — Scroll-to-Bottom Button (Phase 5)
+### 3.14f `ui/views/main_content.py` — Chat Page Structure (SPEC-58 §2a)
 
-**Phase 5 addition:** Floating ↓ button bottom-right of chat overlay.
+**The notebook page IS the chat box.** `create_chat_tab()` appends a plain
+vertical `Gtk.Box` (`hexpand` + `vexpand`) to the notebook. There is no
+`Gtk.Overlay` on the page and no page-level `Gtk.ScrolledWindow`.
 
-**New components:**
-- `self._scroll_btn` — Gtk.Button, opacity 0 by default
-- `self._scroll_btn_box` — positioned bottom-right via `Gtk.Align.END`
+**Scroll:** the page scrolls in the DOCUMENT, not in a GTK adjustment.
+`scroll_chat_to_bottom(page_index)` resolves the page's chat box, asks the
+render handler for `surface_for_box`, and calls `surface.scroll_to_latest()`.
+There is no outer-adjustment fallback and no floating ↓ button
+(`_scroll_btn` / `_scroll_btn_box` / `_on_vadjustment_changed` /
+`_on_scroll_to_bottom_clicked` were removed with the overlay in SPEC-58 §2a).
 
-**Wired in `create_chat_tab()`:**
-- Scroll button box added to each tab's `chat_overlay`
-- Each tab's `vadjustment.value-changed` → `_on_vadjustment_changed()`
-- Shows (opacity=1) when scrolled >80px from bottom; hides when near bottom
-
-**Scroll handler (`_on_vadjustment_changed`):**
-```python
-distance_from_bottom = upper - page_size - value
-self._scroll_btn.set_opacity(1 if distance_from_bottom > 80 else 0)
-```
-
-**Click handler (`_on_scroll_to_bottom_clicked`):**
-```python
-self.scroll_chat_to_bottom()
-self._scroll_btn.set_opacity(0)
-```
+**Project bar:** `_project_settings` is a permanent row of `_top_box` (the
+notebook's parent box). It never overlays a page, so switching tabs does not
+reparent it and closing the last tab does not detach it.
 
 ### 3.14g `utils/block_parser.py` — Block Segment Extractor (Phase 2)
 

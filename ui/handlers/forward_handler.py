@@ -228,7 +228,6 @@ class ForwardHandler:
                 # forced `GLib.timeout_add(16, scroll_chat_to_bottom)` was
                 # REMOVED — same class as the 18 calls dropped from the chat
                 # handlers. The surface owns its own scroll (single-scroll
-                # ruling): the WebKit surface self-heals via smart-scroll and
-                # the TextViewFallback follows/restores itself. A forced
-                # scroll here raced both, yanking a scrolled-up reader to the
-                # bottom ~16ms after a forward.
+                # ruling): the WebKit surface self-heals via smart-scroll.
+                # A forced scroll here raced it, yanking a scrolled-up
+                # reader to the bottom ~16ms after a forward.
