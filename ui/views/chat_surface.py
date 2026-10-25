@@ -1049,8 +1049,12 @@ class ChatSurface(Gtk.Box):
             )
             # SPEC-58 §2b: the WebView mounts DIRECTLY into the surface box
             # (no ScrolledWindow wrapper — the surface IS the scroll owner).
-            self.set_vexpand(True)
-            self.set_hexpand(True)
+            # Expand flags go on the WEBVIEW, not the surface (which already
+            # has them from __init__) — a non-expanding child of a GtkBox
+            # gets only its natural height, and a WebView's is 0px
+            # (Debugger CRITICAL: blank chat pane, WEBVIEW_h=0 under xvfb).
+            self._webview.set_vexpand(True)
+            self._webview.set_hexpand(True)
             self.append(self._webview)
         return self._webview
 
