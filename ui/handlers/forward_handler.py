@@ -197,8 +197,19 @@ class ForwardHandler:
                 target_session_key, target_name, target_tab_exists)
             # SPEC-12 §2f: the forwarded message is a PRIVATE (agent-keyed)
             # send — its reply renders in the target's own tab.
-            self._agent_runtime_handler.send_to_special_agent(
-                target_session_key, text, reply_target=target_session_key)
+            # SPEC-58 r4 Finding 2: the receiver raises RuntimeError when no
+            # provider/API key is configured — inside this "clicked"
+            # callback that crashed the callback. Same try/except idiom as
+            # review_handler._send_isolated: log the WARNING and surface a
+            # "System" bubble in the target tab instead.
+            try:
+                self._agent_runtime_handler.send_to_special_agent(
+                    target_session_key, text, reply_target=target_session_key)
+            except Exception as exc:
+                _logger.warning(
+                    "[forward] Forward failed for %r: %s", target_session_key, exc)
+                self._show_forward_error(target_tab_exists, target_session_key, exc)
+                return
         else:
             target_name = (
                 self._gateway_handler.agent_mgr.get_name(target_session_key)
@@ -210,8 +221,15 @@ class ForwardHandler:
             # Local path only (SPEC-05 R1); receiver no-ops for
             # unregistered/remote keys. Reply target = the target's own tab
             # (same private-view rule as the is_local branch).
-            self._agent_runtime_handler.send_to_special_agent(
-                target_session_key, text, reply_target=target_session_key)
+            # SPEC-58 r4 Finding 2: same guard as the is_local branch above.
+            try:
+                self._agent_runtime_handler.send_to_special_agent(
+                    target_session_key, text, reply_target=target_session_key)
+            except Exception as exc:
+                _logger.warning(
+                    "[forward] Forward failed for %r: %s", target_session_key, exc)
+                self._show_forward_error(target_tab_exists, target_session_key, exc)
+                return
 
         # Append forwarded bubble to the target tab
         chat_box = self._main_content.get_chat_box(target_tab_exists)
@@ -231,3 +249,29 @@ class ForwardHandler:
                 # ruling): the WebKit surface self-heals via smart-scroll.
                 # A forced scroll here raced it, yanking a scrolled-up
                 # reader to the bottom ~16ms after a forward.
+
+    def _show_forward_error(self, target_tab_exists, target_session_key, exc) -> None:
+        """SPEC-58 r4 Finding 2: surface a failed forward in the target tab.
+
+        The failure path's counterpart of the forwarded bubble below —
+        reuses the same render_sync("System", ...) + chat_box.append
+        mechanism, so the user sees WHY nothing happened instead of the
+        forward vanishing silently. Best-effort: render/append problems
+        are logged, never raised (this runs inside a "clicked" callback).
+        """
+        try:
+            chat_box = self._main_content.get_chat_box(target_tab_exists)
+            if chat_box is None or self._chat_render_handler is None:
+                return
+            bubble = self._chat_render_handler.render_sync(
+                "System",
+                f"Forward failed: {exc}",
+                target_session_key,
+            )
+            if bubble is not None:
+                chat_box.append(bubble)
+        except Exception:
+            _logger.exception(
+                "[forward] Could not surface the forward failure for %r",
+                target_session_key,
+            )

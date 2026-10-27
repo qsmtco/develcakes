@@ -461,6 +461,26 @@ class AgentCommandHandler:
         forward_text = f"[{sender_name} asks]: {result.forward_text}"
         self._route_to_target(route_key, forward_text, project_name)
 
+    def _send_with_guard(self, target_sk: str, text: str) -> None:
+        """SPEC-58 r4 chunk 2: a guarded send_to_special_agent call.
+
+        The receiver's _get_runtime guard can raise (RuntimeError "No
+        provider configured — ..." / "No API key configured for provider
+        ..."); an unguarded call inside the agent-response pipeline kills
+        response processing for every later listener. This handler has no
+        UI surface wired (the composition root hands it the command
+        handler, the runtime handler, and the response callback — nothing
+        render-capable), so the failure is surfaced the way THIS handler
+        surfaces everything: the warning log. Logged, never raised.
+        """
+        if self._agent_runtime_handler is None:
+            return
+        try:
+            self._agent_runtime_handler.send_to_special_agent(target_sk, text)
+        except Exception as exc:
+            logger.warning(
+                "[agent-cmd] Send to %s failed: %s", target_sk, exc)
+
     def _route_to_target(self, target_sk: str, text: str,
                          project_name: str | None) -> None:
         """Send message to a target agent via the correct transport."""
@@ -468,19 +488,19 @@ class AgentCommandHandler:
         # This handles relay calls where source_sk is already a session key like "agent:coder".
         if self._agent_runtime_handler is not None and \
            target_sk in self._agent_runtime_handler.get_special_agents():
-            self._agent_runtime_handler.send_to_special_agent(target_sk, text)
+            self._send_with_guard(target_sk, text)
             return
 
         # Try resolving display_name → session_key (CommandHandler returns display names)
         resolved_sk = self._resolve_special_agent_sk(target_sk)
         if resolved_sk is not None:
-            self._agent_runtime_handler.send_to_special_agent(resolved_sk, text)
+            self._send_with_guard(resolved_sk, text)
             return
 
         # Local path only (SPEC-05 R1): receiver no-ops with a warning for
         # unregistered/remote keys — that no-op IS the former gateway branch.
         if self._agent_runtime_handler is not None:
-            self._agent_runtime_handler.send_to_special_agent(target_sk, text)
+            self._send_with_guard(target_sk, text)
         else:
             logger.debug(
                 "[agent-cmd] No runtime handler — cannot route to %s", target_sk

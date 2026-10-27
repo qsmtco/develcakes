@@ -498,6 +498,10 @@ class ChatRenderHandler:
                     # SP5c-1: fan-out victims lose their welcome flags too
                     # (the project box died — reopen = fresh mount).
                     self._welcome_shown.discard(sk)
+                    # SPEC-58 r4 Finding 1: victims' mount-miss counters die
+                    # in the same pass (lockstep with the tombstone written
+                    # above) — stale misses must not follow the surface.
+                    self._mount_misses.pop(sk, None)
                     if s.get_parent() is not None:
                         s.unparent()
                     s.destroy()
@@ -508,6 +512,11 @@ class ChatRenderHandler:
         # SP5c-1: a closed key's surface is gone — its welcome flag goes
         # with it (a fresh surface is a fresh mount = fresh welcome).
         self._welcome_shown.discard(session_key)
+        # SPEC-58 r4 Finding 1: the mount-miss counter dies with the
+        # surface too (lockstep with _streaming/_welcome_shown above) —
+        # misses accrued against a dead tab must not shorten the retry
+        # budget of a fresh surface on reopen.
+        self._mount_misses.pop(session_key, None)
 
     def pop_tombstones_for_box(self, box_key: str) -> None:
         """SP5a r3 FIX 3 — the reopen signal AT THE REAL ENTRY POINT: called
@@ -526,6 +535,11 @@ class ChatRenderHandler:
             # SP5c-1: reopen resets the welcome (fresh mount semantics) —
             # kept in lockstep with the tombstone fan-pop above.
             self._welcome_shown.discard(sk)
+            # SPEC-58 r4 Finding 1: the fan-pop also resets the victim's
+            # mount-miss counter (lockstep with the pops above) — the
+            # recreated surface gets the full retry budget, not the
+            # misses accrued by the dead one.
+            self._mount_misses.pop(sk, None)
 
     def pop_tombstone(self, session_key: str) -> None:
         """SP5a FIX 10: clear one tombstone — the reopen signal. The next

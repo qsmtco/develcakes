@@ -2617,6 +2617,26 @@ def execute_tool(
         return ToolResult(success=False, error=f"Unknown tool: {name}")
 
     defn, handler = entry
+
+    # Required-parameter gate. Check arguments against the declared JSON
+    # Schema before dispatch so a missing param returns a clean, model-
+    # fixable ToolResult instead of a raw TypeError from the handler
+    # (e.g. "<lambda>() missing 1 required positional argument: name").
+    schema = defn.parameters if isinstance(defn.parameters, dict) else {}
+    required = schema.get("required")
+    if isinstance(required, list):
+        args_given = arguments if isinstance(arguments, dict) else {}
+        missing = [p for p in required if p not in args_given]
+        if missing:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Tool '{name}' is missing required parameter(s): "
+                    f"{', '.join(map(str, missing))}. "
+                    f"Required parameters: {', '.join(map(str, required))}."
+                ),
+            )
+
     start = time.monotonic()
 
     try:

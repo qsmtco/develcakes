@@ -500,7 +500,17 @@ class MainWindow(Gtk.ApplicationWindow):
         def _on_send_to_agent(session_key: str, text: str):
             """Send a message to an agent tab (used for rejection notifications)."""
             # SPEC-05 R1: live — FeedHandler's on_send_to_agent ctor arg.
-            self._agent_runtime_handler.send_to_special_agent(session_key, text)
+            # SPEC-58 r4 chunk 2: the _get_runtime guard can raise
+            # (RuntimeError "No provider configured — ..." / "No API key
+            # configured for provider ..."); never let it kill the Feed
+            # callback — warn and surface in the visible tab.
+            try:
+                self._agent_runtime_handler.send_to_special_agent(session_key, text)
+            except Exception as exc:
+                logger.warning(
+                    "[feed-send] Rejection notify failed for %r: %s",
+                    session_key, exc)
+                self._show_feed_send_error(session_key, exc)
 
         # NOTE: the former _on_show_feed_subtab closure was deleted with the
         # B.2 feed-interception block — feeding the registry's tab-switch
@@ -1460,9 +1470,43 @@ class MainWindow(Gtk.ApplicationWindow):
         target = timer.get("target", "")
         if not target:
             return
-        self._agent_runtime_handler.send_to_special_agent(
-            target, f"[timer {timer['id']}]: {timer.get('prompt', '')}",
-        )
+        # SPEC-58 r4 chunk 2: the _get_runtime guard can raise (RuntimeError
+        # "No provider configured — ..." / "No API key configured for
+        # provider ..."). _deliver_timer runs inside a GLib timeout
+        # callback (_fire / the re-arm path) — a raise here kills the
+        # source. Warn and surface in the visible tab instead.
+        try:
+            self._agent_runtime_handler.send_to_special_agent(
+                target, f"[timer {timer['id']}]: {timer.get('prompt', '')}",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[timer] Delivery failed for %r: %s", timer.get("id"), exc)
+            self._show_feed_send_error(target, exc)
+
+    def _show_feed_send_error(self, session_key: str, exc: Exception) -> None:
+        """SPEC-58 r4 chunk 2: surface a failed send in the chat, window-side.
+
+        Best-effort counterpart of chat_handler._show_send_error: renders
+        a "System" bubble under the CURRENTLY VISIBLE tab's key (read at
+        run time — the user can switch tabs between dispatch and callback),
+        falling back to the send target when no tab is focused. Under R1
+        (render_sync returns None ALWAYS — the surface owns the widget
+        tree) the render call alone IS the surface; nothing is appended.
+        Problems are logged, never raised (runs inside GTK callbacks).
+        """
+        try:
+            if self._chat_render_handler is None:
+                return
+            current_key = self._main_content.get_current_session_key()
+            self._chat_render_handler.render_sync(
+                "System",
+                f"Send failed: {exc}",
+                current_key or session_key,
+            )
+        except Exception:
+            logger.exception(
+                "[window] Could not surface the send failure for %r", session_key)
 
     def _fire(self, timer: dict) -> bool:
         """GLib timeout source callback — runs ON the main loop. Returns

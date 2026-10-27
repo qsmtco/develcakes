@@ -163,6 +163,14 @@ class ChatHandler:
         SPEC-12 (B1): reply_target threads through to the runtime's
         turn-scoped slot (R5 REV 3) — None (the default) leaves the routing
         to R7, exactly like the pre-SP4 callers.
+
+        SPEC-58 r4 Finding 2: the receiver raises RuntimeError when no
+        provider/API key is configured — inside a GTK callback that meant a
+        crashed callback and a silently vanished message (the "You" bubble
+        is already rendered by the time _dispatch calls this). Same
+        try/except idiom as review_handler._send_isolated: log the warning,
+        then surface the error through the existing "System" bubble path so
+        the user sees WHY the send failed instead of the message dropping.
         """
         if self._agent_runtime_handler is None:
             _logger.warning(
@@ -172,8 +180,45 @@ class ChatHandler:
             return
         # Local path only (SPEC-05 R1); the receiver no-ops with a warning
         # for unregistered/remote keys.
-        self._agent_runtime_handler.send_to_special_agent(
-            session_key, text, reply_target=reply_target)
+        try:
+            self._agent_runtime_handler.send_to_special_agent(
+                session_key, text, reply_target=reply_target)
+        except Exception as exc:
+            _logger.warning(
+                "[chat] Send failed for %r: %s", session_key, exc)
+            self._show_send_error(session_key, exc)
+
+    def _show_send_error(self, session_key: str, exc: Exception) -> None:
+        """SPEC-58 r4 Finding 2: surface a failed send in the chat.
+
+        Renders through the same "System" bubble mechanism the send path
+        already uses. The render key is the CURRENTLY VISIBLE tab's key —
+        read at callback run time (the user can switch tabs between the
+        _dispatch and this call), falling back to the send target when no
+        tab is focused. Debugger BUG#1 (SPEC-58 r4, adjudicated): rendering
+        with the AGENT target key orphaned the surface under a tab that
+        does not exist on project-tab sends — invisible failure, and the
+        mount-miss counter then evicted it at the cap (the 3rd miss).
+
+        R1 contract (render_sync returns None ALWAYS — the surface owns
+        the widget tree, chat_render_handler.py :849-851): there is NO
+        bubble to append; the render call alone IS the surface. The
+        former `if bubble is not None: chat_box.append(bubble)` block was
+        dead in production. Best-effort: problems are logged, never
+        raised (this runs inside a GTK callback).
+        """
+        try:
+            if self._chat_render_handler is None:
+                return
+            current_key = self._mc.get_current_session_key()
+            self._chat_render_handler.render_sync(
+                "System",
+                f"Send failed: {exc}",
+                current_key or session_key,
+            )
+        except Exception:
+            _logger.exception(
+                "[chat] Could not surface the send failure for %r", session_key)
 
     def _resolve_room_fallback(self, members, roster):
         """Resolve fallback targets per the `jev_room_fallback` setting.
@@ -273,8 +318,13 @@ class ChatHandler:
                             # "agent:" prefix for a clean tab label.
                             label = target.split(":", 1)[-1]
                             self._mc.create_chat_tab(target, label)
-                        self._agent_runtime_handler.send_to_special_agent(
-                            target, forward_text, reply_target=target)
+                        # SPEC-58 r4 Finding 2 (audit BUG#1): delegate the
+                        # send through _send_local — the receiver raises
+                        # RuntimeError (no provider/API key) and this runs in
+                        # a dispatched GTK callback; the guarded path logs and
+                        # surfaces the failure instead of killing the callback
+                        # after the echo bubble rendered.
+                        self._send_local(target, forward_text, reply_target=target)
                     self._dispatch(_show_echo_and_forward)
                 elif result.broadcast_targets and result.forward_text:
                     # BUG #4 fix: fan-out @ broadcast to all project members

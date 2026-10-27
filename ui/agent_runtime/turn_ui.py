@@ -835,5 +835,30 @@ class RuntimeTurnUiMixin:
         if rt is None:
             return
         for text in rt.take_stranded(session_key):
-            self.send_to_special_agent(session_key, text)
+            try:
+                self.send_to_special_agent(session_key, text)
+            except Exception as exc:
+                # SPEC-58 r4 chunk 2: send_to_special_agent's _get_runtime
+                # guard can raise (RuntimeError "No provider configured —
+                # ..." / "No API key configured for provider ..."). This
+                # runs inside the error-callback path (_do_error) — a raise
+                # here escapes the turn teardown. Warn + best-effort System
+                # bubble under the CURRENTLY VISIBLE tab (R1: render_sync
+                # returns None ALWAYS — the render call IS the surface;
+                # nothing is appended), falling back to the target key.
+                _mod().logger.warning(
+                    "stranded-send flush failed for %s: %s", session_key, exc)
+                try:
+                    if self._crh is not None:
+                        current_key = None
+                        mc = getattr(self, "_mc", None)
+                        if mc is not None:
+                            current_key = mc.get_current_session_key()
+                        self._crh.render_sync(
+                            "System", f"Send failed: {exc}",
+                            current_key or session_key)
+                except Exception:
+                    _mod().logger.exception(
+                        "could not surface the stranded-send failure for %s",
+                        session_key)
 
