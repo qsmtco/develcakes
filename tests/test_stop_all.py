@@ -1,10 +1,9 @@
 # tests/test_stop_all.py
-# SPEC-09 SP3 — runtime.stop_all + ARH aggregation + review-checkpoint abort.
+# SPEC-09 SP3 — runtime.stop_all + ARH aggregation.
 #
 # Coverage (spec Edit 5, tests 5-8):
 #   5. test_stop_all_cancels_active_loops   — mid-exec turn cancelled, loop exits
 #   6. test_stop_all_denies_pending_approval — _dispatch_approval unblocks DENIED
-#   7. TestStopAllAbortsCheckpoint          — pre-commit abort + boundary re-check
 #   8. test_stop_all_mid_tool_call_halt     — THE ruling-#6 acceptance: real
 #      mid-tool-call halt end-to-end (real Popen sleep, real kill, real
 #      cancel machinery, summary card). NOT mocked at the layer under test.
@@ -647,133 +646,6 @@ class TestStopAllARH:
         assert "Checkpoints aborted" not in feed.cards[0].body
 
 
-class TestStopAllAbortsCheckpoint:
-    """Test 7 — review checkpoint refuses to commit under stop-all."""
-
-    def _make_handlers(self, project_path):
-        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
-        from ui.handlers.review_handler import ReviewHandler
-        arh = AgentRuntimeHandler(main_content=None, chat_render_handler=None)
-
-        class _MockGLib:
-            def idle_add(self, fn, *a, **k):
-                fn(*a, **k)
-                return 0
-
-        texts = []
-        rh = ReviewHandler(
-            GLib=_MockGLib(),
-            main_content=MagicMock(),
-            project_handler=MagicMock(),
-            on_review_started=MagicMock(),
-            on_review_ended=MagicMock(),
-            on_display_card=MagicMock(),
-            on_display_text=lambda sk, text: texts.append(text),
-            on_feed_card=MagicMock(),
-        )
-        rh.set_agent_runtime_handler(arh)
-        from models.review_state import ReviewState
-        rh._states["proj"] = ReviewState(
-            project_path=str(project_path),
-            review_mode="review",
-            checkpoint_sha=None,
-            is_dirty=True,
-        )
-        return arh, rh, texts
-
-    def _git_repo(self, project_path):
-        import git as gitpython
-        repo = gitpython.Repo.init(str(project_path))
-        with repo.config_writer() as cw:
-            cw.set_value("user", "name", "t")
-            cw.set_value("user", "email", "t@t")
-        (project_path / "seed.txt").write_text("seed\n")
-        repo.index.add(["seed.txt"])
-        repo.index.commit("init")
-        return repo
-
-    def _commit_count(self, project_path):
-        import git as gitpython
-        repo = gitpython.Repo(str(project_path))
-        return len(list(repo.iter_commits()))
-
-    def test_checkpoint_aborted_under_stop_flag_no_commit(self, tmp_path):
-        """Pre-commit gate: flag set → 'checkpoint aborted', git log UNCHANGED."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        self._git_repo(project)
-        before = self._commit_count(project)
-
-        arh, rh, texts = self._make_handlers(project)
-        arh._stop_all_in_progress = True  # stop-all in flight
-        rh.start_review("proj")
-        assert _wait_for(lambda: texts, timeout=5.0), "no text emitted"
-        assert "checkpoint aborted: stop-all" in texts[0]
-        assert self._commit_count(project) == before, "a commit LANDED under stop-all!"
-
-    def test_checkpoint_runs_when_flag_clear(self, tmp_path):
-        """Control: same setup, flag False → the checkpoint DOES commit
-        (proves the gate is the flag, not an always-abort)."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        self._git_repo(project)
-        before = self._commit_count(project)
-
-        _arh, rh, texts = self._make_handlers(project)  # flag defaults False — the control
-        rh.start_review("proj")
-        assert _wait_for(
-            lambda: any("Review session started" in t for t in texts),
-            timeout=10.0,
-        ), f"checkpoint never completed: {texts}"
-        assert self._commit_count(project) == before + 1
-
-    def test_pre_flight_gate_aborts_and_notes_counter(self, tmp_path):
-        """SP3 fix round (audit BUG#4): the PRE-FLIGHT gate (before any git
-        work) must abort through the same path as the boundary re-check —
-        emit the text AND note_stop_all_aborted, so the summary card counts
-        the common case (stop-all already in flight when the review starts)."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        self._git_repo(project)
-        before = self._commit_count(project)
-
-        arh, rh, texts = self._make_handlers(project)
-        arh._stop_all_in_progress = True  # stop-all already running
-        rh.start_review("proj")
-        assert _wait_for(lambda: texts, timeout=5.0), "no text emitted"
-        assert "checkpoint aborted: stop-all" in texts[0]
-        assert self._commit_count(project) == before, "a commit LANDED under stop-all!"
-        # The abort was NOTED (BUG#4: the pre-flight path used to emit only).
-        assert arh._stop_all_aborted_checkpoints == 1
-
-    def test_boundary_recheck_aborts_when_stop_lands_during_staging(self, tmp_path):
-        """The commit-boundary re-check: stop-all landing WHILE staging ran
-        aborts before git_ops.commit (no checkpoint faking pre-halt state)."""
-        project = tmp_path / "proj"
-        project.mkdir()
-        self._git_repo(project)
-        before = self._commit_count(project)
-
-        arh, rh, texts = self._make_handlers(project)
-
-        import ui.handlers.review_handler as rh_mod
-
-        def _stage_all_sets_flag(project_path):
-            # Simulate: stop-all lands while the staging thread is mid-flight.
-            arh._stop_all_in_progress = True
-            return SimpleNamespace(success=True)
-
-        with patch.object(rh_mod.git_ops, "is_repo", return_value=True), \
-             patch.object(rh_mod.git_ops, "stage_all", side_effect=_stage_all_sets_flag):
-            rh.start_review("proj")
-            assert _wait_for(
-                lambda: any("checkpoint aborted" in t for t in texts),
-                timeout=5.0,
-            ), f"boundary re-check never aborted: {texts}"
-        assert self._commit_count(project) == before, "commit slipped past the boundary"
-        # The abort was NOTED (feeds the next summary card) — here outside a
-        # stop_all_agents window, the count waits for the card that consumes it.
-        assert arh._stop_all_aborted_checkpoints == 1
 class TestStopAllMidToolCallHalt:
     """Test 8 — THE ruling-#6 acceptance: a REAL mid-tool-call halt through
     the full ARH stack. Real Popen sleep, real registry kill, real cancel

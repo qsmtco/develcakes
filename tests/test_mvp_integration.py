@@ -1,204 +1,28 @@
-"""SPEC-42: cross-seam integration module — N1 (writer turn end-to-end) and
-N2 (compiled wire adjacency).
+"""SPEC-42: cross-seam integration module — N2 (compiled wire adjacency).
 
-Mock policy: fakes sit ONLY at the provider seam. Worktree, checkpoint,
-queue, persistence, ``_maybe_compile``, ``_compiled_messages``,
-``serialize_messages`` and ``normalize_tool_history`` are all REAL.
+Mock policy: fakes sit ONLY at the provider seam. ``_maybe_compile``,
+``_compiled_messages``, ``serialize_messages`` and
+``normalize_tool_history`` are all REAL.
 
 Reuse disclosure (copied / imported from the existing suites):
-  * ``_sp2_make_handler``, ``_sp2_git_repo``, ``_sp2_writer_def`` are
-    IMPORTED from ``tests.test_agent_runtime`` (module-level helpers).
-  * The ReviewHandler double (``_ImmediateGLib``), the review-state wiring and
-    the ``_finish`` helper are COPIED from
-    ``TestSpec10AgentCheckpoints`` (``_spec10_rh`` / ``_wired`` / ``_finish``,
-    tests/test_agent_runtime.py:6472+) because N1 needs the same real
-    ARH + ReviewHandler + git wiring, with the suffixed writer session
-    registered before the turn.
+  * ``_make_cfg`` is IMPORTED from ``tests.test_agent_runtime`` (module-level
+    helper). The N1 review-wired integration (ARH + ReviewHandler + git) was
+    deleted with SPEC-58 §2i — the machinery it exercised no longer exists.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import time
-import unittest.mock
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from agent.llm.convert import normalize_tool_history
-from agent.runtime import AgentRuntime, TurnResult, TurnStatus
+from agent.runtime import AgentRuntime
 from agent.tools import ToolResult
 from models.conversation import Conversation, ToolCall, serialize_messages
-from tests.test_agent_runtime import (
-    _make_cfg,
-    _sp2_git_repo,
-    _sp2_make_handler,
-    _sp2_writer_def,
-)
-from tests.test_stop_all import _CapturingFeed, _marker_procs
+from tests.test_agent_runtime import _make_cfg
 
 _SK = "agent:coder-2"
-_PROJECT_NAME = "proj"
 
 
-def _wait(cond, timeout: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return True
-        time.sleep(0.01)
-    return cond()
-
-
-# ── N1: writer turn end-to-end ───────────────────────────────────────────────
-
-
-class _ImmediateGLib:
-    """idle_add runs inline (copied from TestSpec10AgentCheckpoints)."""
-
-    def idle_add(self, fn, *a, **k):
-        fn(*a, **k)
-        return 0
-
-
-def _review_handler():
-    from ui.handlers.review_handler import ReviewHandler
-    return ReviewHandler(
-        GLib=_ImmediateGLib(),
-        main_content=unittest.mock.MagicMock(),
-        project_handler=unittest.mock.MagicMock(),
-        on_review_started=unittest.mock.MagicMock(),
-        on_review_ended=unittest.mock.MagicMock(),
-        on_display_card=unittest.mock.MagicMock(),
-        on_display_text=unittest.mock.MagicMock(),
-        on_feed_card=unittest.mock.MagicMock(),
-    )
-
-
-class TestN1WriterTurnEndToEnd:
-    """ONE writer turn must name itself identically at every stage: worktree,
-    enforced write, checkpoint commit, queue attribution, persistence file —
-    and accept must not create a duplicate commit."""
-
-    def _wired(self, tmp_path):
-        """ARH + real ReviewHandler + real git repo + active review session.
-
-        Same shape as TestSpec10AgentCheckpoints._wired, except the suffixed
-        writer session is registered here so N1 can resolve its worktree."""
-        from models.review_state import ReviewState
-
-        handler = _sp2_make_handler()
-        rh = _review_handler()
-        handler.set_review_handler(rh)
-        project = tmp_path / "proj"
-        project.mkdir()
-        _sp2_git_repo(project)
-        pstr = str(project)
-
-        rh._states[_PROJECT_NAME] = ReviewState(
-            project_path=pstr, review_mode="review", checkpoint_sha="c" * 40)
-        handler._agents[_SK] = _sp2_writer_def()
-        token = object()
-        handler._turn_tokens[_SK] = token
-        handler._turn_attr[_SK] = (_PROJECT_NAME, pstr, pstr)
-        return handler, rh, pstr, token
-
-    def test_writer_turn_end_to_end(self, tmp_path, monkeypatch):
-        import git as gitpython
-
-        from agent.persistence import (
-            conversations_dir,
-            load_conversation_from_disk,
-            save_conversation_to_disk,
-        )
-
-        handler, rh, pstr, token = self._wired(tmp_path)
-
-        # ── Step 1: the suffixed writer resolves its worktree ───────────────
-        # No lease exists in SPEC-49: session-key suffix alone drives worktree
-        # entry.
-        wt = handler._worktree_for_turn(_SK, _sp2_writer_def(), pstr)
-        assert wt is not None, "no worktree for a suffixed writer"
-        assert wt == os.path.realpath(wt)
-        assert wt != os.path.realpath(pstr), "worktree resolved to project root"
-        assert os.path.realpath(os.path.dirname(wt)) == os.path.realpath(
-            os.path.join(pstr, ".worktrees"))
-        listing = gitpython.Repo(pstr).git.worktree("list")
-        assert wt in [os.path.realpath(line.split()[0]) for line in
-                      listing.splitlines() if line.strip()], (
-            f"worktree not registered with the project: {listing!r}")
-
-        # ── Step 2: the turn's write lands INSIDE the worktree ──────────────
-        written = Path(wt) / "agent_work.txt"
-        written.write_text("ENFORCED-WRITE-MARKER\n", encoding="utf-8")
-        assert written.is_file()
-        project_copy = Path(pstr) / "agent_work.txt"
-        assert not project_copy.exists(), (
-            "write landed in the project root instead of the worktree")
-
-        # ── Step 3: completion → checkpoint in the WORKTREE + queue entry ───
-        handler._turn_attr[_SK] = (_PROJECT_NAME, pstr, wt)
-        project_head_before = gitpython.Repo(pstr).head.commit.hexsha
-        handler._do_response_complete(_SK, "done", token)
-
-        assert _wait(lambda: rh.pending_count(_PROJECT_NAME, _SK) == 1), (
-            "no queue entry after a completed writer turn")
-        entry = rh._queues[_PROJECT_NAME][_SK][0]
-        assert entry.agent_key == _SK
-        assert entry.path_used == wt, "queue path_used != worktree path"
-        wt_repo = gitpython.Repo(wt)
-        assert entry.sha == wt_repo.head.commit.hexsha, (
-            "queue sha is not the worktree checkpoint commit")
-        body = wt_repo.git.log("--format=%B", "-1")
-        assert "Agent: agent:coder-2" in body.splitlines(), (
-            f"worktree checkpoint missing the Agent: trailer: {body!r}")
-        assert gitpython.Repo(pstr).head.commit.hexsha == project_head_before, (
-            "checkpoint committed in the project root, not the worktree")
-
-        # ── Step 4: per-session persistence round-trip ──────────────────────
-        monkeypatch.setattr("utils.config.get_config_dir",
-                            lambda: str(tmp_path / "cfg"))
-        conv = Conversation(agent_name="Coder", project_path=wt)
-        conv.add_user_message("write agent_work.txt")
-        call_id = "w-n1"
-        conv.add_assistant_message("writing", [ToolCall(
-            call_id=call_id, tool_name="write_file",
-            arguments={"path": "agent_work.txt", "content": "ENFORCED-WRITE-MARKER\n"},
-        )])
-        conv.add_tool_result(call_id, "OK — wrote agent_work.txt")
-        saved = save_conversation_to_disk(conv, _SK)
-        assert os.path.isfile(saved)
-        assert os.path.dirname(os.path.realpath(saved)) == os.path.realpath(
-            conversations_dir())
-        assert os.path.basename(saved) == f"{_SK}.json", (
-            "persistence file does not belong to the session")
-        loaded = load_conversation_from_disk(_SK)
-        assert loaded is not None
-        loaded_conv, _raw = loaded
-        assert loaded_conv.agent_name == "Coder"
-        assert loaded_conv.messages[2].tool_call_id == call_id
-        assert loaded_conv.messages[1].tool_calls[0].arguments["path"] == \
-            "agent_work.txt"
-        assert loaded_conv.messages[2].content == "OK — wrote agent_work.txt", (
-            "the enforced write is missing from the persisted transcript")
-
-        # ── Step 5: accept → reviewed, NO duplicate commit ──────────────────
-        wt_commits_before = len(list(wt_repo.iter_commits()))
-        proj_commits_before = len(list(gitpython.Repo(pstr).iter_commits()))
-        wt_head_before = wt_repo.head.commit.hexsha
-        rh.accept_agent_queue(_SK, _PROJECT_NAME)
-        assert _wait(lambda: rh.pending_count(_PROJECT_NAME, _SK) == 0), (
-            "worktree queue entry was not dequeued by accept")
-        assert gitpython.Repo(wt).head.commit.hexsha == wt_head_before, (
-            "accept committed on the worktree (mark-reviewed must be bookkeeping)")
-        assert len(list(gitpython.Repo(wt).iter_commits())) == wt_commits_before
-        assert len(list(gitpython.Repo(pstr).iter_commits())) == proj_commits_before, (
-            "accept fabricated a duplicate commit in the project root")
-
-
-# ── N2: compiled wire ↔ normalization ↔ provider adjacency ──────────────────
 
 
 def _enforcement_ok():

@@ -35,7 +35,6 @@ from unittest.mock import MagicMock
 
 from ui.handlers.chat_handler import ChatHandler
 from ui.handlers.chat_render_handler import ChatRenderHandler
-from ui.handlers.forward_handler import ForwardHandler
 
 
 # ── Fakes (boundary spies — no WebKit, no real widget tree) ─────────────────
@@ -309,84 +308,3 @@ class TestSendErrorTargetsCurrentTab:
             handler._send_local("agent:main", "hello")
         assert len(render.calls) == 1
         assert render.calls[0]["session_key"] == "project:alpha"
-
-
-class TestForwardToAgentRuntimeErrorContained:
-    """forward_to_agent — BOTH routing branches (special target and
-    gateway target): a raising send_to_special_agent must not propagate
-    out of the plain 'clicked' callback, and the failure must be
-    surfaced through the existing feedback mechanism (a "System" bubble
-    in the target tab)."""
-
-    def _forward_handler(self, chat_box, render_handler, *, raising,
-                         target_in_special):
-        """ForwardHandler with boundary spies (same dependency set the
-        tests/test_forward_handler.py fixtures mock)."""
-        special = {"sk-qa": "QA Bot"} if target_in_special else {}
-        arh = MagicMock(name="AgentRuntimeHandler")
-        arh.get_special_agents.return_value = special
-        # The SPEC-58 raise shape: RuntimeError from the _get_runtime guard,
-        # fired BEFORE AgentRuntime construction.
-        arh.send_to_special_agent = MagicMock(
-            name="send_to_special_agent",
-            side_effect=RuntimeError("No provider configured — set an API key.")
-            if raising else None)
-
-        mc = MagicMock(name="MainContent")
-        mc._tab_sessions = {0: "sk-source"}
-        mc._chat_notebook = MagicMock(name="chat_notebook")
-        mc.get_chat_box = MagicMock(name="get_chat_box", return_value=chat_box)
-
-        gh = MagicMock(name="GatewayHandler")
-        gh.agent_mgr.get_name.return_value = None
-
-        return ForwardHandler(
-            main_content=mc,
-            chat_handler=MagicMock(name="ChatHandler"),
-            chat_render_handler=render_handler,
-            agent_runtime_handler=arh,
-            gateway_handler=gh,
-        )
-
-    def test_special_target_branch_does_not_propagate(self, caplog):
-        box, render = FakeChatBox(), FakeRenderHandler()
-        h = self._forward_handler(box, render, raising=True,
-                                  target_in_special=True)
-        with caplog.at_level(logging.WARNING, logger="ui.handlers.forward_handler"):
-            # No raise above is the primary assertion — pre-fix the
-            # RuntimeError escaped into the "clicked" callback.
-            h.forward_to_agent("sk-qa", "hello", "sk-source",
-                               MagicMock(name="popover"))
-        assert "Forward failed" in caplog.text
-        assert "No provider configured" in caplog.text
-        # Surfaced via the existing bubble mechanism in the target tab…
-        assert len(render.calls) == 1
-        assert render.calls[0]["role"] == "System"
-        assert "No provider configured" in render.calls[0]["text"]
-        assert render.calls[0]["session_key"] == "sk-qa"
-        assert box.bubbles == []  # R1: nothing appends to the box
-        # …and the forwarded "You" bubble below the send is skipped on
-        # failure (no "forwarded from" echo for a send that never left).
-        assert all(c["role"] == "System" for c in render.calls)
-
-    def test_gateway_target_branch_does_not_propagate(self, caplog):
-        box, render = FakeChatBox(), FakeRenderHandler()
-        h = self._forward_handler(box, render, raising=True,
-                                  target_in_special=False)
-        with caplog.at_level(logging.WARNING, logger="ui.handlers.forward_handler"):
-            h.forward_to_agent("sk-target", "hello", "sk-source",
-                               MagicMock(name="popover"))  # must not raise
-        assert "Forward failed" in caplog.text
-        assert render.calls[0]["role"] == "System"
-        assert render.calls[0]["session_key"] == "sk-target"
-        assert box.bubbles == []  # R1: nothing appends to the box
-
-    def test_successful_forward_still_renders_the_you_bubble(self):
-        """Guard-rail: the try/except must not change the happy path."""
-        box, render = FakeChatBox(), FakeRenderHandler()
-        h = self._forward_handler(box, render, raising=False,
-                                  target_in_special=True)
-        h.forward_to_agent("sk-qa", "hello", "sk-source",
-                           MagicMock(name="popover"))
-        assert [c["role"] for c in render.calls] == ["You"]
-        assert box.bubbles == []  # R1: nothing appends to the box

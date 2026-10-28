@@ -89,8 +89,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self._collab_handler = None
         # Session handler — owns session switching logic (Phase 7)
         self._session_handler = None
-        # Forward handler — owns agent-to-agent message forwarding (Phase 3b extraction)
-        self._forward_handler = None
 
         # ── Project settings bar — branch refresh state (SPEC-...-FIX-3 §2.2) ──
         # Cache keyed by project_path — a switch A->B->A reuses A's cached branch.
@@ -197,7 +195,7 @@ class MainWindow(Gtk.ApplicationWindow):
         file_tree_handler = FileTreeHandler()
         left_panel = LeftPanel(
             on_prompt_selected=self._on_prompt_selected,
-            on_project_selected=self._on_project_selected,
+            on_project_selected=None,  # SPEC-58 §2d: diff-viewer path deleted; double-click stays _toggle_drawer
             file_tree_handler=file_tree_handler,
         )
         self._file_tree_handler = file_tree_handler
@@ -223,7 +221,6 @@ class MainWindow(Gtk.ApplicationWindow):
             main_content=self._main_content,
             chat_render_handler=self._chat_render_handler,
             GLib_module=GLib,
-            review_handler=None,  # ReviewHandler created later in _build; Phase 1.5 will wire via setter
         )
         # Register built-in special agents from the registry
         # SPEC-12 (R3): the launch-time auto-open is GONE — agent tabs are not
@@ -443,7 +440,7 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib_module=GLib,
             awareness_module=self._awareness,
         )
-        # Revert-failure toast → project chat (same surface ReviewHandler used).
+        # Revert-failure toast → project chat (the surface the review flow used).
         self._project_handler.set_on_revert_status(self._on_command_text)
         # Wire left_panel project events → ProjectHandler
         # Project list handler — provides project cards with colors and data
@@ -710,24 +707,8 @@ class MainWindow(Gtk.ApplicationWindow):
             project_handler=self._project_handler,
         )
 
-        # Review handler — owns review session lifecycle (Phase 3)
-        # Created BEFORE CommandHandler so it can be passed as a constructor param.
-        from ui.handlers.review_handler import ReviewHandler
-        self._review_handler = ReviewHandler(
-            GLib=GLib,
-            main_content=self._main_content,
-            project_handler=self._project_handler,
-            on_review_started=self._on_review_started,
-            on_review_ended=self._on_review_ended,
-            on_display_card=self._on_command_card,
-            on_display_text=self._on_command_text,
-            on_feed_card=self._feed_handler.add_card,
-            on_confirm_batch_accept=self._confirm_batch_accept,  # SPEC-10 SP3 D4
-        )
-        self._review_handler.set_agent_runtime_handler(self._agent_runtime_handler)
-
         # Command handler — owns backtick command parsing + routing (Phase 0.2)
-        # Created AFTER ProjectHandler and ReviewHandler are initialized.
+        # Created AFTER ProjectHandler is initialized.
         from ui.handlers.command_handler import CommandHandler
         self._command_handler = CommandHandler(
             agent_manager=None,    # stays None in MVP (gateway strip; local agents only)
@@ -736,7 +717,6 @@ class MainWindow(Gtk.ApplicationWindow):
             on_display_card=self._on_command_card,
             on_display_text=self._on_command_text,
             collab_handler=self._collab_handler,
-            review_handler=self._review_handler,
             session_handler=self._session_handler,
         )
         self._command_handler.set_prefix(COMMAND_PREFIX)   # BUG #9 fix: read prefix from config
@@ -744,11 +724,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self._chat_handler.set_command_handler(self._command_handler)
         # Populate CommandHandler with special agent names for @mention resolution in ask/stop commands
         self._command_handler.set_special_agents(self._agent_runtime_handler.get_special_agents())
-        # Wire ReviewHandler into AgentRuntimeHandler (deferred to avoid circular dep in _build order)
-        self._agent_runtime_handler.set_review_handler(self._review_handler)
-        # Wire FeedHandler into ReviewHandler (REVIEW-PERSIST-1: accept_changes/
-        # reject_changes persist the resolution back onto the needs_review cards).
-        self._review_handler.set_feed_handler(self._feed_handler)
         # Wire FeedHandler into AgentRuntimeHandler (Phase D: tool call feed cards)
         self._agent_runtime_handler.set_feed_handler(self._feed_handler)
         # Wire AgentRoutingTable into AgentRuntimeHandler (solo DM response routing)
@@ -826,16 +801,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # (The slot is not stolen; _on_agent_response calls both.)
         self._agent_runtime_handler.set_on_agent_response(self._on_agent_response)
 
-        # Forward handler — owns agent-to-agent message forwarding (Phase 3b extraction)
-        from ui.handlers.forward_handler import ForwardHandler
-        self._forward_handler = ForwardHandler(
-            main_content=self._main_content,
-            chat_handler=self._chat_handler,
-            chat_render_handler=self._chat_render_handler,
-            agent_runtime_handler=self._agent_runtime_handler,
-            gateway_handler=None,  # gateway strip: ARH does the sends; source_name falls back to ARH
-        )
-
         # SPEC-AGENT-DASHBOARD: construct the AgentDashboard in the same early
         # slot the event drawer used to occupy. The dashboard widget is a
         # lightweight Gtk.Box shell; the actual re-parenting of main_content
@@ -849,16 +814,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # open project already shows every registered local agent in the header
         # summary (not a blank "No agents" until the first event/project open).
         self._refresh_agent_dashboard()
-
-        # Wire project lifecycle → ReviewHandler
-        self._project_handler.set_on_project_opened(
-            lambda n, p: (self._review_handler.on_project_opened(n, p))
-        )
-        self._project_handler.set_on_project_closed(
-            lambda name: (self._review_handler.on_project_closed(name))
-        )
-
-
 
         # Wire STT + improve buttons
         self._main_content.set_on_stt_click(self._media_handler.on_stt_click)
@@ -980,13 +935,7 @@ class MainWindow(Gtk.ApplicationWindow):
             chat_box.append(bubble)
 
 
-    # ── Review callbacks (owned by ReviewHandler) ──────────────────────────────
-
-    def _on_review_started(self, project_name: str, bar) -> None:
-        """Called by ReviewHandler when a review session starts. Stub — no-op."""
-
-    def _on_review_ended(self, project_name: str) -> None:
-        """Called by ReviewHandler when a review session ends. Stub — no-op."""
+    # ── Command card display ──────────────────────────────────────────────────
 
     def _on_command_card(self, card: dict):
         """Render a command result card in the current tab.
@@ -1000,45 +949,6 @@ class MainWindow(Gtk.ApplicationWindow):
         if chat_box is None or self._chat_render_handler is None:
             return
         self._chat_render_handler.render_event_card(card["type"], chat_box, **card)
-
-
-
-
-    def _on_project_selected(self, path):
-        """Handle file tree selection — open diff viewer for the clicked file."""
-        project_path = self._project_handler.get_active_project_path()
-        if project_path is None:
-            return
-
-        project_name = self._project_handler.get_active_project_name()
-        if project_name is None:
-            return
-
-        import os
-        rel_path = os.path.relpath(path, project_path)
-
-        # M11 fix: reject paths that escape the project root
-        if rel_path.startswith(".."):
-            return
-
-        review_state = self._review_handler.get_state(project_name)
-        checkpoint_sha = review_state.checkpoint_sha if review_state and review_state.is_active() else None
-
-        from ui.views.diff_viewer import DiffViewer
-
-        # M22 fix: session_key captured in closure, not passed through DiffViewer
-        def on_revert(file_path: str, target_sha: str, on_complete=None):
-            self._review_handler.revert_file_to_sha(project_name, file_path, target_sha,
-                                                    on_complete=on_complete)
-
-        viewer = DiffViewer(
-            file_path=rel_path,
-            project_path=project_path,
-            checkpoint_sha=checkpoint_sha,
-            on_back=lambda: self._main_content.hide_diff_viewer(),
-            on_revert=on_revert,
-        )
-        self._main_content.show_diff_viewer(viewer)
 
     def _wire_group_tool_callbacks(self) -> None:
         """Install agent_context, canvas, talk, and feed_card callbacks.
@@ -1896,8 +1806,7 @@ class MainWindow(Gtk.ApplicationWindow):
             text="Stop all agents?",
             secondary_text=(
                 "Every in-flight agent turn will be cancelled, every spawned "
-                "process group killed (SIGTERM → SIGKILL), and any pending "
-                "review checkpoint aborted. This cannot be undone."
+                "process group killed (SIGTERM → SIGKILL). This cannot be undone."
             ),
         )
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
@@ -2064,52 +1973,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # comes forward over the chat surface.
         self._clear_agent_dialog = dialog
         dialog.present()
-
-    def _confirm_batch_accept(self, project_name: str, n: int,
-                              on_confirm) -> None:
-        """SPEC-10 SP3 (D4): confirmation for batch-accepting N queue
-        entries — mirrors _on_stop_all_clicked's dialog pattern (one-shot
-        _dispatched guard, WARNING type, default CANCEL). Shows the N and
-        the double-click/enqueue-boundary note (Coder's round-2
-        disclosure). The accept runs ONLY on OK. Cannot be undone by one
-        click — worktree items are marked reviewed (no new commit), root
-        items commit with the agent trailer."""
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import Gtk
-
-        dialog = Gtk.MessageDialog(
-            transient_for=self,
-            modal=True,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.NONE,
-            text=(f"Accept {n} checkpoint{'s' if n != 1 else ''} "
-                  f"in {project_name}?"),
-            secondary_text=(
-                "Worktree checkpoints are marked reviewed (no new commit — "
-                "the 'Agent:' trailer already rides the checkpoint commit); "
-                "project-root items commit with the agent trailer. A rapid "
-                "double-click can span an enqueue boundary — a checkpoint "
-                "arriving mid-batch is accepted in the next batch. This "
-                "cannot be undone by one click."
-            ),
-        )
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button(f"Accept {n}", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.CANCEL)
-
-        _dispatched = [False]
-
-        def _on_response(_dialog, response):
-            if _dispatched[0]:
-                return
-            _dispatched[0] = True
-            if response == Gtk.ResponseType.OK:
-                on_confirm()
-            _dialog.close()
-
-        dialog.connect("response", _on_response)
-        dialog.show()
 
     def _close_project_tab(self, name: str):
         """

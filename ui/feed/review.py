@@ -52,13 +52,12 @@ class FeedReviewMixin:
 
                 # Generate the commit message from the ACTUAL staged files,
                 # not from card.title. card.title is user-facing text (not a
-                # file path) and may not match the real diff. Same fix as
-                # T2-RL2 in review_handler.
+                # file path) and may not match the real diff.
                 #
                 # Only catch ImportError (gitpython not installed). Other
                 # exceptions are logged as warnings — the user clicked Accept
                 # on a card and the card remains visible, so we don't need
-                # to surface a chat message like T2-RL2 does.
+                # to surface a chat message.
                 try:
                     import git as gitpython
                 except ImportError:
@@ -177,8 +176,8 @@ class FeedReviewMixin:
                     self._enqueue_card_update(project_path, card_id, {"accepted": False})
                     # Notify agents — FIX 6.2 (SP2 audit): the former
                     # f"project:{name}" key was a guaranteed no-op receiver.
-                    # Per-member routing mirrors ReviewHandler's rejection
-                    # fan-out; agent:supervisor is the fallback when the
+                    # Per-member routing fans the rejection out to every
+                    # project member; agent:supervisor is the fallback when the
                     # project has no registered members (honest minimal
                     # option — the FeedHandler callback shape is a single
                     # (session_key, text) pair, so member iteration happens

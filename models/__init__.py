@@ -21,7 +21,6 @@ from .feed_card import FeedCardData
 from .activity import ActivityBubble, ToolStatus
 from .conversation import Conversation, Message, MessageRole, ToolCall, ToolCallStatus
 from .conversation_snapshot import ConversationSnapshot, SnapshotMessage
-from .review_state import ReviewState
 from .team import TeamMember, ProjectTeam
 
 __all__ = [
@@ -49,8 +48,6 @@ __all__ = [
     # conversation_snapshot
     "ConversationSnapshot",
     "SnapshotMessage",
-    # review_state
-    "ReviewState",
     # team
     "TeamMember",
     "ProjectTeam",

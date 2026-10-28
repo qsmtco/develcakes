@@ -55,7 +55,6 @@ class CommandHandler:
         on_display_card=None,     # callback(card_dict) — render a card in chat
         on_display_text=None,     # callback(session_key, text) — display text in chat
         collab_handler=None,     # CollabHandler — for ask/stop
-        review_handler=None,     # ReviewHandler — for review/check/accept/reject
         session_handler=None,    # SessionHandler — for session
     ):
         self._agent_mgr = agent_manager
@@ -70,7 +69,6 @@ class CommandHandler:
 
         # Store handler references for command registration
         self._collab_handler = collab_handler
-        self._review_handler = review_handler
         self._session_handler = session_handler
 
         # ── Register built-in commands ──────────────────────────────────────────
@@ -86,21 +84,6 @@ class CommandHandler:
                 help_text="Ask an agent a question: /ask @agent — question")
             self.register_command("stop", collab_handler.cmd_stop,
                 help_text="PM stops the current collaboration: /stop @agent",
-                payload_free=True)
-
-        # Review — requires ReviewHandler
-        if review_handler is not None:
-            self.register_command("review", review_handler.cmd_review,
-                help_text="Start a review checkpoint",
-                payload_free=True)
-            self.register_command("check", review_handler.cmd_check,
-                help_text="Show diff of changes since checkpoint",
-                payload_free=True)
-            self.register_command("accept", review_handler.cmd_accept,
-                help_text="Accept all changes (or single file)",
-                payload_free=True)
-            self.register_command("reject", review_handler.cmd_reject,
-                help_text="Reject all pending changes",
                 payload_free=True)
 
         # Project — requires ProjectHandler (always provided in production; None in tests)
@@ -329,8 +312,7 @@ class CommandHandler:
                 return resolved  # CommandResult error from _resolve_mention
 
         # Payload-free commands: check via registry (derives from register_command payload_free=True)
-        # Commands marked payload_free: stop, tasks, review, check, accept, reject,
-        # status, agents, cost, help, done, start, blocked, cancel, clear, session
+        # Commands marked payload_free: stop, tasks, status, agents, cost, help, done, start, blocked, cancel, clear, session
 
         # After @mention, require quoted payload (unless command is payload-free)
         rest_text = " ".join(args_after_mentions)

@@ -19,8 +19,6 @@ REPO = Path(__file__).resolve().parent.parent
 
 REPOINTED_FILES = [
     "ui/handlers/chat_handler.py",
-    "ui/handlers/review_handler.py",
-    "ui/handlers/forward_handler.py",
     "ui/handlers/agent_command_handler.py",
     "ui/handlers/command_handler.py",
 ]

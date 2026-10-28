@@ -1,9 +1,6 @@
 """Turn UI adapters: deltas, tools, completion, and errors."""
 from __future__ import annotations
 
-import os
-import re
-import shutil
 import threading
 import time
 from dataclasses import is_dataclass, replace
@@ -281,9 +278,8 @@ class RuntimeTurnUiMixin:
     def _do_tool_call_result(self, session_key: str, name: str, result: Any, success: bool = True) -> None:
         """Main-thread portion of _on_tool_call_result.
 
-        Phase D: Update the feed card with the tool result, then flag for review.
-        Phase 1.5 review staging: If write_file succeeds and review mode is active,
-        copy the written file to a shadow staging directory inside the project.
+        Phase D: Update the feed card with the tool result. write_file
+        success emits a patch bubble instead of a tool_end bubble (BUG #12).
         """
         _mod().logger.debug("[handler] _do_tool_call_result: sk=%s tool=%s result_len=%d",
                      session_key, name, len(str(result)) if result else 0)
@@ -335,14 +331,6 @@ class RuntimeTurnUiMixin:
                 card.metadata["status"] = "complete" if card_success else "error"
                 card.metadata["duration_ms"] = duration
 
-                # Flag for review if write_file/exec_command in active review session
-                if name in ("write_file", "exec_command") and self._review_handler is not None:
-                    proj_name, proj_path = self._active_project or (None, None)
-                    if proj_path:
-                        state = self._review_handler.get_state(proj_name)
-                        if state and state.is_active():
-                            card.metadata["needs_review"] = True
-
                 # Persist the updated card data and re-render the widget
                 self._fh.update_card(card_id, card)
 
@@ -350,8 +338,10 @@ class RuntimeTurnUiMixin:
         # Captures the command from start time, takes the last 10 lines of output
         # from the ToolResult, plus exit_code and duration_ms for the drawer's
         # exit badge and duration display. Output may be empty for silent commands.
+        # SPEC-58 §2d: the pop is unconditional — the dict must not grow per
+        # session forever now that the drawer wiring is gone.
+        cmd = self._pending_exec_commands.pop(session_key, "")
         if name == "exec_command" and self._on_command_output is not None:
-            cmd = self._pending_exec_commands.pop(session_key, "")
             output_text = ""
             if hasattr(result, "output") and result.output:
                 output_text = result.output
@@ -422,30 +412,6 @@ class RuntimeTurnUiMixin:
                 agent_name=agent_name_bubble,
             ))
 
-        proj_name, proj_path = self._active_project or (None, None)
-        if proj_path is None or self._review_handler is None:
-            return
-
-        state = self._review_handler.get_state(proj_name)
-        if state is None or not state.is_active():
-            return
-
-        # Extract relative path from output like "OK — wrote 123 bytes to src/foo.py"
-        path_match = re.search(r"to (.+)$", result)
-        if not path_match:
-            return
-        rel_path = path_match.group(1).strip()
-
-        from agent.config import load_agent_config
-        cfg = load_agent_config()
-        staging_dir = os.path.join(proj_path, cfg.review_staging_dirname)
-        os.makedirs(staging_dir, exist_ok=True)
-        real_path = os.path.join(proj_path, rel_path)
-        staging_path = os.path.join(staging_dir, rel_path)
-        os.makedirs(os.path.dirname(staging_path), exist_ok=True)
-        shutil.copy2(real_path, staging_path)
-        _mod().logger.info("Review staging: copied %s → %s", real_path, staging_path)
-
     def _do_response_complete(self, session_key: str, text: str, complete_token: object = None) -> None:
         """Main-thread portion of _on_response_complete.
 
@@ -484,11 +450,6 @@ class RuntimeTurnUiMixin:
                 _mod().logger.debug("_do_response_complete: duplicate completion for %s, skipping", session_key)
                 return
             self._session_completed.add(session_key)
-
-            # SPEC-10 SP2b (D2 REV 2): turn-complete agent checkpoint. Fires for
-            # COMPLETED turns only (this method IS the completed-turn dispatch —
-            # CANCELLED/FAILED turns route to _do_error, which never calls this).
-            self._maybe_agent_checkpoint(session_key, complete_token)
 
             if self._crh is None:
                 return

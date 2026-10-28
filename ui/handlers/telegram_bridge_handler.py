@@ -250,8 +250,8 @@ class TelegramBridgeHandler:
     def set_agent_runtime_handler(self, arh: Any) -> None:
         """Late-bind the AgentRuntimeHandler (SPEC-15 SP2 part D).
 
-        Setter injection (house pattern — see ARH.set_review_handler /
-        set_feed_handler): window.py builds the bridge handler in its
+        Setter injection (house pattern — see set_feed_handler): window.py
+        builds the bridge handler in its
         composition root and injects the ARH reference AFTER ARH exists,
         so this module never imports ui.handlers.agent_runtime_handler
         (handler-isolation guard). Safe to call before or after start.

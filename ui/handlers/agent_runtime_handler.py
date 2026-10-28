@@ -38,14 +38,6 @@ from ui.agent_runtime.turn_ui import RuntimeTurnUiMixin
 from ui.agent_runtime.provider import RuntimeProviderMixin
 
 
-def _null_lock():
-    """A no-op lock stand-in usable as a context manager. Returned by
-    ARH._project_lock_for when no ReviewHandler is wired (defensive path;
-    normal operation always has the real per-project lock)."""
-    import contextlib
-    return contextlib.nullcontext()
-
-
 # SPEC-AGENT-ID-AND-ROLES §2.10: the three built-in session keys stay on
 # the open project root. Every other local writer (agent:<slug>) gets its
 # own worktree.
@@ -79,13 +71,11 @@ class AgentRuntimeHandler(
         main_content,          # MainContent
         chat_render_handler,  # ChatRenderHandler
         GLib_module: "GLib | None" = None,
-        review_handler=None,   # ReviewHandler — optional, for Phase 1.5 review layer
     ):
         self._mc = main_content
         self._crh = chat_render_handler
         self._fh = None  # FeedHandler — set via set_feed_handler() (Phase D)
         self._GLib = GLib_module
-        self._review_handler = review_handler
 
         # Phase 4 Part B (SPEC-UI-RESPONSIVENESS-2 §2.4): per-session prep
         # lock. Held by _prepare_turn_conversation (loop thread) and taken
@@ -99,12 +89,10 @@ class AgentRuntimeHandler(
         self._worktree_managers: dict[str, Any] = {}
 
         # SPEC-09 SP3: stop-all in-flight flag. Set True across the whole
-        # stop_all_agents() aggregation; ReviewHandler reads it via
-        # stop_all_in_progress() BEFORE git_ops.commit and aborts instead.
+        # stop_all_agents() aggregation; the summary card consumes the abort
+        # counter below (SPEC-58 §2d: the external review reader is deleted —
+        # the counter stays, always 0, dormant).
         self._stop_all_in_progress: bool = False
-        # Review checkpoints aborted during the CURRENT stop-all window
-        # (ReviewHandler increments via note_stop_all_aborted(); the summary
-        # card consumes and resets the counter).
         self._stop_all_aborted_checkpoints: int = 0
 
         # Shared routing table — set via set_agent_routing() (maps session_key → project_name)
@@ -219,13 +207,8 @@ class AgentRuntimeHandler(
         # (project_name, project_path, write_cwd). None until
         # _prepare_turn_conversation resolves the write cwd (worktree or
         # root); read at completion via the token-freshness guard. Bounded by
-        # overwrite-on-dispatch discipline (one entry per agent session).
+        # overwrites-on-dispatch discipline (one entry per agent session).
         self._turn_attr: dict[str, tuple[str, str, str]] = {}
-        # SPEC-10 D8d: per-session checkpoint serialization. Two same-session
-        # turns can overlap (turn N's checkpoint daemon still running when
-        # N+1 completes); both write ONE worktree. Serializes the whole
-        # checkpoint body; no eviction (session keys are roster-bounded).
-        self._checkpoint_locks: dict[str, threading.Lock] = {}
         # V2 exec auto-accept callback (Phase 6): returns current exec mode
         # ("off" | "show" | "silent") or None. Set by window.py wiring via
         # set_check_exec_auto_accept_callback(). When the callback returns
@@ -304,7 +287,7 @@ class AgentRuntimeHandler(
         - `exit_code` is the int exit code from the ToolResult (0 if not set).
         - `duration_ms` is the int tool execution time in ms.
 
-        Wired in connection_sync_handler.sync() to the drawer's append_event
+        Wired by window.py to the activity drawer's append_event
         with a dict constructed from these five arguments.
         """
         self._on_command_output = cb
@@ -424,10 +407,6 @@ class AgentRuntimeHandler(
         """
         self._on_check_exec_auto_accept = callback
 
-    def set_review_handler(self, review_handler) -> None:
-        """Set ReviewHandler after construction (deferred to avoid circular deps with window._build)."""
-        self._review_handler = review_handler
-
     def stop_all_agents(self) -> dict[str, str]:
         """Stop every agent: cancel turns, kill registered processes, abort
         in-flight review checkpoints. Merged sk → outcome across runtimes.
@@ -448,8 +427,8 @@ class AgentRuntimeHandler(
                         merged[sk] = outcome
                 except Exception:
                     logger.exception("stop_all_agents: runtime stop_all raised")
-            # Review checkpoints that aborted under the flag report through
-            # this counter (ReviewHandler increments via note_aborted).
+            # The abort counter reports through the summary card (the
+            # review-side incrementer is deleted — SPEC-58 §2d).
             aborted = self._stop_all_aborted_checkpoints
             self._stop_all_aborted_checkpoints = 0
             self._emit_stop_all_card(merged, aborted)
@@ -463,8 +442,8 @@ class AgentRuntimeHandler(
         return self._stop_all_in_progress
 
     def note_stop_all_aborted(self) -> None:
-        """ReviewHandler calls this when it aborts a checkpoint under the
-        stop-all flag; the count feeds the stop-all summary card."""
+        """Count an aborted checkpoint under the stop-all flag; the count
+        feeds the stop-all summary card."""
         self._stop_all_aborted_checkpoints += 1
 
     def _emit_stop_all_card(self, outcomes: dict[str, str], aborted_checkpoints: int) -> None:
@@ -775,12 +754,10 @@ class AgentRuntimeHandler(
     def get_agent_name_for_session(self, session_key: str) -> str:
         """Return the display name of the local special agent that owns this session, or ''.
 
-        Used by the local exec adapter (in activity_wiring_handler.py) to populate
-        ActivityBubble.agent_name so the activity drawer shows the right agent name
-        in the [Agent] column. Mirrors the fallback chain in
-        ActivityHandler._resolve_agent_name, but resolves locally via session_key
-        since local exec bubbles don't have a gateway payload to read data.agentName
-        from.
+        Resolves the display name locally via the special-agent registry:
+        mirrors the fallback chain in ActivityHandler._resolve_agent_name but
+        needs no gateway payload (local exec bubbles never carry
+        data.agentName).
 
         Args:
             session_key: The agent's session key.
@@ -1642,117 +1619,6 @@ class AgentRuntimeHandler(
             self._GLib.idle_add(self._do_response_complete, session_key, text, _turn_token)
         else:
             self._do_response_complete(session_key, text, _turn_token)
-
-    def _maybe_agent_checkpoint(self, session_key: str, turn_token: object) -> None:
-        """SPEC-10 SP2b (D2 REV 2): COMPLETED-turn checkpoint for writer
-        agents under an active review session.
-
-        Gate order: writer → snapshot exists → token freshness → review gate
-        (D2b: review_mode == "review" AND is_active()) → stop-all gate 1
-        (D8b REV 2). The checkpoint itself runs on a background daemon
-        thread; gate 2 re-checks stop-all just before the commit. Failure is
-        non-fatal (D8c: log + skip, never an error card into the agent's
-        chat). Locking per D3 REV 4b: a WORKTREE write cwd is agent-private —
-        NO project lock; a PROJECT-ROOT write cwd takes the project accept
-        lock (PM/accept paths mutate the root concurrently)."""
-        agent_def = self._agents.get(session_key)
-        if not getattr(agent_def, "can_write", False):
-            return
-        current_attr = self._turn_attr.get(session_key)
-        if current_attr is None:
-            return
-        # Token freshness: the completion must carry the token that was
-        # current at dispatch — a rotated token means a superseded turn.
-        if self._turn_tokens.get(session_key) is not turn_token:
-            return
-        project_name, project_path, write_cwd = current_attr
-        rh = self._review_handler
-        if rh is None:
-            return
-        state = rh.get_state(project_name)
-        if state is None or not (state.review_mode == "review"
-                                 and state.is_active()):
-            return
-        # D8b REV 2 gate 1 (pre-flight, before the thread). NOTE: ARH owns
-        # the stop-all registry — this is self.stop_all_in_progress(), NOT
-        # a ReviewHandler reference (the SP2b brief's warning block).
-        if self.stop_all_in_progress():
-            self.note_stop_all_aborted()
-            logger.info("agent checkpoint aborted: stop-all (gate 1) for %s",
-                        session_key)
-            return
-
-        from utils.worktree_manager import is_worktree_of
-
-        in_worktree = is_worktree_of(project_path, write_cwd)
-
-        def _do():
-            try:
-                # SPEC-10 D8d: per-session checkpoint serialization. Two
-                # same-session turns can overlap (turn N's checkpoint daemon
-                # still running when N+1 completes); both write ONE tree.
-                # Held across the WHOLE checkpoint body (init → stage →
-                # gates → commit → enqueue); no eviction (session keys are
-                # roster-bounded). Nesting order: checkpoint lock → project
-                # lock (the root branch takes the project lock INSIDE it;
-                # never the reverse).
-                with self._checkpoint_locks.setdefault(
-                        session_key, threading.Lock()):
-                    # Worktree = agent-private tree: NO project lock (D3 REV 4b).
-                    # Project root = shared with the PM/accept paths: project lock.
-                    root_ctx = (self._project_lock_for(project_name)
-                                if not in_worktree else _null_lock())
-                    with root_ctx:
-                        if not git_ops.is_repo(write_cwd):
-                            init_result = git_ops.init_repo(write_cwd)
-                            if not init_result.success:
-                                logger.warning(
-                                    "agent checkpoint: repo init failed for %s in %s: %s",
-                                    session_key, write_cwd, init_result.error)
-                                return
-                        git_ops.stage_all(write_cwd)
-                        # D8b REV 2 gate 2: stop-all may land while staging ran.
-                        if self.stop_all_in_progress():
-                            self.note_stop_all_aborted()
-                            logger.info(
-                                "agent checkpoint aborted: stop-all (gate 2) for %s",
-                                session_key)
-                            return
-                        commit = git_ops.commit(
-                            write_cwd, "[review] agent checkpoint",
-                            allow_empty=True,          # D8c: SHA marker / sweep
-                            agent_trailer=session_key,  # D1/SP1 fail-closed guard
-                        )
-                        if not commit.success:
-                            # D8c: non-fatal — log + skip, never an error card.
-                            logger.warning(
-                                "agent checkpoint commit failed for %s in %s: %s",
-                                session_key, write_cwd, commit.error)
-                            return
-                        rh.enqueue_agent_checkpoint(
-                            project_name=project_name,
-                            agent_key=session_key,
-                            sha=commit.sha,
-                            path_used=write_cwd,
-                        )
-            except Exception:
-                # D8c: checkpoint failure never propagates into the turn.
-                logger.exception(
-                    "agent checkpoint thread failed for %s in %s",
-                    session_key, write_cwd)
-
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _project_lock_for(self, project_name: str):
-        """The per-project accept lock, borrowed from the wired
-        ReviewHandler (D3 REV 4b discipline: ONE lock family per project).
-        Returns a no-op context when no ReviewHandler is wired (defensive —
-        the gate above already returned in that case)."""
-        rh = self._review_handler
-        if rh is not None and hasattr(rh, "_project_lock_for"):
-            return rh._project_lock_for(project_name)
-        return _null_lock()
-
 
     def _on_token_usage(self, session_key: str, total_tokens: int, cost: float) -> None:
         """AgentRuntime token usage callback. Store and log."""
