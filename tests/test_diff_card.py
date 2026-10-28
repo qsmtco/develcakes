@@ -225,3 +225,54 @@ class TestBuildDiffSummaryCard:
             pass
         card = build_diff_summary_card(self._make_parsed_diff(), on_accept_all=on_accept)
         assert isinstance(card, Gtk.Box)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Moved from tests/test_diff_viewer.py before its deletion (SPEC-58 §2i):
+# get_lang_from_path still lives (ui/views/diff_card.py, file_tree.py).
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestGetLangFromPathIntegration:
+    """get_lang_from_path works with common extensions."""
+    # Same mapping used by DiffViewer internally
+
+    def test_python(self):
+        assert get_lang_from_path("foo.py") == "python"
+
+    def test_javascript(self):
+        assert get_lang_from_path("foo.js") == "javascript"
+
+    def test_typescript(self):
+        assert get_lang_from_path("foo.ts") == "typescript"
+
+    def test_go(self):
+        assert get_lang_from_path("foo.go") == "go"
+
+    def test_rust(self):
+        assert get_lang_from_path("foo.rs") == "rust"
+
+    def test_markdown(self):
+        assert get_lang_from_path("README.md") == "markdown"
+
+    def test_yaml(self):
+        assert get_lang_from_path("config.yml") == "yaml"
+
+    def test_dockerfile(self):
+        assert get_lang_from_path("Dockerfile") == "dockerfile"
+
+    def test_dockerfile_variant(self):
+        assert get_lang_from_path("Dockerfile.prod") == "dockerfile"
+
+    def test_makefile(self):
+        assert get_lang_from_path("Makefile") == "makefile"
+
+    def test_pathlib_path(self):
+        import pathlib
+        assert get_lang_from_path(pathlib.Path("foo.py")) == "python"
+
+    def test_empty_path(self):
+        assert get_lang_from_path("") is None
+
+    def test_unknown_extension(self):
+        assert get_lang_from_path("foo.xyz") is None
