@@ -36,38 +36,11 @@ class MockGLib:
 
 # ── Mock FeedTab ──────────────────────────────────────────────────────────────
 
-class MockVadjustment:
-    """Fake Gtk.Adjustment for smart scroll tests."""
-    def __init__(self, value=0, upper=1000, page_size=600):
-        self._value = value
-        self._upper = upper
-        self._page_size = page_size
-        # MEMRATCHET P5: record every write so the eviction pass's scroll
-        # compensation can be asserted on the call, not just on the result.
-        self.set_value_calls = []
-
-    def get_value(self):
-        return self._value
-
-    def set_value(self, v):
-        self.set_value_calls.append(v)
-        self._value = v
-
-    def get_upper(self):
-        return self._upper
-
-    def get_page_size(self):
-        return self._page_size
-
-
 class MockCardContainer:
     """Minimal stand-in for FeedTab's card Gtk.Box (MEMRATCHET P3, spec §2.6).
 
-    The eviction pass only reads the container's inter-child spacing, via
-    FeedHandler._card_container_spacing() ->
-    get_card_container().get_spacing() (feed_tab.py: card_container.set_spacing(8)),
-    so the double exposes get_spacing() and nothing else. The value is read
-    from the owning tab on every call, so a Phase-5 test can drive the spacing
+    The double exposes get_spacing() and nothing else. The value is read
+    from the owning tab on every call, so a test can drive the spacing
     term with `tab._card_spacing = <n>` (default 8).
     """
 
@@ -127,13 +100,6 @@ class MockFeedTab:
         self._feed_surface = self._surface
         self.upserts = self._surface.upserts
         self.html_load_more = []
-        # Fake scroll state for smart scroll tests
-        self._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
-        # Reader intent for the smart-scroll gate. Default False: the default
-        # adjustment above (upper=1000, page=600, value=0) describes a reader
-        # sitting at the TOP of the feed, i.e. not following. Tests that want
-        # the following case set this True explicitly.
-        self._was_near_bottom = False
         # MEMRATCHET P3: eviction-pass surface (spec §2.6). Defaults chosen so
         # the eviction cases are permissive; individual tests override the
         # attributes to drive the guarded / non-guarded branches.
@@ -150,10 +116,10 @@ class MockFeedTab:
         self._batch_button_label = ""
         self._batch_button_visible = True
         self.append_calls = []  # log of (widget, card_id) per append_card() call (for batch tests)
-        # MEMRATCHET P5: count the bottom-pin path so the near-bottom arm of
-        # the eviction scroll compensation is assertable as a CALL, distinct
-        # from the scrolled-up compensation arm (which writes the vadjustment).
-        self.scroll_to_bottom_calls = 0
+        # Count the smart-scroll funnel calls (SPEC-58 §2f: the scroll
+        # itself is a no-op on the real tab; the CALL is what the funnel
+        # contract pins).
+        self.smart_scroll_calls = 0
 
     def append_card(self, widget, card_id=None):
         self.cards.append((widget, card_id))
@@ -173,29 +139,15 @@ class MockFeedTab:
                 self.cards[i] = (card_id, new_widget)
                 break
 
-    def schedule_scroll_to_bottom(self):
-        # Mirror the real FeedTab: scroll after a simulated layout pass.
-        # The real implementation uses vadj.set_value(vadj.get_upper())
-        # via the 'changed' signal; in tests we just set the value directly.
-        self.scroll_to_bottom_calls += 1
-        if self._vadjustment is not None:
-            self._vadjustment.set_value(self._vadjustment.get_upper())
-
     def schedule_smart_scroll_to_bottom(self):
         """Mirror of FeedTab.schedule_smart_scroll_to_bottom() for test.
 
-        Follow state is the reader's intent (`_was_near_bottom`), matching the
-        real gate. An earlier version mirrored a live `upper - page_size -
-        value` distance with a `< 80` comparison — which both disagreed with
-        the real boundary (production used `<= 80`) and encoded the
-        growth-sensitivity bug: content growing after a completed scroll read
-        as "the reader scrolled away", stopping the follow.
+        The real method is a no-op (SPEC-58 §2f: the GTK scroll settle is
+        gone; the document owns scrolling). The mock keeps the CALL
+        observable — the handler funnel pins "exactly one smart scroll per
+        append" — but moves no adjustment.
         """
-        if self._vadjustment is None:
-            return
-        if not self._was_near_bottom:
-            return
-        self.schedule_scroll_to_bottom()
+        self.smart_scroll_calls += 1
 
     # Phase 5 batch bar mocks
     def update_batch_bar(self, pending_count: int):
@@ -1200,74 +1152,24 @@ class TestLoadOrderingInvariant:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TestSmartScroll — Phase 4 (consolidated: only schedule_smart_scroll_to_bottom
-#  and schedule_scroll_to_bottom remain in the public API; the old synchronous
-#  scroll_to_bottom() and smart_scroll_to_bottom() were removed during the
-#  4-scroll-sites → 1-funnel refactor).
+#  TestSmartScroll — the funnel contract (SPEC-58 §2f: the GTK scroll
+#  settle is gone; the real FeedTab's schedule_smart_scroll_to_bottom is
+#  a no-op and the DOCUMENT owns scrolling).
 # ═══════════════════════════════════════════════════════════════════
 
 class TestSmartScroll:
-    """Phase 4 + refactor: schedule_smart_scroll_to_bottom only scrolls when
-    the user is near the bottom (within 80px). If the user has scrolled up to
-    read older cards, the scroll is skipped so their reading position is
-    preserved. schedule_scroll_to_bottom is the unconditional variant."""
+    """The append paths funnel through ONE smart-scroll call.
 
-    def test_smart_scroll_when_near_bottom(self):
-        """A caught-up reader is followed to the bottom."""
-        mock_tab = MockFeedTab()
-        mock_tab._was_near_bottom = True   # reader is following
-        # Reader sitting at upper-50 (50px from bottom, page_size=600, upper=1000)
-        mock_tab._vadjustment = MockVadjustment(value=950, upper=1000, page_size=600)
-        mock_tab.schedule_smart_scroll_to_bottom()
-        assert mock_tab._vadjustment.get_value() == 1000
+    The scroll itself no longer lives in the tab (the document owns it),
+    so what is pinned here is the FUNNEL: exactly one smart-scroll call
+    per append, and no unconditional scroll variant left behind."""
 
-    # NOTE: `test_smart_scroll_when_exactly_80px_from_bottom` was removed here.
-    # It asserted the gate does NOT scroll at exactly 80px — a boundary that
-    # only ever existed in this mock's `< 80` comparison. Production used
-    # `<= 80`, and the real tab's own test asserts the follow DOES happen at
-    # exactly 80. The 80px boundary that still exists (the eviction slack in
-    # `is_near_bottom`) is pinned on the real tab by
-    # TestScheduleSmartScrollToBottom::test_exactly_80px_counts_as_near_bottom.
-
-    def test_smart_scroll_when_far_from_bottom(self):
-        """A reader who has scrolled away is not yanked to the bottom.
-
-        The old setup expressed "scrolled away" only as a 400px distance. The
-        gate does not read distance any more (content growth made it
-        unreliable), so the reader's intent is stated directly.
-        """
-        mock_tab = MockFeedTab()
-        mock_tab._was_near_bottom = False  # reader scrolled to the top: value=0
-        mock_tab._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
-        mock_tab.schedule_smart_scroll_to_bottom()
-        assert mock_tab._vadjustment.get_value() == 0  # unchanged
-
-    def test_smart_scroll_when_mid_feed(self):
-        """A reader parked mid-feed is not yanked to the bottom.
-
-        As with the far-from-bottom case, "not following" is stated as intent
-        rather than inferred from distance.
-        """
-        mock_tab = MockFeedTab()
-        mock_tab._was_near_bottom = False  # reader parked mid-feed: value=200
-        mock_tab._vadjustment = MockVadjustment(value=200, upper=1000, page_size=600)
-        mock_tab.schedule_smart_scroll_to_bottom()
-        assert mock_tab._vadjustment.get_value() == 200  # unchanged
-
-    def test_schedule_scroll_to_bottom_always_scrolls(self):
-        """The unconditional schedule_scroll_to_bottom() always scrolls."""
-        mock_tab = MockFeedTab()
-        # User scrolled to top
-        mock_tab._vadjustment = MockVadjustment(value=0, upper=1000, page_size=600)
-        mock_tab.schedule_scroll_to_bottom()
-        assert mock_tab._vadjustment.get_value() == 1000
-
-    def test_smart_scroll_no_vadjustment_is_noop(self):
-        """If _vadjustment is None, smart_scroll is a no-op (graceful)."""
-        mock_tab = MockFeedTab()
-        mock_tab._vadjustment = None
-        # Should not raise
-        mock_tab.schedule_smart_scroll_to_bottom()
+    def test_smart_scroll_is_a_noop_on_the_real_tab(self, real_feed_tab):
+        """The real tab's smart scroll does not move anything (no GTK settle)."""
+        real_feed_tab.schedule_smart_scroll_to_bottom()
+        assert not hasattr(real_feed_tab, "_scroll_handler_id"), (
+            "the GTK scroll settle must be gone (SPEC-58 §2f)"
+        )
 
     def test_add_card_uses_smart_scroll_only(self, feed_handler, mock_feed_tab):
         """add_card() calls schedule_smart_scroll_to_bottom exactly once.
@@ -1657,130 +1559,25 @@ class TestBatchAccept:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TestScheduleScrollToBottom — Phase 4D-1
-#  Tests the real schedule_scroll_to_bottom mechanism on FeedTab.
-#  Uses _FakeAdjustment (not MockFeedTab) to exercise the actual
-#  connect/disconnect/emit/timeout logic in feed_tab.py.
+#  real_feed_tab — the REAL FeedTab, used by the HTML-surface pins.
+#  The GTK scroll settle it used to carry is GONE (SPEC-58 §2f).
 # ═══════════════════════════════════════════════════════════════════
 
 import gi
 gi.require_version('Gtk', '4.0')
 
 
-class _FakeAdjustment:
-    """
-    Duck-typed replacement for Gtk.Adjustment that does NOT auto-emit
-    'changed' when properties change. Tests manually call emit_changed()
-    to control exactly when the 'changed' signal fires, and set_upper()
-    to control what get_upper() returns.
-
-    This is necessary because Gtk.Adjustment.set_upper() emits 'changed'
-    internally — making it impossible to test the 'changed never fires'
-    timeout-fallback path with a real Adjustment.
-    """
-
-    def __init__(self, upper=0.0, page_size=600.0):
-        self._upper = upper
-        self._value = 0.0
-        self._page_size = page_size
-        self._handlers: dict[int, callable] = {}
-        self._next_id = 1
-        self.set_value_calls: list[float] = []
-        self.disconnect_calls: list[int] = []
-
-    def connect(self, signal: str, callback) -> int:
-        assert signal in ("changed", "value-changed"), (
-            f"_FakeAdjustment.connect: unexpected signal {signal!r}"
-        )
-        handler_id = self._next_id
-        self._next_id += 1
-        self._handlers[handler_id] = (signal, callback)
-        return handler_id
-
-    def disconnect(self, handler_id: int):
-        self.disconnect_calls.append(handler_id)
-        self._handlers.pop(handler_id, None)
-
-    def emit_changed(self):
-        """Manually fire the 'changed' signal to all connected handlers."""
-        # Copy the list because handlers may disconnect during iteration
-        for signal, cb in list(self._handlers.values()):
-            if signal == "changed":
-                cb(self)
-
-    def emit_value_changed(self):
-        """Manually fire the 'value-changed' signal to all connected handlers.
-
-        Ride-along (auditor Issue #4): the FeedTab reader-intent tracker
-        (`_on_scroll_value_changed`) hangs off this signal; without a way to
-        fire it, the tracker logic was never directly tested (which is how
-        BUG#2 hid). Mirrors `emit_changed` above.
-        """
-        for signal, cb in list(self._handlers.values()):
-            if signal == "value-changed":
-                cb(self)
-
-    def get_lower(self) -> float:
-        return 0.0
-
-    def get_upper(self) -> float:
-        return self._upper
-
-    def set_upper(self, upper: float):
-        """Set upper WITHOUT emitting 'changed' (unlike real Gtk.Adjustment)."""
-        self._upper = upper
-
-    def get_value(self) -> float:
-        return self._value
-
-    def set_value(self, value: float):
-        self._value = value
-        self.set_value_calls.append(value)
-
-    def get_page_size(self) -> float:
-        return self._page_size
-
-
-class _FakeScrolledWindow:
-    """Minimal stand-in for Gtk.ScrolledWindow holding a _FakeAdjustment.
-
-    `set_child` / `set_policy` exist because FeedTab.attach_html_surface()
-    swaps the scroll child for the WebKit document; the harness replaces the
-    real ScrolledWindow, so the double must accept the same calls.
-    """
-
-    def __init__(self, vadj: _FakeAdjustment):
-        self._vadj = vadj
-        self.child = None
-        self.policy = None
-
-    def get_vadjustment(self) -> _FakeAdjustment:
-        return self._vadj
-
-    def set_child(self, child):
-        self.child = child
-
-    def set_policy(self, horizontal, vertical):
-        self.policy = (horizontal, vertical)
-
-    def get_child(self):
-        return self.child
-
-
 @pytest.fixture
 def real_feed_tab():
-    """Create a real FeedTab instance for testing schedule_scroll_to_bottom.
+    """A real FeedTab instance.
 
-    FeedTab constructs a Gtk.ScrolledWindow in __init__, but we replace
-    _feed_scroll with a _FakeScrolledWindow holding a _FakeAdjustment so
-    we can control when 'changed' fires.
+    FeedTab constructs a Gtk.ScrolledWindow in __init__; the GTK scroll
+    settle that used to hang off it is GONE (SPEC-58 §2f), so the tab is
+    used here as-is — no fake adjustment, no signal choreography.
     """
     from ui.views.feed_tab import FeedTab
-    tab = FeedTab()
-    # Replace the real scrolled window with our fake
-    adj = _FakeAdjustment(upper=0.0)
-    tab._feed_scroll = _FakeScrolledWindow(adj)
-    return tab
+
+    return FeedTab()
 
 
 class TestBacklogDiscipline:
@@ -1908,242 +1705,14 @@ class TestBacklogDiscipline:
         )
 
 
+class TestNearBottomFallback:
+    """SPEC-MEMORY-WIDGET-RATCHET §2.2 — the no-surface fail-safe.
 
-def _pump_feed_idles(limit: int = 20) -> None:
-    """Run queued GLib idles so FeedTab's height settle can finish."""
-    from gi.repository import GLib
-
-    ctx = GLib.MainContext.default()
-    for _ in range(limit):
-        if not ctx.pending():
-            break
-        ctx.iteration(False)
-
-
-class TestScheduleScrollToBottom:
+    With no document attached there is nothing rendered, so the viewport
+    counts as "near bottom" and eviction is permitted. (SPEC-58 §2f: the
+    adjustment fallback is gone; only the document branch and this
+    no-surface True remain.)
     """
-    Phase 4D-1: Test the real schedule_scroll_to_bottom mechanism.
-
-    These tests exercise the actual FeedTab.schedule_scroll_to_bottom code,
-    NOT the MockFeedTab stub. They use _FakeAdjustment to control when the
-    'changed' signal fires and what upper returns.
-    """
-
-    def test_schedule_scroll_does_not_scroll_immediately_when_upper_is_stale(
-        self, real_feed_tab
-    ):
-        """Bug A regression: when upper is stale (0) at connect time, the scroll
-        must NOT happen synchronously. It must wait for a stable height.
-
-        page_size defaults to 600, so the bottom is upper - 600.
-        """
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        tab.schedule_scroll_to_bottom()
-
-        # set_value must NOT have been called synchronously
-        assert adj.set_value_calls == [], (
-            f"Expected no set_value call before 'changed', got {adj.set_value_calls}"
-        )
-
-        # Simulate layout pass updating upper
-        adj.set_upper(1000.0)
-        adj.emit_changed()
-        assert adj.set_value_calls == [], (
-            f"First changed must not scroll, got {adj.set_value_calls}"
-        )
-        assert tab._scroll_handler_id is not None
-
-        _pump_feed_idles()
-
-        assert adj.set_value_calls == [400.0], (
-            f"Expected set_value(upper - page_size = 400) after settle, "
-            f"got {adj.set_value_calls}"
-        )
-
-    def test_schedule_scroll_fires_via_timeout_fallback_when_changed_never_fires(
-        self, real_feed_tab, monkeypatch
-    ):
-        """Safety net: if 'changed' never fires, the 150ms timeout must scroll.
-
-        We monkeypatch GLib.timeout_add to capture the callback and timeout
-        so we can invoke it manually without waiting 150ms.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        captured_timeouts = []
-
-        def fake_timeout_add(ms, callback):
-            source_id = 42  # deterministic fake source ID
-            captured_timeouts.append((source_id, ms, callback))
-            return source_id
-
-        monkeypatch.setattr(GLib, "timeout_add", fake_timeout_add)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        tab.schedule_scroll_to_bottom()
-
-        # A timeout must have been registered
-        assert len(captured_timeouts) == 1, (
-            f"Expected 1 timeout registered, got {len(captured_timeouts)}"
-        )
-        source_id, ms, callback = captured_timeouts[0]
-        assert ms == 150, f"Expected 150ms timeout, got {ms}ms"
-
-        # Set upper to simulate content being present
-        adj.set_upper(800.0)
-
-        # 'changed' never fires — invoke the timeout callback directly
-        result = callback()
-
-        assert result == GLib.SOURCE_REMOVE, (
-            f"Expected SOURCE_REMOVE, got {result}"
-        )
-        assert adj.set_value_calls == [200.0], (
-            f"Expected set_value(upper - page_size = 200) from timeout, "
-            f"got {adj.set_value_calls}"
-        )
-
-    def test_schedule_scroll_uses_later_upper_before_settle(
-        self, real_feed_tab, monkeypatch
-    ):
-        """An intermediate changed must not consume the scroll. The settle
-        uses the later upper, and the handler is still connected after the first.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 99)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        tab.schedule_scroll_to_bottom()
-
-        adj.set_upper(1000.0)
-        adj.emit_changed()
-        assert adj.set_value_calls == [], (
-            f"Expected no scroll after the first changed, got {adj.set_value_calls}"
-        )
-        assert tab._scroll_handler_id is not None
-
-        adj.set_upper(2000.0)
-        adj.emit_changed()
-        _pump_feed_idles()
-
-        # page_size is 600, so the bottom of 2000 is 1400.
-        assert adj.set_value_calls == [1400.0], (
-            f"Expected set_value(1400.0) from the later upper, got {adj.set_value_calls}"
-        )
-
-    def test_schedule_scroll_disarms_timeout_after_changed_fires(
-        self, real_feed_tab, monkeypatch
-    ):
-        """The timeout must not scroll once `changed` has fired, and it must
-        not cancel the settle. The settle itself removes the timeout when it
-        consumes the scroll.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        captured_timeouts = []
-        removed_sources = []
-
-        def fake_timeout_add(ms, callback):
-            source_id = 77
-            captured_timeouts.append((source_id, ms, callback))
-            return source_id
-
-        monkeypatch.setattr(GLib, "timeout_add", fake_timeout_add)
-        monkeypatch.setattr(
-            GLib,
-            "source_remove",
-            lambda sid: removed_sources.append(sid),
-        )
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        tab.schedule_scroll_to_bottom()
-
-        assert len(captured_timeouts) == 1
-        timeout_source_id, _, timeout_callback = captured_timeouts[0]
-
-        # Verify _scroll_timeout_id was set
-        assert tab._scroll_timeout_id == timeout_source_id, (
-            f"Expected _scroll_timeout_id={timeout_source_id}, "
-            f"got {tab._scroll_timeout_id}"
-        )
-
-        adj.set_upper(1000.0)
-        adj.emit_changed()
-
-        assert timeout_source_id not in removed_sources, (
-            f"First changed must not cancel the timeout, removed={removed_sources}"
-        )
-        assert adj.set_value_calls == []
-
-        _pump_feed_idles()
-        assert adj.set_value_calls == [400.0], (
-            f"Expected settled bottom 400, got {adj.set_value_calls}"
-        )
-        assert timeout_source_id in removed_sources
-
-        timeout_callback()
-        assert adj.set_value_calls == [400.0], (
-            f"Late timeout scrolled again: {adj.set_value_calls}"
-        )
-
-    def test_schedule_scroll_handles_disconnect_exception(
-        self, real_feed_tab, monkeypatch
-    ):
-        """Defensive cleanup test: if disconnect() raises during the 'changed'
-        handler (e.g., adjustment disposed during teardown), the handler must
-        not propagate the exception and must still clean up state.
-
-        This documents the try/except behavior in the production code.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 88)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        # Make disconnect raise
-        original_disconnect = adj.disconnect
-        adj.disconnect = lambda hid: (_ for _ in ()).throw(
-            RuntimeError("simulated dispose")
-        )
-
-        tab.schedule_scroll_to_bottom()
-
-        adj.set_upper(1000.0)
-        adj.emit_changed()
-        _pump_feed_idles()  # settle calls disconnect; the raise must not escape
-
-        assert 400.0 in adj.set_value_calls, (
-            f"Expected set_value(400.0) despite disconnect exception, "
-            f"got {adj.set_value_calls}"
-        )
-
-        # Restore disconnect for cleanup
-        adj.disconnect = original_disconnect
-
-    # ── SPEC-MEMORY-WIDGET-RATCHET §2.2/§2.6 — geometry primitives ────────
-    # Real-GTK harness (real FeedTab + real Gtk.ScrolledWindow/Gtk.Box),
-    # driven the same way as the scroll tests above.
 
     def test_is_near_bottom_true_when_no_vadjustment(self, real_feed_tab):
         """Fail-safe: with no ScrolledWindow there is nothing rendered, so the
@@ -2164,377 +1733,6 @@ class TestScheduleScrollToBottom:
 
         assert tab.get_vadjustment() is None
         assert tab.is_near_bottom() is True
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  TestScheduleSmartScrollToBottom — Deferred Smart Scroll with Proximity
-#  Tests the real schedule_smart_scroll_to_bottom method on FeedTab.
-#  Uses _FakeAdjustment (not MockFeedTab) to exercise the real code path
-#  with full control over when 'changed' fires and what upper returns.
-# ═══════════════════════════════════════════════════════════════════
-
-class TestScheduleSmartScrollToBottom:
-    """
-    Tests schedule_smart_scroll_to_bottom: proximity check + deferred scroll.
-
-    These tests exercise the actual FeedTab.schedule_smart_scroll_to_bottom
-    code, NOT the MockFeedTab stub. They use _FakeAdjustment to control
-    vadjustment values and signal timing.
-    """
-
-    def test_schedule_smart_scrolls_when_user_near_bottom(
-        self, real_feed_tab, monkeypatch
-    ):
-        """When the user is within 80px of the bottom, the method must delegate
-        to schedule_scroll_to_bottom so the scroll fires after the layout pass.
-
-        Setup: upper=1000, page_size=600, value=350.
-        distance_from_bottom = 1000 - 600 - 350 = 50px (< 80 → near bottom).
-
-        After calling schedule_smart_scroll_to_bottom:
-        - The 'changed' handler must be connected (proof delegation happened)
-        - When we simulate layout (set upper to 1500, emit 'changed'), the
-          scroll must fire to 1500 (the post-layout upper, not the stale 1000)
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 42)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-
-        # User is near the bottom: distance = 1000 - 600 - 350 = 50px
-        adj.set_upper(1000.0)
-        adj._value = 350.0
-        adj._page_size = 600.0
-
-        tab.schedule_smart_scroll_to_bottom()
-
-        # Proof that delegation to schedule_scroll_to_bottom happened:
-        # the 'changed' handler must be connected.
-        assert tab._scroll_handler_id is not None, (
-            "Expected _scroll_handler_id to be set (delegation to "
-            "schedule_scroll_to_bottom), got None"
-        )
-
-        # No scroll should have happened yet (waiting for 'changed')
-        assert adj.set_value_calls == [], (
-            f"Expected no set_value before 'changed', got {adj.set_value_calls}"
-        )
-
-        adj.set_upper(1500.0)
-        adj.emit_changed()
-        _pump_feed_idles()
-
-        # page_size is 600, so the bottom of the post-layout upper is 900.
-        assert adj.set_value_calls == [900.0], (
-            f"Expected set_value(900.0) after settle, got {adj.set_value_calls}"
-        )
-
-    def test_schedule_smart_does_not_scroll_when_user_scrolled_up(
-        self, real_feed_tab, monkeypatch
-    ):
-        """When the reader has scrolled away from the bottom, the method must
-        NOT scroll at all — preserve the reading position.
-
-        Setup: upper=2000, page_size=600, value=200, then fire 'value-changed'
-        the way a real user scroll does. That signal is what records the
-        reader's intent (`_was_near_bottom=False`).
-
-        After calling schedule_smart_scroll_to_bottom:
-        - No 'changed' handler connected (no delegation)
-        - No timeout installed
-        - No set_value calls
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        timeout_calls = []
-        monkeypatch.setattr(
-            GLib, "timeout_add",
-            lambda ms, cb: timeout_calls.append((ms, cb)) or 99,
-        )
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        # The fixture replaces the scroll AFTER __init__, so the tracker is not
-        # wired to the fake — connect it the way __init__ does.
-        adj.connect("value-changed", tab._on_scroll_value_changed)
-
-        # Reader has scrolled way up: distance = 2000 - 600 - 200 = 1200px.
-        adj.set_upper(2000.0)
-        adj._value = 200.0
-        adj._page_size = 600.0
-        # A real scroll emits 'value-changed', and that signal is what records
-        # the reader's intent. Writing the value directly bypasses it, which
-        # would leave the tracker on its default ("following") and make this
-        # test assert nothing about a reader who scrolled away.
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is False, "precondition: reader is away"
-
-        tab.schedule_smart_scroll_to_bottom()
-
-        # No handler must be connected
-        assert tab._scroll_handler_id is None, (
-            f"Expected _scroll_handler_id=None (user scrolled up, no scroll), "
-            f"got {tab._scroll_handler_id}"
-        )
-        # No timeout must be installed
-        assert tab._scroll_timeout_id is None, (
-            f"Expected _scroll_timeout_id=None (no delegation), "
-            f"got {tab._scroll_timeout_id}"
-        )
-        assert timeout_calls == [], (
-            f"Expected no timeout_add call, got {timeout_calls}"
-        )
-        # No scroll
-        assert adj.set_value_calls == [], (
-            f"Expected no set_value calls, got {adj.set_value_calls}"
-        )
-
-    def test_schedule_smart_follows_by_reader_intent_not_content_height(
-        self, real_feed_tab, monkeypatch
-    ):
-        """Pins the follow-state design: the decision to follow uses the
-        reader's recorded intent, never the live content height.
-
-        This replaces an earlier test that pinned the same *purpose* ("measure
-        the reader's reading position, not the future content height") via the
-        mechanism of a stale-upper distance reading. That mechanism is what let
-        the feed stop following: content growing AFTER a completed scroll
-        raises upper without the reader moving, and the live reading then
-        reports the reader as having scrolled away.
-
-        Setup: reader caught up at upper=800, page=600, value=200 (distance 0),
-        recorded through 'value-changed'. Content then grows by 300px with no
-        reader movement. The follow must survive the growth.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 55)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        # The fixture replaces the scroll AFTER __init__, so the tracker is not
-        # wired to the fake — connect it the way __init__ does.
-        adj.connect("value-changed", tab._on_scroll_value_changed)
-
-        adj.set_upper(800.0)
-        adj._page_size = 600.0
-        adj._value = 200.0
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is True, "precondition: reader is caught up"
-
-        # Content grows. No value change — the reader did not move.
-        adj.set_upper(1100.0)
-
-        tab.schedule_smart_scroll_to_bottom()
-
-        assert tab._scroll_handler_id is not None, (
-            "Content growth suppressed the follow: the decision read the grown "
-            "upper as the reader having scrolled away."
-        )
-
-    def test_follow_survives_card_growth_between_cards(
-        self, real_feed_tab, monkeypatch
-    ):
-        """REGRESSION (reported): the feed stops following once a card grows.
-
-        Sequence reproduced: the reader is caught up; the one-shot scroll lands
-        on the bottom; that card then GROWS (a line wraps, a body arrives late)
-        so the scroll range moves while the position does not; a new card is
-        appended. The leftover gap must not be read as the reader having
-        scrolled away.
-
-        Figures from the report: position 566 against a bottom of 566, bottom
-        then moves to 756 (190px short), and the next card raises it again.
-        """
-        import gi
-        gi.require_version('Gtk', '4.0')
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 77)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        # The fixture replaces the scroll AFTER __init__, so the tracker is not
-        # wired to the fake — connect it the way __init__ does.
-        adj.connect("value-changed", tab._on_scroll_value_changed)
-
-        # Caught up: upper=756, page=600, value=156 → distance 0.
-        adj.set_upper(756.0)
-        adj._page_size = 600.0
-        adj._value = 156.0
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is True, "precondition: reader is caught up"
-
-        # The last card grows by 190px. Value does not move.
-        adj.set_upper(946.0)
-        assert tab.is_near_bottom() is False, (
-            "precondition: the growth opened a 190px gap"
-        )
-
-        # A new card arrives — following must not have stopped.
-        tab.schedule_smart_scroll_to_bottom()
-        assert tab._scroll_handler_id is not None, (
-            "Following stopped: the 190px growth gap was read as the reader "
-            "having scrolled away, so the new card was never scrolled to."
-        )
-
-        adj.set_upper(1044.0)          # the new card lands
-        adj.emit_changed()
-        _pump_feed_idles()
-
-        assert adj.set_value_calls == [444.0], (
-            f"Expected the follow to land on the new bottom (1044 - 600 = 444), "
-            f"got {adj.set_value_calls}"
-        )
-
-    def test_exactly_80px_counts_as_near_bottom(self, real_feed_tab, monkeypatch):
-        """Distance of exactly 80px follows. is_near_bottom agrees."""
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 61)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        # 1000 - 600 - 320 = 80
-        adj.set_upper(1000.0)
-        adj._value = 320.0
-        adj._page_size = 600.0
-
-        assert tab.is_near_bottom() is True
-        tab.schedule_smart_scroll_to_bottom()
-        assert tab._scroll_handler_id is not None
-
-    def test_map_restores_reading_offset(self, real_feed_tab):
-        """A hidden tab that the reader had scrolled up restores that offset."""
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        tab._was_near_bottom = False
-        tab._saved_value = 120.0
-        adj.set_upper(2000.0)
-        adj._page_size = 600.0
-        adj._value = 0.0
-
-        tab._on_scroll_mapped(None)
-
-        assert adj.set_value_calls == [120.0]
-        assert tab._scroll_handler_id is None
-
-    def test_map_cancels_pending_settle_before_restore(self, real_feed_tab, monkeypatch):
-        """BUG#2 (audit fix): a settle armed BEFORE the tab was hidden is still
-        pending when the user (now scrolled up) shows the tab. The map restores
-        `_saved_value`, but the stale settle later fires and yanks them to the
-        bottom. The map must `_cancel_settle()` + `_disarm_scroll(vadj)` BEFORE
-        the restore."""
-        from gi.repository import GLib
-
-        removed: list[int] = []
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: removed.append(sid))
-
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        adj.set_upper(2000.0)
-        adj._page_size = 600.0
-        adj._value = 0.0
-
-        # Pre-arm a stale settle + a connected changed handler (an earlier
-        # project-open smart scroll left them pending).
-        tab._scroll_handler_id = adj.connect("changed", tab._on_adj_changed)
-        tab._arm_settle(adj)  # real idle queued; _settle_source set
-        settled_id = tab._settle_source
-        assert settled_id is not None
-
-        # The reader has since scrolled up.
-        tab._was_near_bottom = False
-        tab._saved_value = 120.0
-
-        tab._on_scroll_mapped(None)
-
-        assert adj.set_value_calls == [120.0]        # restored
-        assert tab._settle_source is None            # stale settle cancelled
-        assert tab._scroll_handler_id is None        # changed handler disarmed
-        assert settled_id in removed                 # the idle was actually removed
-
-        # Fire a layout change + drain idles: the stale settle must NOT yank.
-        adj.emit_changed()
-        _pump_feed_idles()
-        assert adj.set_value_calls == [120.0], (
-            "a stale settle yanked the reader to the bottom after the map restore"
-        )
-
-    def test_tracker_direct_value_changed_updates_intent(self, real_feed_tab):
-        """Ride-along (auditor Issue #4): drive the reader-intent tracker
-        DIRECTLY through the `value-changed` signal (via the new
-        `emit_value_changed`) — a real scroll-up flips the tracker False and
-        saves the offset. This closes the gap that let BUG#2 hide (the tracker
-        was never exercised directly)."""
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        # The fixture replaces the scroll AFTER __init__, so the tracker is not
-        # wired to the fake — connect it the way __init__ does.
-        adj.connect("value-changed", tab._on_scroll_value_changed)
-
-        # Real scrollable height; reader scrolled UP away from the bottom.
-        adj.set_upper(2000.0)
-        adj._page_size = 600.0
-        adj._value = 120.0
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is False
-        assert tab._saved_value == 120.0
-
-        # Reader returns to the bottom → tracker flips True again.
-        adj._value = 1400.0  # upper - page_size == bottom
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is True
-
-    def test_tracker_value_changed_ignores_layout_artifact(self, real_feed_tab):
-        """Ride-along (auditor Issue #4), guard half: when the adjustment is
-        not scrollable (`upper <= page_size`) a value change is a LAYOUT
-        artifact, not the reader — the tracker must not move. Drives the real
-        `value-changed` signal via `emit_value_changed`."""
-        tab = real_feed_tab
-        adj = tab._feed_scroll.get_vadjustment()
-        adj.connect("value-changed", tab._on_scroll_value_changed)
-
-        # Establish a non-default intent so an accidental update is visible.
-        adj.set_upper(2000.0)
-        adj._page_size = 600.0
-        adj._value = 120.0
-        adj.emit_value_changed()
-        assert tab._was_near_bottom is False
-        before = (tab._was_near_bottom, tab._saved_value)
-
-        # Artifact: not scrollable (upper <= page_size) → tracker UNCHANGED.
-        adj.set_upper(100.0)
-        adj._page_size = 600.0
-        adj._value = 0.0
-        adj.emit_value_changed()
-        assert (tab._was_near_bottom, tab._saved_value) == before, (
-            "the upper<=page_size layout artifact must not update the tracker"
-        )
-
-    def test_map_follows_when_caught_up(self, real_feed_tab, monkeypatch):
-        """Showing the tab while caught up schedules a settle to the bottom."""
-        from gi.repository import GLib
-
-        monkeypatch.setattr(GLib, "timeout_add", lambda ms, cb: 62)
-        monkeypatch.setattr(GLib, "source_remove", lambda sid: None)
-
-        tab = real_feed_tab
-        tab._was_near_bottom = True
-        tab._on_scroll_mapped(None)
-        assert tab._scroll_handler_id is not None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3269,11 +2467,17 @@ class TestExecAutoAccept:
         assert len(approved_calls) == 1  # still only 1
         assert feed_handler._cards[cid_b].accepted is None
 
-    def test_exec_auto_accept_snoozed_card_not_approved(self, feed_handler, mock_glib, mock_feed_tab, monkeypatch):
-        """A snoozed exec card should NOT be auto-approved.
+    def test_snoozed_id_in_legacy_prefs_is_not_skipped(self, feed_handler, mock_glib, mock_feed_tab, monkeypatch):
+        """SPEC-58 §2f: the snooze BUTTON and its skip-check are gone.
+
+        A card id left in `snoozed_card_ids` by an OLD prefs file must NOT
+        block auto-accept any more — only the persisted field survives (the
+        prefs round-trip is pinned by test_feed_retention). This test is the
+        inverse of the deleted `snooze_card` behaviour: same id, same prefs
+        list, but the card IS auto-approved now.
 
         Uses monkeypatch to predict the UUID that add_card will assign,
-        so we can pre-snooze it before the auto-accept check fires.
+        so the id can be pre-seeded before the auto-accept check fires.
         (MockGLib.idle_add runs synchronously, so auto-accept fires inside
         add_card before we can read the returned card_id.)"""
         monkeypatch.setattr("ui.handlers.feed_handler.uuid.uuid4", lambda: "snoozed-uuid")
@@ -3291,8 +2495,11 @@ class TestExecAutoAccept:
         )
         card_id = feed_handler.add_card(card)
 
-        assert len(approved_calls) == 0
-        assert feed_handler._cards[card_id].accepted is None
+        assert len(approved_calls) == 1, (
+            "a snoozed id in legacy prefs must no longer block auto-accept"
+        )
+        assert approved_calls[0][0] == card_id
+        assert feed_handler._cards[card_id].accepted is True
 
 
 class TestAutoAcceptScenario:
@@ -4397,7 +3604,7 @@ class TestBackgroundPersistWriter:
 
         # Precondition guard: the card is in the document, not a GTK widget.
         assert h._html_feed is True, "precondition: the handler runs the HTML path"
-        assert card_id not in h._card_widgets, (
+        assert not hasattr(h, "_card_widgets"), (
             "fixture precondition: the GTK widget path must be gone"
         )
         upserts_before = len(h._feed_tab.upserts)

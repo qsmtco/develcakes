@@ -25,7 +25,7 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)  # kept: file-wide convention, used by future handlers
 
 
 class FeedTab(Gtk.Box):
@@ -73,18 +73,6 @@ class FeedTab(Gtk.Box):
         # Phase 5 — Batch button label (read by tests for assertions; mirrors the actual
         # _batch_accept_button.get_label()).
         self._batch_button_label: str = ""
-        # Deferred scroll-to-bottom. The changed handler stays connected until
-        # the content height is stable; the timeout fires only if changed never does.
-        self._scroll_handler_id: int | None = None
-        self._scroll_timeout_id: int | None = None
-        self._scroll_changed_seen: bool = False
-        self._settle_source: int | None = None
-        self._settle_upper: float | None = None
-        self._settle_stable_count: int = 0
-        # Reader intent across tab hide/show. True until the reader scrolls up.
-        self._was_near_bottom: bool = True
-        self._saved_value: float = 0.0
-
         # ── Build the scroll host ───────────────────────────────────────
         # The scroll's child is the WebKit document set by
         # attach_html_surface() (set_child swaps the child; it does not add a
@@ -155,12 +143,6 @@ class FeedTab(Gtk.Box):
         self._agent_dropdown.connect("notify::selected", self._on_agent_dropdown_changed)
         self._syncing_agent_dropdown = False
 
-        # Group 3 — snooze button. Hidden when count == 0; revealed by
-        # update_auto_accept_prefs() when the prefs dict carries snoozed ids.
-        self._snooze_button = Gtk.MenuButton(label="Snooze 0")
-        self._snooze_button.add_css_class("feed-toolbar-snooze")
-        self._snooze_button.set_visible(False)  # hidden until snooze count > 0
-
         self._batch_accept_button = Gtk.Button(label="Accept All")
         self._batch_accept_button.add_css_class("feed-btn-batch-accept")
         self._batch_accept_button.set_visible(False)  # hidden until count >= 2
@@ -177,18 +159,10 @@ class FeedTab(Gtk.Box):
         self._toolbar.append(self._files_toggle)
         self._toolbar.append(self._exec_toggle)
         self._toolbar.append(self._agent_dropdown)
-        self._toolbar.append(self._snooze_button)
         self._toolbar.append(self._batch_accept_button)  # existing batch accept button
         self._toolbar.append(self._batch_accept_label)   # existing batch accept label
 
         self.append(self._toolbar)
-
-        # Track whether the reader is caught up. A hide/show can reset value
-        # to 0; the map handler uses this instead of jumping to the bottom.
-        vadj = scroll.get_vadjustment()
-        if vadj is not None:
-            vadj.connect("value-changed", self._on_scroll_value_changed)
-        scroll.connect("map", self._on_scroll_mapped)
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -326,223 +300,11 @@ class FeedTab(Gtk.Box):
         if callback is not None:
             callback()
 
-    _BOTTOM_THRESHOLD = 80.0
-    _SETTLE_STABLE_FRAMES = 2
-
-    def _bottom_value(self, adj) -> float:
-        """Last visible pixel. GTK clamps value to upper - page_size."""
-        lower = adj.get_lower() if hasattr(adj, "get_lower") else 0.0
-        return max(lower, adj.get_upper() - adj.get_page_size())
-
-    def _distance_from_bottom(self, adj) -> float:
-        return adj.get_upper() - adj.get_page_size() - adj.get_value()
-
-    def _on_scroll_value_changed(self, adj) -> None:
-        """Remember whether the reader is caught up.
-
-        A non-scrollable adjustment (upper <= page_size) is a layout
-        artifact, not the reader. Do not update the tracker from it.
-        """
-        if adj.get_upper() <= adj.get_page_size():
-            return
-        self._saved_value = adj.get_value()
-        self._was_near_bottom = (
-            self._distance_from_bottom(adj) <= self._BOTTOM_THRESHOLD
-        )
-
-    def _cancel_settle(self) -> None:
-        if self._settle_source is None:
-            return
-        from gi.repository import GLib
-        try:
-            GLib.source_remove(self._settle_source)
-        except Exception:  # noqa: BLE001 — source already fired: idempotent cleanup
-            logger.debug("settle source already removed (idempotent cancel)")
-        self._settle_source = None
-
-    def _disarm_scroll(self, adj) -> None:
-        """Drop the pending scroll after it has been consumed."""
-        from gi.repository import GLib
-        if self._scroll_timeout_id is not None:
-            try:
-                GLib.source_remove(self._scroll_timeout_id)
-            except Exception:
-                pass
-            self._scroll_timeout_id = None
-        if self._scroll_handler_id is not None:
-            try:
-                adj.disconnect(self._scroll_handler_id)
-            except Exception:
-                pass
-            self._scroll_handler_id = None
-        self._settle_stable_count = 0
-        self._settle_upper = None
-
-    def _arm_settle(self, adj) -> None:
-        """Restart the stable-height count and ensure one idle is queued."""
-        from gi.repository import GLib
-        self._settle_upper = adj.get_upper()
-        self._settle_stable_count = 0
-        if self._settle_source is not None:
-            return
-        self._settle_source = GLib.idle_add(self._settle_scroll)
-
-    def _settle_scroll(self) -> bool:
-        """Idle: scroll only after the content height stops changing."""
-        from gi.repository import GLib
-        self._settle_source = None
-        if self._scroll_handler_id is None or self._feed_scroll is None:
-            return GLib.SOURCE_REMOVE
-        adj = self._feed_scroll.get_vadjustment()
-        if adj is None:
-            return GLib.SOURCE_REMOVE
-        current = adj.get_upper()
-        if current != self._settle_upper:
-            self._settle_upper = current
-            self._settle_stable_count = 0
-            self._settle_source = GLib.idle_add(self._settle_scroll)
-            return GLib.SOURCE_REMOVE
-        if adj.get_upper() <= adj.get_page_size():
-            return GLib.SOURCE_REMOVE  # collapsed — leave the request pending
-        self._settle_stable_count += 1
-        if self._settle_stable_count < self._SETTLE_STABLE_FRAMES:
-            self._settle_source = GLib.idle_add(self._settle_scroll)
-            return GLib.SOURCE_REMOVE
-        adj.set_value(self._bottom_value(adj))
-        self._disarm_scroll(adj)
-        return GLib.SOURCE_REMOVE
-
-    def _on_adj_changed(self, adj) -> bool:
-        """Layout moved. Do not scroll yet — wait until upper is stable."""
-        self._scroll_changed_seen = True
-        if adj.get_upper() <= adj.get_page_size():
-            return False  # nothing to scroll yet; keep the request
-        self._arm_settle(adj)
-        return False
-
-    def schedule_scroll_to_bottom(self) -> None:
-        """
-        Scroll to the bottom after the content height settles.
-
-        GTK4 does not recompute vadjustment.upper synchronously after
-        append. The first `changed` is often an intermediate height.
-        Scrolling there and disconnecting leaves the newest card below
-        the fold. This waits for two idle frames at the same upper, then
-        sets value to upper - page_size.
-
-        The 150ms timeout scrolls only when `changed` never fires.
-        """
-        if self._feed_scroll is None:
-            return
-        vadj = self._feed_scroll.get_vadjustment()
-        if vadj is None:
-            return
-
-        from gi.repository import GLib
-
-        if self._scroll_handler_id is not None:
-            try:
-                vadj.disconnect(self._scroll_handler_id)
-            except Exception:
-                pass
-            self._scroll_handler_id = None
-
-        if self._scroll_timeout_id is not None:
-            try:
-                GLib.source_remove(self._scroll_timeout_id)
-            except Exception:
-                pass
-            self._scroll_timeout_id = None
-
-        self._cancel_settle()
-        self._scroll_changed_seen = False
-        self._settle_stable_count = 0
-        self._settle_upper = None
-
-        self._scroll_handler_id = vadj.connect("changed", self._on_adj_changed)
-
-        def _timeout_fallback():
-            self._scroll_timeout_id = None
-            # A changed signal owns the settle. Do not scroll and do not
-            # disconnect that settle from here.
-            if self._scroll_changed_seen:
-                return GLib.SOURCE_REMOVE
-            if self._scroll_handler_id is not None:
-                vadj.set_value(self._bottom_value(vadj))
-                try:
-                    vadj.disconnect(self._scroll_handler_id)
-                except Exception:
-                    pass
-                self._scroll_handler_id = None
-            return GLib.SOURCE_REMOVE
-
-        self._scroll_timeout_id = GLib.timeout_add(150, _timeout_fallback)
-
     def schedule_smart_scroll_to_bottom(self) -> None:
+        """No-op. Callers exist across the handler/mixins; the follow
+        decision lives in FeedSurface._flush (the document owns scrolling).
         """
-        Scroll to the bottom if the reader is still following the feed.
-
-        Follow state is the reader's recorded intent (`_was_near_bottom`,
-        maintained by `_on_scroll_value_changed` on every value change), NOT a
-        live `upper - page_size - value` reading.
-
-        A live reading is wrong here because content can grow after a scroll
-        has already completed — a line wrapping, a card body arriving late —
-        which raises `upper` without the reader having moved anywhere. The
-        reading then reports "the reader scrolled away" and following stops
-        permanently: each later card lands below the fold with nothing left to
-        catch up. (Reported as: view stuck short of the bottom, each new card
-        leaving it further behind.)
-
-        Reading intent instead keeps following until the reader actually
-        scrolls away, which is the documented contract for this method.
-        """
-        # HTML surface: the document owns the scroll position. Under
-        # Gtk.PolicyType.NEVER the vadjustment never changes, so both the
-        # `_was_near_bottom` tracker and the GTK scroll choreography are
-        # inert. The follow decision lives in FeedSurface._flush, which reads
-        # the page's own `_doc_near_bottom` report.
-        if self._html_surface is not None:
-            return
-        if self._feed_scroll is None:
-            return
-        vadj = self._feed_scroll.get_vadjustment()
-        if vadj is None:
-            return
-        if not self._was_near_bottom:
-            return
-        self.schedule_scroll_to_bottom()
-
-    def _on_scroll_mapped(self, scroll_window):
-        """
-        Feed tab became visible.
-
-        GTK may reset value to 0 while the tab is hidden. If the reader
-        was caught up, settle on the newest card. If they were reading
-        higher up, put the viewport back at the saved offset.
-        """
-        if self._html_surface is not None:
-            return False
-        if self._was_near_bottom:
-            self.schedule_scroll_to_bottom()
-            return False
-        if self._feed_scroll is None:
-            return False
-        vadj = self._feed_scroll.get_vadjustment()
-        if vadj is None:
-            return False
-        # BUG#2 (audit fix): a settle armed BEFORE the tab was hidden (project-
-        # open smart scroll, eviction, or an earlier append) may still be
-        # pending. Restoring `_saved_value` alone is not enough — the stale
-        # settle later fires and yanks the reader to the bottom. Cancel it and
-        # disarm the changed handler BEFORE the restore. (The near-bottom branch
-        # is clean: schedule_scroll_to_bottom cancels prior settles internally.)
-        self._cancel_settle()
-        self._disarm_scroll(vadj)
-        lower = vadj.get_lower() if hasattr(vadj, "get_lower") else 0.0
-        restored = min(max(self._saved_value, lower), self._bottom_value(vadj))
-        vadj.set_value(restored)
-        return False
+        return
 
     def get_vadjustment(self):
         """The feed ScrolledWindow's vadjustment, or None when _feed_scroll is absent.
@@ -557,18 +319,13 @@ class FeedTab(Gtk.Box):
     def is_near_bottom(self, slack: int = 80) -> bool:
         """True when the feed is within `slack` px of its bottom.
 
-        With an HTML surface attached the document scrolls itself, so the GTK
-        vadjustment is frozen under PolicyType.NEVER and cannot answer this.
-        Delegate to the surface's own `_doc_near_bottom` (fed by the page's
-        `scroll_state` reports); fall back to the adjustment when no surface
-        is attached.
+        With an HTML surface attached the document scrolls itself; its own
+        `scroll_state` reports carry the follow intent. No surface attached
+        means nothing is rendered, so eviction is trivially safe.
         """
         if self._html_surface is not None:
             return self._html_surface._doc_near_bottom
-        vadj = self.get_vadjustment()
-        if vadj is None:
-            return True                       # nothing rendered: eviction is safe
-        return (vadj.get_upper() - vadj.get_page_size() - vadj.get_value()) <= slack
+        return True
 
     def is_above_viewport(self, widget) -> bool:
         """Always False: card eviction is a GTK-list concept (WU 10 purge).
@@ -747,11 +504,8 @@ class FeedTab(Gtk.Box):
             finally:
                 self._syncing_agent_dropdown = False
 
-            # Snooze count
-            snoozed = auto.get("snoozed_card_ids", [])
-            count = len(snoozed)
-            self._snooze_button.set_label(f"Snooze {count}")
-            self._snooze_button.set_visible(count > 0)
+            # Snooze state stays on the prefs dataclass + store round-trip
+            # (test_feed_retention pins the field); the toolbar button is gone.
         finally:
             self._syncing_toolbar = False
 

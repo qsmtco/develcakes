@@ -141,32 +141,13 @@ class FeedSnapshotMixin:
             # Instead, we'll handle this in _persist by stripping snapshot.
             card.metadata["_snapshot_oversized"] = True
 
-        widget = self._card_widgets.get(card_id)
-        if widget is not None and hasattr(widget, "_context_panel"):
-            # Panel already built without snapshot — update it
-            panel = widget._context_panel
-            # Clear old content
-            child = panel.get_first_child()
-            while child is not None:
-                next_child = child.get_next_sibling()
-                panel.remove(child)
-                child = next_child
-            # Rebuild panel content with snapshot data
-            self._rebuild_context_panel(panel, snapshot)
+        # HTML-only (SPEC-58 §2f-2): there is no per-card GTK widget and no
+        # widget-hosted context panel any more. The document renders the
+        # snapshot from the card data, so re-upserting the card is what makes
+        # the new snapshot visible.
+        if self._html_feed and self._feed_tab is not None:
+            self._feed_tab.upsert_card(card)
         return False
-
-    def _rebuild_context_panel(self, panel, snapshot):
-        """Rebuild the contents of a context panel from a snapshot."""
-        from ui.views.feed_card import build_context_panel
-        # We can't replace the panel in-place easily, so we rebuild its children.
-        # build_context_panel returns a new box — copy its children into the existing panel.
-        new_panel = build_context_panel(snapshot)
-        child = new_panel.get_first_child()
-        while child is not None:
-            next_child = child.get_next_sibling()
-            new_panel.remove(child)
-            panel.append(child)
-            child = next_child
 
     def _maybe_create_snapshot(self, card_data: FeedCardData) -> None:
         """

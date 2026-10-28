@@ -1219,13 +1219,6 @@ notebook > header > tabs > tab {
     min-height: 22px;
     border: none;
 }
-.feed-toolbar-snooze {
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-    min-height: 22px;
-    border: none;
-}
 .feed-toolbar-agent-dropdown {
     padding: 0 6px;
     min-height: 22px;

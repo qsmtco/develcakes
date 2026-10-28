@@ -260,8 +260,8 @@ class TestDiffBuildIsDeferred:
         # card carries the diff and the document surfaces carry it, i.e. the
         # handler did not route the update through a deleted widget path.
         assert "only-line" in card.conversation_snapshot.diff_text
-        assert not handler._card_widgets, (
-            "the HTML feed path must not build per-card GTK widgets"
+        assert not hasattr(handler, "_card_widgets"), (
+            "the HTML feed path must not carry a per-card GTK widget map"
         )
         handler.shutdown_persist_writer()
 

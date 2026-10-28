@@ -31,7 +31,6 @@ class FeedLoadMixin:
         # write _backlog (round-2 BUG #3).
         with self._lock:
             self._backlog = []
-        self._load_more_widget = None
 
         def _load_and_render():
             # Mark loading mode — add_card skips persistence for already-saved cards
@@ -155,12 +154,10 @@ class FeedLoadMixin:
                 )
 
             # Add cards + load-more on main thread.
-            # Use schedule_scroll_to_bottom() to defer the scroll until
-            # AFTER GTK updates the vadjustment upper (layout pass).
-            # Two GLib.idle_add callbacks run in the same idle batch and
-            # do NOT yield to layout between them, so the second callback
-            # reads a stale upper. The 'changed' signal on the vadjustment
-            # fires after GTK allocates the new content height. (Bug A fix)
+            # The document owns scrolling (SPEC-58 §2f): the follow decision
+            # lives in FeedSurface._flush, which reads the page's own
+            # near-bottom report; the tab's schedule_smart_scroll_to_bottom
+            # is a no-op kept for the call-site contract.
             def _append_and_schedule_scroll():
                 if self._feed_tab is None:
                     return False
@@ -172,7 +169,6 @@ class FeedLoadMixin:
                     self._feed_tab.set_html_cards(recent)
                     if hasattr(self._feed_tab, "set_html_load_more"):
                         self._feed_tab.set_html_load_more(merged_backlog_count)
-                    self._load_more_widget = None
                 else:
                     _mod()._logger.warning(
                         "on_project_opened: feed document unavailable; "
@@ -180,8 +176,8 @@ class FeedLoadMixin:
                         len(recent),
                     )
 
-                # Bound the live widget window once this batch is parented.
-                self._evict_surplus_card_widgets()
+                # Bound the live view once this batch is parented.
+                self._evict_surplus_rows()
 
                 # Smart scroll: respects reading position if user scrolled up.
                 # On project open the user has no prior position in this
@@ -213,41 +209,11 @@ class FeedLoadMixin:
         # write _backlog (round-2 BUG #3).
         with self._lock:
             self._backlog = []
-        self._load_more_widget = None
 
         def _clear():
             if self._feed_tab is not None:
                 self._feed_tab.show_empty_state()
         self._GLib.idle_add(_clear)
-
-    def _build_load_more_widget(self, remaining: int) -> Gtk.Widget:
-        """Build the 'Load More' card that sits at the top of the feed.
-
-        Shows count of older cards and a button to load the next page.
-        Uses feed-card CSS for visual consistency.
-        """
-        from gi.repository import Gtk
-
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        card.add_css_class("feed-card")
-        card.add_css_class("feed-card-load-more")
-
-        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        body.add_css_class("feed-card-body")
-        body.set_spacing(8)
-
-        label = Gtk.Label(label=f"📂 {remaining} older card{'s' if remaining != 1 else ''}")
-        label.set_halign(Gtk.Align.START)
-        label.set_hexpand(True)
-
-        btn = Gtk.Button(label="Load More")
-        btn.add_css_class("feed-btn-load-more")
-        btn.connect("clicked", lambda *_: self._load_more())
-
-        body.append(label)
-        body.append(btn)
-        card.append(body)
-        return card
 
     def _load_more(self) -> None:
         """Load the next PAGE_SIZE cards from backlog and prepend them."""
@@ -283,7 +249,7 @@ class FeedLoadMixin:
                         ids_just_loaded.add(data.card_id)
                 if hasattr(self._feed_tab, "set_html_load_more"):
                     self._feed_tab.set_html_load_more(remaining)
-                self._evict_surplus_card_widgets(exclude=frozenset(ids_just_loaded))
+                self._evict_surplus_rows(exclude=frozenset(ids_just_loaded))
 
             self._GLib.idle_add(_render_html)
             return
@@ -335,105 +301,20 @@ class FeedLoadMixin:
             )
             return _mod().MAX_LIVE_CARD_WIDGETS
 
-    def _evict_surplus_card_widgets(self, exclude: frozenset[str] = frozenset()) -> None:
-        """Release card widgets for the oldest cards beyond the live window.
+    def _evict_surplus_rows(self, exclude: frozenset[str] = frozenset()) -> None:
+        """Bound the live view. HTML-only dispatch (SPEC-58 §2f-2).
 
-        Card DATA is never dropped: the evicted FeedCardData is pushed back onto
-        _backlog (newest-first), so Load More re-renders it (F4). If the backlog
-        was fully drained, the Load More widget is rebuilt so the pushed cards
-        are reachable without reopening the project (round-3 BUG #2).
-
-        Victims are chosen by seq_num — NOT list position — and across ALL
-        projects, because _card_widgets is one flat dict (feed_handler.py:73)
-        while widget creation is keyed on the CARD's project, which need not be
-        the active one (round-3 BUG #5).
-
-        `exclude` are the ids the caller just rendered (Load More passes its
-        page): without it, a Load More click re-evicts the page it just built
-        and the button becomes a permanent no-op (round-3 BUG #1).
-
-        Threading: dict mutation under self._lock (class contract at :83);
-        FeedTab calls are main-thread only and are never made while holding it.
+        The GTK-widget eviction walk (victim selection, is_above_viewport
+        check, vadjustment compensation, Load More rebuild) died with the
+        GTK card list — its per-card widget registry went with it, so
+        there is nothing to walk. Card DATA survives either way: the HTML
+        pass pushes evicted rows' data onto `_backlog` for Load More.
         """
         if self._html_feed:
             self._evict_surplus_html_rows(exclude)
             return
         if self._feed_tab is None:
             return
-        # SP2 (SPEC-03): the cap is CONFIG — resolved per pass (R3 call-time
-        # read) as min(constant, get_live_window) (R1: config can only lower;
-        # R5: failure → 120 inside the helper). Read OUTSIDE the lock: the
-        # helper does file I/O and must never hold self._lock (R4).
-        cap = self._effective_live_window()
-        with self._lock:
-            if len(self._card_widgets) <= cap:
-                return
-            candidates = {
-                cid for ids in self._project_cards.values() for cid in ids
-            } | set(self._card_widgets)
-            live = [c for c in candidates
-                    if c in self._card_widgets and c in self._cards and c not in exclude]
-            if len(live) <= _mod().KEEP_NEWEST_CARDS:
-                return
-            live.sort(key=lambda cid: self._cards[cid].seq_num or 0)  # oldest first
-            victims = live[: len(live) - _mod().KEEP_NEWEST_CARDS]
-            target = len(self._card_widgets) - cap
-
-        was_near_bottom = self._feed_tab.is_near_bottom()
-        vadj = self._feed_tab.get_vadjustment()
-        spacing = self._card_container_spacing()
-        removed_height = 0
-        released = 0
-        backlog_count = 0
-        for card_id in victims:
-            if released >= target:
-                break
-            with self._lock:
-                widget = self._card_widgets.get(card_id)
-                data = self._cards.get(card_id)
-            if widget is None:
-                continue
-            # Never destroy a widget that is on screen or below the viewport (F10).
-            if not self._feed_tab.is_above_viewport(widget):
-                break
-            height = widget.get_height() or 0
-            with self._lock:
-                if self._card_widgets.pop(card_id, None) is None:
-                    continue
-                if data is not None:
-                    # Newest-first backlog (pop(0)) → Load More re-renders it. Under
-                    # the lock: _load_and_render MERGES _backlog on a background
-                    # thread (survivors first; :1661-1665) (round-2 BUG #3).
-                    self._backlog.insert(0, data)
-                backlog_count = len(self._backlog)   # P7a: label read, same lock
-            self._feed_tab.remove_card(card_id)     # clears state, unparents, drops map entry
-            # Gtk.Box spacing (feed_tab.py:86) applies BETWEEN children, so each
-            # removed child shortens the content by height + spacing (round-2 BUG #2).
-            removed_height += height + spacing
-            released += 1
-
-        if released:
-            # Load More must reflect the cards eviction just pushed back: the label
-            # bakes `remaining` in at build time (:1736) and is otherwise only
-            # recomputed inside _load_more (:1771, :1786-1788). Before this change
-            # _backlog only ever shrank, so eviction is the first thing that can
-            # make the widget under-report (round-4 BUG #4).
-            # The remove_card call (early-returns on an unknown id) is for the
-            # rebuild, NOT for duplicate prevention — the duplicate is created on
-            # the load path, which eviction never runs on (round-5 BUG #1; see the
-            # load-path bullet below).
-            self._feed_tab.remove_card("__load_more__")
-            self._load_more_widget = None
-            # backlog_count was read inside the locked insert region above —
-            # reading len(self._backlog) here would be an unlocked read against
-            # a list the loader can merge into on another thread (P5 audit).
-            if backlog_count:
-                self._load_more_widget = self._build_load_more_widget(backlog_count)
-                self._feed_tab.prepend_card(self._load_more_widget, card_id="__load_more__")
-            if was_near_bottom:
-                self._feed_tab.schedule_scroll_to_bottom()      # keep the bottom pinned
-            elif vadj is not None and removed_height:
-                vadj.set_value(max(0.0, vadj.get_value() - removed_height))
 
     def _evict_surplus_html_rows(self, exclude: frozenset[str] = frozenset()) -> None:
         """Drop the oldest document rows past the live window.
@@ -483,11 +364,4 @@ class FeedLoadMixin:
             surface.remove(cid)
         if backlog_count and hasattr(tab, "set_html_load_more"):
             tab.set_html_load_more(backlog_count)
-
-    def _card_container_spacing(self) -> int:
-        """Gtk.Box spacing between cards, for scroll compensation. 0 if unknown."""
-        try:
-            return self._feed_tab.get_card_container().get_spacing()
-        except (AttributeError, TypeError):
-            return 0
 

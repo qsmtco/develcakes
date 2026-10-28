@@ -26,7 +26,6 @@
 # import-time resolution), which test_persisted_value_survives_new_process
 # guards against regressing.
 
-import gc
 import json
 import os
 import shutil
@@ -455,17 +454,6 @@ class _LiteGLib:
         return 0
 
 
-class _StubWidget:
-    """Widget double for the eviction pass: only get_height() is read
-    (scroll compensation) and is_above_viewport() takes it opaquely."""
-
-    def __init__(self, height=56):
-        self._height = height
-
-    def get_height(self):
-        return self._height
-
-
 class _LiteFeedTab:
     """FeedTab double covering ONLY what set_feed_tab + the eviction pass
     touch. SP2 tests must run headless: the repo's gi/cairo segfault makes
@@ -482,7 +470,6 @@ class _LiteFeedTab:
         self._above_viewport = True
         self._card_spacing = 8
         self._vadjustment = None
-        self.scroll_to_bottom_calls = 0
         self.batch_callback = None
 
     # set_feed_tab surface
@@ -514,11 +501,8 @@ class _LiteFeedTab:
     def prepend_card(self, widget, card_id=None):
         pass
 
-    def schedule_scroll_to_bottom(self):
-        self.scroll_to_bottom_calls += 1
-
     def schedule_smart_scroll_to_bottom(self):
-        self.scroll_to_bottom_calls += 1
+        pass
 
     def update_batch_bar(self, pending_count: int):
         self.batch_bar_count = pending_count
@@ -565,9 +549,9 @@ class _LiteHtmlFeedTab(_LiteFeedTab):
     """`_LiteFeedTab` plus the document surface, so FeedHandler.set_feed_tab()
     flips `_html_feed` on and the real upsert/evict funnel runs.
 
-    Kept as a SUBCLASS: the SP2 eviction-wiring tests seed `_card_widgets`
-    directly and must keep taking the widget-map branch, so the HTML surface
-    is opt-in per test class.
+    Kept as a SUBCLASS so the plain double stays available for the cases
+    that need a tab WITHOUT a document (the HTML surface is opt-in per
+    test class).
     """
 
     def __init__(self):
@@ -598,16 +582,20 @@ class _LiteHtmlFeedTab(_LiteFeedTab):
 class TestEvictionWindowWiring:
     """SPEC-03 SP2 — the eviction cap resolves from the SP1 accessors.
 
-    Headless by construction: _LiteFeedTab + stub widgets + a patched
-    Load-More builder, so no real GTK widget is ever built. The eviction
-    pass itself is UNCHANGED code under test — only its cap source is
-    wired to config (R1/R3/R5)."""
+    Headless by construction: _LiteFeedTab + stub widgets, so no real GTK
+    widget is ever built. The eviction pass itself is UNCHANGED code under
+    test — only its cap source is wired to config (R1/R3/R5).
+
+    SPEC-58 §2f-2: the GTK-widget eviction walk is gone (`_card_widgets` is
+    never populated). The live pass is the HTML row eviction, so the
+    over-cap state is seeded as DOCUMENT ROWS, and the pins below assert on
+    the row set and the backlog, not on a widget map."""
 
     def _handler(self, project="wiring-proj", register=True):
         from ui.handlers.feed_handler import FeedHandler
 
         h = FeedHandler(GLib=_LiteGLib(), on_send_to_agent=MagicMock())
-        h.set_feed_tab(_LiteFeedTab())
+        h.set_feed_tab(_LiteHtmlFeedTab())
         if register:
             # Direct attribute registration: the R3/R5 helper reads only
             # _project_paths + _active_project_name; driving the full
@@ -618,9 +606,8 @@ class TestEvictionWindowWiring:
         return h
 
     def _seed(self, h, count, project="wiring-proj", seq_start=1):
-        """Seed N live widgets + card data directly (mirrors
-        test_feed_handler.TestEvictionSurplus._seed) so the over-cap state
-        exists WITHOUT the append path's own eviction running first."""
+        """Seed N live document rows + card data directly so the over-cap
+        state exists WITHOUT the append path's own eviction running first."""
         ts = datetime.now(UTC)
         ids = []
         for seq in range(seq_start, seq_start + count):
@@ -637,23 +624,14 @@ class TestEvictionWindowWiring:
                 seq_num=seq,
             )
             h._project_cards.setdefault(project, []).insert(0, cid)
-            h._card_widgets[cid] = _StubWidget(height=56)
+            h._feed_tab._surface.upsert(h._cards[cid])
             ids.append(cid)
         h._project_seq[project] = seq_start + count - 1
         return ids
 
-    def _patch_load_more_builder(self, monkeypatch):
-        """Replace _build_load_more_widget (real one builds Gtk widgets —
-        impossible headless). The patch is an aknowledged test seam: the
-        eviction tail's bookkeeping (widget reset, prepend, backlog label)
-        still runs against the stub return value."""
-        from ui.handlers import feed_handler as fh_mod
-
-        monkeypatch.setattr(
-            fh_mod.FeedHandler,
-            "_build_load_more_widget",
-            lambda self, remaining: _StubWidget(height=10),
-        )
+    def _live_rows(self, h):
+        """The live view's size — the document's row set."""
+        return len(h._feed_tab._surface.card_ids())
 
     def test_default_effective_cap_is_120(self, tmp_path, monkeypatch):
         """R1 pin (lower bound side): no prefs file → get_live_window
@@ -666,28 +644,27 @@ class TestEvictionWindowWiring:
 
     def test_configured_below_reduces_cap(self, tmp_path, monkeypatch):
         """R1: a config BELOW the constant lowers the cap — set 80, seed
-        120 live widgets (the old constant cap), one pass evicts down
+        120 live rows (the old constant cap), one pass evicts down
         toward 80 and the post-pass count never exceeds 80."""
         self._root = tmp_path
         h = self._handler()
         project_path = h._project_paths["wiring-proj"]
         assert set_live_window(project_path, 80) is True
-        self._patch_load_more_builder(monkeypatch)
         self._seed(h, 120)
-        assert len(h._card_widgets) == 120
-        h._evict_surplus_card_widgets()
-        assert len(h._card_widgets) <= 80
+        assert self._live_rows(h) == 120
+        h._evict_surplus_rows()
+        assert self._live_rows(h) <= 80
         assert get_live_window(project_path) == 80
 
     def test_configured_above_never_raises_cap(self, tmp_path, monkeypatch):
-        """THE R1 pin: set_live_window(9000) clamps to 5000, yet the widget
+        """THE R1 pin: set_live_window(9000) clamps to 5000, yet the row
         cap STAYS 120 — config can only lower, never raise (post-mortem
         slope 0.82 > 0.5 budget).
 
-        Rider 9 (SP2 audit): seed 150 widgets — ABOVE both the constant cap
+        Rider 9 (SP2 audit): seed 150 rows — ABOVE both the constant cap
         and any bugged raised cap — so the post-pass assert can actually
         FAIL. At the former seed of 120, a raised-cap regression (min→max)
-        left 120 widgets and the `== 120` assert passed VACUOUSLY
+        left 120 rows and the `== 120` assert passed VACUOUSLY
         (sp2_r1pin_vacuity.py); at 150 the bugged cap leaves all 150 and
         the assert fails loudly."""
         self._root = tmp_path
@@ -696,12 +673,11 @@ class TestEvictionWindowWiring:
         assert set_live_window(project_path, 9000) is True
         assert get_live_window(project_path) == 5000  # clamp holds (SP1)
         assert h._effective_live_window() == 120
-        self._patch_load_more_builder(monkeypatch)
         self._seed(h, 150)
-        h._evict_surplus_card_widgets()
+        h._evict_surplus_rows()
         # Correct behavior: min(120, 5000) = 120 → evict 30. Under a raised
         # cap (5000): 150 remain → this assert FAILS (non-vacuous pin).
-        assert len(h._card_widgets) == 120
+        assert self._live_rows(h) == 120
         assert len(h._backlog) == 30  # push-back proves eviction actually ran
 
     def test_missing_project_falls_back(self, tmp_path, monkeypatch):
@@ -729,10 +705,9 @@ class TestEvictionWindowWiring:
             lambda p: (_ for _ in ()).throw(RuntimeError("disk smoke")),
         )
         assert h._effective_live_window() == 120
-        self._patch_load_more_builder(monkeypatch)
         self._seed(h, 130)
-        h._evict_surplus_card_widgets()  # must not raise
-        assert len(h._card_widgets) <= 120
+        h._evict_surplus_rows()  # must not raise
+        assert self._live_rows(h) <= 120
 
     def test_garbage_config_return_falls_back_to_constant(self, tmp_path, monkeypatch):
         """R5 garbage-RETURN shape (SPEC-04 SP4 micro-fix; latent since
@@ -748,10 +723,9 @@ class TestEvictionWindowWiring:
             feed_store, "get_live_window", lambda p: MagicMock(),
         )
         assert h._effective_live_window() == 120
-        self._patch_load_more_builder(monkeypatch)
         self._seed(h, 130)
-        h._evict_surplus_card_widgets()  # must not raise
-        assert len(h._card_widgets) <= 120
+        h._evict_surplus_rows()  # must not raise
+        assert self._live_rows(h) <= 120
 
     def test_cap_read_per_pass_not_cached(self, tmp_path, monkeypatch):
         """R3: the cap resolves at eviction-call time — lower the config
@@ -759,17 +733,16 @@ class TestEvictionWindowWiring:
         self._root = tmp_path
         h = self._handler()
         project_path = h._project_paths["wiring-proj"]
-        self._patch_load_more_builder(monkeypatch)
         set_live_window(project_path, 100)
         self._seed(h, 110, seq_start=1)
-        h._evict_surplus_card_widgets()
-        after_first = len(h._card_widgets)
+        h._evict_surplus_rows()
+        after_first = self._live_rows(h)
         assert after_first <= 100
         # Re-seed above the NEW cap so the second pass has work to do.
         self._seed(h, 10, seq_start=after_first + 1)
         set_live_window(project_path, 90)
-        h._evict_surplus_card_widgets()
-        assert len(h._card_widgets) <= 90
+        h._evict_surplus_rows()
+        assert self._live_rows(h) <= 90
 
     def test_eviction_still_respects_keep_newest(self, tmp_path, monkeypatch):
         """R2: KEEP_NEWEST_CARDS is untouched by config wiring — with cap
@@ -780,20 +753,20 @@ class TestEvictionWindowWiring:
         self._root = tmp_path
         h = self._handler()
         project_path = h._project_paths["wiring-proj"]
-        self._patch_load_more_builder(monkeypatch)
         set_live_window(project_path, 60)
         self._seed(h, 100, seq_start=1)
-        h._evict_surplus_card_widgets()
+        h._evict_surplus_rows()
         newest = {
             c.card_id
             for c in sorted(
                 h._cards.values(), key=lambda c: c.seq_num or 0, reverse=True
             )[:KEEP_NEWEST_CARDS]
         }
-        assert newest <= set(h._card_widgets), (
+        live = set(h._feed_tab._surface.card_ids())
+        assert newest <= live, (
             "the newest KEEP_NEWEST_CARDS must never be evicted (R2)"
         )
-        assert len(h._card_widgets) <= 60
+        assert len(live) <= 60
 
     def test_prefs_file_corrupt_falls_back(self, tmp_path, monkeypatch):
         """R3 tolerance: a corrupt prefs file reads as default 300 →
@@ -807,10 +780,25 @@ class TestEvictionWindowWiring:
             f.write(b"\x00\x01garbage not json")  # rider 10: real control bytes
         assert get_live_window(project_path) == 300  # SP1 tolerance holds
         assert h._effective_live_window() == 120
-        self._patch_load_more_builder(monkeypatch)
         self._seed(h, 125)
-        h._evict_surplus_card_widgets()
-        assert len(h._card_widgets) == 120
+        h._evict_surplus_rows()
+        assert self._live_rows(h) == 120
+
+    def test_evict_surplus_rows_dispatches_to_the_html_pass(self, tmp_path):
+        """SPEC-58 §2f-2 pin: the renamed dispatch reaches the HTML row
+        eviction under `_html_feed`, and the GTK-widget tail is gone."""
+        self._root = tmp_path
+        h = self._handler()
+        assert h._html_feed is True, "the fixture must attach a document feed"
+        calls = []
+        h._evict_surplus_html_rows = lambda exclude=frozenset(): calls.append(exclude)
+        h._evict_surplus_rows()
+        assert calls == [frozenset()], (
+            "_evict_surplus_rows must dispatch to _evict_surplus_html_rows"
+        )
+        # The old GTK-widget walk is gone for good.
+        assert not hasattr(h, "_card_widgets")
+
 
 
 # ── SP3: the 2,000-card measurement harness ──────────────────────────────────
@@ -838,11 +826,12 @@ class TestTwoThousandCardRetention:
     """SPEC-03 §6 acceptance — the measurement rows.
 
     One 2,000-card run through the REAL FeedHandler add path (disk persist,
-    seq assignment, widget bookkeeping, eviction, backlog, Load More),
-    shared by all invariant tests via a MODULE-scoped fixture. The seams
-    are GTK-chrome only (build_feed_card → _StubWidget; Load-More builder →
-    stub — both probe-verified as the headless blockers); the
-    retention-relevant machinery runs for real.
+    seq assignment, document bookkeeping, eviction, backlog, Load More),
+    shared by all invariant tests via a MODULE-scoped fixture. There are no
+    GTK seams left to patch (the HTML feed document builds no per-card
+    widgets and no Load-More Gtk.Box — load-more is a row count pushed
+    through set_html_load_more); the retention-relevant machinery runs
+    for real.
     """
 
     COUNT = 2000
@@ -911,8 +900,8 @@ class TestTwoThousandCardRetention:
         # each hold re-reads + rewrites the growing snapshot, hold times
         # blow the 2 s deadline, and 1,538/2,000 appends were silently
         # SKIPPED (measured: 462/2000 on disk). The batch path is the
-        # sanctioned equivalent funnel (same seq/index/widget bookkeeping,
-        # same _append_all → _evict_surplus_card_widgets pass, same
+        # sanctioned equivalent funnel (same seq/index/document bookkeeping,
+        # same _append_all → _evict_surplus_rows pass, same
         # per-card append_feed_card persist) with ONE persist thread —
         # the production shape for bulk arrival.
         # No GTK seam to patch any more: the HTML feed document has no
@@ -959,11 +948,11 @@ class TestTwoThousandCardRetention:
         """Invariant 1: live document rows ≤ the effective cap
         (min(MAX_LIVE_CARD_WIDGETS, live_window) == 120 under window=300,
         per the R1 ruling) — asserted as ≤ for the Load-More row allowance.
-        Retargeted from `_card_widgets` (now always empty: the HTML path
-        builds no widgets) to the surface's row set, which is the thing the
-        retention budget actually bounds."""
-        assert len(self._handler._card_widgets) == 0, (
-            "HTML feed path must not build per-card GTK widgets"
+        Retargeted from `_card_widgets` (the map is GONE as of SPEC-58
+        §2f-2) to the surface's row set, which is the thing the retention
+        budget actually bounds."""
+        assert not hasattr(self._handler, "_card_widgets"), (
+            "the HTML feed path must not carry a per-card GTK widget map"
         )
         assert len(self._rows()) <= self.WINDOW + 1
         assert len(self._rows()) <= self._handler._effective_live_window()
@@ -1000,17 +989,17 @@ class TestTwoThousandCardRetention:
     def test_no_widget_leak(self):
         """Invariant 4 — leak census, retargeted to the HTML path.
 
-        The old form counted live _StubWidget instances; the document path
-        builds no widgets at all, so that census would be vacuous. Two
-        assertions carry the original intent instead:
-          - ZERO widget stubs were created (nothing to leak);
+        The old form counted live widget stubs; the document path builds no
+        widgets at all (and the widget map itself is GONE as of SPEC-58
+        §2f-2), so that census would be vacuous. Two assertions carry the
+        original intent instead:
+          - the handler carries NO per-card widget map (nothing to leak);
           - eviction released ROWS, never CARD DATA: every one of the 2,000
             cards still lives in _cards (reachable via the row set or the
             backlog) — a card dropped from both would be a real leak.
         """
-        stubs = [o for o in gc.get_objects() if isinstance(o, _StubWidget)]
-        assert stubs == [], (
-            f"{len(stubs)} stub widgets alive — the HTML path built widgets"
+        assert not hasattr(self._handler, "_card_widgets"), (
+            "the HTML path must not carry a per-card GTK widget map"
         )
         assert len(self._handler._cards) == self.COUNT, (
             f"card data lost: {len(self._handler._cards)}/{self.COUNT} in _cards"
@@ -1141,7 +1130,7 @@ class TestTwoThousandCardRetention:
         rows = tab._surface.card_ids()
         assert len(handler._backlog) + len(rows) == self.COUNT
         assert len(rows) <= 16
-        assert handler._card_widgets == {}
+        assert not hasattr(handler, "_card_widgets")
 
     def test_compaction_interplay(self):
         """Test 8 — HONEST documentation of two DIFFERENT mechanisms.

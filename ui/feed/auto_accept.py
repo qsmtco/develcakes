@@ -369,18 +369,20 @@ class FeedAutoAcceptMixin:
 
     def _is_card_auto_acceptable(self, card: FeedCardData) -> bool:
         """Central auto-accept policy. Returns True if a card should be
-        auto-accepted based on current prefs, agent scope, and snooze list.
+        auto-accepted based on current prefs and agent scope.
 
         Called from add_card() on every new card. Must be O(1).
 
         Rules:
         1. File-change cards (diff, file_created, file_modified, file_deleted):
-           check _prefs.file_changes[card_type].enabled + agent_scope match
-           + not in snooze list.
+           check _prefs.file_changes[card_type].enabled + agent_scope match.
         2. Exec approval cards (agent_action with needs_approval=True):
-           check _prefs.exec_command.mode != "off" + agent_scope match
-           + not in snooze list.
+           check _prefs.exec_command.mode != "off" + agent_scope match.
         3. All other card types: never auto-accepted.
+
+        Snooze ruling (SPEC-58 §2f): the snooze button is gone and a
+        snoozed id in legacy prefs is NOT honored here — only the persisted
+        field survives (test_feed_retention pins the round-trip).
 
         Legacy-compat fallback: if the legacy _auto_accept_enabled flag is
         True but the v2 _prefs have not been migrated (i.e. _prefs.any_enabled()
@@ -391,10 +393,6 @@ class FeedAutoAcceptMixin:
         """
         # Fast path: nothing enabled
         if not self._auto_accept_enabled:
-            return False
-
-        # Snooze check (per card-id)
-        if card.card_id and card.card_id in self._prefs.snoozed_card_ids:
             return False
 
         # File-change cards
@@ -456,16 +454,4 @@ class FeedAutoAcceptMixin:
             return author == self._auto_accept_agent
         # Specific agent name (persisted in v2 migration from v1 auto_accept_agent)
         return author == scope
-
-    def snooze_card(self, card_id: str) -> None:
-        """Add a card to the snooze list so it is not auto-accepted."""
-        if card_id not in self._prefs.snoozed_card_ids:
-            self._prefs.snoozed_card_ids.append(card_id)
-            self._refresh_auto_accept_state()
-
-    def unsnooze_card(self, card_id: str) -> None:
-        """Remove a card from the snooze list."""
-        if card_id in self._prefs.snoozed_card_ids:
-            self._prefs.snoozed_card_ids.remove(card_id)
-            self._refresh_auto_accept_state()
 

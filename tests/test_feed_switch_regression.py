@@ -198,45 +198,10 @@ class TestProjectSwitchAndClose:
         assert surface.card_ids() == []
 
 
-# ── 2. remove_card forwards to remove_card_html ──────────────────────────────
-
-
-class TestRemoveCardCompat:
-    def test_remove_card_forwards_to_remove_card_html(self, real_tab, surface):
-        real_tab.set_html_cards([_card("forward-me")])
-
-        real_tab.remove_card("forward-me")
-
-        assert surface.removed == ["forward-me"]
-        assert surface.card_ids() == []
-
-    def test_remove_card_calls_the_document_api(self, real_tab, monkeypatch):
-        calls = []
-        monkeypatch.setattr(real_tab, "remove_card_html", calls.append)
-
-        real_tab.remove_card("routed-id")
-
-        assert calls == ["routed-id"]
-
-    def test_legacy_no_ops_keep_their_signatures(self, real_tab):
-        # The pre-purge signatures: no caller may break on arity.
-        assert real_tab.append_card(Gtk.Label(label="w"), "cid") is None
-        assert real_tab.prepend_card(Gtk.Label(label="w"), "cid") is None
-        assert real_tab.replace_card("cid", Gtk.Label(label="w")) is None
-        assert real_tab.get_card_container() is None
-
-
 # ── 3. Stale-state methods on a widget-less tab ──────────────────────────────
 
 
 class TestStaleStateMethods:
-    def test_is_above_viewport_is_false(self):
-        from ui.views.feed_tab import FeedTab
-
-        tab = FeedTab()  # no surface, no card container
-        assert tab.is_above_viewport(Gtk.Label(label="card")) is False
-        assert tab.is_above_viewport(object()) is False
-
     def test_hide_card_buttons_returns_without_raising(self):
         from ui.views.feed_tab import FeedTab
 

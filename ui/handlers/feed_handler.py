@@ -98,8 +98,6 @@ class FeedHandler(
 
         # Card storage: card_id → FeedCardData
         self._cards: dict[str, FeedCardData] = {}
-        # Widget storage: card_id → Gtk.Widget
-        self._card_widgets: dict[str, Gtk.Widget] = {}
         # Project → [card_ids] index (newest first)
         self._project_cards: dict[str, list[str]] = {}
         # Project name → project path lookup (for persistence)
@@ -148,18 +146,17 @@ class FeedHandler(
         # crabwatch 200 ms debounce that feeds this path.
         self.SNAPSHOT_REUSE_SECONDS = 0.2
 
-        # Lazy-load backlog: cards not currently rendered as live widgets.
+        # Lazy-load backlog: cards not currently rendered as live rows.
         # NEWEST-FIRST: every reader pops from the front.
         #   • populated by on_project_opened() — the loader MERGES (survivors
         #     first, then the snapshot's older slice) when total > PAGE_SIZE;
         #   • drained by _load_more() — one PAGE_SIZE page per click;
-        #   • re-populated by _evict_surplus_card_widgets() — evicted cards are
+        #   • re-populated by _evict_surplus_rows() — evicted rows are
         #     pushed back newest-first (insert(0, …)) so nothing becomes
         #     unreachable; Load More re-renders them.
         # Written from the loader thread, the main thread and _load_more, so
         # every access is under self._lock.
         self._backlog: list[FeedCardData] = []
-        self._load_more_widget: Gtk.Widget | None = None
         self.PAGE_SIZE = 15
 
         # Echo suppression: git accept/reject triggers filesystem changes that
@@ -433,7 +430,7 @@ class FeedHandler(
                 if self._feed_tab is not None:
                     self._feed_tab.upsert_card(card_data)
                     self._schedule_smart_scroll()
-                    self._evict_surplus_card_widgets()
+                    self._evict_surplus_rows()
                     if card_data.accepted is None and self._is_card_auto_acceptable(card_data):
                         if (card_data.card_type == "agent_action"
                                 and (card_data.metadata or {}).get("needs_approval")):
@@ -548,7 +545,7 @@ class FeedHandler(
             self._schedule_smart_scroll()
             # MEMRATCHET §2.1: one eviction pass for the whole batch — the
             # batch path is the other unbounded widget writer.
-            self._evict_surplus_card_widgets()
+            self._evict_surplus_rows()
             if self._on_card_added:
                 for card_id in card_ids:
                     self._on_card_added(card_id)
@@ -589,7 +586,6 @@ class FeedHandler(
             if proj in self._project_cards and card_id in self._project_cards[proj]:
                 self._project_cards[proj].remove(card_id)
             self._cards.pop(card_id, None)
-            widget = self._card_widgets.pop(card_id, None)
 
         def _remove():
             tab = self._feed_tab
@@ -773,7 +769,6 @@ class FeedHandler(
         with self._lock:
             card_ids = self._project_cards.get(project_name, [])
             for cid in list(card_ids):
-                self._card_widgets.pop(cid, None)
                 self._cards.pop(cid, None)
             self._project_cards.pop(project_name, None)
             self._project_seq.pop(project_name, None)
@@ -1138,24 +1133,13 @@ class FeedHandler(
             return
 
     def _update_card_visual(self, card_id: str, accepted: bool) -> None:
-        """Apply accepted/rejected CSS class + badge to card widget."""
+        """Apply the accepted/rejected state to the card.
+
+        HTML-only (SPEC-58 §2f-2): the feed is a document, so the card's
+        own `accepted` flag is the state and the document redraws it.
+        """
         card = self._cards.get(card_id)
         if card is not None:
             card.accepted = accepted
         if self._html_feed and self._feed_tab is not None and card is not None:
             self._feed_tab.upsert_card(card)
-            return
-        widget = self._card_widgets.get(card_id)
-        if widget is None:
-            return
-        # accepted=True → add feed-card-accepted, remove feed-card-rejected
-        # accepted=False → add feed-card-rejected, remove feed-card-accepted
-        cls_add = "feed-card-accepted" if accepted else "feed-card-rejected"
-        cls_rem = "feed-card-rejected" if accepted else "feed-card-accepted"
-        widget.add_css_class(cls_add)
-        widget.remove_css_class(cls_rem)
-
-        # Update card data
-        card = self._cards.get(card_id)
-        if card:
-            card.accepted = accepted
