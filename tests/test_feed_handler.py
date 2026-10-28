@@ -2653,12 +2653,50 @@ class TestAutoAcceptScenario:
         cid_b = feed_handler.add_card(card_b)
         assert feed_handler._cards[cid_b].accepted is None
 
-    def test_scenario_snoozed_card_not_auto_accepted(self, feed_handler, mock_glib, mock_feed_tab, monkeypatch):
-        """Snoozed cards are not auto-accepted.
+    def test_scenario_snoozed_card_not_auto_accepted(self, mock_glib, mock_feed_tab, monkeypatch):
+        """SPEC-58 §2f NEW semantics: a snoozed card id in legacy prefs does
+        NOT skip acceptance — the snooze skip-check was deleted, and a
+        snoozed id in _prefs.snoozed_card_ids is ignored.
 
-        Uses monkeypatch to predict the UUID that add_card will assign,
-        so we can pre-snooze it before the auto-accept check fires."""
-        monkeypatch.setattr("ui.handlers.feed_handler.uuid.uuid4", lambda: "snoozed-scenario-uuid")
+        Uses monkeypatch to predict the UUID add_card assigns so the id can
+        be pre-snoozed BEFORE the auto-accept check fires. project_path is
+        on the card metadata so handle_accept passes its early return and
+        actually runs the git path (the old version omitted it, so
+        handle_accept returned before setting accepted — the test passed
+        vacuously for the wrong reason). Sibling pattern: git_ops + git
+        module patched at the ui.handlers.feed_handler boundary,
+        _SyncThreading makes the _git_accept thread inline, MockGLib runs
+        the idle_add hops synchronously.
+        """
+        import uuid as _uuid_mod
+
+        import ui.handlers.feed_handler as fh
+        from ui.handlers.feed_handler import FeedHandler
+
+        # First uuid4() = the pinned, pre-snoozed id; later calls (the
+        # follow-up git_commit card from _add_git_card) get REAL unique ids —
+        # a constant-id patch here would collide in _cards and raise.
+        real_uuid4 = _uuid_mod.uuid4
+
+        class _UuidGate:
+            @staticmethod
+            def uuid4():
+                if not _UuidGate.pinned:
+                    _UuidGate.pinned = True
+                    return "snoozed-scenario-uuid"
+                return real_uuid4()
+
+        _UuidGate.pinned = False
+        monkeypatch.setattr(fh, "threading", _SyncThreading)
+        monkeypatch.setattr(fh, "uuid", _UuidGate)
+        feed_handler = FeedHandler(GLib=mock_glib, on_send_to_agent=MagicMock())
+        feed_handler.set_feed_tab(mock_feed_tab)
+        feed_handler._project_paths["testproject"] = "/tmp/testproject"
+        # _no_writer pattern (sibling: TestGitRejectMemberFanout): the inline
+        # writer/builder loops would park forever under _SyncThreading.
+        feed_handler._ensure_persist_writer = lambda: None
+        feed_handler._ensure_snapshot_builder = lambda: None
+
         feed_handler._prefs.file_changes["diff"].enabled = True
         feed_handler._prefs.file_changes["diff"].agent_scope = "all_agents"
         feed_handler._auto_accept_enabled = True
@@ -2667,11 +2705,26 @@ class TestAutoAcceptScenario:
         card = FeedCardData(
             card_type="diff", source="agent", title="snoozed diff",
             body="+code", author="AgentA",
-            timestamp=datetime.now(timezone.utc), project_name="proj",
+            timestamp=datetime.now(timezone.utc), project_name="testproject",
             file_path="foo.py",
+            metadata={"project_path": "/tmp/testproject"},
         )
-        cid = feed_handler.add_card(card)
-        assert feed_handler._cards[cid].accepted is None
+        mock_git_module = MagicMock()
+        staged = MagicMock(a_path="foo.py", b_path=None)
+        mock_git_module.Repo.return_value.index.diff.return_value = [staged]
+
+        with patch("ui.handlers.feed_handler.git_ops") as mock_git_ops, \
+                patch("ui.handlers.feed_handler.feed_store"), \
+                patch.dict(sys.modules, {"git": mock_git_module}):
+            mock_git_ops.stage_all.return_value = MockGitResult(success=True)
+            mock_git_ops.commit.return_value = MockGitResult(
+                success=True, stdout="[main abc123d] Accept: foo.py", sha="abc123"
+            )
+            cid = feed_handler.add_card(card)
+
+            # NEW: the snoozed id is ignored — acceptance PROCEEDS.
+            assert feed_handler._cards[cid].accepted is True
+            assert mock_git_ops.commit.called
 
     def test_scenario_batch_accept_independent_of_auto_accept(self, feed_handler, mock_glib, mock_feed_tab):
         """All toggles OFF, then user clicks Accept All → batch accept still works.

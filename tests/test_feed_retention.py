@@ -41,6 +41,7 @@ import pytest
 
 from models.feed_card import AutoAcceptPrefs, FeedCardData
 from utils import feed_store
+from utils.conversation_store import ConversationSnapshot
 from utils.config import get_config_dir
 from utils.feed_store import (
     LIVE_WINDOW_DEFAULT,
@@ -679,6 +680,36 @@ class TestEvictionWindowWiring:
         # cap (5000): 150 remain → this assert FAILS (non-vacuous pin).
         assert self._live_rows(h) == 120
         assert len(h._backlog) == 30  # push-back proves eviction actually ran
+
+    def test_snapshot_apply_after_eviction_does_not_resurrect_row(self, tmp_path, monkeypatch):
+        """H4 BUG#1 regression pin — the debugger falsifier.
+
+        FeedSurface.upsert appends an UNKNOWN id as the newest row, so
+        _apply_snapshot re-upserting a card whose row an eviction pass had
+        just dropped resurrects that row: back in the live document, plus a
+        second _backlog entry for the same cid, plus a spurious Load More
+        count. A snapshot apply must only attach data to the card — the
+        document re-renders it from card data on its next rebuild (SPEC-58
+        §2f-2); it must never push rows. Under the bugged code this test
+        FAILS (mutation-verified): the evicted cid reappears in
+        card_ids() and _backlog grows to 2.
+        """
+        self._root = tmp_path
+        h = self._handler()
+        cid = self._seed(h, 150)[0]  # lowest seq — the eviction victim
+        h._evict_surplus_rows()
+        assert cid not in h._feed_tab._surface.card_ids()
+        backlog_before = len(h._backlog)
+        assert backlog_before == 30
+
+        snapshot = ConversationSnapshot(snapshot_type="diff", diff_text="+x")
+        assert h._apply_snapshot(cid, snapshot) is False  # GLib contract
+        assert h._cards[cid].conversation_snapshot is snapshot
+
+        surface = h._feed_tab._surface
+        assert cid not in surface.card_ids()  # row stays evicted
+        assert len(h._backlog) == backlog_before  # backlog does not grow
+        assert surface.upserts == 150  # seeding only — no snapshot-apply upsert
 
     def test_missing_project_falls_back(self, tmp_path, monkeypatch):
         """R3/R5: no active project path → the helper returns the constant

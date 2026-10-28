@@ -141,12 +141,14 @@ class FeedSnapshotMixin:
             # Instead, we'll handle this in _persist by stripping snapshot.
             card.metadata["_snapshot_oversized"] = True
 
-        # HTML-only (SPEC-58 §2f-2): there is no per-card GTK widget and no
-        # widget-hosted context panel any more. The document renders the
-        # snapshot from the card data, so re-upserting the card is what makes
-        # the new snapshot visible.
-        if self._html_feed and self._feed_tab is not None:
-            self._feed_tab.upsert_card(card)
+        # HTML-only (SPEC-58 §2f-2): there is no widget panel and no
+        # per-apply re-upsert. The document renders the snapshot from the
+        # card data on its next document rebuild — nothing needs to be
+        # pushed here. Re-upserting from _apply_snapshot is actively wrong:
+        # FeedSurface.upsert appends an unknown id as the newest row, so a
+        # snapshot applied after an eviction pass resurrects the evicted
+        # cid (row back in the document + duplicate _backlog entry + a
+        # spurious Load More count). Debugger H4 BUG#1, mutation-verified.
         return False
 
     def _maybe_create_snapshot(self, card_data: FeedCardData) -> None:
