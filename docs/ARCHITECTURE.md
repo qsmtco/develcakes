@@ -2247,7 +2247,7 @@ class AgentBuilderHandler:
 
 **Responsibility:** GTK4 form widget for creating and editing agents. Pure view — receives data from `AgentBuilderHandler`, emits user actions via callbacks. Ex `AgentBuilderDialog` (2026-10-29): the form was extracted from the modal window and is now hosted in window.py's slide-down agent-edit drawer (`Gtk.Revealer`, permanent `_top_box` row of MainContent).
 
-**Layout:** Name, Emoji, Role, **Provider dropdown (populated from `handler.get_provider_options()` at construction)**, Fallback provider, Prompts multi-select, Tools checkboxes with presets (Full Access / Read Only / Custom), MCP servers, Compaction strategy. `build_buttons_row()` returns the Cancel/Save row for the drawer to place below the form.
+**Layout:** Name, Emoji, Role, **Provider dropdown (populated from `handler.get_provider_options()` at construction)**, Fallback provider, Prompts multi-select, Tools checkboxes with presets (Full Access / Read Only / Custom), MCP servers, Compaction strategy. The widget is self-contained: its own box ends with the Cancel/Save row it builds in `__init__` (the separate `build_buttons_row()` API was deleted 2026-10-29).
 
 **Simplifications (Phase 4 of SPEC-AGENT-BUILDER-PROVIDER-DROPDOWN):**
 - **No Model dropdown** — the agent's model is resolved at runtime from `providers.yaml` using the provider's `default_model`. The runtime in `agent/runtime.py` handles this.
@@ -2264,7 +2264,6 @@ class AgentBuilderWidget(Gtk.Box):
     def __init__(handler, agent_def=None, is_edit=False, on_save=None, on_cancel=None)
     def get_values() -> dict
     def set_provider_options(providers: list[ProviderConfig]) -> None
-    def build_buttons_row() -> Gtk.Box
     def focus_name_entry() -> None
     def show_errors(errors: list[str]) -> None
 ```

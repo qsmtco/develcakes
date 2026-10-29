@@ -265,7 +265,7 @@ class TestPerSessionSurfaces:
     def _handler_with_spy_factory(self, monkeypatch):
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -515,7 +515,7 @@ class TestSurfaceMountLifecycle:
         a dict of real Gtk.Boxes (mount targets)."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -743,7 +743,7 @@ class TestStreamingMountLifecycle:
         (handler, created_surfaces)."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -898,7 +898,7 @@ class TestSurfaceAllocationAndCaps:
     def _wired(self, monkeypatch, boxes):
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -995,7 +995,7 @@ class TestRound3Lifecycle:
     def _wired(self, monkeypatch, boxes):
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -1100,7 +1100,7 @@ class TestCloseFanOutProductionPath:
         """Real MainContent + real handler + real tabs — WebKit-free."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s

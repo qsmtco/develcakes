@@ -421,7 +421,7 @@ class TestTranslateCoordinatesWarning:
     tests verify the warning is logged.
 
     The closure `_on_input_right_click` is defined as a local function
-    inside `MainWindow._build()` and is not directly importable. We
+    inside `MainWindow._wire_agents()` and is not directly importable. We
     extract its source via `ast.get_source_segment` and `exec` it in a
     controlled namespace of MagicMock objects. This means any change to
     the production closure source is automatically tested — the test
@@ -443,7 +443,7 @@ class TestTranslateCoordinatesWarning:
             source = f.read()
         tree = ast.parse(source)
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_build":
+            if isinstance(node, ast.FunctionDef) and node.name == "_wire_agents":
                 for child in ast.walk(node):
                     if (
                         isinstance(child, ast.FunctionDef)
@@ -452,7 +452,7 @@ class TestTranslateCoordinatesWarning:
                         closure_src = ast.get_source_segment(source, child)
                         dedented = textwrap.dedent(closure_src)
                         # The closure references `logger` (module-level) and
-                        # `self` (free variable from the enclosing _build
+                        # `self` (free variable from the enclosing _wire_agents
                         # method). Inject both so exec'd code can resolve them.
                         import logging
                         import gi as _gi
@@ -905,7 +905,7 @@ class TestStale1WordChangeDetected:
             source = f.read()
         tree = ast.parse(source)
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_build":
+            if isinstance(node, ast.FunctionDef) and node.name == "_wire_agents":
                 for child in ast.walk(node):
                     if (
                         isinstance(child, ast.FunctionDef)

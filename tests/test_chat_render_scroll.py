@@ -57,7 +57,7 @@ class TestSurfaceScrollDelegation:
     surface's scroll_to_latest(); nothing drives a GTK adjustment."""
 
     def _make(self, monkeypatch):
-        def factory():
+        def factory(**kwargs):
             return _SpySurface()
 
         monkeypatch.setattr(crh_module, "create_chat_surface", factory)

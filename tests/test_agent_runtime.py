@@ -4498,17 +4498,24 @@ class TestLocalAgentDrawerEmissions:
             "send_to_special_agent must clear _ended_sessions for the new turn"
         )
         assert "agent:coder" not in handler._session_completed
-        # Phase 4 Part B: the conversation prep moved off the main thread into
-        # a `prepare` closure passed to send_message. `handler._prepare_turn`
-        # does not exist — the closure is a LOCAL function in
-        # send_to_special_agent, so assert the call shape and then exercise
-        # the closure itself (Rule 4: real code path, not just the mock).
-        rt.send_message.assert_called_once()
-        call_args, call_kwargs = rt.send_message.call_args
-        assert call_args == ("agent:coder", "hello")
-        prepare = call_kwargs.get("prepare")
+        # Phase 4 Part B + SPEC-WIRE-CONTEXT-PRESSURE §2.3: the conversation
+        # prep moved off the main thread and the send path became CLAIM +
+        # DIRECT LOOP START: begin_send(session_key, text) claims the loop,
+        # then start_claimed_loop(session_key, text, token, prepare) hands
+        # the off-thread `_prepare_turn` closure (a LOCAL function in
+        # send_to_special_agent) to the runtime. send_message must NOT be
+        # called — it would begin_send a second time.
+        rt.begin_send.assert_called_once_with("agent:coder", "hello")
+        rt.start_claimed_loop.assert_called_once()
+        call_args, _call_kwargs = rt.start_claimed_loop.call_args
+        assert call_args[0] == "agent:coder"
+        assert call_args[1] == "hello"
+        assert call_args[2] is handler._turn_tokens["agent:coder"], (
+            "the loop must start with the token assigned on the main thread"
+        )
+        prepare = call_args[3]
         assert callable(prepare), (
-            "Part B: send_message must receive the off-thread prepare callback"
+            "the loop must receive the off-thread prepare callback"
         )
         assert prepare.__name__ == "_prepare_turn", (
             f"expected the _prepare_turn closure, got {prepare!r}"
@@ -4520,6 +4527,7 @@ class TestLocalAgentDrawerEmissions:
         assert prep_kwargs["project_path"] == "/tmp/test"
         assert prep_kwargs["turn_token"] is handler._turn_tokens["agent:coder"]
         assert handler._turn_tokens["agent:coder"] is not None
+        rt.send_message.assert_not_called()
 
     # ── BUG #21 redesign: dedicated on_turn_start signal ─────────────────
 

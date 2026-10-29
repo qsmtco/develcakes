@@ -90,11 +90,14 @@ class _FakeConv:
 
 
 class _FakeRuntime:
-    """Mirrors AgentRuntime.send_message's prepare contract.
+    """Mirrors AgentRuntime's send contract (SPEC-WIRE-CONTEXT-PRESSURE
+    §2.3): the caller CLAIMS the session via begin_send(), then starts the
+    loop directly with start_claimed_loop(session_key, text, turn_token,
+    prepare) — send_message() is only the convenience wrapper around those
+    two and is NOT on the handler's path.
 
-    send_message() spawns a thread that runs `prepare` (exactly what the real
-    runtime does in _run_loop) and every fake method records its calls so the
-    tests can assert what happened on which thread.
+    Every fake method records its calls so the tests can assert what
+    happened on which thread.
     """
 
     def __init__(self, *, conv_exists=True, auto_run_prepare=True):
@@ -116,6 +119,8 @@ class _FakeRuntime:
         self.get_gate_entered = threading.Event()
         self.load_gate = None       # blocks load_conversation
         self.turn_token = object()
+        self.loops = []             # (sk, text, token, prepare) per start_claimed_loop
+        self._active_loops = set()  # sessions claimed by begin_send, per real runtime
 
     # ── contract used by _prepare_turn_conversation ───────────────────────
 
@@ -142,10 +147,23 @@ class _FakeRuntime:
     def _rebuild_conversation_context(self, session_key, project_path, agent_role=""):
         self.rebuild_calls.append((project_path, agent_role))
 
-    # ── send_message: spawns a thread, like the real runtime ──────────────
+    # ── send contract: claim + loop start, mirroring the real runtime ─────
 
-    def send_message(self, session_key, text, prepare=None):
+    def begin_send(self, session_key, text):
+        """Claim the session like AgentRuntime.begin_send (SPEC-WIRE-
+        CONTEXT-PRESSURE §2.3): True + _active_loops.add when the caller
+        must start the loop; False (text queued) when one is already
+        running. Each claim stores its text so asserts can read it back."""
         self.send_calls.append((session_key, text))
+        if session_key in self._active_loops:
+            return False
+        self._active_loops.add(session_key)
+        return True
+
+    def start_claimed_loop(self, session_key, text, turn_token, prepare=None):
+        """Spawn the loop thread like the real runtime: `prepare` runs on
+        that thread before the conversation lookup."""
+        self.loops.append((session_key, text, turn_token, prepare))
         idx = len(self.prepares)
         self.prepares.append(prepare)
 
@@ -155,7 +173,7 @@ class _FakeRuntime:
         def _run():
             # NOTE: no try/else here — `else` would fire even when there is no
             # prepare at all, which would make the RED assertions pass on the
-            # pre-Phase-4 code (where send_message was called without one).
+            # pre-Phase-4 code (where the loop was started without one).
             if prepare is None:
                 return
             try:
@@ -166,6 +184,14 @@ class _FakeRuntime:
                 self.prep_completed.append(idx)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def send_message(self, session_key, text, prepare=None):
+        """Convenience wrapper on the real runtime; kept for fidelity even
+        though the handler path never calls it."""
+        token = self.turn_token
+        if not self.begin_send(session_key, text):
+            return
+        self.start_claimed_loop(session_key, text, token, prepare)
 
     def run_prepare(self, idx):
         """Run a stored prepare synchronously (for the superseded-send test)."""
