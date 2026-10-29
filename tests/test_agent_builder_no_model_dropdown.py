@@ -53,27 +53,20 @@ class StubHandler:
         return None, "stub save_role not implemented"
 
 
-@pytest.fixture
-def gtk_parent():
-    app = Gtk.Application()
-    win = Gtk.ApplicationWindow(application=app)
-    return win
-
-
-def _make_dlg(parent, providers, *, agent_def=None, is_edit=False):
+def _make_dlg(providers, *, agent_def=None, is_edit=False):
     handler = StubHandler(providers)
-    from ui.views.agent_builder import AgentBuilderDialog
-    return AgentBuilderDialog(
-        parent=parent, handler=handler, agent_def=agent_def, is_edit=is_edit,
+    from ui.views.agent_builder import AgentBuilderWidget
+    return AgentBuilderWidget(
+        handler, agent_def=agent_def, is_edit=is_edit,
     )
 
 
 class TestNoModelDropdown:
     """The form has no Model dropdown widget."""
 
-    def test_no_model_dropdown_attribute(self, gtk_parent):
+    def test_no_model_dropdown_attribute(self):
         providers = [ProviderConfig("openai", "u", "k", "gpt-4o", True)]
-        dlg = _make_dlg(gtk_parent, providers)
+        dlg = _make_dlg(providers)
         assert not hasattr(dlg, "_model_dropdown")
         assert not hasattr(dlg, "_model_labeled")
         assert not hasattr(dlg, "_build_model_dropdown")
@@ -84,9 +77,9 @@ class TestNoModelDropdown:
 class TestNoManualEntry:
     """The form has no Manual provider/model entry widgets."""
 
-    def test_no_manual_widgets(self, gtk_parent):
+    def test_no_manual_widgets(self):
         providers = [ProviderConfig("openai", "u", "k", "gpt-4o", True)]
-        dlg = _make_dlg(gtk_parent, providers)
+        dlg = _make_dlg(providers)
         assert not hasattr(dlg, "_manual_provider_entry")
         assert not hasattr(dlg, "_manual_model_entry")
         assert not hasattr(dlg, "_manual_toggle")
@@ -97,9 +90,9 @@ class TestNoManualEntry:
 class TestNoApiKeyField:
     """The form has no API key entry."""
 
-    def test_no_api_key_entry(self, gtk_parent):
+    def test_no_api_key_entry(self):
         providers = [ProviderConfig("openai", "u", "k", "gpt-4o", True)]
-        dlg = _make_dlg(gtk_parent, providers)
+        dlg = _make_dlg(providers)
         assert not hasattr(dlg, "_api_key_entry")
         assert not hasattr(dlg, "_provider_keys")
 
@@ -107,20 +100,20 @@ class TestNoApiKeyField:
 class TestSaveButtonEnablesWithoutApiKey:
     """Save enables when name + prompts + tools + provider + fallback are set (no API key)."""
 
-    def test_save_disabled_when_only_name_set(self, gtk_parent):
+    def test_save_disabled_when_only_name_set(self):
         providers = [ProviderConfig("openai", "u", "k", "gpt-4o", True)]
-        dlg = _make_dlg(gtk_parent, providers)
+        dlg = _make_dlg(providers)
         dlg._name_entry.set_text("agent")
         dlg._update_save_button()
         assert dlg._save_btn.get_sensitive() is False
 
-    def test_save_enabled_when_all_required_fields_set(self, gtk_parent):
+    def test_save_enabled_when_all_required_fields_set(self):
         """name + prompts + tools + provider + fallback → Save sensitive, no API key entered."""
         providers = [
             ProviderConfig("openai", "u", "k", "gpt-4o", True),
             ProviderConfig("openrouter", "u", "k", "auto", True),
         ]
-        dlg = _make_dlg(gtk_parent, providers)
+        dlg = _make_dlg(providers)
         dlg._name_entry.set_text("agent")
         # Select primary provider (index 0 = openai)
         dlg._provider_dropdown.set_selected(0)

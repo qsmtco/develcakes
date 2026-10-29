@@ -23,17 +23,14 @@ class AgentListHandler:
         self,
         *,
         agent_mgr=None,
-        on_agent_chat: Callable = None,
         on_agent_toggle: Callable = None,
     ):
         """
         Args:
             agent_mgr:     AgentManager instance (from gateway_handler)
-            on_agent_chat: callback(session_key, name) — Chat button clicked
             on_agent_toggle: callback(session_key, name, in_project) — +/− clicked
         """
         self._agent_mgr = agent_mgr
-        self._on_agent_chat = on_agent_chat
         self._on_agent_toggle = on_agent_toggle
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -121,11 +118,6 @@ class AgentListHandler:
             result.append((sk, name, in_project, session_count))
 
         return result
-
-    def on_chat_clicked(self, session_key: str, name: str):
-        """Handle Chat button click — delegate to registered callback."""
-        if self._on_agent_chat:
-            self._on_agent_chat(session_key, name)
 
     def on_toggle_clicked(self, session_key: str, name: str, in_project: bool):
         """Handle +/− button click — delegate to registered callback."""

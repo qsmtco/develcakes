@@ -19,13 +19,11 @@ def agent_mgr():
 
 @pytest.fixture
 def handler(agent_mgr):
-    chat_mock = MagicMock()
     toggle_mock = MagicMock()
     return AgentListHandler(
         agent_mgr=agent_mgr,
-        on_agent_chat=chat_mock,
         on_agent_toggle=toggle_mock,
-    ), chat_mock, toggle_mock
+    ), toggle_mock
 
 
 class TestComputeInitials:
@@ -88,19 +86,14 @@ class TestGetSortedAgents:
 
 
 class TestCallbacks:
-    def test_chat_callback(self, handler):
-        h, chat_mock, _ = handler
-        h.on_chat_clicked("agent:qat:main", "Qat")
-        chat_mock.assert_called_once_with("agent:qat:main", "Qat")
-
     def test_toggle_callback(self, handler):
-        h, _, toggle_mock = handler
+        h, toggle_mock = handler
         h.on_toggle_clicked("agent:qat:main", "Qat", True)
         toggle_mock.assert_called_once_with("agent:qat:main", "Qat", True)
 
-    def test_chat_callback_not_set(self):
-        h = AgentListHandler()
-        h.on_chat_clicked("agent:qat:main", "Qat")  # no-op, no error
+    # Tombstone: test_chat_callback / test_chat_callback_not_set were
+    # deleted with AgentListHandler.on_chat_clicked (the old
+    # double-click→chat path); the +/− toggle is the only row callback.
 
     def test_set_agent_mgr(self, agent_mgr):
         h = AgentListHandler()

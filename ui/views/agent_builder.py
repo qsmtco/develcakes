@@ -1,8 +1,9 @@
 # ui/views/agent_builder.py
-# GTK4 dialog for creating and editing user-defined agents.
+# GTK4 form widget for creating and editing user-defined agents.
 #
 # Pure view — receives data from AgentBuilderHandler, emits user actions
-# back through callbacks (on_save, on_cancel).
+# back through callbacks (on_save, on_cancel). Hosted inside window.py's
+# agent-edit drawer (Gtk.Revealer); not a dialog.
 #
 # Architecture rule (ARCHITECTURE.md Section 9):
 #   - Uses add_css_class() only, no inline CssProvider
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio, GLib
+from gi.repository import Gtk
 
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER
 from models.providers import ProviderConfig
@@ -22,35 +23,36 @@ from utils.agent_defs import VALID_COMPACTION_STRATEGIES, merge_preserved_tools
 from utils.mcp_config import load_mcp_servers, MCPConfigError
 
 
-class AgentBuilderDialog:
-    """GTK4 dialog for creating/editing agent definitions.
+class AgentBuilderWidget(Gtk.Box):
+    """GTK4 form widget for creating/editing agent definitions.
 
-    The mode (create vs. edit) is set explicitly via the `is_edit` parameter,
+    Ex AgentBuilderDialog — the same form, extracted out of the modal
+    window and hosted in window.py's slide-down agent-edit drawer. The
+    mode (create vs. edit) is set explicitly via the `is_edit` parameter,
     NOT inferred from the presence of `agent_def`. The handler's `create_new()`
     returns a non-None template dict for new agents, so a truthiness check on
     `agent_def` would incorrectly classify new agents as edits.
 
     Args:
-        parent: Parent Gtk.Window for transient setting.
         handler: AgentBuilderHandler — provides tool/prompt/provider options.
         agent_def: Optional existing agent dict to pre-fill the form.
             Pass None for new agents, the loaded dict for edits.
-        is_edit: True for edit mode (title="Edit Agent", button="Save");
-            False for create mode (title="Create Agent", button="Create").
+        is_edit: True for edit mode (button="Save"); False for create
+            mode (button="Create").
         on_save: Callback with the form dict when user clicks Save.
-        on_cancel: Callback when user clicks Cancel or closes window.
+        on_cancel: Callback when user clicks Cancel.
     """
 
     def __init__(
         self,
-        parent: Gtk.Window,
-        *,
         handler,
         agent_def: dict | None = None,
         is_edit: bool = False,
         on_save=None,
         on_cancel=None,
     ):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
         self._handler = handler
         self._on_save = on_save
         self._on_cancel = on_cancel
@@ -66,23 +68,7 @@ class AgentBuilderDialog:
         self._hidden_tools_preserved: set[str] = set()
         self._providers: list = []  # list[ProviderConfig] — populated via set_provider_options()
 
-        # ── Window setup ──────────────────────────────────────────────
-        title = "Edit Agent" if self._is_edit else "Create Agent"
-        self._window = Gtk.Window(title=title)
-        self._window.set_transient_for(parent)
-        self._window.set_modal(True)
-        self._window.set_default_size(480, 620)
-        self._window.add_css_class("agent-builder-window")
-
-        self._window.connect("close-request", self._on_close_request)
-
         # ── Build form ────────────────────────────────────────────────
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
-        # Header bar with title + buttons
-        header = self._build_header(title)
-        content.append(header)
-
         # Scrollable form body
         scroll = Gtk.ScrolledWindow()
         scroll.set_vexpand(True)
@@ -145,7 +131,7 @@ class AgentBuilderDialog:
         form_box.append(strat_row)
 
         scroll.set_child(form_box)
-        content.append(scroll)
+        self.append(scroll)
 
         # Error label (hidden by default)
         self._error_label = Gtk.Label()
@@ -154,9 +140,7 @@ class AgentBuilderDialog:
         self._error_label.set_wrap(True)
         self._error_label.set_margin_start(20)
         self._error_label.set_margin_end(20)
-        content.append(self._error_label)
-
-        self._window.set_child(content)
+        self.append(self._error_label)
 
         # Populate provider dropdown from handler first (reads providers.yaml),
         # so that _fill_form can match the saved llm_name against self._providers.
@@ -165,9 +149,37 @@ class AgentBuilderDialog:
         # Pre-fill if editing
         if agent_def:
             self._fill_form(agent_def)
-        else:
-            # New agent — ensure save button starts disabled
-            self._update_save_button()
+
+        # ── Cancel / Save row ─────────────────────────────────────────
+        # Built here, inside __init__, so the widget is self-contained:
+        # any construction (window drawer assembly, tests, future hosts)
+        # always yields a working widget with its own Cancel/Save row.
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_margin_start(16)
+        row.set_margin_end(16)
+        row.set_margin_top(8)
+        row.set_margin_bottom(12)
+        row.set_halign(Gtk.Align.END)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.add_css_class("flat")
+        cancel_btn.connect("clicked", lambda *_: self._do_cancel())
+        row.append(cancel_btn)
+
+        save_label = "Save" if self._is_edit else "Create"
+        self._save_btn = Gtk.Button(label=save_label)
+        self._save_btn.add_css_class("suggested-action")
+        self._save_btn.connect("clicked", lambda *_: self._do_save())
+        self._save_btn.set_sensitive(False)
+        row.append(self._save_btn)
+        self.append(row)
+
+        # The button now exists: sync its state with the form as already
+        # filled (edit-mode _fill_form above may have completed the form,
+        # which must not start with a disabled Save). Calls that fired
+        # earlier in __init__ were no-ops via the getattr guard in
+        # _update_save_button().
+        self._update_save_button()
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -198,15 +210,9 @@ class AgentBuilderDialog:
                 list(VALID_COMPACTION_STRATEGIES)[self._compaction_strategy_combo.get_selected()],
         }
 
-    def show(self) -> None:
-        """Present the dialog window."""
-        self._window.present()
-        # Focus name entry after window appears
-        GLib.idle_add(lambda: self._name_entry.grab_focus() and False)
-
-    def close(self) -> None:
-        """Close the dialog window."""
-        self._window.close()
+    def focus_name_entry(self) -> None:
+        """Focus the name entry once the drawer is on screen."""
+        self._name_entry.grab_focus()
 
     def show_errors(self, errors: list[str]) -> None:
         """Display validation errors."""
@@ -215,35 +221,6 @@ class AgentBuilderDialog:
 
     def _clear_errors(self) -> None:
         self._error_label.set_visible(False)
-
-    # ── Header ────────────────────────────────────────────────────────
-
-    def _build_header(self, title: str) -> Gtk.Box:
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.set_margin_start(16)
-        header.set_margin_end(16)
-        header.set_margin_top(12)
-        header.set_margin_bottom(8)
-
-        title_label = Gtk.Label(label=title)
-        title_label.add_css_class("title-2")
-        title_label.set_hexpand(True)
-        title_label.set_xalign(0.0)
-        header.append(title_label)
-
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.add_css_class("flat")
-        cancel_btn.connect("clicked", lambda *_: self._do_cancel())
-        header.append(cancel_btn)
-
-        save_label = "Save" if self._is_edit else "Create"
-        self._save_btn = Gtk.Button(label=save_label)
-        self._save_btn.add_css_class("suggested-action")
-        self._save_btn.connect("clicked", lambda *_: self._do_save())
-        self._save_btn.set_sensitive(False)
-        header.append(self._save_btn)
-
-        return header
 
     # ── Form helpers ──────────────────────────────────────────────────
 
@@ -347,7 +324,6 @@ class AgentBuilderDialog:
         if self._create_role_window is not None:
             return
         win = Gtk.Window(title="Create role")
-        win.set_transient_for(self._window)
         win.set_modal(True)
         win.set_default_size(440, 340)
 
@@ -929,6 +905,14 @@ class AgentBuilderDialog:
         This is widget state management (is the form complete?), NOT validation.
         Actual validation lives in validate_agent_def().
         """
+        save_btn = getattr(self, "_save_btn", None)
+        if save_btn is None:
+            # Defensive only: _save_btn is created at the end of __init__,
+            # while form callbacks — set_provider_options' fallback
+            # dropdown, the name entry — fire earlier in __init__. Nothing
+            # to enable yet; the row builder starts the button disabled.
+            return
+
         has_name = bool(self._name_entry.get_text().strip())
         # A role is a prompt: a non-sentinel role satisfies has_prompts even
         # when the System Prompts checklist is empty.
@@ -939,7 +923,7 @@ class AgentBuilderDialog:
         has_provider = bool(self._get_selected_llm_name())
         has_fallback = bool(self._get_selected_fallback_provider())
 
-        self._save_btn.set_sensitive(
+        save_btn.set_sensitive(
             has_name and has_prompts and has_tools and has_provider and has_fallback
         )
 
@@ -953,13 +937,6 @@ class AgentBuilderDialog:
             self._on_save(values)
 
     def _do_cancel(self) -> None:
-        """User clicked Cancel."""
+        """User clicked Cancel — the window hides the drawer."""
         if self._on_cancel:
             self._on_cancel()
-        self._window.destroy()
-
-    def _on_close_request(self, _widget=None) -> bool:
-        """Window close button clicked."""
-        if self._on_cancel:
-            self._on_cancel()
-        return False  # allow close

@@ -173,7 +173,7 @@ develcakes/
 │       ├── chat_input_toolbar.py # ~480 lines — ChatInputToolbar — find/replace bar + spell check toggle (view only)
 │       ├── feed_tab.py          # ~167 lines — FeedTab — project feed card container (view only)
 │       ├── settings_dialog.py   # GTK4 dialog for managing LLM provider settings
-│       ├── agent_builder.py     # AgentBuilderDialog — modal dialog for creating/editing agents
+│       ├── agent_builder.py     # AgentBuilderWidget — agent create/edit form hosted in window.py's drawer
 │       └── auxilium_wizard.py  # Auxilium first-run wizard view (Tier 1, D7)
 │
 ├── knowledge/                # User-facing documentation files (read by Develcakes agent via web_fetch)
@@ -594,7 +594,7 @@ class InputToolbarHandler:
 
 **Prompts tab:** PromptsHandler-backed list with search, favorites, and rich metadata rows. Star/favorite persisted to `~/.config/develcakes/favorites.json`. Double-click or `+` button calls `on_prompt_loaded(filepath, name, content)`, which loads content into chat input. Search filters by name (case-insensitive). Favorites sort to top. Right-click on a prompt row opens a 2-item popover menu ("Copy path" / "Copy prompt"); the selection is copied to the system clipboard via `Gdk.Display.get_clipboard()` and a transient "Copied path" / "Copied prompt" confirmation appears in the tab header for 2.5s (auto-cleared via `GLib.timeout_add`).
 
-**Agents tab:** Initially empty placeholder. After `set_agents()` is called, builds avatar cards (colored circle + initials + name + +/− toggle button). Double-click calls `on_agent_selected(session_key, name)`. CSS for agent rows is scoped to `left_panel`. When a project is open, the toggle button is visible — `+` adds the agent to the project, `−` removes them. Toggle button uses `.agent-add-btn` (green) or `.agent-remove-btn` (red) CSS classes.
+**Agents tab:** Initially empty placeholder. After `set_agents()` is called, builds avatar cards (colored circle + initials + name + +/− toggle button). Double-click on a local (`agent:`) row opens the agent-edit drawer in window.py (slide-down revealer over the chat area); gateway rows are no-ops. Right-click shows a Delete-only popover — Edit moved from the menu to the row double-click (2026-10-29). CSS for agent rows is scoped to `left_panel`. When a project is open, the toggle button is visible — `+` adds the agent to the project, `−` removes them. Toggle button uses `.agent-add-btn` (green) or `.agent-remove-btn` (red) CSS classes.
 
 **Projects tab:** `FileTree` widget — `Gtk.TreeView` with `Gtk.TreeStore`, lazy-loading subdirectories, back button.
 
@@ -606,7 +606,7 @@ class InputToolbarHandler:
 # ui/views must not import ui.handlers (arch guard).
 panel = LeftPanel(on_prompt_selected=cb, on_project_selected=cb,
                   file_tree_handler=FileTreeHandler())
-panel.set_agents(agent_names_dict, on_agent_selected_callback)
+panel.set_agents(agent_names_dict)            # names only — no chat callback
 panel.set_agent_list_handler(handler)         # wires AgentListHandler for avatar cards
 panel.set_prompts_handler(handler)             # wires PromptsHandler for prompt library
 panel.refresh_prompts()                       # rebuilds the prompts list
@@ -904,9 +904,10 @@ def has_agent_mgr() -> bool: pass          # True if AgentManager is populated
 def compute_initials(name: str) -> str: pass
 def get_agent_color(name: str) -> str: pass
 def get_sorted_agents(project_members=None) -> list[(sk, name, in_project)]: pass
-def on_chat_clicked(session_key: str, name: str): pass
 def on_toggle_clicked(session_key: str, name: str, in_project: bool): pass
 ```
+
+(Tombstone, 2026-10-29: `on_chat_clicked(session_key, name)` was deleted with the double-click→chat path — agent-row double-click now opens the agent-edit drawer, and the +/− toggle is the only row button callback.)
 
 ### 3.13 `ui/handlers/prompts_handler.py` — Prompts Handler
 
@@ -2242,33 +2243,33 @@ class AgentBuilderHandler:
     def get_provider_options() -> list[dict]
 ```
 
-### 3.21t `ui/views/agent_builder.py` — Agent Builder Dialog (User-Defined Agents)
+### 3.21t `ui/views/agent_builder.py` — Agent Builder Widget (User-Defined Agents)
 
-**Responsibility:** GTK4 modal dialog for creating and editing agents. Pure view — receives data from `AgentBuilderHandler`, emits user actions via callbacks.
+**Responsibility:** GTK4 form widget for creating and editing agents. Pure view — receives data from `AgentBuilderHandler`, emits user actions via callbacks. Ex `AgentBuilderDialog` (2026-10-29): the form was extracted from the modal window and is now hosted in window.py's slide-down agent-edit drawer (`Gtk.Revealer`, permanent `_top_box` row of MainContent).
 
-**Layout:** Name, Emoji, Role, **Provider dropdown (populated from `handler.get_provider_options()` at construction)**, Prompts multi-select, Tools checkboxes with presets (Full Access / Read Only / Custom).
+**Layout:** Name, Emoji, Role, **Provider dropdown (populated from `handler.get_provider_options()` at construction)**, Fallback provider, Prompts multi-select, Tools checkboxes with presets (Full Access / Read Only / Custom), MCP servers, Compaction strategy. `build_buttons_row()` returns the Cancel/Save row for the drawer to place below the form.
 
 **Simplifications (Phase 4 of SPEC-AGENT-BUILDER-PROVIDER-DROPDOWN):**
 - **No Model dropdown** — the agent's model is resolved at runtime from `providers.yaml` using the provider's `default_model`. The runtime in `agent/runtime.py` handles this.
 - **No Manual entry mode** — the user adds providers only via the Settings dialog.
 - **No API key field** — API keys live in `providers.yaml`, never in agent definitions.
 
-**Save button enables when:** name (non-empty) AND prompts (≥1 selected) AND tools (≥1 selected) AND provider (selected in dropdown).
+**Save button enables when:** name (non-empty) AND (role OR ≥1 prompt selected) AND tools (≥1 selected) AND provider (selected in dropdown) AND fallback provider (non-None).
 
 **`get_values()` returns:** `{"name", "emoji", "role", "prompts", "tools", "provider", "model": "", "mcp_servers", "self_improvement"}`. The `model` field is always empty string for new agents; the runtime resolves it from the provider's `default_model`.
 
 **Public API:**
 ```python
-class AgentBuilderDialog:
-    def __init__(parent, *, handler, agent_def=None, on_save=None, on_cancel=None)
+class AgentBuilderWidget(Gtk.Box):
+    def __init__(handler, agent_def=None, is_edit=False, on_save=None, on_cancel=None)
     def get_values() -> dict
     def set_provider_options(providers: list[ProviderConfig]) -> None
-    def show() -> None
-    def close() -> None
+    def build_buttons_row() -> Gtk.Box
+    def focus_name_entry() -> None
     def show_errors(errors: list[str]) -> None
 ```
 
-**Live updates:** When providers change in Settings while the dialog is open, the wiring (`ui/wiring.py`) calls `set_provider_options()` on this dialog. The dropdown rebuilds. The handler resolves the new model from `providers.yaml` at save time, not at dialog open time.
+**Live updates:** When providers change in Settings while the drawer is open, the wiring (`ui/wiring.py`) calls `set_provider_options()` on this widget. The dropdown rebuilds. The handler resolves the new model from `providers.yaml` at save time, not at drawer-open time.
 
 ### 3.21u.a `ui/wiring.py` — SettingsHandler Callback Wiring (Phase 1 of SPEC-AGENT-BUILDER-PROVIDER-DROPDOWN)
 
@@ -2289,7 +2290,7 @@ def wire_settings_handler(
 
 **Idempotency:** The function is idempotent — calling it twice on the same handler is a no-op (uses a `_wired` flag on the handler). The composition root (`ui/window.py`) calls it exactly once during `_build()`.
 
-**Factories:** Both `settings_dialog_factory` and `agent_builder_factory` are LAZY factories that return a dialog or `None` if the dialog is not open. This is critical — the dialogs may not exist when the wiring is set up (e.g., the agent builder is only created when the user clicks the `+ Agent` button). The factory is called only when `on_providers_changed` fires.
+**Factories:** Both `settings_dialog_factory` and `agent_builder_factory` are LAZY factories that return the live widget or `None` if it is not open. This is critical — the widgets may not exist when the wiring is set up (e.g., the agent builder form is only created when the drawer first opens). The factory is called only when `on_providers_changed` fires.
 
 **Behavior:**
 - Initial call: `toolbar.set_settings_status(has_any_verified_provider(load_providers()))` is invoked (wrapped in try/except so a toolbar failure doesn't break the wiring).
@@ -3337,7 +3338,7 @@ Connected
     → toolbar.update_connection_state("connected")
     → snapshot = gw.get_snapshot()
     → for each agent: agent_mgr.register(session_key, name)
-    → left_panel.set_agents(names_ref, _on_agent_selected)
+    → left_panel.set_agents(names_ref)
 
 User clicks Disconnect
   → window._on_disconnect_gateway()
@@ -3345,13 +3346,30 @@ User clicks Disconnect
     → toolbar.update_connection_state("disconnected")
 ```
 
-### 4.2 Agent Selection Flow
+### 4.2 Agent Edit Flow (was: Agent Selection Flow)
 
 ```
-User clicks agent row
+User double-clicks a local agent row (Agents tab)
   → left_panel._on_agent_row_activated()
-    → _on_agent_selected(session_key, agent_name)
-      → main_content.create_chat_tab(session_key, agent_name)
+    → window._on_edit_agent(agent_name)   [via left_panel.set_on_edit_agent]
+      → window._open_agent_builder(name)
+        → load_for_edit(name) → drawer form repopulated
+        → Gtk.Revealer.set_reveal_child(True)   [slide-down drawer]
+
+Create Agent card (click or double-click)
+  → left_panel._on_create_agent()
+    → window._open_agent_builder(None)     [same drawer, create mode]
+
+Cancel / Close ✕ / same-agent re-click → window._close_agent_edit_drawer()
+  → Gtk.Revealer.set_reveal_child(False)   [form discarded]
+
+Gateway rows: double-click is a no-op.
+
+(Tombstone, 2026-10-29: the old double-click → `_on_agent_selected` →
+`main_content.create_chat_tab` path was deleted — project group tabs
+open from the project tree, and the private /ask view is a command path.
+`window._on_agent_selected`, `AgentListHandler.on_agent_chat` /
+`on_chat_clicked`, and tests/test_window_agent_selected.py went with it.)
 ```
 
 ### 4.3 Project Group Chat — Open Project
@@ -3681,8 +3699,8 @@ User adds a provider in Settings while the Agent Builder is open
       → handler._on_providers_changed(providers)  (if handler is the SettingsHandler)
         → wire_settings_handler._on_providers_changed(providers)  (closure)
           → settings_dialog_factory() → None (or settings dialog) → refresh_providers(providers)
-          → agent_builder_factory() → AgentBuilderDialog or None
-            → dialog.set_provider_options(providers)  (rebuilds dropdown)
+          → agent_builder_factory() → AgentBuilderWidget (the open drawer form) or None
+            → widget.set_provider_options(providers)  (rebuilds dropdown)
 
 User removes a provider in Settings while the Agent Builder is open (with that provider selected)
   → same chain as above
@@ -3733,7 +3751,7 @@ Accept/reject clicks follow the same update queue. `add_card` persists via its o
 
 **Setter pattern** (for data available after construction):
 ```python
-panel.set_agents(agent_names, on_agent_selected)
+panel.set_agents(agent_names)
 panel.set_on_project_opened(cb)
 panel.refresh_agents_with_project(name)
 ```
@@ -4294,7 +4312,7 @@ develcakes/
 │   │   └── file_tree_handler.py  # ~93 lines — FileTree sort prefs + git status cache (no GTK)
 │   └── views/
 │       ├── __init__.py           # 1 line
-│       ├── agent_builder.py      # ~770 lines — AgentBuilderDialog
+│       ├── agent_builder.py      # ~900 lines — AgentBuilderWidget (agent-edit drawer form)
 │       ├── auxilium_wizard.py    # ~452 lines — Auxilium wizard view (Tier 1, D7)
 │       ├── chat_input_toolbar.py # ~588 lines — find/replace bar + spell check (view only)
 │       ├── feed_tab.py           # ~387 lines — FeedTab (view only)

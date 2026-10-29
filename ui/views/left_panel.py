@@ -13,6 +13,7 @@ from gi.repository import Gtk, Gio, GLib, Gdk
 from typing import TYPE_CHECKING
 
 from utils.projects import load_members
+from utils.agent_defs import agent_slug
 from utils.icons import render_agent_icon
 from ui.views.file_tree import FileTree
 
@@ -38,9 +39,12 @@ class LeftPanel(Gtk.Box):
         # Project callback
         self._on_project_selected = on_project_selected
 
-        # Agent state — set via set_agents() after gateway connects
-        self._agent_names = {}
-        self._on_agent_selected = None
+        # Agent state — set via set_agents() after gateway connects.
+        # A set of agent:<slug> session keys; the panel derives keys from
+        # the agent names it is given (agent_slug, utils.agent_defs).
+        # _agent_display_names is key → original name for row labels.
+        self._agent_names: set[str] = set()
+        self._agent_display_names: dict[str, str] = {}
         self._agents_list_box = None
         self._agent_list_handler = None  # set via set_agent_list_handler()
 
@@ -212,13 +216,26 @@ class LeftPanel(Gtk.Box):
         self._agent_runtime_handler = handler
         self._refresh_agents_list()
 
-    def set_agents(self, agent_names, on_agent_selected):
+    def set_agents(self, agent_names) -> None:
         """
-        Populate the agents tab and register the selection callback.
-        Called by window after gateway connects and agents are discovered.
+        Populate the agents tab with the discovered agent names.
+
+        Accepts an iterable of agent names; the panel derives each agent's
+        ``agent:<slug>`` session key itself (agent_slug, utils.agent_defs).
+        A legacy {session_key: name} mapping is also accepted — its values
+        are treated as the names. Called by window after gateway connects
+        and agents are discovered.
         """
-        self._agent_names = agent_names
-        self._on_agent_selected = on_agent_selected
+        if isinstance(agent_names, dict):
+            names = list(agent_names.values())
+        else:
+            names = list(agent_names)
+        # Store what refresh needs: derived agent:<slug> keys, plus the
+        # original names for row labels.
+        self._agent_display_names = {
+            f"agent:{agent_slug(n)}": n for n in names if agent_slug(n)
+        }
+        self._agent_names = set(self._agent_display_names)
         self._refresh_agents_list()
 
     def set_on_project_opened(self, cb):
@@ -234,7 +251,7 @@ class LeftPanel(Gtk.Box):
         self._on_create_agent = cb
 
     def set_on_edit_agent(self, cb):
-        """Set callback for editing a local agent (right-click → Edit)."""
+        """Set callback for editing a local agent (double-click on its row)."""
         self._on_edit_agent = cb
 
     def set_on_delete_agent(self, cb):
@@ -408,14 +425,14 @@ class LeftPanel(Gtk.Box):
         if self._agent_list_handler and self._agent_list_handler.has_agent_mgr():
             sorted_agents = self._agent_list_handler.get_sorted_agents(project_members)
         else:
-            # Fallback: group by name, prefer :main (old behavior)
-            agents = {}
-            for session_key, name in self._agent_names.items():
-                if name not in agents:
-                    agents[name] = session_key
-                if ":main" in session_key:
-                    agents[name] = session_key
-            sorted_agents = [(sk, name, sk in project_members, sum(1 for _, n in self._agent_names.items() if n == name)) for name, sk in agents.items()]
+            # Fallback: one row per agent:<slug> key (the panel owns the key
+            # format; set_agents derives them from agent names). No session
+            # multiplexing in this path — count is 1 per key.
+            sorted_agents = [
+                (key, self._agent_display_names.get(key, key.removeprefix("agent:")),
+                 key in project_members, 1)
+                for key in sorted(self._agent_names)
+            ]
         # Append special agents (Phase 1.4) — shown even without gateway connection
         if getattr(self, '_agent_runtime_handler', None):
             for sk, name in self._agent_runtime_handler.get_special_agents().items():
@@ -439,7 +456,7 @@ class LeftPanel(Gtk.Box):
                 row = self._build_agent_row(session_key, name, in_project, session_count)
                 self._agents_list_box.append(row)
 
-        # Single-click activates (opens chat tab)
+        # Single-click activates (double-click → edit drawer for agent rows)
         self._agents_list_box.set_activate_on_single_click(False)
         self._agents_list_box.connect("row_activated", self._on_agent_row_activated)
 
@@ -578,30 +595,39 @@ class LeftPanel(Gtk.Box):
         return row
 
     def _on_agent_row_activated(self, list_box, row):
-        """Called when an agent row is clicked — open/create chat tab."""
+        """Called when a local agent row is double-clicked — open the
+        agent-edit drawer. The Create Agent card routes through the same
+        drawer in create mode; gateway rows are no-ops."""
         # Check if this is the Create Agent card
         if getattr(row, '_is_create_agent_card', False):
             if self._on_create_agent:
                 self._on_create_agent()
             return
 
-        if self._on_agent_selected is not None:
-            self._on_agent_selected(row._session_key, row._agent_name)
+        if getattr(row, '_session_key', '').startswith("agent:"):
+            if self._on_edit_agent:
+                self._on_edit_agent(row._agent_name)
 
     def _on_agent_right_click(self, gesture, n_press, x, y, session_key, name):
         """Show context menu on right-click over an agent row.
 
-        Local (special) agents get Edit/Delete. Non-agent keys (the legacy
-        gateway rows) have no menu — the session switcher is gone.
+        Local (special) agents get Delete; Edit is the row double-click.
+        Non-agent keys (the legacy gateway rows) have no menu — the session
+        switcher is gone.
         """
         # SPEC-58 §2g: gateway session switcher is gone. For an "agent:" key
-        # (local special agent) show Edit/Delete; any other key (legacy
-        # gateway rows) has no menu.
+        # (local special agent) show Delete — Edit lives on the row
+        # double-click (agent-edit drawer); any other key (legacy gateway
+        # rows) has no menu.
         if session_key.startswith("agent:"):
             self._show_local_agent_menu(gesture.get_widget(), name)
 
     def _show_local_agent_menu(self, parent: Gtk.Widget, name: str) -> None:
-        """Show Edit/Delete popover for a local (special) agent."""
+        """Show the Delete-only popover for a local (special) agent.
+
+        Edit moved off the menu — double-clicking the row opens the
+        agent-edit drawer (window.py `_open_agent_builder`).
+        """
         popover = Gtk.Popover()
         popover.set_parent(parent)
         popover.set_position(Gtk.PositionType.BOTTOM)
@@ -612,11 +638,6 @@ class LeftPanel(Gtk.Box):
         vbox.set_margin_top(6)
         vbox.set_margin_bottom(6)
 
-        edit_btn = Gtk.Button(label="Edit")
-        edit_btn.add_css_class("flat")
-        edit_btn.connect("clicked", lambda *_: self._do_edit_agent(popover, name))
-        vbox.append(edit_btn)
-
         delete_btn = Gtk.Button(label="Delete")
         delete_btn.add_css_class("flat")
         delete_btn.connect("clicked", lambda *_: self._do_delete_agent(popover, name))
@@ -624,11 +645,6 @@ class LeftPanel(Gtk.Box):
 
         popover.set_child(vbox)
         popover.popup()
-
-    def _do_edit_agent(self, popover: Gtk.Popover, name: str) -> None:
-        popover.popdown()
-        if self._on_edit_agent:
-            self._on_edit_agent(name)
 
     def _do_delete_agent(self, popover: Gtk.Popover, name: str) -> None:
         popover.popdown()

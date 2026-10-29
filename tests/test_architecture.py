@@ -121,7 +121,6 @@ def test_all_documented_public_apis_exist():
         "compute_initials",
         "get_agent_color",
         "get_sorted_agents",
-        "on_chat_clicked",
         "on_toggle_clicked",
     ]
     missing = [m for m in arch_api if not hasattr(AgentListHandler, m)]

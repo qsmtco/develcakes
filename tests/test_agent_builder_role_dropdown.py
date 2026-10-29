@@ -58,19 +58,13 @@ class StubHandler:
         return self._save_result
 
 
-@pytest.fixture
-def gtk_parent():
-    app = Gtk.Application()
-    return Gtk.ApplicationWindow(application=app)
-
-
-def _make_dlg(parent, *, roles=(), agent_def=None, is_edit=False,
+def _make_dlg(*, roles=(), agent_def=None, is_edit=False,
               save_result=("my-role", None), tool_options=()):
     handler = StubHandler(roles=roles, save_result=save_result,
                           tool_options=tool_options)
-    from ui.views.agent_builder import AgentBuilderDialog
-    dlg = AgentBuilderDialog(
-        parent=parent, handler=handler, agent_def=agent_def, is_edit=is_edit,
+    from ui.views.agent_builder import AgentBuilderWidget
+    dlg = AgentBuilderWidget(
+        handler, agent_def=agent_def, is_edit=is_edit,
     )
     return dlg, handler
 
@@ -82,17 +76,17 @@ def _builtin_agent_def(role=""):
 class TestRoleControlIsDropdown:
     """§2.5 — the Role control is a Gtk.DropDown, not a Gtk.Entry."""
 
-    def test_role_is_dropdown_not_entry(self, gtk_parent):
-        dlg, _ = _make_dlg(gtk_parent)
+    def test_role_is_dropdown_not_entry(self):
+        dlg, _ = _make_dlg()
         assert isinstance(dlg._role_dropdown, Gtk.DropDown)
         assert not hasattr(dlg, "_role_entry")
 
-    def test_rows_builtins_then_user_roles_then_sentinel(self, gtk_parent):
+    def test_rows_builtins_then_user_roles_then_sentinel(self):
         roles = [
             {"name": "Architect", "slug": "architect"},
             {"name": "Reviewer", "slug": "reviewer"},
         ]
-        dlg, _ = _make_dlg(gtk_parent, roles=roles)
+        dlg, _ = _make_dlg(roles=roles)
         assert dlg._role_labels == [
             "Supervisor", "Coder", "Debugger",
             "Architect", "Reviewer", "Create role…",
@@ -102,29 +96,29 @@ class TestRoleControlIsDropdown:
             "architect", "reviewer", "",
         ]
 
-    def test_new_agent_defaults_to_coder(self, gtk_parent):
+    def test_new_agent_defaults_to_coder(self):
         # agent_def=None (create mode without template)
-        dlg, _ = _make_dlg(gtk_parent)
+        dlg, _ = _make_dlg()
         assert dlg._get_selected_role_value() == "coder"
 
         # create mode with the handler template (role "")
-        dlg, _ = _make_dlg(gtk_parent, agent_def=_builtin_agent_def(""))
+        dlg, _ = _make_dlg(agent_def=_builtin_agent_def(""))
         assert dlg._get_selected_role_value() == "coder"
 
 
 class TestGetValuesWritesValue:
     """§2.5 — get_values() writes the dropdown's value, not its label."""
 
-    def test_returns_value_not_label(self, gtk_parent):
+    def test_returns_value_not_label(self):
         roles = [{"name": "Reviewer", "slug": "reviewer"}]
-        dlg, _ = _make_dlg(gtk_parent, roles=roles)
+        dlg, _ = _make_dlg(roles=roles)
         reviewer_idx = dlg._role_values.index("reviewer")
         dlg._role_dropdown.set_selected(reviewer_idx)
         dlg._name_entry.set_text("TestAgent")
         assert dlg.get_values()["role"] == "reviewer"
 
-    def test_returns_builtin_value(self, gtk_parent):
-        dlg, _ = _make_dlg(gtk_parent)
+    def test_returns_builtin_value(self):
+        dlg, _ = _make_dlg()
         dlg._role_dropdown.set_selected(0)  # Supervisor
         assert dlg.get_values()["role"] == "supervisor"
 
@@ -133,8 +127,8 @@ class TestSentinelOpensCreateDialog:
     """§2.5 — choosing 'Create role…' restores the previous selection and
     opens the modal Create-role dialog."""
 
-    def test_sentinel_restores_previous_and_opens_dialog(self, gtk_parent):
-        dlg, _ = _make_dlg(gtk_parent)
+    def test_sentinel_restores_previous_and_opens_dialog(self):
+        dlg, _ = _make_dlg()
         dlg._role_dropdown.set_selected(2)  # Debugger
         assert dlg._role_dropdown.get_selected() == 2
         sentinel_idx = len(dlg._role_values) - 1
@@ -147,8 +141,8 @@ class TestSentinelOpensCreateDialog:
         assert dlg._create_role_window.get_title() == "Create role"
         assert dlg._create_role_window.get_modal() is True
 
-    def test_sentinel_restores_to_coder_when_no_previous(self, gtk_parent):
-        dlg, _ = _make_dlg(gtk_parent)
+    def test_sentinel_restores_to_coder_when_no_previous(self):
+        dlg, _ = _make_dlg()
         # No prior non-sentinel change — previous defaults to Coder.
         sentinel_idx = len(dlg._role_values) - 1
         dlg._role_dropdown.set_selected(sentinel_idx)
@@ -160,9 +154,9 @@ class TestCreateDialogSubmit:
     """§2.5 — Create calls handler.save_role; success refreshes the dropdown
     and closes the dialog, error stays open with the message shown."""
 
-    def test_success_refreshes_dropdown_and_closes(self, gtk_parent):
+    def test_success_refreshes_dropdown_and_closes(self):
         role = {"name": "Reviewer", "slug": "reviewer"}
-        dlg, handler = _make_dlg(gtk_parent, roles=[role],
+        dlg, handler = _make_dlg(roles=[role],
                                  save_result=("reviewer", None))
         dlg._role_dropdown.set_selected(len(dlg._role_values) - 1)  # sentinel
         dlg._create_role_name.set_text("Reviewer")
@@ -175,8 +169,8 @@ class TestCreateDialogSubmit:
         assert dlg._role_values[-2] == "reviewer"
         assert dlg._role_values[-1] == ""
 
-    def test_error_keeps_dialog_open_and_shows_message(self, gtk_parent):
-        dlg, handler = _make_dlg(gtk_parent,
+    def test_error_keeps_dialog_open_and_shows_message(self):
+        dlg, handler = _make_dlg(
                                  save_result=(None, "Role name cannot be empty."))
         dlg._role_dropdown.set_selected(len(dlg._role_values) - 1)  # sentinel
         assert dlg._create_role_window is not None
@@ -194,15 +188,15 @@ class TestFillFormRole:
     """§2.5 — _fill_form selects the stored role; an absent stored role is
     inserted before the sentinel so edits never silently retarget."""
 
-    def test_selects_stored_role(self, gtk_parent):
+    def test_selects_stored_role(self):
         role = {"name": "Reviewer", "slug": "reviewer"}
-        dlg, _ = _make_dlg(gtk_parent, roles=[role],
+        dlg, _ = _make_dlg(roles=[role],
                            agent_def={"name": "A", "role": "reviewer"},
                            is_edit=True)
         assert dlg._get_selected_role_value() == "reviewer"
 
-    def test_inserts_unknown_role_before_sentinel(self, gtk_parent):
-        dlg, _ = _make_dlg(gtk_parent,
+    def test_inserts_unknown_role_before_sentinel(self):
+        dlg, _ = _make_dlg(
                            agent_def={"name": "A", "role": "vanished"},
                            is_edit=True)
         assert dlg._get_selected_role_value() == "vanished"
@@ -214,9 +208,9 @@ class TestSaveButtonRoleCountsAsPrompt:
     """§2.5 — a non-sentinel role satisfies has_prompts even with an empty
     System Prompts checklist."""
 
-    def test_role_alone_satisfies_has_prompts(self, gtk_parent):
+    def test_role_alone_satisfies_has_prompts(self):
         tool_opts = [{"name": "read_file", "description": "Read a file"}]
-        dlg, _ = _make_dlg(gtk_parent, tool_options=tool_opts)
+        dlg, _ = _make_dlg(tool_options=tool_opts)
         # Selected role defaults to coder (non-sentinel).
         assert dlg._get_selected_role_value() == "coder"
         assert dlg._prompt_checks == {}  # no prompt checkboxes available

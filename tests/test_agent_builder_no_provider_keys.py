@@ -39,8 +39,8 @@ class StubHandler:
 
 
 def _make_dlg(agent_def=None):
-    from ui.views.agent_builder import AgentBuilderDialog
-    return AgentBuilderDialog(parent=None, handler=StubHandler(), agent_def=agent_def)
+    from ui.views.agent_builder import AgentBuilderWidget
+    return AgentBuilderWidget(StubHandler(), agent_def=agent_def)
 
 
 class TestValidateAgentDef:
