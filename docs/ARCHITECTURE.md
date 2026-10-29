@@ -933,22 +933,9 @@ def on_prompt_activated(filepath: str):   # load + fire on_prompt_loaded callbac
 
 **ALL-branch room addressing (SPEC-39):** When the project bar is ALL (`get_solo_target` returns `None`) and the text is not a slash command or an inline `@` mention, `on_send` asks `resolve_room_addressee` on a daemon worker thread; delivery happens through `GLib.idle_add` (one-shot returning `False`). The choice is one member session key or `all`. `all` (or a JEV failure/unknown choice) is the current fan-out. A single-member choice sends the raw text only to that member via `record_room_line`-paired `mark_room_turn`; every other member gets a `"[room] PM: ..."` user line through `record_room_line` and does not start a turn. A solo target skips the decision.
 
-**Key setters:** `set_gateway_client()`, `set_project_handler()`, `set_command_handler()`, `set_chat_render_handler()`, `set_agent_runtime_handler()`, `set_agent_manager()`, `set_on_forward_message()`, `set_on_send_initiated()`, `set_on_res_confirmed()`, `set_on_activity_bubble()`
+**Key setters:** `set_chat_render_handler()`, `set_agent_runtime_handler()`, `set_on_agent_response()`, `set_on_res_confirmed()`, `set_project_handler()`, `set_command_handler()`, `set_agent_manager()`
 
-**Bug fix (Phase 1 of SPEC-smarter-chat-ux) — missing message recovery:**
-
-New state variables:
-- `_assistant_text_buffer[session_key] → str`: last assistant text per session (populated by `_buffer_assistant_text()` callback from ActivityHandler)
-- `_chat_final_rendered[session_key] → bool`: True when a final response has rendered — prevents double-render. Cleared on each new agent round via `_clear_render_guard()`.
-
-New methods:
-- `_buffer_assistant_text(session_key, text)`: callback target for ActivityHandler's `set_on_assistant_buffer()` — populates `_assistant_text_buffer`
-- `_clear_render_guard(session_key)`: callback target for ActivityHandler's `set_on_agent_start()` — clears `_chat_final_rendered` so subsequent responses render. Receives RAW `session_key` from the gateway event (not resolved via `_active_session()`).
-- `_handle_lifecycle_completed(session_key, text)`: fallback render path — called when ActivityHandler fires lifecycle end/error but no chat final has rendered; resolves project tab via `agent_to_project` routing table (same pattern as `on_chat_event`), then renders buffered assistant text via `_handle_final_response()` with resolved `target_tab` and original `session_key`. Guarded by `_chat_final_rendered`.
-- `_render_activity_bubble(bubble)`: called by ActivityHandler via `set_on_activity_bubble()` — dispatches to `_render_activity_bubble_impl` on main thread. Activity bubbles are NOT guarded by `_chat_final_rendered`.
-- `_render_activity_bubble_impl(session_key, text)`: thread-unsafe internal render — resolves project tab via `agent_to_project` routing table when no direct tab exists, then calls `render_sync(role="System", text=..., tight=True)`, appends to chat box, scrolls.
-
-**Architecture:** ChatHandler owns all render decisions. ActivityHandler only tracks state. The lifecycle-completed callback is the fallback path when the gateway sends `stream=assistant` text but the corresponding `chat final` event carries no message body. The render guard is cleared when a new agent round starts (lifecycle phase=start) so that multiple responses per session work correctly. Activity bubbles are separate from the conversation message flow — they don't interact with `_chat_final_rendered`.
+**Missing message recovery (SPEC-smarter-chat-ux Phase 1) — REMOVED in SPEC-58 §2c.** The assistant-text buffer, the render guard, and the activity-bubble path were deleted with the Pango pipeline; none of the state, methods, or ActivityHandler callback slots below exist in the tree, and ActivityHandler renders to the activity pill (§3.23), not to chat bubbles. This block is retained for history only. (History: `_assistant_text_buffer[session_key]` held the last assistant text per session, populated by `_buffer_assistant_text()` via ActivityHandler's `set_on_assistant_buffer()`; `_chat_final_rendered[session_key]` prevented double-renders and was cleared each new agent round by `_clear_render_guard()` via `set_on_agent_start()`; `_handle_lifecycle_completed()` was the ActivityHandler fallback render — resolve the project tab via the `agent_to_project` routing table, then render the buffered text via `_handle_final_response()`; `_render_activity_bubble()` / `_render_activity_bubble_impl()` dispatched ActivityHandler bubbles to the main thread and appended them to the chat box as `role="System"` rows, unguarded by the render guard and separate from the conversation message flow.)
 
 ### 3.14a `utils/escaping.py` — Pango-Aware XML Escape
 
@@ -1055,7 +1042,7 @@ handler.render_sync(role, text, session_key=None)
 **Row pipeline (post-SPEC-58):**
 1. `_compose_text(text, role)` — whole-message ```html / ```live fences →
    (live_payload, html_fragment); otherwise markdown → HTML
-   (`render/markdown.py`) → nh3 sanitize, fail-closed, always in the path
+   (`render/html.py`) → nh3 sanitize, fail-closed, always in the path
 2. `ChatSurface.append_message(role, html_fragment, agent_name, agent_color,
    ts)` — display-keyed windowed deque; agent_color resolved via
    `_resolve_agent_color` (SPEC-14 §2b.2) and frozen into the row
@@ -1157,9 +1144,10 @@ event card factories `create_file_card` / `create_edit_card` /
 red) with `escape_for_pango()` and selectable content; a shared
 `_make_block_header()` factory served `_build_code_segment` /
 `_build_terminal_segment`. The Phase 5 "Project Solo DM" notes that followed
-here described live `ProjectHandler` behavior and live with their owners —
-see §3.13 (`_solo_targets`, `get_solo_target`, `set_solo_target`,
-`show_project_menu`) and the SPEC-39 ALL-branch notes in §3.10/§3.13.)
+here described live solo-target behavior and live with their owners —
+see §3.19 (`ProjectHandler._solo_targets`, `get_solo_target`,
+`set_solo_target`), §3.21 (`session_menu.show_project_menu`), and §3.14
+(the SPEC-39 ALL-branch room-addressing notes in ChatHandler).)
 
 
 ### 3.14j (removed) `ui/views/activity_drawer.py` — Activity Drawer
@@ -3421,6 +3409,17 @@ User types message in project tab and clicks Send
 
 ### 4.5 Project Group Chat — Response Routing (Phase 3)
 
+**Removed in SPEC-58 §2c** — ChatHandler's gateway-event methods
+(`on_chat_event`, `_handle_streaming_delta`, `_handle_final_response`) were
+deleted with the Pango pipeline; no gateway chat-event handler remains in the
+tree. Streaming today is driven by the agent runtime path —
+`ui/agent_runtime/turn_ui.py` calls `ChatRenderHandler.start_streaming` /
+`update_streaming` / `end_streaming` (§3.14d) — and `update_streaming`
+REPLACES the buffer with each gateway delta (deltas arrive as full cumulative
+text; the buffer is never appended to). This section is retained for history
+only. (History: the diagram below shows the former gateway-event routing;
+non-"chat" events and the Phase 4 card pipeline are covered in §4.6.)
+
 ```
 Gateway sends events → ChatHandler.on_chat_event(event, payload)
 
@@ -3429,7 +3428,7 @@ Gateway sends events → ChatHandler.on_chat_event(event, payload)
       → ChatRenderHandler.start_streaming(session_key)   # first delta only
         → buffers deltas (no pending bubble; the HTML surface renders rows atomically)
       → ChatRenderHandler.update_streaming(session_key, delta_text)
-        → appends the gateway's cumulative delta text (no local accumulation)
+        → replaces the buffer with the gateway's cumulative delta text (no local accumulation)
 
   event="chat", state="final":
     → _handle_final_response(tab, session_key, final_text)

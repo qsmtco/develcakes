@@ -27,7 +27,7 @@ CrabCakes is built for developers who want AI agents that participate in real pr
 |---------|--------------------------|-----------|
 | **Project tabs** | No project concept | Open multiple projects as tabs; each has its own team, feed, and chat |
 | **File access** | Upload files manually | Agents read/write files directly from your project directory |
-| **Code review** | Copy-paste diffs | Enforcement results as feed cards with accept/reject, plus standalone git-backed revert |
+| **Code review** | Copy-paste diffs | File-change feed cards with accept/reject, plus standalone git-backed revert |
 | **Agent collaboration** | One assistant | Multiple agents (Coder, Debugger, gateway agents) work in the same project |
 | **Feed cards** | Linear chat | Structured feed cards for audit reports, file diffs, tool calls, and task assignments |
 | **Multi-agent teams** | Not supported | Add/remove agents to project teams; fan-out messages to all members |
@@ -163,8 +163,8 @@ Here's a quick tour of major features:
 - Messages fan out to all team members; responses route back to the project tab
 
 ### Code review
-- Agents' writes produce enforcement results; problems surface as feed cards
-- Accept or reject each change right on its feed card
+- Agent file changes arrive as feed cards — these cards are the accept/reject surface
+- Enforcement results appear in those cards' text but are not themselves actionable
 - File diffs can also be reverted to an earlier commit from the file drawer
   (`ProjectHandler.revert_file_to_sha`; see knowledge/projects.md,
   "Checkpoint-Based Review — removed")
