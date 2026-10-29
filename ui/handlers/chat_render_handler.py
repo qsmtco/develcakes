@@ -42,8 +42,7 @@
 #         surface MOUNTED in that key's box (SP5a FIX 10: project close
 #         kills the agent-keyed surfaces mounted in the project box) and
 #         tombstones both keys — late renders are dropped, not resurrected.
-#   render_event_card / render_task_card
-#       → UNCHANGED Pango cards (not transcript sites; R3 catalog untouched).
+#       (The Pango event/task/diff cards went with SPEC-58 §2c.)
 
 import html as _html
 import logging
@@ -172,12 +171,14 @@ class ChatRenderHandler:
     Feature parity (ruling R2 — dispositions):
       DROPPED for Phase A (documented): forward buttons, copy buttons,
         agent color tint, per-row timestamp header, tight grouping, and the
-        render-time feed-card registry. FORWARD via the toolbar still works;
-        the registry retires with the bubble pipeline in SP5. (The
-        text-extraction path that fed it was deleted by SPEC-45.)
+        render-time feed-card registry. The whole forward plumbing (the
+        on_forward_click parameter and the per-row buttons) is GONE since
+        SPEC-58 §2c — ForwardHandler is deleted and there is no popover
+        left to open. The toolbar's own Forward flow never used this
+        handler.
       KEPT: reentrancy guard, error fallback (escaped raw text — still
-        sanitized), buffered streaming with a final atomic row, Pango
-        event/task/diff cards (render_event_card — not transcript sites).
+        sanitized), buffered streaming with a final atomic row. There are
+        no Pango cards: every reply is a row on the HTML surface.
 
     Args:
         GLib_module: gi.repository.GLib or None — for thread-safe GTK calls
@@ -190,7 +191,6 @@ class ChatRenderHandler:
         # box; ruling R1 — the surface owns the widget tree). Lazily
         # created; destroy via close_session.
         self._surfaces: dict = {}
-        self._on_forward_message = None   # set via set_on_forward_message()
         # SPEC-19 SP4: the live-bridge approver, threaded into every surface
         # created by the factory. None until window wires it (setter-injection
         # — no ARH/feed import here).
@@ -252,8 +252,8 @@ class ChatRenderHandler:
         create it asks the getter for the session's chat box and packs the
         surface in. One wiring point (main_content.set_chat_render_handler);
         no window.py edits; SP5c's bubble-pipeline deletion cannot disturb it.
-        (SP5c-2 Phase A note: the bubble pipeline's builders now live in
-        ui/views/event_cards.py; this handler imports from there.)
+        (Its builders — relocated to ui/views/event_cards.py in SP5c-2 —
+        were deleted entirely in SPEC-58 §2c.)
 
         FIX 10 (round 2): a NEW getter is the wiring signal of a reopened
         tab/project — r3 FIX 3 REMOVES the global tombstone clear() that
@@ -669,16 +669,15 @@ class ChatRenderHandler:
 
     # ── Async (thread-safe) ──────────────────────────────────────────────
 
-    def render_async(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None, agent_name: str = None, agent_color: str = None, mount_key: str | None = None):
+    def render_async(self, role: str, text: str, session_key: str, on_bubble_ready, on_error=None, agent_name: str = None, agent_color: str = None, mount_key: str | None = None):
         """
         Compose HTML off-thread, append to the session surface on main.
 
         RULING R1: on_bubble_ready fires with None — the surface already
         displayed the message. Callers' existing None-guards are verified.
-        on_forward_click is accepted for signature compat and ignored
-        (dropped for Phase A, ruling R2). agent_color is accepted from the
-        caller and, when absent, resolved via _resolve_agent_color (SPEC-14
-        §2b.2 — revived).
+        (on_forward_click was removed with the forward plumbing — SPEC-58
+        §2c.) agent_color is accepted from the caller and, when absent,
+        resolved via _resolve_agent_color (SPEC-14 §2b.2 — revived).
 
         SPEC-12 BUG#4+#10: pass mount_key for any non-project caller; the
         surface cache is display-keyed (mount_key or session_key). SP4c
@@ -747,24 +746,16 @@ class ChatRenderHandler:
 
         self._pool.submit(_compose_off_thread)
 
-    def render(self, role: str, text: str, session_key: str, on_bubble_ready, on_forward_click=None, on_error=None):
+    def render(self, role: str, text: str, session_key: str, on_bubble_ready, on_error=None):
         """Legacy async entry — same surface path as render_async (R1:
         on_bubble_ready fires with None)."""
         self.render_async(
             role, text, session_key,
             on_bubble_ready=on_bubble_ready,
-            on_forward_click=on_forward_click,
             on_error=on_error,
         )
 
     # ── Sync (main thread only) ──────────────────────────────────────────
-
-    def set_on_forward_message(self, cb):
-        """Set callback for forward button: cb(text, anchor_widget).
-
-        Kept: the FORWARD toolbar button still works in Phase A (ruling R2
-        disposition (b)) even though per-row forward buttons are dropped."""
-        self._on_forward_message = cb
 
     def set_live_bridge_approver(self, approver) -> None:
         """SPEC-19 SP4: late-bind the live-bridge approver (house setter-
@@ -828,7 +819,7 @@ class ChatRenderHandler:
         # Tier 3: deterministic default
         return "#6366f1"
 
-    def render_sync(self, role: str, text: str, session_key: str = None, on_forward_click=None, forwarded_from: str = None, agent_name: str = None, tab_key: str = None, mount_key: str | None = None):
+    def render_sync(self, role: str, text: str, session_key: str = None, forwarded_from: str = None, agent_name: str = None, tab_key: str = None, mount_key: str | None = None):
         """
         Append to the session surface synchronously. Returns None (R1).
 
@@ -850,7 +841,7 @@ class ChatRenderHandler:
             None — ALWAYS (ruling R1: the surface owns the widget tree;
             callers' `if bubble is not None` guards skip the append).
         """
-        _ = (on_forward_click, forwarded_from, tab_key)  # compat; dropped for Phase A
+        _ = (forwarded_from, tab_key)  # legacy compat markers; ignored
         if agent_name is None and role == "Agent" and session_key and self._main_content is not None:
             agent_mgr = getattr(self._main_content, '_agent_mgr', None)
             if agent_mgr is not None:
@@ -990,151 +981,9 @@ class ChatRenderHandler:
 
         self._dispatch(_finalize)
 
-    def render_event_card(self, event_type: str, container: Gtk.Box, session_key: str = None, **kwargs):
-        """
-        Render a special event card into container.
-
-        SPEC-06 SP4: UNCHANGED — Pango event cards are not transcript sites
-        (ruling R2/R3; architecture keeps cards Pango in Phase A).
-
-        Args:
-            event_type: "file_read" | "edit_proposal" | "tool_call" | "error" | "thinking"
-            container: Parent box to append the card widget to.
-            session_key: Optional session key for agent name lookup (thinking events).
-            kwargs: Per-event-type fields:
-                file_read:   file_path, snippet="", line_range=""
-                edit_proposal: file_path, diff=""
-                tool_call:   tool_name, detail=""
-                error:       error_msg
-                thinking:    thought_text
-        """
-        from ui.views.event_cards import (
-            build_role_bubble,
-            create_file_card,
-            create_edit_card,
-            create_tool_card,
-            create_error_bubble,
-        )
-
-        if event_type == "file_read":
-            card = create_file_card(kwargs.get("file_path", ""),
-                                   kwargs.get("snippet", ""),
-                                   kwargs.get("line_range", ""))
-        elif event_type == "edit_proposal":
-            card = create_edit_card(kwargs.get("file_path", ""),
-                                    kwargs.get("diff", ""))
-        elif event_type == "tool_call":
-            card = create_tool_card(kwargs.get("tool_name", ""),
-                                    kwargs.get("detail", ""))
-        elif event_type == "error":
-            card = create_error_bubble(kwargs.get("error_msg", ""))
-        elif event_type == "thinking":
-            # Fall back to plain text bubble for thoughts
-            text = kwargs.get("thought_text", "")
-            # Look up agent name for header
-            agent_name = None
-            if session_key and self._main_content is not None:
-                agent_mgr = getattr(self._main_content, '_agent_mgr', None)
-                if agent_mgr is not None:
-                    agent_name = agent_mgr.get_name(session_key)
-            card = build_role_bubble("Agent", text, agent_name=agent_name)
-        elif event_type == "task":
-            card = self.render_task_card(
-                action=kwargs.get("action", ""),
-                task_id=kwargs.get("id", ""),
-                title=kwargs.get("title", ""),
-                status=kwargs.get("status", ""),
-                priority=kwargs.get("priority", ""),
-                assigned_to=kwargs.get("assigned_to", ""),
-            )
-        elif event_type == "diff_summary":
-            from ui.views.diff_card import build_diff_summary_card
-            parsed_diff = kwargs.get("parsed_diff")
-            on_accept_all = kwargs.get("on_accept_all")
-            on_reject_all = kwargs.get("on_reject_all")
-            card = build_diff_summary_card(
-                parsed_diff=parsed_diff,
-                on_accept_all=on_accept_all,
-                on_reject_all=on_reject_all,
-            )
-        elif event_type == "diff_file":
-            from ui.views.diff_card import build_file_diff_card
-            file_diff = kwargs.get("file_diff")
-            on_accept_file = kwargs.get("on_accept_file")
-            on_reject_file = kwargs.get("on_reject_file")
-            card = build_file_diff_card(
-                file_diff=file_diff,
-                on_accept_file=on_accept_file,
-                on_reject_file=on_reject_file,
-            )
-        elif event_type == "widget":
-            # Pass-through for pre-built widgets
-            card = kwargs.get("widget")
-        else:
-            # Unknown event type — ignore silently
-            return
-
-        def _append():
-            container.append(card)
-            # MICRO-SMART-SCROLL (priority fix, Finding 3 sibling): the
-            # forced scroll_chat_to_bottom was REMOVED — the surface now
-            # self-heals its own scroll; a forced scroll here races it.
-            # Scrolling is USER intent (button/API) only.
-
-        self._dispatch(_append)
-
-
-    def render_task_card(
-        self,
-        action: str,
-        task_id: str,
-        title: str,
-        status: str,
-        priority: str,
-        assigned_to: str,
-    ) -> Gtk.Widget | None:
-        """Render a task card bubble (created/updated)."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.set_margin_start(8)
-        box.set_margin_end(8)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
-
-        # Title label
-        title_label = Gtk.Label()
-        # MED-9: xml_template escapes interpolated values to prevent Pango markup injection
-        title_label.set_markup(xml_template(
-            "<b>Task {action}:</b> {task_id}",
-            action=action.capitalize(),
-            task_id=task_id,
-        ))
-        title_label.set_xalign(0)
-        box.append(title_label)
-
-        # Task title
-        if title:
-            desc_label = Gtk.Label(label=title)
-            desc_label.set_xalign(0)
-            desc_label.set_selectable(True)
-            box.append(desc_label)
-
-        # Status + priority row
-        meta_label = Gtk.Label()
-        parts = [s for s in [status, priority] if s]
-        # MED-9: xml_template escapes interpolated values to prevent Pango markup injection
-        meta_label.set_markup(xml_template("{parts}", parts=" | ".join(parts)))
-        meta_label.set_xalign(0)
-        box.append(meta_label)
-
-        # Assigned-to
-        if assigned_to:
-            at_label = Gtk.Label()
-            # MED-9: xml_template escapes interpolated values to prevent Pango markup injection
-            at_label.set_markup(xml_template("→ {assigned_to}", assigned_to=assigned_to))
-            at_label.set_xalign(0)
-            box.append(at_label)
-
-        return box
+    # (SPEC-58 §2c: the Pango card path and the diff_summary / diff_file
+    # branches were deleted with event_cards.py — no GTK widget is appended
+    # to a chat box anymore.)
 
     def _dispatch(self, fn):
         """Call fn on the GTK main thread.

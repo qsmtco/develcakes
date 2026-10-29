@@ -237,11 +237,12 @@ class FeedTab(Gtk.Box):
         if self._html_surface is not None:
             self._html_surface.remove(card_id)
 
-    # ── Compatibility API (WU 10 purge survivors, SPEC-41 §2 Phase 1(a)) ──
-    # The GTK card list was removed in WU 10. These five methods keep the
-    # pre-purge signatures so callers that still speak the old API do not
-    # raise AttributeError. Only `remove_card` does work: it forwards to the
+    # ── Compatibility API (WU 10 purge survivor) ─────────────────────────
+    # `remove_card` keeps the pre-purge signature so callers that still
+    # speak the old API do not raise AttributeError; it forwards to the
     # document row so a project switch/close actually clears the surface.
+    # (The widget no-ops — append_card/prepend_card/replace_card/
+    # get_card_container/is_above_viewport — were deleted in SPEC-58 §2h.)
 
     def remove_card(self, card_id: str) -> None:
         """Compat no-op: the feed is a document. Removes the row if attached.
@@ -251,18 +252,6 @@ class FeedTab(Gtk.Box):
         AttributeError.
         """
         self.remove_card_html(card_id)
-
-    def append_card(self, widget, card_id: str) -> None:
-        """Compat no-op: widgets are not part of the document feed."""
-
-    def prepend_card(self, widget, card_id: str) -> None:
-        """Compat no-op: widgets are not part of the document feed."""
-
-    def replace_card(self, card_id: str, widget) -> None:
-        """Compat no-op: widgets are not part of the document feed."""
-
-    def get_card_container(self) -> Gtk.Box:
-        """Compat no-op: the document has no GTK container. Returns None."""
 
     def set_html_cards(self, cards: list) -> None:
         if self._html_surface is not None:
@@ -326,16 +315,6 @@ class FeedTab(Gtk.Box):
         if self._html_surface is not None:
             return self._html_surface._doc_near_bottom
         return True
-
-    def is_above_viewport(self, widget) -> bool:
-        """Always False: card eviction is a GTK-list concept (WU 10 purge).
-
-        The only caller was the GTK eviction branch, which is dead on the
-        HTML surface: the document owns its own rows and there is no GTK
-        container geometry to measure against. False is the fail-safe answer
-        — "not above the viewport" means "never evict".
-        """
-        return False
 
     def update_batch_bar(self, pending_count: int) -> None:
         """

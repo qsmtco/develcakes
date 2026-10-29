@@ -1,5 +1,9 @@
 # tests/test_diff_card.py
 # Tests for ui/views/diff_card.py
+#
+# SPEC-58 §2c/§2i: the build_file_diff_card / build_diff_summary_card
+# builders are deleted (the drawer imports only get_lang_from_path and
+# render_diff_hunks); their test classes went with them.
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -7,12 +11,10 @@ from gi.repository import Gtk
 
 import pathlib
 
-from utils.diff_parser import FileDiff, ParsedDiff, DiffHunk, DiffLine
+from utils.diff_parser import DiffHunk, DiffLine
 from ui.views.diff_card import (
     get_lang_from_path,
     render_diff_hunks,
-    build_file_diff_card,
-    build_diff_summary_card,
 )
 
 
@@ -148,83 +150,6 @@ class TestRenderDiffHunks:
         assert isinstance(result, Gtk.Box)
         children = list(result)
         assert len(children) == 2
-
-
-class TestBuildFileDiffCard:
-    """build_file_diff_card returns a card widget (smoke test)."""
-
-    def _make_diff(self, is_binary=False, additions=1, deletions=1) -> FileDiff:
-        hunk = DiffHunk(
-            header="@@ -1 +1 @@",
-            old_start=1,
-            new_start=1,
-            lines=[DiffLine(type="add", content="+new", old_line_no=None, new_line_no=1)],
-        )
-        return FileDiff(
-            display_path="test.py",
-            old_path="a/test.py",
-            new_path="b/test.py",
-            is_new=False,
-            is_deleted=False,
-            is_renamed=False,
-            is_binary=is_binary,
-            additions=additions,
-            deletions=deletions,
-            hunks=[hunk],
-        )
-
-    def test_build_file_diff_card_returns_box(self):
-        card = build_file_diff_card(self._make_diff())
-        assert isinstance(card, Gtk.Box)
-        assert "diff-card" in card.get_css_classes()
-
-    def test_build_file_diff_card_binary(self):
-        """Binary diffs get a text label instead of hunks."""
-        card = build_file_diff_card(self._make_diff(is_binary=True))
-        assert isinstance(card, Gtk.Box)
-
-    def test_build_file_diff_card_with_callbacks(self):
-        """Accept/reject callbacks don't crash."""
-        def on_accept(fp):
-            pass
-        card = build_file_diff_card(self._make_diff(), on_accept_file=on_accept)
-        assert isinstance(card, Gtk.Box)
-
-
-class TestBuildDiffSummaryCard:
-    """build_diff_summary_card returns a card widget (smoke test)."""
-
-    def _make_parsed_diff(self) -> ParsedDiff:
-        hunk = DiffHunk(
-            header="@@ -1 +1 @@",
-            old_start=1,
-            new_start=1,
-            lines=[DiffLine(type="add", content="+new", old_line_no=None, new_line_no=1)],
-        )
-        f = FileDiff(
-            display_path="test.py",
-            old_path="a/test.py",
-            new_path="b/test.py",
-            is_new=False,
-            is_deleted=False,
-            is_renamed=False,
-            is_binary=False,
-            additions=1,
-            deletions=0,
-            hunks=[hunk],
-        )
-        return ParsedDiff(summary="1 file changed", files=[f], total_additions=1, total_deletions=0)
-
-    def test_summary_card_returns_box(self):
-        card = build_diff_summary_card(self._make_parsed_diff())
-        assert isinstance(card, Gtk.Box)
-        assert "diff-card" in card.get_css_classes()
-
-    def test_summary_card_with_callbacks(self):
-        def on_accept():
-            pass
-        card = build_diff_summary_card(self._make_parsed_diff(), on_accept_all=on_accept)
-        assert isinstance(card, Gtk.Box)
 
 
 # ═══════════════════════════════════════════════════════════════════════

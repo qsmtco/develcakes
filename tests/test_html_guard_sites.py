@@ -404,17 +404,10 @@ class TestRenderHandlerAppendsArePipelineSanitized:
         assert "<script>" not in received["html"]
         assert received["html"].startswith("<p>")  # sanitized pipeline output
 
-    def test_event_cards_pango_guard_witness(self):
-        """Catalog entry 5 (presence witness): the non-converted Pango
-        surface's parse_markup guard is still in event_cards.py. The deep
-        pins (fallback text, try-block placement, label properties) live in
-        TestEventCardsCodeLabelGuard (tests/test_pango_guard_sites.py) —
-        reference, don't duplicate."""
-        from ui.views import event_cards
-        src = inspect.getsource(event_cards)
-        assert "Pango.parse_markup(code_markup, -1" in src, (
-            "event_cards code-label Pango guard missing"
-        )
+    # (Catalog entry 5's presence witness — event_cards' code-label Pango
+    # guard — was dropped in SPEC-58 §2i: ui/views/event_cards.py is deleted
+    # and there is no Pango surface left to inspect. The surviving HTML
+    # surface's guards are pinned by the classes above.)
 
 
 # ── Red-first harness (mutation demo documented in the phase report) ──────

@@ -4,13 +4,18 @@
 # Owns: message sending, project fan-out, incoming message routing, tab switching.
 # Does NOT own: gateway connection lifecycle, project state, STT, prompt selection.
 #
-# Thread safety: on_chat_event() is called from the gateway background thread.
-# All GTK calls (switch_to_tab, get_chat_box) MUST
-# be dispatched via GLib.idle_add(). The handler receives GLib as a constructor
-# argument for this purpose.
+# Thread safety: the public send path may be called from background threads.
+# All GTK calls (switch_to_tab, get_chat_box) MUST be dispatched via
+# GLib.idle_add(). The handler receives GLib as a constructor argument for
+# this purpose.
 #
 # If GLib is None (e.g. in tests), GTK calls are made directly — only safe
 # when the caller is already on the main thread.
+#
+# SPEC-58 §2c: the gateway event cluster (on_chat_event, the streaming/
+# final/special handlers, the assistant-text buffer and its render guard)
+# is deleted. Local replies render through AgentRuntimeHandler and
+# ChatRenderHandler.render_sync / render_async.
 
 from typing import Callable
 
@@ -22,11 +27,11 @@ _logger = logging.getLogger(__name__)
 
 class ChatHandler:
     """
-    Handles all chat-related logic: sending, fan-out, and routing responses.
+    Handles all chat-related logic: sending, fan-out, and tab switching.
 
-    This handler is thread-aware: its public methods may be called from
-    background threads (gateway client thread). GTK operations are dispatched
-    via GLib.idle_add when a GLib module is provided.
+    This handler is thread-aware: its public send methods may be called
+    from background threads. GTK operations are dispatched via GLib.idle_add
+    when a GLib module is provided.
 
     Args:
         main_content:       MainContent instance — for tab ops and input access
@@ -49,16 +54,12 @@ class ChatHandler:
         self._GLib = GLib_module
         self._project_handler = None   # injected via set_project_handler()
         self._chat_render_handler = None  # injected via set_chat_render_handler()
-        self._on_forward_message = None   # injected via set_on_forward_message()
         self._command_handler = None     # injected via set_command_handler() — for slash commands
         self._pending_req_id: str | None = None  # tracks last sent req_id for res correlation
         self._on_agent_response: Callable[[str, str, str | None], None] | None = None  # agent response hook (Phase 6.2)
         self._on_res_confirmed: Callable[[str], None] | None = None  # pre-flight confirm via res
         self._agent_runtime_handler = None  # injected via set_agent_runtime_handler()
         self._agent_mgr = None  # injected via set_agent_manager() after gateway connect
-        # Bug fix: state for missing message recovery (Phase 1 of SPEC-smarter-chat-ux)
-        self._assistant_text_buffer: dict[str, str] = {}  # session_key → last assistant text
-        self._chat_final_rendered: dict[str, bool] = {}  # session_key → True when final rendered (guard)
 
     def set_chat_render_handler(self, handler):
         """"Inject ChatRenderHandler. Called by window.py._build()."""
@@ -69,13 +70,6 @@ class ChatHandler:
         self._agent_runtime_handler = handler
 
     # ── Public API ───────────────────────────────────────────────────────────
-
-    def set_on_forward_message(self, cb):
-        """Set callback for forward button: cb(text, anchor_widget)."""
-        self._on_forward_message = cb
-        # Propagate to render handler so streaming final bubbles also get the button
-        if self._chat_render_handler is not None:
-            self._chat_render_handler.set_on_forward_message(cb)
 
     def set_on_agent_response(self, cb: Callable[[str, str, str | None], None]) -> None:
         """Set callback for agent response command parsing hook (Phase 6.2).
@@ -95,49 +89,6 @@ class ChatHandler:
             return
         if self._on_res_confirmed is not None:
             self._on_res_confirmed(session_key)
-
-    def _buffer_assistant_text(self, session_key: str, text: str):
-        """Buffer assistant text from ActivityHandler for missing-message recovery.
-
-        Called by ActivityHandler's on_assistant_buffer callback after every
-        stream=assistant event. ChatHandler uses this to recover when a chat
-        final arrives with no message body.
-        """
-        self._assistant_text_buffer[session_key] = text
-
-    def _clear_render_guard(self, session_key: str):
-        """Clear the render guard for a session — called when a new agent round starts.
-
-        ActivityHandler calls this via set_on_agent_start when lifecycle phase=start
-        fires. Without this cleanup, the guard blocks ALL subsequent responses
-        for the same session after the first render.
-        """
-        self._chat_final_rendered.pop(session_key, None)
-
-    def _handle_lifecycle_completed(self, session_key: str, buffered_text: str):
-        """Render fallback bubble when lifecycle ended without a chat final.
-
-        Called by ActivityHandler's on_lifecycle_completed callback when the agent
-        round-trip ends (phase=end or phase=error) but no chat final event with
-        a message has arrived yet.
-
-        Architecture: only one render per session. Uses _chat_final_rendered
-        guard to prevent double-render. All rendering lives in ChatHandler.
-        """
-        if not session_key or not buffered_text:
-            return
-        # Guard: do not double-render if chat final already handled this session.
-        if self._chat_final_rendered.get(session_key):
-            return
-        _logger.info("[fallback] Rendering fallback for session=%r (lifecycle ended)", session_key)
-        # Resolve the project tab for this agent (mirrors on_chat_event routing).
-        project_name = None
-        if self._agent_to_project is not None:
-            project_name = self._agent_to_project.get_project(session_key)
-        target_tab = f"project:{project_name}" if project_name else session_key
-        self._dispatch(lambda t=target_tab, sk=session_key, txt=buffered_text: (
-            self._handle_final_response(t, sk, txt)
-        ))
 
     def set_project_handler(self, handler):
         """Inject ProjectHandler. Called by window.py._build()."""
@@ -297,7 +248,6 @@ class ChatHandler:
                                 self._chat_render_handler.render_async(
                                     "You", echo_text, session_key,
                                     on_bubble_ready=_on_bubble,
-                                    on_forward_click=self._on_forward_message,
                                     agent_name="You",
                                     mount_key=result.forward_to,
                                 )
@@ -339,7 +289,6 @@ class ChatHandler:
                                 self._chat_render_handler.render_async(
                                     "You", echo_text, session_key,
                                     on_bubble_ready=_on_bubble,
-                                    on_forward_click=self._on_forward_message,
                                     agent_name="You",
                                     mount_key=session_key,
                                 )
@@ -376,7 +325,6 @@ class ChatHandler:
                         self._chat_render_handler.render_async(
                             "You", text, session_key,
                             on_bubble_ready=_on_bubble,
-                            on_forward_click=self._on_forward_message,
                             agent_name="You",
                             mount_key=session_key,
                         )
@@ -422,7 +370,6 @@ class ChatHandler:
                             self._chat_render_handler.render_async(
                                 "You", echo_text, session_key,
                                 on_bubble_ready=_on_bubble,
-                                on_forward_click=self._on_forward_message,
                                 agent_name="You",
                                 mount_key=session_key,
                             )
@@ -448,7 +395,6 @@ class ChatHandler:
                             self._chat_render_handler.render_async(
                                 "You", echo_text, session_key,
                                 on_bubble_ready=_on_bubble,
-                                on_forward_click=self._on_forward_message,
                                 agent_name="You",
                                 mount_key=session_key,
                             )
@@ -473,7 +419,6 @@ class ChatHandler:
                     self._chat_render_handler.render_async(
                         "You", text, session_key,
                         on_bubble_ready=_on_bubble,
-                        on_forward_click=self._on_forward_message,
                         agent_name="You",
                         mount_key=session_key,
                     )
@@ -612,221 +557,6 @@ class ChatHandler:
                 self._send_local(session_key, text)
         self._dispatch(_show_and_send)
         buf.set_text("")
-
-    def on_chat_event(self, event: str, payload: dict):
-        """
-        Handle incoming gateway events.
-
-        Event types:
-          - "chat" (delta)   → update streaming bubble
-          - "chat" (final)   → end streaming + render final bubble
-          - Other events      → ignored
-
-        Routing logic (for chat events):
-        - If the sending agent is a known project member, switch to and display
-          in the project tab.
-        - Otherwise, switch to and display in the agent's own tab.
-
-        Called from: gateway background thread. GTK calls are dispatched via
-        GLib.idle_add when available.
-        """
-        session_key = payload.get("sessionKey", "") or ""
-        project_name = self._agent_to_project.get_project(session_key)
-        # Route to project tab if agent is a member, otherwise to their personal tab.
-        # Project tab keys are "project:<name>" — see ProjectHandler.open_project().
-        target_tab = f"project:{project_name}" if project_name else session_key
-
-        if event != "chat":
-            # Handle Phase 4 special event cards
-            special_events = ("file_read", "edit_proposal", "tool_call", "error", "thinking")
-            if event in special_events:
-                self._dispatch(lambda e=event, sk=session_key, tt=target_tab, pl=payload: (
-                    self._handle_special_event(e, sk, tt, pl)
-                ))
-            return
-
-        state = payload.get("state", "")
-        msg_obj = payload.get("message", {})
-
-        if state == "delta":
-            delta_text = self._extract_text(msg_obj)
-            if not delta_text:
-                return
-            _logger.debug("[tab-dot] on_chat_event (delta): session_key=%r, target_tab=%r, state=delta", session_key, target_tab)
-            self._dispatch(lambda sk=session_key, tt=target_tab, txt=delta_text: (
-                self._handle_streaming_delta(sk, tt, txt)
-            ))
-        elif state == "final":
-            final_text = self._extract_text(msg_obj)
-            if not final_text:
-                return
-            # session_key: bubble teardown key; target_tab: UI switch + chat box
-            _logger.debug("[tab-dot] on_chat_event (final): session_key=%r, target_tab=%r", session_key, target_tab)
-            self._dispatch(lambda t=target_tab, sk=session_key, txt=final_text: (
-                self._handle_final_response(t, sk, txt)
-            ))
-
-    def _handle_streaming_delta(self, session_key: str, target_tab: str, delta_text: str):
-        """
-        Update the streaming bubble for session_key with the latest delta text.
-
-        UNREACHABLE in the current app: the only caller chain is
-        on_chat_event (the gateway event path, stripped in SPEC-05 R1).
-        Local agent replies render via AgentRuntimeHandler's own buffer
-        path and never route here.
-
-        The old STREAMING_ENABLED gate (the Stream toolbar toggle, removed
-        2026-10-07) always returned early at the default False — so this
-        method has been a no-op in practice for the app's whole life.
-        """
-        return  # streaming disabled — the flag was removed with the toggle
-        if self._chat_render_handler is None:
-            return
-        if not self._chat_render_handler.is_streaming(session_key):
-            chat_box = self._mc.get_chat_box_for_session(target_tab)
-            if chat_box is not None:
-                self._chat_render_handler.start_streaming(session_key, chat_box, "Agent")
-        self._chat_render_handler.update_streaming(session_key, delta_text)
-        # If this tab is not currently visible, show unread indicator.
-        current_sk = self._mc.get_current_session_key()
-        _logger.debug("[tab-dot] _handle_streaming_delta: session_key=%r, target_tab=%r, current=%r, will_increment=%r", session_key, target_tab, current_sk, target_tab != current_sk)
-        if target_tab != current_sk:
-            self._mc.increment_unread(target_tab)
-
-    def _handle_final_response(self, tab: str, session_key: str, final_text: str):
-        """
-        End any streaming bubble (if one exists) and record the message.
-
-        When STREAMING_ENABLED is False, no streaming bubble is ever started,
-        so end_streaming() is a no-op. In that case we fall back to render_sync()
-        to create the final bubble directly.
-
-        Architecture: _chat_final_rendered guard prevents double-render from both
-        the chat final path and the lifecycle-completed fallback path.
-        """
-        # Guard: do not double-render if chat final already handled this session.
-        if self._chat_final_rendered.get(session_key):
-            return
-        self._chat_final_rendered[session_key] = True
-
-        current_sk = self._mc.get_current_session_key()
-        chat_box = self._mc.get_chat_box_for_session(tab)
-        # Always record the message in the chat box (data plane), regardless of
-        # render handler state. render_sync / end_streaming are presentation.
-        # If this tab is not currently visible, increment unread count so the
-        # tab label dot turns yellow to signal pending messages.
-        if tab != current_sk:
-            self._mc.increment_unread(tab)
-
-        if self._chat_render_handler is None:
-            return
-        if self._chat_render_handler.is_streaming(session_key):
-            self._chat_render_handler.end_streaming(session_key)
-        else:
-            # No streaming bubble existed (STREAMING_ENABLED=False or first msg):
-            # render the final bubble via render_sync instead.
-            bubble = self._chat_render_handler.render_sync("Agent", final_text, session_key, on_forward_click=self._on_forward_message, tab_key=tab)
-            if bubble is not None and chat_box is not None:
-                chat_box.append(bubble)
-
-        # Agent command parsing hook (Phase 6.2) — fire after bubble render.
-        # Resolve project from routing table (authoritative for this session),
-        # fall back to active project if routing table has no entry.
-        if self._on_agent_response is not None and final_text:
-            project_name = None
-            if self._agent_to_project is not None:
-                project_name = self._agent_to_project.get_project(session_key)
-            if not project_name and self._project_handler is not None:
-                project_name = self._project_handler.get_active_project_name()
-            self._on_agent_response(session_key, final_text, project_name)
-
-    def _extract_text(self, msg_obj) -> str:
-        """Extract plain text from a gateway message object.
-
-        The gateway sends message content in two forms:
-        - A string (simple text responses)
-        - A list of typed blocks (block-level formatting: code, quote, media, etc.)
-
-        This method normalizes both into a single string for bubble rendering.
-        input_image blocks (from gateway media attachments) are converted to
-        ```image code blocks for the existing image rendering pipeline.
-        """
-        if isinstance(msg_obj, dict):
-            content = msg_obj.get("content", "")
-        else:
-            content = msg_obj
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type", "")
-                if block_type == "text":
-                    t = block.get("text", "")
-                    if t:
-                        parts.append(t)
-                elif block_type == "input_image":
-                    # Gateway media attachment (image_generate tool / MEDIA: directive)
-                    # The gateway sends type:"input_image" with image_url field.
-                    # Emit as ```image code block for the existing image rendering pipeline.
-                    image_url = block.get("image_url", "")
-                    if image_url and isinstance(image_url, str):
-                        parts.append(f"\n\n```image\n{image_url.strip()}\n```")
-            return "".join(parts)
-        elif isinstance(content, str):
-            return content
-        return str(content) if content else ""
-
-    def _handle_special_event(self, event_type: str, session_key: str, target_tab: str, payload: dict):
-        """
-        Render a special event card (Phase 4: file_read, edit_proposal, tool_call, error, thinking).
-
-        Args:
-            event_type: Event name from gateway (e.g. "file_read")
-            session_key: Session key for the agent/project tab
-            target_tab:  Tab name for UI switching
-            payload:     Full event payload dict
-        """
-        chat_box = self._mc.get_chat_box_for_session(target_tab)
-        if chat_box is None or self._chat_render_handler is None:
-            return
-
-        msg_obj = payload.get("message", {})
-
-        if event_type == "file_read":
-            self._chat_render_handler.render_event_card(
-                "file_read", chat_box,
-                session_key=target_tab,
-                file_path=msg_obj.get("file_path", "<unknown file>"),
-                snippet=msg_obj.get("snippet", ""),
-                line_range=msg_obj.get("line_range", ""),
-            )
-        elif event_type == "edit_proposal":
-            self._chat_render_handler.render_event_card(
-                "edit_proposal", chat_box,
-                session_key=target_tab,
-                file_path=msg_obj.get("file_path", "<unknown file>"),
-                diff=msg_obj.get("diff", ""),
-            )
-        elif event_type == "tool_call":
-            self._chat_render_handler.render_event_card(
-                "tool_call", chat_box,
-                session_key=target_tab,
-                tool_name=msg_obj.get("tool_name", "<unknown tool>"),
-                detail=msg_obj.get("detail", ""),
-            )
-        elif event_type == "error":
-            self._chat_render_handler.render_event_card(
-                "error", chat_box,
-                session_key=target_tab,
-                error_msg=msg_obj.get("error_msg", msg_obj.get("content", "Unknown error")),
-            )
-        elif event_type == "thinking":
-            self._chat_render_handler.render_event_card(
-                "thinking", chat_box,
-                session_key=target_tab,
-                thought_text=msg_obj.get("thought_text", msg_obj.get("content", "")),
-            )
 
     def switch_to_tab(self, session_key: str):
         """

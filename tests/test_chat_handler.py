@@ -1,6 +1,11 @@
 # tests/test_chat_handler.py
 # Tests for ui/handlers/chat_handler.py — ChatHandler.
 #
+# TOMBSTONE (SPEC-58 §2c): TestChatEventRouting (formerly below) was cut with
+# the dead ChatHandler.on_chat_event cluster. Its 8 handler.on_chat_event(...)
+# calls were the only .on_chat_event calls in the suite and drove the deleted
+# runtime path (production caller-less since SPEC-05).
+#
 # Principle: test the failure modes that could break callers.
 # Mock the local-runtime receiver (AgentRuntimeHandler spy) and MainContent
 # at the boundary.
@@ -31,8 +36,8 @@ class FakeChatBox:
     FakeMainContent._chat_render_handler mock (render_async / render_sync
     call args), not this object.
 
-    append() is the actual API the production code calls (chat_handler.py
-    `_handle_final_response`: `chat_box.append(bubble)`). It accepts a widget
+    append() is the actual API the production code calls
+    (`chat_box.append(bubble)`). It accepts a widget
     and stores it. The pre-fix `record()` method is gone.
     """
 
@@ -42,8 +47,8 @@ class FakeChatBox:
     def append(self, widget):
         """Append a bubble widget to this chat box.
 
-        Production: chat_handler.py:_handle_final_response calls this
-        after render_sync produces a bubble. The bubble is a Gtk.Widget
+        Production appends the final bubble here after render_sync
+        produces it. The bubble is a Gtk.Widget
         in production; in tests it's whatever render_sync returns
         (a MagicMock by default).
         """
@@ -391,205 +396,6 @@ class TestSendProjectFanOut:
             f"expected at least one render_async('You', 'broadcast', ...) call; "
             f"got render_async calls: {render_calls}"
         )
-
-
-# ── Tests: on_chat_event — routing ─────────────────────────────────────────────
-
-class TestChatEventRouting:
-    """chat.final events must be routed to the correct tab."""
-
-    def make_final_payload(self, session_key, text):
-        return {
-            "state": "final",
-            "sessionKey": session_key,
-            "message": {"content": text},
-        }
-
-    def test_routes_to_project_tab_when_agent_in_project(self):
-        """Agent is a project member → response rendered to project tab.
-
-        Replaces pre-fix assertion on dead chat_box.record(). The real
-        rendering for a final-state chat event goes through
-        ChatRenderHandler.render_sync (see chat_handler.py:_handle_final_response
-        "no streaming bubble" branch).
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="project:myproj")
-        mc.set_tab_sessions({0: "project:myproj"})
-        # agent:qaster:1 belongs to myproj
-        agent_to_project = {"agent:qaster:1": "myproj"}
-        handler = make_handler(mc, gw, agent_to_project=agent_to_project)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        # Force the "no streaming bubble" branch in _handle_final_response
-        # so render_sync is called. A MagicMock's is_streaming() returns a
-        # truthy MagicMock by default, which would take the end_streaming
-        # branch instead. Mirror the production code path that fires for
-        # the first message of a session (no streaming bubble yet).
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", self.make_final_payload("agent:qaster:1", "got it"))
-
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "got it"
-
-    def test_routes_to_agent_tab_when_not_in_project(self):
-        """Agent is NOT a project member → response rendered to agent's own tab.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:main")
-        mc.set_tab_sessions({0: "agent:main"})
-        agent_to_project = {}  # no project mapping
-        handler = make_handler(mc, gw, agent_to_project=agent_to_project)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", self.make_final_payload("agent:main", "direct reply"))
-
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "direct reply"
-
-    def test_routes_to_correct_project_when_agent_in_multiple_projects(self):
-        """Agent in two projects → uses the project that matches the current tab.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="project:projA")
-        mc.set_tab_sessions({0: "project:projA"})
-        # agent is in both projA and projB
-        agent_to_project = {
-            "agent:shared:1": "projA",
-            "agent:shared:2": "projB",
-        }
-        handler = make_handler(mc, gw, agent_to_project=agent_to_project)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", self.make_final_payload("agent:shared:1", "reply"))
-
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "reply"
-
-    def test_unknown_agent_routes_to_agent_tab(self):
-        """Agent session_key not in _agent_to_project: routes to agent tab.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:unknown")
-        mc.set_tab_sessions({0: "agent:unknown"})
-        agent_to_project = {}  # completely empty
-        handler = make_handler(mc, gw, agent_to_project=agent_to_project)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        # Must not crash — routing falls back to agent tab
-        handler.on_chat_event("chat", self.make_final_payload("agent:unknown", "who?"))
-
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "who?"
-
-    def test_empty_content_does_not_appear(self):
-        """chat.final with empty content: must not render a bubble.
-
-        Replaces pre-fix assertion on dead chat_box.record(). For empty
-        content, _handle_final_response returns early (line: "if not
-        final_text: return") before render_sync is called.
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:main")
-        handler = make_handler(mc, gw)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", self.make_final_payload("agent:main", ""))
-
-        # Empty content → early return → no render call
-        mc._chat_render_handler.render_sync.assert_not_called()
-
-    def test_non_final_state_ignored(self):
-        """state != "final": event is ignored, no render call.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:main")
-        handler = make_handler(mc, gw)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", {
-            "state": "partial",
-            "sessionKey": "agent:main",
-            "message": {"content": "partial text"},
-        })
-
-        # state="partial" → falls through the if/elif in on_chat_event
-        # without firing the final handler. No render call.
-        mc._chat_render_handler.render_sync.assert_not_called()
-
-    def test_content_as_list_text_blocks_extracted(self):
-        """content is a list of text blocks: joined together for render.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:main")
-        mc.set_tab_sessions({0: "agent:main"})
-        handler = make_handler(mc, gw)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        handler.on_chat_event("chat", {
-            "state": "final",
-            "sessionKey": "agent:main",
-            "message": {
-                "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "text", "text": "world"},
-                ]
-            },
-        })
-
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "Hello world"
-
-    def test_content_wrong_type_does_not_crash(self):
-        """content is a number instead of str/list: no crash, str() fallback.
-
-        Replaces pre-fix assertion on dead chat_box.record().
-        """
-        gw = FakeGatewayClient()
-        mc = FakeMainContent(session_key="agent:main")
-        mc.set_tab_sessions({0: "agent:main"})
-        handler = make_handler(mc, gw)
-        handler.set_chat_render_handler(mc._chat_render_handler)
-        mc._chat_render_handler.is_streaming.return_value = False
-
-        # Must not raise — falls back to str() or empty
-        handler.on_chat_event("chat", {
-            "state": "final",
-            "sessionKey": "agent:main",
-            "message": {"content": 12345},
-        })
-
-        # 12345 is truthy → str(12345) = "12345"
-        mc._chat_render_handler.render_sync.assert_called_once()
-        call_args = mc._chat_render_handler.render_sync.call_args
-        assert call_args[0][0] == "Agent"
-        assert call_args[0][1] == "12345"
 
 
 # ── Tests: switch_to_tab ───────────────────────────────────────────────────────

@@ -48,8 +48,9 @@ class TestRenderFeedCard:
         assert "card.body" not in FEED_SCRIPT
 
     def test_limit_matches_the_gtk_constant(self):
-        from ui.views.feed_card import RENDERED_BODY_LIMIT
-        assert FEED_RENDERED_BODY_LIMIT == RENDERED_BODY_LIMIT == 2000
+        """The render-side cap is pinned at 2000 (SPEC-58 §2c: the old
+        ui.views.feed_card duplicate and its equality pin are gone)."""
+        assert FEED_RENDERED_BODY_LIMIT == 2000
 
     def test_long_mono_body_shows_exact_hidden_count(self):
         text = "z" * (FEED_RENDERED_BODY_LIMIT + 7)

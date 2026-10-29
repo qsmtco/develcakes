@@ -979,6 +979,9 @@ class MainContent(Gtk.Box):
                 lambda target_sk: self._on_project_solo_selected(session_key, project_name, target_sk),
             )
             return
+        # No agent branch (SPEC-58 §2a/§2g): the gateway session switcher is
+        # gone — _agent_mgr is permanently None, so non-project tabs have no
+        # right-click menu.
 
     def _on_project_solo_selected(self, session_key, project_name, target_sk):
         """

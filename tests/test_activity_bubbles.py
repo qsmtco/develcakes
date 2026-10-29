@@ -1,18 +1,16 @@
 # tests/test_activity_bubbles.py
 # Tests for Phase 2 of SPEC-smarter-chat-ux — Activity Bubbles.
 #
-# Architecture:
-#   local AgentRuntimeHandler bubbles → ActivityDrawer
-#   ChatHandler._render_activity_bubble(bubble) → calls _render_activity_bubble_impl on main thread
-#   ChatRenderHandler.render_sync("System", text, ...) → build_role_bubble("System", text)
-#   build_role_bubble assigns .chat-bubble-System CSS class for activity bubble styling
+# SPEC-58 §2i: class TestSystemBubbleCSS deleted with its subject —
+# build_role_bubble died with ui/views/event_cards.py; the lifecycle-
+# fallback case died with ChatHandler._handle_lifecycle_completed (the
+# whole missing-message cluster is deleted). The surviving tests pin
+# models/activity.py format_text and ActivityHandler._is_ui_active,
+# which are live.
 
 import gi
 gi.require_version('Gtk', '4.0')
 
-import time
-
-import pytest
 from unittest.mock import MagicMock
 
 
@@ -74,46 +72,15 @@ class TestActivityBubbleModel:
 
 
 class TestChatHandlerActivityBubbleRender:
-    """ChatHandler integration tests for activity/lifecycle routing (Phase 2 SPEC-smarter-chat-ux).
+    """ChatHandler / ActivityHandler integration tests (Phase 2 SPEC-smarter-chat-ux).
 
-    The 4 _render_activity_bubble tests were REMOVED in SPEC-activity-drawer Phase 1
-    (those methods are deleted; activity now flows to ActivityDrawer, not chat).
+    SPEC-58 §2i: the 4 _render_activity_bubble tests were REMOVED in
+    SPEC-activity-drawer Phase 1 (those methods are deleted; activity flows
+    to the ActivityPillAdapter, not chat), and the lifecycle-fallback case
+    died with ChatHandler._handle_lifecycle_completed — the whole
+    missing-message cluster is deleted (see the deleted
+    tests/test_missing_message_fix.py).
     """
-
-    def test_lifecycle_fallback_routes_to_project_tab(self, fake_glib):
-        """Lifecycle fallback resolves to project tab when agent has no direct tab."""
-        from ui.handlers.chat_handler import ChatHandler
-
-        class FakeRouting:
-            def get_project(self, sk):
-                return "crabwatch" if sk == "agent:qaster" else None
-        
-        routing = FakeRouting()
-        mock_project_chat_box = MagicMock()
-        mock_mc = MagicMock()
-        mock_mc.get_chat_box_for_session = lambda sk: (
-            mock_project_chat_box if sk == "project:crabwatch" else None
-        )
-        mock_mc.get_current_session_key = MagicMock(return_value="project:crabwatch")
-
-        handler = ChatHandler(
-            main_content=mock_mc,
-            agent_to_project=routing,
-            projects_module=MagicMock(),
-            GLib_module=fake_glib,
-        )
-
-        fake_render = MagicMock()
-        fake_render.is_streaming.return_value = False
-        fake_render.render_sync.return_value = MagicMock()
-        handler._chat_render_handler = fake_render
-
-        # Fire lifecycle fallback: agent key "agent:qaster" has project "crabwatch"
-        handler._handle_lifecycle_completed("agent:qaster", "Response text from fallback")
-
-        # Should have called _handle_final_response with project:crabwatch tab
-        fake_render.render_sync.assert_called_once()
-        mock_project_chat_box.append.assert_called_once()
 
     def test_is_ui_active_resolves_project_tab_for_agent(self, fake_glib):
         """_is_ui_active returns True when active tab is the project tab for the agent."""
@@ -154,41 +121,4 @@ class TestChatHandlerActivityBubbleRender:
         assert ah._is_ui_active("agent:qaster") is False
         # Direct match still works
         assert ah._is_ui_active("project:crabwatch") is True
-
-
-class TestSystemBubbleCSS:
-    """System bubbles get the .chat-bubble-System CSS class."""
-
-    def _walk_css_classes(self, widget):
-        """Walk all CSS classes from widget and its descendants (GTK4 compatible)."""
-        classes = []
-        if hasattr(widget, 'get_css_classes'):
-            classes.extend(widget.get_css_classes())
-        if hasattr(widget, 'get_first_child'):
-            child = widget.get_first_child()
-            while child is not None:
-                classes.extend(self._walk_css_classes(child))
-                sibling = child.get_next_sibling() if hasattr(child, 'get_next_sibling') else None
-                child = sibling
-        return classes
-
-    def test_system_role_uses_system_css_class(self):
-        from ui.views.event_cards import build_role_bubble
-        widget = build_role_bubble("System", "test activity bubble")
-        classes = self._walk_css_classes(widget)
-        assert "chat-bubble-System" in classes
-
-    def test_agent_role_uses_agent_css_class(self):
-        from ui.views.event_cards import build_role_bubble
-        widget = build_role_bubble("Agent", "hello")
-        classes = self._walk_css_classes(widget)
-        assert "chat-bubble-agent" in classes
-        assert "chat-bubble-System" not in classes
-
-    def test_you_role_uses_you_css_class(self):
-        from ui.views.event_cards import build_role_bubble
-        widget = build_role_bubble("You", "hello")
-        classes = self._walk_css_classes(widget)
-        assert "chat-bubble-you" in classes
-        assert "chat-bubble-System" not in classes
 

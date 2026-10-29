@@ -335,138 +335,19 @@ button.lib-fav-star {
     color: #6b6b7a;
 }
 
-/* -- Chat bubbles (Phase 1) --------------------------------------------- */
-.chat-bubble-agent {
-    background: linear-gradient(135deg,
-        rgba(34, 197, 94, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
-
-/* System activity bubbles — Phase 2 of SPEC-smarter-chat-ux */
-.chat-bubble-System {
-    background: rgba(255, 255, 255, 0.03);
-    border-left: 2px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px 6px 6px 2px;
-    padding: 4px 10px 4px 10px;
-    margin: 1px 12px 1px 8px;
-}
-.chat-bubble-System .chat-msg-label {
-    font-family: monospace;
-    font-size: 12px;
-    color: #9090a8;
-}
-.chat-bubble-header {
-    margin: 0 0 2px 0;
-    padding: 0;
-}
-.chat-bubble-header-name {
-    font-size: 11px;
-    font-weight: 600;
-    color: #c0c0d8;
-}
-.chat-bubble-header-dot {
-    background: #22c55e;
-    border-radius: 50%;
-    min-width: 6px;
-    min-height: 6px;
-    margin: 0 2px;
-}
-
-/* Agent-colored bubble backgrounds — per-agent tint matching avatar color.
-   Applied when build_role_bubble receives agent_color. Falls back to
-   .chat-bubble-agent (generic green) when no color is provided. */
-.agent-bg-6366f1 {
-    background: linear-gradient(135deg,
-        rgba(99, 102, 241, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
+/* (SPEC-58 §2h: the .chat-bubble-* / .agent-bg-* Pango bubble families and
+   the .agent-bg-*/.agent-dot-* per-color pairs' backgrounds were deleted with
+   event_cards.py. The bare .agent-dot-* color rules survive — AgentDashboard
+   applies agent-dot / agent-dot-{color}.) */
 .agent-dot-6366f1 { background: #6366f1; }
-.agent-bg-10b981 {
-    background: linear-gradient(135deg,
-        rgba(16, 185, 129, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-10b981 { background: #10b981; }
-.agent-bg-f59e0b {
-    background: linear-gradient(135deg,
-        rgba(245, 158, 11, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-f59e0b { background: #f59e0b; }
-.agent-bg-f43f5e {
-    background: linear-gradient(135deg,
-        rgba(244, 63, 94, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-f43f5e { background: #f43f5e; }
-.agent-bg-06b6d4 {
-    background: linear-gradient(135deg,
-        rgba(6, 182, 212, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-06b6d4 { background: #06b6d4; }
-.agent-bg-8b5cf6 {
-    background: linear-gradient(135deg,
-        rgba(139, 92, 246, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-8b5cf6 { background: #8b5cf6; }
-.agent-bg-ec4899 {
-    background: linear-gradient(135deg,
-        rgba(236, 72, 153, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-ec4899 { background: #ec4899; }
-.agent-bg-14b8a6 {
-    background: linear-gradient(135deg,
-        rgba(20, 184, 166, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-14b8a6 { background: #14b8a6; }
-.agent-bg-f97316 {
-    background: linear-gradient(135deg,
-        rgba(249, 115, 22, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-f97316 { background: #f97316; }
-.agent-bg-84cc16 {
-    background: linear-gradient(135deg,
-        rgba(132, 204, 22, 0.70) 0%,
-        rgba(255, 255, 255, 0.20) 100%);
-    border-radius: 12px 12px 12px 4px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 12px 2px 8px;
-}
 .agent-dot-84cc16 { background: #84cc16; }
 
 /* Tab dot — shows agent status in the chat tab label */
@@ -600,46 +481,6 @@ notebook > header > tabs > tab {
     min-width: 0;
     padding: 4px 8px;
 }
-.chat-bubble-header-time {
-    font-size: 10px;
-    color: #707088;
-}
-.chat-bubble-you {
-    background: linear-gradient(135deg,
-        rgba(99, 102, 241, 0.40) 0%,
-        rgba(79, 85, 210, 0.12) 100%);
-    border-radius: 12px 12px 4px 12px;
-    padding: 6px 10px 8px 10px;
-    margin: 2px 8px 2px 12px;
-}
-.chat-role-label {
-    font-size: 11px;
-    color: #8888a0;
-    margin-bottom: 2px;
-}
-.chat-bubble-you .chat-role-label {
-    color: #9090c0;
-}
-.chat-msg-label {
-    font-size: 14px;
-    color: #d8d8e8;
-}
-.chat-msg-label:selected {
-    background-color: #6366f1;
-    color: #ffffff;
-}
-
-/* -- Bubble pending state (optimistic UI) ------------------------------- */
-.chat-bubble-pending {
-    opacity: 0.6;
-    transition: opacity 0.3s ease;
-}
-.chat-bubble-pending.chat-bubble-you {
-    background: rgba(99, 102, 241, 0.15);
-}
-.chat-bubble-pending.chat-bubble-agent {
-    background: rgba(255, 255, 255, 0.04);
-}
 
 /* -- Code blocks ------------------------------------------------------- */
 .code-block {
@@ -717,14 +558,6 @@ notebook > header > tabs > tab {
 }
 
 
-/* -- Event cards (Phase 4) ------------------------------------------------ */
-.bubble-file-read       { border-left: 3px solid #22c55e; }
-.bubble-edit-proposal   { border-left: 3px solid #f59e0b; }
-.bubble-tool-call       { border-left: 3px solid #94a3b8; }
-.bubble-error           { border-left: 3px solid #ef4444; background: rgba(239,68,68,0.08); }
-.bubble-thinking        { border-left: 3px solid #f59e0b; }
-.bubble-streaming       { border-left: 3px solid #6366f1; }
-
 /* -- Terminal blocks ---------------------------------------------------- */
 .terminal-block {
     background: rgba(20, 20, 30, 0.95);
@@ -756,27 +589,10 @@ notebook > header > tabs > tab {
     margin-right: 4px;
 }
 
-.chat-bubble-actions {
-    margin-top: 2px;
-}
-.chat-action-btn {
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    padding: 2px;
-    font-size: 11px;
-    color: #9b9bab;
-}
-.chat-action-btn:hover {
-    color: #a9b1d6;
-}
-
-/* -- Headings inside bubbles ------------------------------------------- */
-.chat-heading { font-weight: 700; color: #e8e8f0; }
-.chat-heading-1 { font-size: 20px; }
-.chat-heading-2 { font-size: 17px; }
-.chat-heading-3 { font-size: 15px; }
-.chat-heading-4 { font-size: 14px; }
+/* (SPEC-58 §2h: .chat-bubble-actions / .chat-action-btn and the .chat-heading*
+   rules went with the Pango bubble pipeline. The make_safe_label tests that
+   exercised the heading-class guard survive in tests/test_gtk_safe_link.py —
+   the guard itself is the subject, not the CSS.) */
 
 /* -- Task list items --------------------------------------------------- */
 .task-item { font-size: 13px; color: #c0caf5; padding: 1px 0; }
@@ -840,55 +656,8 @@ notebook > header > tabs > tab {
     to { background-position: 40px 0; }
 }
 
-/* -- Review Bar -------------------------------------------------------- */
-.review-bar {
-    background: rgba(0, 0, 0, 0.05);
-    border-radius: 8px;
-    padding: 6px 12px;
-    margin: 4px 8px;
-}
-.review-bar-status {
-    color: alpha(@theme_fg_color, 0.6);
-    font-size: 0.9em;
-}
-.review-bar-btn-start {
-    background: #6366f1;
-    color: white;
-    border-radius: 6px;
-    padding: 4px 12px;
-}
-.review-bar-btn-start:hover {
-    background: #4f46e5;
-}
-.review-bar-btn-check {
-    background: alpha(@theme_fg_color, 0.1);
-    border-radius: 6px;
-    padding: 4px 12px;
-}
-.review-bar-btn-check:hover {
-    background: alpha(@theme_fg_color, 0.15);
-}
-.review-bar-btn-accept {
-    background: #10b981;
-    color: white;
-    border-radius: 6px;
-    padding: 4px 12px;
-}
-.review-bar-btn-accept:hover {
-    background: #059669;
-}
-.review-bar-btn-reject {
-    background: #f43f5e;
-    color: white;
-    border-radius: 6px;
-    padding: 4px 12px;
-}
-.review-bar-btn-reject:hover {
-    background: #e11d48;
-}
-.review-bar-loading {
-    opacity: 0.6;
-}
+/* (SPEC-58 §2h: the .review-bar* family went with ReviewBar/review_bar.py —
+   H3. The drawer's Revert button needs none of it.) */
 
 /* -- Diff Cards -------------------------------------------------------- */
 .diff-card {
@@ -1076,95 +845,11 @@ notebook > header > tabs > tab {
 .diff-history-row-msg {
     font-size: 0.9em;
 }
-/* -- Feed Cards -------------------------------------------------------- */
-.feed-card {
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    margin-bottom: 8px;
-}
-.feed-card-header {
-    padding: 2px 8px;
-    font-weight: bold;
-    font-size: 12px;
-    border-radius: 6px 6px 0 0;
-}
-.feed-card-body {
-    padding: 8px 12px;
-    font-family: monospace;
-    font-size: 12px;
-    min-height: 24px;
-}
-.feed-card-footer {
-    padding: 6px 12px;
-    font-size: 11px;
-    color: alpha(@theme_fg_color, 0.5);
-    background: rgba(0, 0, 0, 0.25);
-}
-.feed-card-actions {
-    padding: 4px 12px 8px;
-    background: rgba(0, 0, 0, 0.25);
-    border-radius: 0 0 6px 6px;
-}
-
-/* Card type colors */
-.feed-card-git .feed-card-header { background: #2d5a3d; color: #a8e6c1; }
-.feed-card-git .feed-card-body { background: #1a3d2a; }
-.feed-card-diff .feed-card-header { background: #5a4a2d; color: #e6c1a8; }
-.feed-card-diff .feed-card-body { background: #3d321a; }
-.feed-card-file-new .feed-card-header { background: #2d4a5a; color: #a8c1e6; }
-.feed-card-file-new .feed-card-body { background: #1a323d; }
-.feed-card-file-mod .feed-card-header { background: #5a4a2d; color: #e6e6a8; }
-.feed-card-file-mod .feed-card-body { background: #3d321a; }
-.feed-card-file-del .feed-card-header { background: #5a2d2d; color: #e6a8a8; }
-.feed-card-file-del .feed-card-body { background: #3d1a1a; }
-.feed-card-dir-new .feed-card-header { background: #2d5a5a; color: #a8e6e6; }
-.feed-card-dir-new .feed-card-body { background: #1a3d3d; }
-.feed-card-dir-del .feed-card-header { background: #5a3d3d; color: #e6b8b8; }
-.feed-card-dir-del .feed-card-body { background: #3d1a1a; }
-.feed-card-agent .feed-card-header { background: #4a2d5a; color: #c1a8e6; }
-.feed-card-agent .feed-card-body { background: #321a3d; }
-.feed-card-task .feed-card-header { background: #5a5a2d; color: #e6e6a8; }
-.feed-card-task .feed-card-body { background: #3d3d1a; }
-.feed-card-system .feed-card-header { background: #3a3a3a; color: #b0b0b0; }
-.feed-card-system .feed-card-body { background: #2a2a2a; }
-.feed-card-audit .feed-card-header { background: #2d5a5a; color: #a8e6e6; }
-.feed-card-audit .feed-card-body { background: #1a3d3d; }
-/* Agent action sub-states */
-.feed-card-agent.feed-card-approval .feed-card-header {
-    background: #5a3d2d; color: #ffb085;
-}
-.feed-card-agent.feed-card-approval .feed-card-body {
-    background: #3d2a1a;
-}
-.feed-card-agent.feed-card-running .feed-card-header {
-    background: #2d3a5a; color: #a8c1e6;
-}
-.feed-card-agent.feed-card-running .feed-card-body {
-    background: #1a273d;
-}
-.feed-card-agent.feed-card-complete .feed-card-header {
-    background: #2d4a3d; color: #a8e6c1;
-}
-.feed-card-agent.feed-card-complete .feed-card-body {
-    background: #1a3d2a;
-}
-.feed-card-agent.feed-card-error .feed-card-header {
-    background: #5a2d2d; color: #e6a8a8;
-}
-.feed-card-agent.feed-card-error .feed-card-body {
-    background: #3d1a1a;
-}
-
-/* Sequence number badge */
-.feed-card-seq {
-    background: rgba(99, 102, 241, 0.3);
-    color: #c7d2fe;
-    border-radius: 4px;
-    padding: 1px 6px;
-    font-size: 10px;
-    font-weight: bold;
-    min-width: 20px;
-}
+/* (SPEC-58 §2h: the GTK .feed-card* widget rules — the card chrome, the
+   per-type colors, the agent sub-states, and .feed-card-seq — are deleted
+   with the widget feed. The HTML feed has its own FEED_CSS in
+   render/feed_html.py. .feed-card-load-more / .feed-btn-load-more below
+   stay: they are on the kept HTML Load More bar in FeedTab.set_html_load_more.) */
 
 /* Batch accept bar */
 .feed-batch-bar {
@@ -1313,52 +998,9 @@ notebook > header > tabs > tab {
     font-size: 10px;
     font-weight: bold;
 }
-/* ── Feed Card Context Panel ────────────────────────────────────── */
-.feed-context-panel {
-    background: alpha(@theme_bg_color, 0.5);
-    border-top: 1px solid alpha(@theme_fg_color, 0.1);
-    border-radius: 0 0 8px 8px;
-    padding: 8px;
-    margin: 4px 6px 6px 6px;
-}
-.feed-context-header {
-    font-weight: bold;
-    font-size: 0.9em;
-    color: alpha(@theme_fg_color, 0.7);
-}
-.feed-context-mini-bubble {
-    padding: 4px 8px;
-    border-radius: 6px;
-    margin: 2px 0;
-    font-size: 0.85em;
-}
-.feed-context-mini-bubble-user {
-    background: alpha(@theme_selected_bg_color, 0.15);
-    margin-left: 24px;
-}
-.feed-context-mini-bubble-agent {
-    background: alpha(@theme_fg_color, 0.08);
-    margin-right: 24px;
-}
-.feed-context-diff {
-    font-family: monospace;
-    font-size: 0.82em;
-    padding: 8px;
-    background: alpha(#1e1e1e, 0.9);
-    border-radius: 4px;
-    color: #d4d4d4;
-}
-.feed-context-diff-line-add {
-    color: #6a9955;
-}
-.feed-context-diff-line-del {
-    color: #f44747;
-}
-.feed-context-empty {
-    color: alpha(@theme_fg_color, 0.4);
-    font-style: italic;
-    padding: 8px;
-}
+/* (SPEC-58 §2h: the .feed-context-* family went with ui/views/feed_card.py's
+   build_context_panel — the HTML feed's Review context lives in
+   render/feed_html.py with its own FEED_CSS.) */
 
 /* -- Inline chat images ----------------------------------------------- */
 .chat-image {

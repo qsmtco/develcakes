@@ -36,6 +36,10 @@ def _has_display() -> bool:
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Path → _imports_widget_construction verdict, shared across all collected
+# items in one pytest run (see the memoization note inside the function).
+_WIDGET_SCAN_CACHE: dict[str, bool] = {}
+
 
 def _imports_widget_construction(path: str) -> bool:
     """True if `path` can reach a Gtk widget constructor through imports.
@@ -63,8 +67,16 @@ def _imports_widget_construction(path: str) -> bool:
     ``GTK_HEADLESS_SAFE = True`` at module top. The guard then skips the
     widget-scan for that module entirely (pytest still collects it).
     """
-    # Parse the module's own source once up-front so the opt-out can be
-    # honored before anything else is scanned.
+    # Deterministic per path and immutable within a run: memoized so a
+    # module's closure is walked once per pytest invocation instead of once
+    # per collected item. Per-item cost made full-suite headless collection
+    # take minutes (2026-10-24, SPEC-58 gate); the cache keeps identical
+    # results — the function is pure over the filesystem state, which does
+    # not change mid-run.
+    real_path = os.path.realpath(path)
+    cached = _WIDGET_SCAN_CACHE.get(real_path)
+    if cached is not None:
+        return cached
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             root_tree = ast.parse(fh.read(), filename=path)
@@ -76,6 +88,7 @@ def _imports_widget_construction(path: str) -> bool:
                         for t in node.targets)
                 and isinstance(node.value, ast.Constant)
                 and node.value.value is True):
+            _WIDGET_SCAN_CACHE[real_path] = False
             return False
 
     seen: set[str] = set()
@@ -144,7 +157,9 @@ def _imports_widget_construction(path: str) -> bool:
                     return True
         return False
 
-    return walk(path, 0)
+    result = walk(path, 0)
+    _WIDGET_SCAN_CACHE[real_path] = result
+    return result
 
 
 def pytest_collection_modifyitems(config, items):

@@ -1,11 +1,5 @@
 # ui/views/session_menu.py
-# Right-click session switcher menu for any widget.
-#
-# Usage (agent session switcher):
-#   from ui.views.session_menu import show_session_menu
-#   show_session_menu(parent_widget, agent_name, sessions, on_select)
-#   sessions: list[str] of session keys
-#   on_select: callable(session_key: str)
+# Right-click project-member selector menu (solo-DM targeting).
 #
 # Usage (project member selector):
 #   from ui.views.session_menu import show_project_menu
@@ -14,7 +8,8 @@
 #   current_solo: str or None — session_key of current solo target, None = All
 #   on_select: callable(session_key | None) — None = All (group broadcast)
 #
-# Can be attached to any visible GTK widget for positioning.
+# (The agent session switcher, show_session_menu, was deleted with the
+# gateway strip — SPEC-58 §2g.)
 #
 # GTK4 note: Gtk.ModelButton was removed in GTK4. We use Gtk.Popover
 # with a Gtk.ListBox instead, which is the recommended pattern.
@@ -22,96 +17,6 @@
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
-
-
-def show_session_menu(parent, agent_name, sessions, on_select, current_session_key=None):
-    """
-    Build and popup a right-click menu listing all sessions for an agent.
-    Clicking a session item calls on_select(session_key).
-
-    Args:
-        parent:               Any visible GTK widget — used for positioning the popup.
-        agent_name:           Display name for the agent (shown as menu header).
-        sessions:             List of session key strings.
-        on_select:            Callable(session_key: str) — called with the selected session.
-        current_session_key:  Session key to mark with a check mark (active session).
-    """
-    popover = Gtk.Popover()
-
-    vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-    vbox.set_margin_top(6)
-    vbox.set_margin_bottom(6)
-    vbox.set_margin_start(6)
-    vbox.set_margin_end(6)
-
-    # Header — agent name, non-interactive
-    header = Gtk.Label()
-    # MED-9: escape interpolated values to prevent Pango markup injection
-    header.set_markup(f"<b>{GLib.markup_escape_text(agent_name)}</b>")
-    header.set_sensitive(False)
-    header.set_margin_bottom(4)
-    vbox.append(header)
-
-    # Separator
-    sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-    sep.set_margin_bottom(4)
-    vbox.append(sep)
-
-    if not sessions:
-        empty = Gtk.Label(label="No sessions available")
-        empty.add_css_class("dim-label")
-        vbox.append(empty)
-    else:
-        list_box = Gtk.ListBox()
-        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        for sk in sessions:
-            row = Gtk.ListBoxRow()
-            row.set_activatable(True)
-            row.set_selectable(False)
-
-            label = Gtk.Label(xalign=0)
-            label.set_margin_top(4)
-            label.set_margin_bottom(4)
-            label.set_margin_start(8)
-            label.set_margin_end(8)
-
-            display = _shorten_session_key(sk)
-            if sk == current_session_key:
-                # MED-9: escape interpolated values
-                label.set_markup(f"✓ {GLib.markup_escape_text(display)}")
-            else:
-                label.set_text(display)
-
-            row.set_child(label)
-            row._session_key = sk
-            list_box.append(row)
-        list_box.connect("row-activated", lambda _lb, row: _on_selected(popover, row._session_key, on_select))
-        vbox.append(list_box)
-
-    popover.set_child(vbox)
-    popover.set_parent(parent)
-    popover.popup()
-
-
-def _on_selected(popover, session_key, on_select):
-    popover.popdown()
-    popover.unparent()
-    on_select(session_key)
-
-
-def _shorten_session_key(key: str) -> str:
-    """Shorten a session key for display in the menu.
-
-    Examples:
-        agent:qaster:main → main
-        agent:qaster:telegram:direct:7478874934 → telegram:direct:7478874934
-        agent:qaster:subagent:abc-123 → subagent:abc-123
-    """
-    parts = key.split(":")
-    if len(parts) >= 3 and parts[0] == "agent":
-        # Strip "agent:<name>:" prefix, show the rest
-        return ":".join(parts[2:])
-    return key
 
 
 def show_project_menu(parent, project_name, member_names, current_solo, on_select):

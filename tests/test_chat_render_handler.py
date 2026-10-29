@@ -1285,90 +1285,10 @@ class TestEndStreamingDoesNotForceScroll:
             "now (smart-scroll); a forced scroll races it (Finding 3)"
         )
 
-    def test_render_event_card_does_not_call_scroll_chat_to_bottom(self):
-        """Same finding, sibling site: event-card append must not force-scroll."""
-        from unittest.mock import MagicMock
 
-        from gi.repository import Gtk
-
-        h = ChatRenderHandler()
-        mc = MagicMock()
-        mc.scroll_chat_to_bottom = MagicMock()
-        h._main_content = mc
-        container = Gtk.Box()
-        h.render_event_card("error", container, error_msg="boom")
-        assert not mc.scroll_chat_to_bottom.called, (
-            "render_event_card must NOT force-scroll (Finding 3 sibling)"
-        )
-
-
-class TestPhase4EventCards:
-    """SPEC-06 SP4: the Pango event-card pipeline is LIVE (render_event_card
-    at chat_render_handler:979, called from window._on_command_card:992) and
-    stays covered until H3 section 2c retires the call sites. The cards are
-    not transcript sites (ruling R2/R3), so these pins target the DISPATCH
-    contract — routing per event_type, GTK-thread dispatch, silent ignore of
-    unknown types, error fallback, and the no-force-scroll rule."""
-
-    def test_error_card_routed_into_container(self):
-        h = ChatRenderHandler()
-        container = Gtk.Box()
-        h.render_event_card("error", container, error_msg="boom")
-
-        def _find_label(w, needle):
-            if hasattr(w, "get_label") and needle in (w.get_label() or ""):
-                return True
-            child = w.get_first_child()
-            while child:
-                if _find_label(child, needle):
-                    return True
-                child = child.get_next_sibling()
-            return False
-
-        card = container.get_first_child()
-        assert card is not None, "error card must be appended synchronously"
-        assert _find_label(card, "boom"), "error text lost in routing"
-
-    def test_unknown_event_type_is_ignored_silently(self):
-        h = ChatRenderHandler()
-        container = Gtk.Box()
-        h.render_event_card("no_such_kind", container)  # must not raise
-        assert container.get_first_child() is None
-
-    def test_each_live_event_type_appends_a_card(self):
-        h = ChatRenderHandler()
-        for kind, kwargs in (
-            ("file_read", {"file_path": "/x.py", "snippet": "a=1",
-                           "line_range": "1-2"}),
-            ("edit_proposal", {"file_path": "/x.py", "diff": "-a\n+b"}),
-            ("tool_call", {"tool_name": "grep", "detail": "needle"}),
-            ("thinking", {"thought_text": "hmm"}),
-        ):
-            container = Gtk.Box()
-            h.render_event_card(kind, container, **kwargs)
-            assert container.get_first_child() is not None, (
-                f"{kind} card missing"
-            )
-
-    def test_task_card_passthrough_builds_widget(self):
-        h = ChatRenderHandler()
-        container = Gtk.Box()
-        h.render_event_card("task", container, action="created", id="t1",
-                            title="Fix thing", status="todo",
-                            priority="high", assigned_to="Coder")
-        assert container.get_first_child() is not None
-
-    def test_card_dispatch_runs_on_gtk_main_thread(self, monkeypatch):
-        """With GLib wired, the append must be queued via idle_add (thread
-        hand-off) rather than appended inline."""
-        h = ChatRenderHandler(GLib_module=GLib)
-        queued: list = []
-        monkeypatch.setattr(GLib, "idle_add", lambda fn: queued.append(fn) or 0)
-        container = Gtk.Box()
-        h.render_event_card("error", container, error_msg="boom")
-        assert queued and container.get_first_child() is None, (
-            "GLib path must DEFER the append to the GTK main loop"
-        )
-        queued.pop()()  # drain the queued callback
-        assert container.get_first_child() is not None
+# (TestPhase4EventCards and its no-force-scroll sibling case were deleted in
+# SPEC-58 §2i: render_event_card / render_task_card are gone with the Pango
+# card pipeline, so there is no dispatch contract left to pin. The
+# surface-scroll contract these cases guarded is pinned above against the
+# surviving end_streaming / render_sync sites.)
 

@@ -14,8 +14,9 @@ import html
 
 from models.feed_card import FeedCardData, format_feed_timestamp
 
-# Same number as ui.views.feed_card.RENDERED_BODY_LIMIT. This module must
-# not import the view (that import pulls GTK). A test pins the two equal.
+# Same number as the old ui.views.feed_card.RENDERED_BODY_LIMIT (deleted,
+# SPEC-58 §2c) — the HTML surface kept the measurement budget. This module
+# must not import that view (it pulled GTK). A test pins the value == 2000.
 FEED_RENDERED_BODY_LIMIT = 2000
 
 REVEAL_TITLE_APPROVAL = "Full command text — view before approving"

@@ -12,6 +12,5 @@
 
 # Streaming: the local agent runtime paints one row at turn end (the
 # AgentRuntimeHandler buffer path). The old STREAMING_ENABLED toggle + Stream
-# toolbar button were removed 2026-10-07 — the flag's only reader was the
-# dead gateway event path (on_chat_event, gateway stripped SPEC-05), so the
-# toggle never affected local-agent rendering.
+# toolbar button were removed 2026-10-07 — their only reader was the dead
+# gateway event path, so the toggle never affected local-agent rendering.

@@ -1,12 +1,11 @@
 # ui/views/activity_pill.py — the shared activity-status pill + its adapter
 # (UI-PILLBAR Phase 1 Edit 2; adapter relocated here in Phase 2).
 #
-# SPEC-07 SP1 placed the status pill PER-CHAT-SURFACE (a private Gtk.Label in
-# the chat surface class, resolved per tab by ActivityPillAdapter's
-# surface resolver). PM relocation 2026-10-02: the pill moves to a single
-# shared widget hosted at the RIGHT END of the project feed bar
+# SPEC-07 SP1 originally placed the status pill PER-CHAT-SURFACE (a private
+# Gtk.Label resolved per tab). PM relocation 2026-10-02: the pill moves to a
+# single shared widget hosted at the RIGHT END of the project feed bar
 # (main_content.py) — one pill, visible on every tab including project-less
-# ones. Phase 2 retires the per-surface pill; this module is now the pill's
+# ones. Phase 2 retired the per-surface pill; this module is now the pill's
 # ONLY home (logic + styling contract), and ActivityPillAdapter — the
 # duck-type between ActivityHandler and the pill — moved alongside it
 # (window.py imports it from here). chat_surface.py keeps NO pill code.

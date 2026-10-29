@@ -14,11 +14,11 @@ from utils.providers_store import has_any_verified_provider, load_providers
 
 logger = logging.getLogger(__name__)
 
-# LOW-7: process-global env var that the image viewer in event_cards.py reads
-# to determine the active project root. Set by set_active_project_path() on
-# project open, cleared by clear_active_project_path() on project close.
-# Without this wiring, the viewer only ever has the home + /tmp fallback
-# roots — see test_low7_image_viewer.py for the threat model.
+# LOW-7: process-global env var read by the path-sandbox policy in
+# utils/image_paths.py (consumed by render/html.py and utils/live_reader.py
+# for image blocks). Set by set_active_project_path() on project open,
+# cleared by clear_active_project_path() on project close. Without this
+# wiring, the sandbox only ever has the home + /tmp fallback roots.
 # SPEC-11 SP2: the VALUE is the new DEVELCAKES_ literal (D2); readers route
 # through utils.config.get_env, so an old CRABCAKES_ACTIVE_PROJECT_PATH set
 # by external scripts still resolves via the one-release fallback.
@@ -26,14 +26,15 @@ ACTIVE_PROJECT_ENV = "DEVELCAKES_ACTIVE_PROJECT_PATH"
 
 
 def set_active_project_path(project_path: str) -> None:
-    """LOW-7 wiring: publish the active project path for the image viewer.
+    """LOW-7 wiring: publish the active project path for the path sandbox.
 
     Overwrites any prior value. Process-global (env vars are not per-window);
     this is the documented limitation — only the most recently opened project
-    is in scope. The viewer falls back to home + /tmp if the env var is empty.
+    is in scope. utils/image_paths.py falls back to home + /tmp if the env
+    var is empty.
 
     Normalizes the path: expands ~ and resolves to an absolute path. This is
-    required so event_cards.py's _is_path_in_allowed_roots (which calls
+    required so the sandbox's is_path_in_allowed_roots (which calls
     os.path.realpath, which does NOT expand ~) can correctly check whether
     a file lives under this root.
     """

@@ -422,8 +422,10 @@ class RuntimeTurnUiMixin:
         agents are — see gateway_handler.on_connected). Their display name
         comes from self._agents, populated by add_special_agent(). We resolve
         it once here and thread it into both end_streaming and render_sync so
-        build_role_bubble's header condition (event_cards.py:288) is satisfied.
-        Without this, local agent bubbles render the body but no name/dot/timestamp.
+        the surface's agent header is filled. Without this, local agent replies
+        render the body with no name/color. (SPEC-58 §2c: the old Pango header
+        condition — build_role_bubble, event_cards.py:288 — is deleted with the
+        module; the threading survives for the HTML surface's agent fields.)
         """
         # RACE-FIX v4: Reject stale completions from a previous turn.
         # complete_token=None means a legacy caller (no token) — allow through.

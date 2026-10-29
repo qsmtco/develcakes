@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from utils.projects import load_members
 from utils.icons import render_agent_icon
 from ui.views.file_tree import FileTree
-from ui.views.session_menu import show_session_menu
 
 logger = logging.getLogger(__name__)
 
@@ -539,20 +538,9 @@ class LeftPanel(Gtk.Box):
         name_lbl.set_halign(Gtk.Align.START)
         name_lbl.add_css_class("agent-name-label")
 
-        # Tag line: source + session count
-        is_local = session_key.startswith("agent:")
-        source_tag = "DevelCakes" if is_local else "Openclaw"
-        session_word = "Session" if session_count == 1 else "Sessions"
-        tag_text = f"{source_tag}: {session_count} {session_word}"
-        tag_lbl = Gtk.Label(label=tag_text)
-        tag_lbl.set_halign(Gtk.Align.START)
-        tag_lbl.add_css_class("agent-tag-label")
-
         name_col.append(name_lbl)
-        name_col.append(tag_lbl)
 
         name_lbl.show()
-        tag_lbl.show()
         name_col.show()
 
         # Buttons box: +/− toggle (if project active)
@@ -603,34 +591,14 @@ class LeftPanel(Gtk.Box):
     def _on_agent_right_click(self, gesture, n_press, x, y, session_key, name):
         """Show context menu on right-click over an agent row.
 
-        For gateway agents with multiple sessions: show session switcher.
-        For local (special) agents: show Edit/Delete options.
+        Local (special) agents get Edit/Delete. Non-agent keys (the legacy
+        gateway rows) have no menu — the session switcher is gone.
         """
-        row_widget = gesture.get_widget()
-        is_local = session_key.startswith("agent:")
-
-        if is_local:
-            self._show_local_agent_menu(row_widget, name)
-            return
-
-        # Gateway agent — show session switcher if multiple sessions
-        if self._agent_list_handler is None:
-            return
-        sessions = self._agent_list_handler.get_all_sessions_for_agent(name)
-        if len(sessions) <= 1:
-            return  # nothing to switch between
-        current_active = (
-            self._main_content.get_current_session_key()
-            if hasattr(self, "_main_content") and self._main_content
-            else None
-        )
-        show_session_menu(
-            parent=row_widget,
-            agent_name=name,
-            sessions=sessions,
-            on_select=lambda sk: self._on_agent_selected(sk, name),
-            current_session_key=current_active,
-        )
+        # SPEC-58 §2g: gateway session switcher is gone. For an "agent:" key
+        # (local special agent) show Edit/Delete; any other key (legacy
+        # gateway rows) has no menu.
+        if session_key.startswith("agent:"):
+            self._show_local_agent_menu(gesture.get_widget(), name)
 
     def _show_local_agent_menu(self, parent: Gtk.Widget, name: str) -> None:
         """Show Edit/Delete popover for a local (special) agent."""

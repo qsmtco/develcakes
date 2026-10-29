@@ -96,14 +96,17 @@ class TestSites:
 
     def test_active_project_env_constant_and_reader(self, monkeypatch):
         """Site 6: the wiring constant's VALUE is the NEW literal, and
-        event_cards' allowed-roots reader resolves it via get_env — the NEW
-        name is honored. RED (pre-SP2): the constant held the old literal
-        and the reader read os.environ directly for it."""
+        the path-sandbox policy in utils.image_paths resolves it via
+        get_env — the NEW name is honored. RED (pre-SP2): the constant held
+        the old literal and the reader read os.environ directly for it.
+        (Retargeted in SPEC-58 §2i: event_cards' private re-export wrapper
+        died with the module; utils.image_paths.get_allowed_roots is the
+        surviving reader.)"""
         from ui import wiring
-        from ui.views import event_cards
+        from utils import image_paths
 
         assert wiring.ACTIVE_PROJECT_ENV == "DEVELCAKES_ACTIVE_PROJECT_PATH"
 
         monkeypatch.setenv("DEVELCAKES_ACTIVE_PROJECT_PATH", "/new/proj")
         monkeypatch.delenv("CRABCAKES_ACTIVE_PROJECT_PATH", raising=False)
-        assert "/new/proj" in event_cards._get_allowed_roots()
+        assert "/new/proj" in image_paths.get_allowed_roots()

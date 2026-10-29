@@ -645,10 +645,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 # newly opened project (was: clear the event drawer).
                 self._refresh_agent_dashboard(),
                 self._on_feed_bar_update(n, len(self._project_handler.get_project_members(n)) if n else 0),
-                # LOW-7 wiring: publish the active project path so the image viewer
-                # in event_cards.py can scope _open_in_viewer to the project root
-                # (in addition to the home + /tmp fallbacks). Helper lives in
-                # ui/wiring.py so it's testable in isolation.
+                # LOW-7 wiring: publish the active project path so the
+                # path-sandbox policy in utils/image_paths.py (read by
+                # render/html.py and utils/live_reader.py for image blocks)
+                # scopes to the project root (in addition to the home + /tmp
+                # fallbacks). Helper lives in ui/wiring.py so it's testable
+                # in isolation.
                 set_active_project_path(p),
                 # PHASE-5: seed per-project prompts, wire handlers, refresh UI
                 # (SPEC-PROJECT-PROMPTS-DIRECTORY §2.4 — lazy-seed on open,
@@ -714,7 +716,11 @@ class MainWindow(Gtk.ApplicationWindow):
             agent_manager=None,    # stays None in MVP (gateway strip; local agents only)
             project_handler=self._project_handler,
             GLib_module=GLib,
-            on_display_card=self._on_command_card,
+            # SPEC-58 §2c: response_card is never built into a widget (the
+            # Pango card pipeline is gone). The on_display_card slot stays so
+            # the ctor signature does not grow a required argument; the
+            # callback ignores the dict.
+            on_display_card=lambda card: None,
             on_display_text=self._on_command_text,
             collab_handler=self._collab_handler,
             session_handler=self._session_handler,
@@ -833,22 +839,10 @@ class MainWindow(Gtk.ApplicationWindow):
         paned.set_shrink_end_child(False)
         paned.set_position(250)
 
-        # Vertical layout: paned → status bar
+        # Vertical layout: the paned is the only child (SPEC-58 §2e — the
+        # A-9 status bar and its agent_id label are gone).
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(paned)
-
-        # A-9: Status bar with agent_id display
-        _status_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        _status_bar.add_css_class("statusbar")
-        _status_bar.set_margin_start(6)
-        _status_bar.set_margin_end(6)
-        _status_bar.set_margin_bottom(2)
-        self._agent_id_label = Gtk.Label(label="Agent: —")
-        self._agent_id_label.add_css_class("dim-label")
-        self._agent_id_label.set_halign(Gtk.Align.START)
-        self._agent_id_label.set_hexpand(True)
-        _status_bar.append(self._agent_id_label)
-        main_box.append(_status_bar)
 
         self.set_child(main_box)
 
@@ -936,19 +930,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
 
     # ── Command card display ──────────────────────────────────────────────────
-
-    def _on_command_card(self, card: dict):
-        """Render a command result card in the current tab.
-
-        Called by CommandHandler via on_display_card callback when a command
-        returns response_card (e.g. task card, status card).
-        """
-        # card = {type, ...fields} — rendered as a special bubble
-        session_key = self._main_content.get_current_session_key() or ""
-        chat_box = self._main_content.get_chat_box()
-        if chat_box is None or self._chat_render_handler is None:
-            return
-        self._chat_render_handler.render_event_card(card["type"], chat_box, **card)
+    # SPEC-58 §2c: window._on_command_card is gone — no Pango card is built
+    # from CommandHandler's response_card. CommandHandler keeps the
+    # on_display_card slot; the wiring above passes a no-op lambda that
+    # ignores the dict so the ctor signature never grows a required arg.
 
     def _wire_group_tool_callbacks(self) -> None:
         """Install agent_context, canvas, talk, and feed_card callbacks.
@@ -2296,11 +2281,6 @@ class MainWindow(Gtk.ApplicationWindow):
         arh = getattr(self, "_agent_runtime_handler", None)
         if arh is not None:
             arh.refresh_provider_config()
-
-    def update_agent_id_display(self, agent_id: str) -> None:
-        """A-9: Update the agent_id label in the status bar."""
-        if hasattr(self, "_agent_id_label") and self._agent_id_label:
-            self._agent_id_label.set_text(f"Agent: {agent_id}")
 
     # ── Agent selection callback ────────────────────────────────────────────
 
