@@ -1287,8 +1287,7 @@ class TestEndStreamingDoesNotForceScroll:
 
 
 # (TestPhase4EventCards and its no-force-scroll sibling case were deleted in
-# SPEC-58 §2i: render_event_card / render_task_card are gone with the Pango
-# card pipeline, so there is no dispatch contract left to pin. The
-# surface-scroll contract these cases guarded is pinned above against the
-# surviving end_streaming / render_sync sites.)
+# SPEC-58 §2i with the Pango card pipeline, so there is no dispatch contract
+# left to pin. The surface-scroll contract these cases guarded is pinned above
+# against the surviving end_streaming / render_sync sites.)
 

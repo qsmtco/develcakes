@@ -41,8 +41,8 @@ import pytest
 
 from models.feed_card import AutoAcceptPrefs, FeedCardData
 from utils import feed_store
-from utils.conversation_store import ConversationSnapshot
 from utils.config import get_config_dir
+from utils.conversation_store import ConversationSnapshot
 from utils.feed_store import (
     LIVE_WINDOW_DEFAULT,
     LIVE_WINDOW_MAX,
@@ -514,8 +514,7 @@ class _LiteHtmlSurface:
 
     Mirrors ui/views/feed_surface.py's surface API: `card_ids`, `set_cards`,
     `upsert`, `remove`, `reveal`. There are no per-card GTK widgets any more,
-    so the SP3 retention harness measures the DOCUMENT's row set instead of
-    `_card_widgets`.
+    so the SP3 retention harness measures the DOCUMENT's row set.
     """
 
     def __init__(self):
@@ -587,10 +586,10 @@ class TestEvictionWindowWiring:
     widget is ever built. The eviction pass itself is UNCHANGED code under
     test — only its cap source is wired to config (R1/R3/R5).
 
-    SPEC-58 §2f-2: the GTK-widget eviction walk is gone (`_card_widgets` is
-    never populated). The live pass is the HTML row eviction, so the
+    SPEC-58 §2f-2: the feed is a single HTML document — there is no
+    GTK-widget eviction walk. The live pass is the HTML row eviction, so the
     over-cap state is seeded as DOCUMENT ROWS, and the pins below assert on
-    the row set and the backlog, not on a widget map."""
+    the row set and the backlog."""
 
     def _handler(self, project="wiring-proj", register=True):
         from ui.handlers.feed_handler import FeedHandler
@@ -827,13 +826,10 @@ class TestEvictionWindowWiring:
         assert calls == [frozenset()], (
             "_evict_surplus_rows must dispatch to _evict_surplus_html_rows"
         )
-        # The old GTK-widget walk is gone for good.
-        assert not hasattr(h, "_card_widgets")
 
 
 
 # ── SP3: the 2,000-card measurement harness ──────────────────────────────────
-# PROBE RESULT (run BEFORE building this harness, .debug/audit-scratch/
 # sp3_probe.py): 100 cards through the real add_card path with the
 # build_feed_card seam patched → build_feed_card is the ONLY headless
 # blocker (nothing else in the funnel touched real GTK). One finding: the
@@ -979,12 +975,7 @@ class TestTwoThousandCardRetention:
         """Invariant 1: live document rows ≤ the effective cap
         (min(MAX_LIVE_CARD_WIDGETS, live_window) == 120 under window=300,
         per the R1 ruling) — asserted as ≤ for the Load-More row allowance.
-        Retargeted from `_card_widgets` (the map is GONE as of SPEC-58
-        §2f-2) to the surface's row set, which is the thing the retention
-        budget actually bounds."""
-        assert not hasattr(self._handler, "_card_widgets"), (
-            "the HTML feed path must not carry a per-card GTK widget map"
-        )
+        The retention budget bounds the surface's live row set."""
         assert len(self._rows()) <= self.WINDOW + 1
         assert len(self._rows()) <= self._handler._effective_live_window()
 
@@ -1024,14 +1015,10 @@ class TestTwoThousandCardRetention:
         widgets at all (and the widget map itself is GONE as of SPEC-58
         §2f-2), so that census would be vacuous. Two assertions carry the
         original intent instead:
-          - the handler carries NO per-card widget map (nothing to leak);
           - eviction released ROWS, never CARD DATA: every one of the 2,000
             cards still lives in _cards (reachable via the row set or the
             backlog) — a card dropped from both would be a real leak.
         """
-        assert not hasattr(self._handler, "_card_widgets"), (
-            "the HTML path must not carry a per-card GTK widget map"
-        )
         assert len(self._handler._cards) == self.COUNT, (
             f"card data lost: {len(self._handler._cards)}/{self.COUNT} in _cards"
         )
@@ -1161,7 +1148,6 @@ class TestTwoThousandCardRetention:
         rows = tab._surface.card_ids()
         assert len(handler._backlog) + len(rows) == self.COUNT
         assert len(rows) <= 16
-        assert not hasattr(handler, "_card_widgets")
 
     def test_compaction_interplay(self):
         """Test 8 — HONEST documentation of two DIFFERENT mechanisms.

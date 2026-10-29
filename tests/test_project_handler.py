@@ -287,7 +287,7 @@ class TestCmdStatus:
 
 class TestRevertFileToSha:
     """SPEC-58 H1: ProjectHandler.revert_file_to_sha is standalone — no review
-    session and no ReviewHandler; failures surface via set_on_revert_status."""
+    session and no review wiring; failures surface via set_on_revert_status."""
 
     @staticmethod
     def _make_git_result(success=True, error=""):

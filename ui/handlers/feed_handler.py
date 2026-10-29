@@ -920,7 +920,7 @@ class FeedHandler(
         Extract (role, text) pairs from a Gtk.Box containing chat bubbles.
 
         Walks child widgets and reads _crabcakes_role / _crabcakes_text
-        attributes set by build_role_bubble(). Returns oldest-first.
+        attributes set by build_agent_bubble(). Returns oldest-first.
 
         This is the ONLY place GTK widget methods are called for snapshot
         extraction — keeping utils/conversation_store.py GTK-free.

@@ -2,16 +2,16 @@
 # ActivityBubble dataclass — Phase 2 of SPEC-smarter-chat-ux.
 #
 # Pure data container. No GTK, no gateway calls, no state.
-# ActivityHandler populates these from gateway events.
-# ChatHandler renders them via build_role_bubble() with role="System".
+# AgentRuntimeHandler (ui/agent_runtime/turn_ui.py) emits these on tool
+# start/end/error and patch events to whatever callback is registered
+# via set_on_activity_bubble (a dormant seam since SPEC-58 §2e removed
+# the drawer; tests pin the emission and batching).
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
-from datetime import datetime
-
 
 # Supported activity types — exhaustive list from gateway event catalog
 ActivityType = Literal[
@@ -36,10 +36,11 @@ class ToolStatus(Enum):
 @dataclass
 class ActivityBubble:
     """
-    Structured data for an activity bubble — ephemeral system-styled status indicator.
+    Structured data for an activity event.
 
-    Populated by ActivityHandler from gateway events.
-    Rendered by ChatHandler via build_role_bubble(role="System", text=...).
+    Emitted by AgentRuntimeHandler (ui/agent_runtime/turn_ui.py) on tool
+    start/end/error and patch events; delivered to the callback registered
+    via set_on_activity_bubble.
 
     Attributes:
         type:       Which activity type this bubble represents
@@ -133,97 +134,6 @@ class ActivityBubble:
             return f"{self.tool_name}  {label}"
         else:
             return self.raw_text or self.type
-
-    def to_drawer_row(self) -> dict:
-        """
-        Build the dict the ActivityDrawer view consumes.
-
-        The drawer (ui/views/activity_drawer.py) expects a flat dict with these
-        keys (see _format_summary and _build_row_widget):
-            agent, agent_name, session_key, activity_type, icon, type_label,
-            title, command, file_path, output, exit_code, duration, duration_ms,
-            timestamp, raw_text, added, modified, deleted
-
-        Notes:
-        - The drawer reads `agent` (not `agent_name`); we map agent_name → agent.
-        - `type_label` is a human label derived from activity_type.
-        - `duration` is a pre-formatted string (e.g. "1.2s"); duration_ms is the raw int.
-        - `timestamp` is HH:MM:SS formatted for header display; None until set by caller.
-
-        Returns:
-            A new dict. Safe to mutate by the caller.
-        """
-        ts = datetime.now().strftime("%H:%M:%S")
-        return {
-            "agent": self.agent_name or "Agent",
-            "agent_name": self.agent_name,
-            "session_key": self.session_key,
-            "activity_type": self.type,
-            "icon": self.icon,
-            "type_label": activity_type_label(self.type),
-            "title": self.title,
-            "command": self.command,
-            "file_path": self.file_path,
-            "output": self.output,
-            "exit_code": self.exit_code if self.type == "command_output" else None,
-            "duration": format_duration(self.duration_ms),
-            "duration_ms": self.duration_ms,
-            "timestamp": ts,
-            "raw_text": self.raw_text,
-            "added": self.added,
-            "modified": self.modified,
-            "deleted": self.deleted,
-        }
-
-
-def activity_type_label(activity_type: str) -> str:
-    """
-    Map an ActivityType literal to a short human label for the drawer row.
-
-    Single source of truth for activity type labels (Bug 2,
-    SPEC-AUDIT-CLEANUP-1) — the drawer imports this directly; there is no
-    longer a duplicated copy in ui/views/activity_drawer.py.
-
-    Returns the input verbatim if no mapping exists.
-    """
-    if not activity_type:
-        return ""
-    mapping = {
-        "command_output": "exec",
-        "lifecycle_start": "lifecycle",
-        "lifecycle_end": "lifecycle",
-        "plan": "plan",
-        "approval_request": "approval",
-        "patch": "patch",
-        "tool_start": "tool",
-        "tool_end": "tool",
-        "tool_error": "tool",
-    }
-    return mapping.get(activity_type, activity_type)
-
-
-def format_duration(ms: int) -> str:
-    """
-    Format a duration in milliseconds as a short human string.
-
-    Single source of truth for duration formatting (Bug 2,
-    SPEC-AUDIT-CLEANUP-1) — the drawer imports this directly; there is no
-    longer a duplicated copy in ui/views/activity_drawer.py.
-
-    Rules:
-    - ms is None, non-numeric (fail-safe for external input garbage), or <= 0 → ""
-    - ms < 1000      → "Nms"            (e.g. "847ms")
-    - ms < 60_000    → "N.Ns"           (e.g. "1.2s")
-    - ms >= 60_000   → "Nm Ns"          (e.g. "1m 23s")
-    """
-    if ms is None or not isinstance(ms, (int, float)) or ms <= 0:
-        return ""
-    if ms < 1000:
-        return f"{ms}ms"
-    if ms < 60_000:
-        return f"{ms / 1000:.1f}s"
-    minutes, secs = divmod(ms // 1000, 60)
-    return f"{minutes}m {secs}s"
 
 
 def _friendly_tool_name(name: str) -> str:

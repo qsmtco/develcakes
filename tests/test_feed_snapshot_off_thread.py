@@ -257,12 +257,8 @@ class TestDiffBuildIsDeferred:
         # There is no per-card GTK widget any more (WU feed-surface chunk 3b):
         # `_apply_snapshot` attaches the snapshot to the CARD DATA and the
         # document re-renders from it. The equivalent assertion is that the
-        # card carries the diff and the document surfaces carry it, i.e. the
-        # handler did not route the update through a deleted widget path.
+        # card carries the diff and the document surfaces carry it.
         assert "only-line" in card.conversation_snapshot.diff_text
-        assert not hasattr(handler, "_card_widgets"), (
-            "the HTML feed path must not carry a per-card GTK widget map"
-        )
         handler.shutdown_persist_writer()
 
     def test_existing_snapshot_is_never_rebuilt(self, monkeypatch, tmp_path):

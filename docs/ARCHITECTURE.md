@@ -3505,7 +3505,7 @@ window._build()
 On render_sync() call:
   → ChatHandler.render_sync(role, text, session_key, on_forward_click=self._on_forward_message)
     → ChatRenderHandler.render_sync(role, text, session_key, on_forward_click=cb)
-      → build_role_bubble(role, text, on_forward_click=cb, tight=...)
+      → build_agent_bubble(role, text, on_forward_click=cb, tight=...)
         → creates Forward button → on click → cb(text, anchor_widget)
 
 On forward click (user clicks Forward button on agent bubble):

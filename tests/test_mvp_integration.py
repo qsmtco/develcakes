@@ -6,8 +6,8 @@ Mock policy: fakes sit ONLY at the provider seam. ``_maybe_compile``,
 
 Reuse disclosure (copied / imported from the existing suites):
   * ``_make_cfg`` is IMPORTED from ``tests.test_agent_runtime`` (module-level
-    helper). The N1 review-wired integration (ARH + ReviewHandler + git) was
-    deleted with SPEC-58 §2i — the machinery it exercised no longer exists.
+    helper). The N1 review-wired integration was deleted with SPEC-58 §2i —
+    the machinery it exercised no longer exists.
 """
 
 from __future__ import annotations

@@ -160,7 +160,7 @@ class TestRenderDiffHunks:
 
 class TestGetLangFromPathIntegration:
     """get_lang_from_path works with common extensions."""
-    # Same mapping used by DiffViewer internally
+    # Same mapping used by diff_card / file_tree internally
 
     def test_python(self):
         assert get_lang_from_path("foo.py") == "python"

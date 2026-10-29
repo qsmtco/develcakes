@@ -2473,7 +2473,7 @@ class TestExecAutoAccept:
         A card id left in `snoozed_card_ids` by an OLD prefs file must NOT
         block auto-accept any more — only the persisted field survives (the
         prefs round-trip is pinned by test_feed_retention). This test is the
-        inverse of the deleted `snooze_card` behaviour: same id, same prefs
+        inverse of the old snooze behaviour: same id, same prefs
         list, but the card IS auto-approved now.
 
         Uses monkeypatch to predict the UUID that add_card will assign,
@@ -3657,9 +3657,6 @@ class TestBackgroundPersistWriter:
 
         # Precondition guard: the card is in the document, not a GTK widget.
         assert h._html_feed is True, "precondition: the handler runs the HTML path"
-        assert not hasattr(h, "_card_widgets"), (
-            "fixture precondition: the GTK widget path must be gone"
-        )
         upserts_before = len(h._feed_tab.upserts)
 
         store = MagicMock()

@@ -97,9 +97,6 @@ class MockFeedTab:
                 self.cards[i] = (new_widget, card_id)
                 break
 
-    def schedule_scroll_to_bottom(self):
-        pass
-
     def schedule_smart_scroll_to_bottom(self):
         pass
 
