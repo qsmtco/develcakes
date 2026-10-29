@@ -549,7 +549,6 @@ openclaw gateway start
 | `DEVELCAKES_INCLUDE_DOCS` | _(off)_ | Include docs/ in file context |
 | `DEVELCAKES_MIGRATE_STORE` | `1` | JSON→store migration at launch (0 skips) |
 | `DEVELCAKES_PROMPT_DEBUG` | _(off)_ | Dump the full composed prompt to stderr |
-| `DEVELCAKES_NO_WEBKIT` | _(off)_ | **Feed only** — set truthy to force the feed's "Feed requires WebKit (unset NO_WEBKIT)" notice; chat ignores it (chat hard-fails at boot without WebKit, by design) |
 | `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | comma-separated OpenRouter STT keyword-bias phrases; any all-blank value (empty, whitespace-only, commas-only) disables biasing |
 | `STT_MODEL` | — | overrides the configured dictation model for THIS process (debug/testing; never written to disk) |
 
@@ -588,7 +587,6 @@ Every handler follows the same pattern: **receives dependencies via setters, nev
 ```
 ui/handlers/
 ├── activity_handler.py            6-state activity machine
-├── activity_wiring_handler.py     Activity state → widget wiring
 ├── agent_builder_handler.py       Custom agent config UI
 ├── agent_command_handler.py       Audit reports · enforcement
 ├── agent_list_handler.py          Agent roster
@@ -600,13 +598,11 @@ ui/handlers/
 ├── crabwatch_handler.py           File system watcher
 ├── feed_handler.py                Feed card lifecycle
 ├── file_tree_handler.py           File tree sort · filter · prefs
-├── forward_handler.py             Agent-to-agent forwarding
 ├── input_toolbar_handler.py       Chat input controls
 ├── media_handler.py               STT + prompt improvement
 ├── project_handler.py             Project open/close/create · onboarding
 ├── project_list_handler.py        Project browser
 ├── prompts_handler.py             Prompt library
-├── review_handler.py              Review lifecycle
 ├── session_handler.py             Session management
 ├── settings_handler.py            Settings dialog
 └── task_handler.py                Task CRUD
@@ -625,7 +621,6 @@ develcakes/
 │   ├── conversation_snapshot.py     # Serializable snapshots
 │   ├── feed_card.py                 # Feed card data
 │   ├── activity.py                  # Activity bubble data
-│   ├── review_state.py              # Review session state
 │   ├── streaming.py                 # Streaming bubble state
 │   ├── colors.py                    # Agent color rotation
 │   ├── providers.py                 # Provider config data

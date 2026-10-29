@@ -65,7 +65,7 @@ Develcakes maintains a **two-tier prompt storage** architecture:
 - **Project group chat**: open a project → fan-out message to all project members → responses routed back to the project tab
 - **Membership toggles**: +/− buttons in the Agents tab add/remove agents from the active project
 - **Crabcake Special Agents**: local agent runtime — Coder and Debugger agents run directly against OpenAI/MiniMax/Anthropic APIs with file/exec tools, no gateway required
-- **Review layer**: git-backed code review for agent writes — checkpoint → diff → accept/reject
+- Code review commands were removed in SPEC-58 — accept/reject rides the project feed cards
 
 **Technology stack:**
 - Python 3, GTK4 (via PyGObject)
@@ -89,7 +89,7 @@ develcakes/
 │   ├── __init__.py           # Exports: AgentManager, AgentRoutingTable, Command, CommandResult, CommandRegistry,
 │   │                          # StreamingBubble, FeedCardData, ActivityBubble, ToolStatus, Conversation, Message,
 │   │                          # MessageRole, ToolCall, ToolCallStatus, ConversationSnapshot, SnapshotMessage,
-│   │                          # ReviewState, TeamMember, ProjectTeam, next_agent_color, reset_color_indices
+│   │                          # TeamMember, ProjectTeam, next_agent_color, reset_color_indices
 │   ├── agents.py              # AgentManager — session_key → name, colors, sessions
 │   ├── activity.py            # ActivityBubble dataclass — activity bubble state for ActivityHandler
 │   ├── colors.py              # Color palettes + round-robin assignment
@@ -99,7 +99,6 @@ develcakes/
 │   ├── conversation_snapshot.py # ConversationSnapshot + SnapshotMessage — conversation snapshot data
 │   ├── feed_card.py           # FeedCardData dataclass + css_class_for_type() (Phase 5)
 │   ├── providers.py           # ProviderConfig dataclass + caller_default_max_tokens() (per-provider context window resolution)
-│   ├── review_state.py        # ReviewState dataclass — per-project review session data (Phase 7)
 │   ├── streaming.py           # StreamingBubble dataclass — streaming bubble state (Phase 5)
 │   └── team.py                # TeamMember + ProjectTeam — project team membership data
 │
@@ -147,9 +146,7 @@ develcakes/
 │   │   ├── media_handler.py   # MediaHandler — STT + improve
 │   │   ├── project_handler.py  # ProjectHandler — active project + agent-to-project routing
 │   │   ├── activity_handler.py  # ActivityHandler — 6-state activity machine rendering to the status_target duck-type (Phase 6; repointed to the activity pill in SPEC-07 R4)
-│   │   ├── activity_wiring_handler.py  # ActivityDrawer event wiring — gateway + local, online + offline (SPEC-activity-drawer)
 │   │   ├── command_handler.py   # CommandHandler — slash-prefix command parser (Phase 7)
-│   │   ├── review_handler.py    # ReviewHandler — review session lifecycle (Phase 7)
 │   │   ├── collab_handler.py   # CollabHandler — collaboration commands: ask/stop (Phase 7)
 │   │   ├── agent_runtime_handler.py  # AgentRuntimeHandler — local agent UI bridge (Phase 1.4)
 │   │   ├── project_list_handler.py  # ProjectListHandler — project card data + color round-robin
@@ -160,19 +157,16 @@ develcakes/
 │   │   ├── feed_handler.py        # ~2276 lines — FeedHandler — feed card lifecycle, background persist writer, compaction + prune surfacing (SPEC-UI-RESPONSIVENESS-2 P1/P3)
 │   │   ├── session_handler.py     # ~164 lines — SessionHandler — session switching commands (Phase 7)
 │   │   ├── connection_sync_handler.py  # post-connect wiring (Phase 3a extraction)
-│   │   ├── forward_handler.py     # 17 tests (Phase 3b extraction)
 │   │   ├── settings_handler.py    # Settings dialog logic — provider CRUD, test connection, status
 │   │   ├── auxilium_wizard_handler.py # Auxilium first-run wizard handler (Tier 1, D7)
 │   │   └── file_tree_handler.py   # Sort prefs + git status cache (no GTK) — FileTree enhancements Phase 4
 │   └── views/                 # View widgets
 │       ├── __init__.py
-│       ├── activity_drawer.py  # collapsible activity event panel — NO LONGER MOUNTED from window.py (SPEC-AGENT-DASHBOARD); class + tests remain
+│       ├── (activity_drawer.py removed in SPEC-58 §2c — see §3.14j)
 │       ├── agent_dashboard.py  # AgentDashboard — per-agent rows in the paned end child (SPEC-AGENT-DASHBOARD)
 │       ├── chat_bubble.py      # build_role_bubble() — chat bubble widget factories (Phase 1)
-│       ├── chat_surface.py     # ChatSurface — WebKit chat surface; the WebView is a DIRECT child (no ScrolledWindow, no text-view fallback) (SPEC-06/07/58)
-│       ├── feed_card.py        # ~581 lines — feed_card widget factory (Phase 5)
-│       ├── diff_card.py         # Diff card widget factories — build_file_diff_card, build_diff_summary_card (Phase 7)
-│       ├── review_bar.py        # ReviewBar widget — review mode dropdown + action buttons (Phase 7)
+│       ├── chat_surface.py     # ChatSurface — WebKit chat surface. The transcript WebView is a direct child of ChatSurface; the notebook page is the chat box; the page scrolls in the document — there is no GTK scrollbar on that page (SPEC-06/07/58)
+│       ├── (views/feed_card.py, diff_card.py, review_bar.py removed in SPEC-58 §2c — the feed is render/feed_html.py + FeedSurface)
 │       ├── file_tree.py        # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
 │       ├── left_panel.py         # LeftPanel (Prompts/Agents/Projects/Settings notebook)
 │       ├── main_content.py     # MainContent — chat notebook + input + button bar
@@ -387,8 +381,7 @@ calls both the agent-command handler and `bridge.on_supervisor_reply`).
 | `CommandRegistry` | `command.py` | Maps command names to handlers; extensible |
 | `StreamingBubble` | `streaming.py` | Dataclass for streaming bubble state (Phase 5) |
 | `FeedCardData` | `feed_card.py` | Dataclass for Project Feed cards (Phase 5) |
-| `ActivityBubble` | `activity.py` | Dataclass for activity event state; `to_drawer_row()` builds the dict the ActivityDrawer consumes (SPEC-activity-drawer) |
-| `ReviewState` | `review_state.py` | Per-project review session data (Phase 7) |
+| `ActivityBubble` | `activity.py` | Dataclass for activity event state (SPEC-activity-drawer; `to_drawer_row()` was removed with the drawer in SPEC-58 §2e) |
 
 ### 3.3a `models/routing.py` — Agent Routing Table
 
@@ -459,19 +452,10 @@ work-unit system in SPEC-49. No task model exists in `models/`; task/work-unit
 commands fall through to chat send. See
 `docs/specs/SPEC-49-WORK-SYSTEM-REMOVAL.md`.
 
-### 3.3e `models/review_state.py` — Review State
+### 3.3e (removed) `models/review_state.py` — Review State
 
-```python
-@dataclass ReviewState:
-    project_path: str
-    review_mode: str        # "off" | "review"
-    checkpoint_sha: str | None
-    is_dirty: bool
-    last_check_files: list[str]
-
-    def is_active() -> bool      # checkpoint exists and not resolved
-    def can_checkpoint() -> bool   # review mode on, no active session
-```
+Deleted in SPEC-58 §2c with the review checkpoint machinery (ReviewHandler,
+ReviewBar, the review commands). See `docs/specs/SPEC-58-UI-LEAN.md` §2c/§8.
 
 ### 3.4 App-level toolbar — removed
 
@@ -1207,38 +1191,14 @@ Right-clicking a project tab now shows a project-specific menu (All / member ent
 **Architecture:** Each segment becomes a child widget inside a vertical `Gtk.Box`. The bubble's CSS class (`.chat-bubble-you` / `.chat-bubble-agent`) controls bubble background.
 
 
-### 3.14j `ui/views/activity_drawer.py` — Activity Drawer (SPEC-activity-drawer)
+### 3.14j (removed) `ui/views/activity_drawer.py` — Activity Drawer
 
-**Responsibility:** Collapsible GTK panel below the chat that displays activity events (tool calls, plans, approvals, command output, patches, lifecycle separators) in a scrollable `Gtk.ListBox`. Pure view — no business logic, no gateway calls, no state mutations beyond its own widget tree.
-
-**Owns:** Internal widget tree (header bar, list, filter state, per-agent counters, separator tracking, expanded revealers). All state is private to the drawer.
-
-**Public API:**
-```python
-class ActivityDrawer(Gtk.Box):
-    def __init__(self) -> None
-    def append_event(self, row: dict) -> None     # row from ActivityBubble.to_drawer_row()
-    def on_agent_start(self, session_key: str, agent_name: str) -> None
-    def on_agent_end(self, session_key: str, agent_name: str) -> None
-    def clear_events(self) -> None                  # remove all rows, reset state
-    def toggle(self) -> None                       # programmatic expand/collapse
-```
-
-**Counter-collapse behavior:** Consecutive events with the same `(agent_name, activity_type)` are merged in place — count increments, duration sums. The first event of a new `(agent, type)` pair opens a new row.
-
-**Filter semantics:** Two filter dropdowns (agent, type) with AND semantics. Empty set = all pass. Filter state lives in `self._visible_agents` and `self._visible_types`. Filter resets on `clear_events()`.
-
-**Click-to-expand:** Rows with `output` set (command_output, tool_end, tool_error) get a `Gtk.Revealer` that toggles on row click, showing the last 10 lines.
-
-**Lifecycle separators:** `on_agent_start` / `on_agent_end` insert marker rows that break the counter chain for the named agent and show per-agent stats on end.
-
-**Thread safety:** `append_event`, `on_agent_start`, `on_agent_end`, `clear_events`, `toggle` must all be called on the GTK main thread. ActivityHandler already dispatches via `GLib.idle_add()` before firing callbacks.
-
-**Architecture rules:**
-- Lives in `ui/views/` — no imports from `gateway/`, `agent/`, `ui/handlers/`
-- Receives data as flat dicts (see `models/activity.py:ActivityBubble.to_drawer_row()`)
-- Pure view — no business logic, no state beyond the widget tree
-- Connected to ActivityHandler via `set_on_activity_bubble` (adapter in `activity_wiring_handler.py` converts `ActivityBubble` to dict via `to_drawer_row()`)
+**Removed in SPEC-58 §2c** together with `models/activity.py:to_drawer_row()`,
+`ui/handlers/activity_wiring_handler.py`, and `tests/test_activity_drawer.py`.
+The live activity UI is the ActivityHandler 6-state machine rendering to the
+activity pill (`ActivityPillAdapter`) — see §3.23. (History: the drawer was a
+collapsible GTK panel below the chat listing activity events in a scrollable
+`Gtk.ListBox`, already unmounted from `window.py` by SPEC-AGENT-DASHBOARD.)
 
 
 ### 3.15 `ui/handlers/gateway_handler.py` — Gateway Handler (Phase 2)
@@ -1478,53 +1438,23 @@ def get_help(name) -> str | None
 
 **Thread safety:** All GTK via `GLib.idle_add()`.
 
-### 3.21b `ui/handlers/review_handler.py` — Review Session Handler (Phase 7) — *Superseded by Feed Cards*
+### 3.21b (removed) `ui/handlers/review_handler.py` — Review Session Handler
 
-**Responsibility:** Review session lifecycle — checkpoint, check changes, accept, reject. Coordinates git_ops, diff_parser, and GTK views.
+**Removed in SPEC-58 §2c** with `models/review_state.py`, `ui/views/review_bar.py`,
+`ui/views/diff_viewer.py`, and the `/review` / `/check` / `/accept` / `/reject`
+commands. Review of agent writes happens through the project feed cards
+(accept/reject on the feed document) and the standalone
+`ProjectHandler.revert_file_to_sha` (a plain git checkout — see §2d of
+`docs/specs/SPEC-58-UI-LEAN.md`). The former primary workflow text — enforcement
+layer catches issues on write → feed cards surface events in the feed bar →
+audit reports log bugs to the target agent's bug journal — still holds and needs
+no handler of its own.
 
-**Status:** **Superseded by the project feed card system + SPEC-3 structured feedback protocol.** The `/review`/`check`/`accept`/`reject` commands and ReviewBar are kept in the codebase for potential future use, but the primary review workflow is now: enforcement layer catches issues on write → feed cards surface events in the feed bar → audit reports (`## Audit Report` blocks) log bugs to the target agent's bug journal. This is more intuitive and always-on compared to the mode-gated checkpoint flow. See `docs/specs/SPEC-3-structured-feedback.md`.
+### 3.21c (removed) `ui/views/review_bar.py` — Review Bar Widget
 
-**Owns:** Per-project `ReviewState` dict.
-
-**Public API:**
-```python
-ReviewHandler(GLib, main_content, project_handler, on_review_started, on_review_ended, on_display_card, on_display_text)
-
-def set_review_mode(project_name, mode)        # "off" | "review"
-def get_review_mode(project_name) -> str
-def start_review(project_name)                   # git add -A && git commit → checkpoint SHA
-def check_changes(project_name)                  # git diff <sha> → display diff cards
-def accept_changes(project_name, message)       # git add -A && git commit
-def reject_changes(project_name, reason)        # git checkout <sha> -- .
-def reject_file(project_name, file_path)
-def get_state(project_name) -> ReviewState | None
-def on_project_opened(project_name, project_path)
-def on_project_closed(project_name)
-def set_chat_handler(chat_handler)
-def set_gateway_client(gw)
-```
-
-**Thread safety:** All GTK via `GLib.idle_add()`. All git calls in background threads.
-
-### 3.21c `ui/views/review_bar.py` — Review Bar Widget (Phase 7) — *Superseded by Feed Cards*
-
-**Responsibility:** GTK widget for review mode controls — dropdown, status, action buttons.
-
-**Status:** **Superseded.** See 3.21b. The ReviewBar was non-functional from creation (GTK3 `pack_start` call) until 2026-05-21 (fixed to `prepend()`). It works now but is not the primary review mechanism — feed cards serve that role.
-
-**Public API:**
-```python
-ReviewBar(on_mode_changed, on_start_clicked, on_check_clicked)
-
-def set_review_mode(mode)              # update dropdown without firing callback
-def set_status(text)
-def set_state_idle()
-def set_state_reviewing(checkpoint_sha)
-def set_state_has_changes(file_count, additions, deletions)
-def set_loading(loading)
-def set_accept_callback(cb)
-def set_reject_callback(cb)
-```
+**Removed in SPEC-58 §2c** together with the ReviewHandler (§3.21b). The
+project-bar auto-accept cycle (`⚡ files: …` on the settings bar) and the feed
+document's accept/reject controls are the surviving review UX.
 
 ### 3.21d (removed) `ui/handlers/task_handler.py` / `work_handler.py`
 
@@ -2619,13 +2549,12 @@ class ConnectionSyncHandler:
         main_content,                  # MainContent — gets agent_manager
         agent_list_handler,            # AgentListHandler — gets agent_mgr
         gateway_handler,               # GatewayHandler — SOURCE of live agent_mgr
-        project_handler,               # ProjectHandler — gets agent_manager + review_handler
+        project_handler,               # ProjectHandler — gets agent_manager
         command_handler,               # CommandHandler — gets gateway_client + agent_manager
         agent_command_handler,         # AgentCommandHandler — gets 6 setters wired at once
         session_handler,               # SessionHandler — gets agent_manager
         feed_handler,                  # FeedHandler — receives audit-report callback
         left_panel,                    # LeftPanel — refreshed on connect if a project is open
-        review_handler,                # ReviewHandler — wired into project_handler
         activity_handler,              # ActivityHandler — gets 4 lifecycle callbacks from chat_handler
         agent_to_project,              # AgentRoutingTable — shared with agent_command_handler
         on_forward_clicked: Callable,  # chat bubble forward-button → ForwardHandler.show_forward_popover
@@ -2645,61 +2574,21 @@ class ConnectionSyncHandler:
 
 **Extracted from:** `window._sync_gateway_to_chat_handler` (former location: ui/window.py). The original method was 73 lines and violated the §3.6 boundary between window.py (composition root) and handlers (business logic).
 
-    # NOTE: ActivityDrawer wiring (set_on_activity_bubble, set_on_agent_lifecycle,
-    # set_on_command_output) has moved to ui/handlers/activity_wiring_handler.py
-    # (constructed at startup, not deferred to connect) so the drawer works offline.
-    # sync() now only injects AgentManager via set_agent_manager().
+    # NOTE (SPEC-58 §2c): the ActivityDrawer wiring closures (set_on_activity_bubble,
+    # set_on_agent_lifecycle, set_on_command_output) and the ReviewHandler /
+    # ForwardHandler injections are gone — the drawer, its wiring handler
+    # (activity_wiring_handler.py), and both handlers were deleted. sync() now only
+    # injects AgentManager via set_agent_manager().
 
-### 3.21z `ui/handlers/forward_handler.py` — Forward Handler (Phase 3b extraction)
+### 3.21z (removed) `ui/handlers/forward_handler.py` — Forward Handler
 
-**Responsibility:** Agent-to-agent message forwarding flow. Builds a `Gtk.Popover` listing every other agent the user could forward to; on selection, routes the text to the target (special agent or gateway agent), creates/selects the target's chat tab, and renders a "forwarded from <source>" bubble into it.
-
-**Owns:** The popover widget construction, target agent resolution (special vs gateway), and forwarded bubble rendering. Stateless otherwise.
-
-**Constructor:**
-```python
-class ForwardHandler:
-    def __init__(
-        self,
-        *,
-        main_content,                  # MainContent — for create_chat_tab, get_chat_box, _chat_notebook, scroll_chat_to_bottom, _tab_sessions
-        chat_handler,                  # ChatHandler — placeholder for future evolution; not currently read
-        chat_render_handler,           # ChatRenderHandler — for render_sync (forwarded bubble) + _on_forward_message
-        agent_runtime_handler,         # AgentRuntimeHandler — for get_special_agents() + send_to_special_agent()
-        gateway_handler,               # GatewayHandler — for agent_mgr.get_name() + gw.send_message() + gw.is_connected()
-    ) -> None
-```
-
-**Public API:**
-```python
-    def show_forward_popover(
-        self,
-        text: str,
-        anchor_widget,                 # Gtk.Widget — the popover's parent (e.g. a chat bubble)
-        source_session_key: str | None,
-    ) -> None
-        # Build a Gtk.Popover with one button per other agent.
-        # Excludes source_session_key from the list.
-        # Deduplicates between special-agent and gateway-tab lists.
-        # Returns silently if no other agents exist.
-
-    def forward_to_agent(
-        self,
-        target_session_key: str,
-        text: str,
-        source_session_key: str | None,
-        popover,                       # Gtk.Popover — popped down at start
-    ) -> None
-        # Route text to special-agent (send_to_special_agent) or gateway (gw.send_message).
-        # Resolve source_name for the forwarded_from label.
-        # Create new tab if target not in _tab_sessions, else select existing.
-        # Render "You" bubble with forwarded_from=<source_name> via chat_render_handler.
-        # Defer scroll to bottom via GLib.timeout_add(16, ...).
-```
-
-**Thread safety:** Called only on the main thread (button click handler). The `GLib.timeout_add(16, ...)` deferral runs on the default main loop context.
-
-**Extracted from:** `window._on_forward_clicked` and `window._forward_to_agent` (former location: ui/window.py, 100 combined lines). The methods were tightly coupled via a shared `popover` variable and were extracted as a single unit to preserve that coupling.
+**Removed in SPEC-58 §2c** with the chat-bubble forward button
+(`on_forward_clicked`) and `tests/test_forward_handler.py`. Agent-to-agent
+consultation now goes through `/ask` (`CollabHandler`, §3.21e), which still
+returns `forward_to` from the gateway. (History: the handler built a
+`Gtk.Popover` listing candidate target agents and rendered
+"forwarded from <source>" bubbles — extracted from
+`window._on_forward_clicked` / `window._forward_to_agent`.)
 
 ### 3.21za `ui/handlers/settings_handler.py` — Settings Dialog Logic Handler
 
@@ -2745,29 +2634,16 @@ class _ProviderCard:
 **CSS classes:** `settings-provider-card`, `settings-test-button`,
 `settings-status-dot`.
 
-### 3.21zd `ui/handlers/activity_wiring_handler.py` — Activity Wiring Handler (SPEC-activity-drawer offline + local)
+### 3.21zd (removed) `ui/handlers/activity_wiring_handler.py` — Activity Wiring Handler
 
-**Responsibility:** Single owner of all ActivityDrawer event wiring — gateway AND local, online AND offline. Constructed in `window.py._build()` and `.wire()` called unconditionally at startup (no gateway required), so the drawer receives events from the first local-agent tool call onward.
-
-**Owns:** The adapter logic that converts `ActivityBubble` dataclass instances to drawer row dicts (via `bubble.to_drawer_row()`), and the routing of local `AgentRuntimeHandler` tool/lifecycle/exec events into the drawer.
-
-**Constructor dependencies:**
-- `activity_handler`: ActivityHandler — source of gateway bubbles + lifecycle separators
-- `agent_runtime_handler`: AgentRuntimeHandler — source of local exec_command output, tool lifecycle, agent start/end
-- `activity_drawer`: ActivityDrawer — the target
-
-**Public API:**
-```python
-class ActivityWiringHandler:
-    def __init__(self, *, activity_handler, agent_runtime_handler, activity_drawer) -> None
-    def wire(self) -> None   # idempotent — wires 5 callbacks (gateway bubble/lifecycle, local exec/tool/lifecycle)
-```
-
-**Dedup invariant:** Local bridges fire only for special-agent sessions (`special:*` keys via `AgentRuntimeHandler`); gateway bridges fire for gateway sessions. The namespaces are disjoint for built-in agents. No explicit dedup code is needed (documented invariant).
-
-**Extracted from:** `connection_sync_handler.sync()` (the former home of the gateway-bubble adapter closures). Moved out because `sync()` only runs on gateway connect, which broke the drawer offline.
-
-**Offline name resolution:** `_resolve_local_agent_name()` uses `AgentRuntimeHandler.get_agent_name_for_session()` (the local registry), not the gateway `AgentManager`, so agent names resolve correctly without a connection.
+**Removed in SPEC-58 §2c** with the ActivityDrawer (§3.14j) and
+`models/activity.py:to_drawer_row()`. The gateway/local activity callbacks it
+wired (set_on_activity_bubble, set_on_agent_lifecycle, set_on_command_output)
+no longer exist on ActivityHandler either — activity renders only through the
+6-state machine to the activity pill (§3.23). (History: it was constructed in
+`window.py._build()` with `.wire()` called unconditionally at startup, bridging
+gateway bubbles and local `AgentRuntimeHandler` exec/tool/lifecycle events into
+`ActivityDrawer.append_event` via `bubble.to_drawer_row()`.)
 
 ### 3.22 `ui/views/feedbar.py` — RETIRED (deleted in SPEC-07 R4)
 
@@ -2795,24 +2671,11 @@ set_progress_opacity(opacity)      # Set bar opacity 0.0..1.0 (for subtle idle p
 
 **States driven by ActivityHandler:** idle | sending | reasoning | streaming | tool_use | done
 
-### 3.22a `ui/views/feed_card.py` — Project Feed Card Widgets (Phase 5)
+### 3.22a (removed) `ui/views/feed_card.py` — Project Feed Card GTK Widgets
 
-The live feed is one `WebKit.WebView` in `ui/views/feed_surface.py`. The first paint and any structural reset use `load_html`. Later inserts, deletes, and in-place card updates patch `#feed` with `evaluate_javascript`. The view background and the `.feed-scroll` host are `#1a1b26`. Chat uses the same view background from `ChatSurface._ensure_webview`.
+The live feed is one `WebKit.WebView` in `ui/views/feed_surface.py`. The first paint and any structural reset use `load_html`. Later inserts, deletes, and in-place card updates patch `#feed` with `evaluate_javascript`. The view background and the `.feed-scroll` host are `#1a1b26`. Chat uses the same view background from `ChatSurface._ensure_webview`. **There is no GTK fallback any more** — SPEC-58 §2b made WebKit mandatory and SPEC-58 §2c deleted `ui/views/feed_card.py`; the feed is `render/feed_html.py` plus `ui/views/feed_surface.py`, and bodies stay escaped text.
 
-**Responsibility:** GTK widget factories for individual feed cards in the project tab. Pure view — no business logic. This is the `NO_WEBKIT` fallback. When WebKit is available the feed document is `render/feed_html.py` plus `ui/views/feed_surface.py`; bodies stay escaped text.
-
-**Owns:** Card widget layout and CSS class application. State comes from `FeedCardData` dicts passed at construction.
-
-**Public API:**
-```python
-build_feed_card(card_data: FeedCardData, *, on_review, on_accept, on_reject, on_copy) -> Gtk.Widget
-build_feed_reference_widget(card_data: FeedCardData, *, on_click) -> Gtk.Widget
-build_empty_feed_widget() -> Gtk.Widget
-update_card_badge(card_widget: Gtk.Widget, accepted: bool | None) -> None
-    # Post-construction badge update — called by FeedHandler after accept/reject
-```
-
-**card_type key determines card variant and icon** (see `models/feed_card.py` for the authoritative `css_class_for_type()` mapping; `agent/tools.py` `_TOOLS["feed_card"]` for the wire format):
+**card_type key determines card variant and icon** (see `models/feed_card.py` for the authoritative `css_class_for_type()` mapping; `agent/tools.py` `_TOOLS["feed_card"]` for the wire format; the CSS class strings below are consumed by `render/feed_html.py`, the document feed):
 - `file_created` — green dot icon, CSS: `feed-card-file-new`
 - `file_modified` — amber dot icon, CSS: `feed-card-file-mod`
 - `file_deleted` — red dot icon, CSS: `feed-card-file-del`
@@ -2877,11 +2740,11 @@ def format_feed_timestamp(ts) -> str:
 
 ### 3.22c `ui/handlers/feed_handler.py` — Project Feed Handler (Phase 5)
 
-**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and the `feed_card` tool callback (`MainWindow._post_feed_card`). Delegates rendering to `feed_card.py` (GTK fallback) or the WebKit document, persistence to `feed_store.py`, git ops to `git_ops.py`.
+**Responsibility:** Manages project feed card lifecycle — add, remove, persist, accept/reject. Coordinates with `CrabWatchHandler` (filesystem events) and the `feed_card` tool callback (`MainWindow._post_feed_card`). Rendering is the WebKit document — `render/feed_html.py` plus `ui/views/feed_surface.py` (the GTK `feed_card.py` factory was removed in SPEC-58 §2c) — persistence goes to `feed_store.py`, git ops to `git_ops.py`.
 
-`on_feed_action(card_id, action)` is the document click entry. In HTML mode `_card_widgets` stays empty. The 120 / 40 cap (`MAX_LIVE_CARD_WIDGETS` / `KEEP_NEWEST_CARDS`) applies to document rows when the reader is near the bottom, and is unchanged for GTK widgets otherwise.
+`on_feed_action(card_id, action)` is the document click entry. The 120 / 40 row window (`MAX_LIVE_HTML_ROWS` / `KEEP_NEWEST_HTML_ROWS`) applies to document rows when the reader is near the bottom.
 
-**Owns:** `_cards` (dict: card_id → FeedCardData), `_card_widgets` (dict: card_id → Gtk.Widget), `_project_cards` (dict: project_name → [card_ids]), `_project_paths` (dict: project_name → abs_path), `_recent_git_paths` (dict: file_path → monotonic timestamp for echo suppression), `_lock` (threading.Lock), plus the background-persistence state: `_persist_queue` (dict: (project_path, card_id) → coalesced updates), `_persist_deferred` (dict: same key → (payload, tries)), `_persist_compactions` (list: (project_path, tries)), `_persist_queue_lock`, `_persist_wakeup` (threading.Event), `_persist_writer` (threading.Thread | None), `_persist_stop` (bool).
+**Owns:** `_cards` (dict: card_id → FeedCardData), `_project_cards` (dict: project_name → [card_ids]), `_project_paths` (dict: project_name → abs_path), `_recent_git_paths` (dict: file_path → monotonic timestamp for echo suppression), `_lock` (threading.Lock), plus the background-persistence state: `_persist_queue` (dict: (project_path, card_id) → coalesced updates), `_persist_deferred` (dict: same key → (payload, tries)), `_persist_compactions` (list: (project_path, tries)), `_persist_queue_lock`, `_persist_wakeup` (threading.Event), `_persist_writer` (threading.Thread | None), `_persist_stop` (bool).
 
 **Background feed writer (SPEC-UI-RESPONSIVENESS-2 Phases 1 + 3):** the GTK main thread never does feed disk I/O. `update_card` mutates `_cards` under `_lock` and calls `_enqueue_card_update` (coalesced per `(project_path, card_id)`, last-write-wins, <1 ms, no disk); the daemon `develcakes-feed-writer` thread drains it via `feed_store.update_feed_card`, moving failures to `_persist_deferred` (retry cap 3 → ERROR drop, in-place retries preserving the try count). Accept/reject clicks ride the same queue. `shutdown_persist_writer()` (wired to project-close and window close-request) joins with a size-scaled timeout, empties within one bounded drain pass, and classifies leftovers.
 
@@ -2893,7 +2756,7 @@ def format_feed_timestamp(ts) -> str:
 
 **`add_card(card_data, persist=True)`:** `persist=False` skips the per-card persist thread entirely — used only by `_surface_prune_card`, which owns persistence from the main-thread copy. All other callers keep the default.
 
-**Bounded live-widget window (`MAX_LIVE_CARD_WIDGETS` = 120, `KEEP_NEWEST_CARDS` = 40; SPEC-MEMORY-WIDGET-RATCHET §2.1):** the invariant is **card data is unbounded; card widgets are bounded**. `_cards` retains every card this process has seen; `_card_widgets` (and `FeedTab._cards_by_id`) retain at most `MAX_LIVE_CARD_WIDGETS` `Gtk.Widget`s — freed widget memory is **never returned** to the OS by GTK/glibc (measured: 0 MB returned; 897 MB → 2,177 MB over ~7 h), which is why the bound exists at all: an unbounded widget map ratchets monotonically for the life of the session. `_evict_surplus_card_widgets` runs after every widget-append path (`add_card`, `add_cards_batch`, the project-open render loop, `_load_more`) and releases only victims that lie **entirely above the viewport** (`FeedTab.is_above_viewport`), chosen by `seq_num` across **all** projects — `_card_widgets` is one flat dict while widget creation is keyed on the *card's* project, which need not be the active one. The newest `KEEP_NEWEST_CARDS` by `seq_num` are never candidates, and `_load_more` passes its own page as `exclude` so a click can never re-evict what it just built. Eviction never drops data: the released `FeedCardData` is pushed back onto `_backlog` newest-first (`insert(0, …)`) under `_lock`, so Load More re-renders it (rebuilding the Load More widget if the backlog had been fully drained), and the loader **merges** its rebuilt list with any push that landed during its parse window — survivors first — rather than rebinding. The cap is a bound *when the geometry guard permits*, not an unconditional invariant: an unmeasurable widget or a scrolled-up viewport legitimately leaves the map above the cap. Detail: `SPEC-MEMORY-WIDGET-RATCHET.md` §2.1 / §7.
+**Bounded live-row window (`MAX_LIVE_HTML_ROWS` = 120, `KEEP_NEWEST_HTML_ROWS` = 40; SPEC-58 §2f-2 renamed the eviction to `_evict_surplus_rows`):** the invariant is **card data is unbounded; document rows are bounded**. `_cards` retains every card this process has seen; the rendered `#feed` document keeps at most `MAX_LIVE_HTML_ROWS` rows — freed widget memory is **never returned** to the OS by WebKit/glibc, which is why the bound exists at all: an unbounded row list ratchets monotonically for the life of the session. `_evict_surplus_rows` runs after every row-append path (`add_card`, `add_cards_batch`, the project-open render loop, Load More) and releases only rows that lie **entirely above the viewport** (`is_above_viewport` in the HTML geometry module), chosen by `seq_num` across **all** projects. The newest `KEEP_NEWEST_HTML_ROWS` by `seq_num` are never candidates, and Load More passes its own page as `exclude` so a click can never re-evict what it just built. Eviction never drops data: the released `FeedCardData` is pushed back onto `_backlog` newest-first (`insert(0, …)`) under `_lock`, so Load More re-renders it (rebuilding the Load More row if the backlog had been fully drained), and the loader **merges** its rebuilt list with any push that landed during its parse window — survivors first — rather than rebinding. The cap is a bound *when the geometry guard permits*, not an unconditional invariant: an unmeasurable row or a scrolled-up viewport legitimately leaves the document above the cap.
 
 **`_project_cards` ordering:** `_project_cards[project]` is **newest-first by `seq_num` at every insertion point** — `add_card` and `add_cards_batch` `insert(0, …)`, and the load path sorts the deduped `prev + new_ids` candidates by `seq_num` descending. The order is load-bearing: `get_cards_for_project` drives the batch-bar count and Accept All, both of which `break` at the first non-actionable card, so a card placed at the tail is invisible to both until the project is reopened. Ordering is by `seq_num`, never by provenance — a live arrival during the load's parse window lands at index 0, while ids the feed pruned at compaction sort to the tail and are never promoted to "newest" (a pruned card must not become the first entry Accept All commits). (Note: `add_cards_batch` shares this insertion path but has had no product callers since SPEC-45 — retained for API compatibility and batch inserts from tests.)
 
@@ -2969,7 +2832,6 @@ Manages state transitions, live timers, and status renders via the status_target
 
 **Constructor dependencies:**
 - `status_target`: duck-type implementing `set_status_text(text, state=None)` (+ no-op progress quartet) — in production, `ActivityPillAdapter` over the active chat surface
-- `main_content`: MainContent instance — used via `main_content.get_review_bar()` to read current ReviewBar state
 - `GLib_module`: optional GLib reference for thread dispatch
 
 **Thread safety:** All GTK calls via `GLib.idle_add()` / `timeout_add()`. Entry points are called from GTK main thread only.
@@ -2995,32 +2857,12 @@ on_chat_final(session_key)                       # chat final (no-op; on_agent_e
 State tracked for recovery when chat final arrives with no message body:
 - `_assistant_text_buffer[session_key] → str`: last assistant text per session
 
-Public setters for the recovery callbacks:
+Public setters (SPEC-58 §2c: the missing-message recovery pair, the activity-bubble pair, and `set_on_agent_start` died with the drawer/cluster; `set_agent_routing` is the only one of these that survives):
 ```python
-set_on_assistant_buffer(cb)                     # cb(session_key, text) — forward each assistant delta
-set_on_lifecycle_completed(cb)                 # cb(session_key, text) — lifecycle end/error fires this; ChatHandler renders fallback
-set_on_activity_bubble(cb)                     # cb(ActivityBubble) — tool/plan/approval/command_output/patch events; Phase 2 of SPEC-smarter-chat-ux
-set_on_agent_lifecycle(cb)                      # NEW (SPEC-activity-drawer) — cb(session_key, agent_name, "start"|"end") for per-agent separator rows in the drawer
-set_on_agent_start(cb)                          # cb(session_key) — clears ChatHandler render guard for next round. Receives RAW session_key from the gateway event (the agent key), not _active_session() key.
 set_agent_routing(routing_table)                # Injected by window.py._build(). Enables _is_ui_active() to resolve project tabs for agent session keys.
 ```
 
-**Activity Bubbles (Phase 2 of SPEC-smarter-chat-ux):**
-
-ActivityHandler fires `_activity_bubble_callback` for each gateway event that warrants a visible status indicator in the chat:
-- `stream=lifecycle phase=start` → ⏳ Agent started...
-- `stream=tool phase=start` → 🔧 Running {name}...
-- `stream=tool phase=end` → ✅ {name} ({durationMs}ms)  or  ❌ {name} — error
-- `stream=plan` → 📋 Plan: {title} ({n} steps)
-- `stream=approval phase=requested` → 🔒 Approval needed: {command}
-- `stream=patch phase=end` → ✏️ {name}: +{added} ~{modified} -{deleted} files
-
-Architecture: ActivityHandler only creates ActivityBubble dataclass instances and fires the callback. As of SPEC-activity-drawer Phase 1, the callback target is `ActivityDrawer.append_event(bubble.to_drawer_row())` — the adapter that converts the dataclass to the drawer's dict shape lives in `activity_wiring_handler.py` (a dedicated handler constructed at startup, not deferred to gateway connect, so the drawer works offline). ChatHandler no longer renders activity bubbles.
-
-Activity bubbles (Phase 2 of SPEC-smarter-chat-ux):
-- `on_gateway_event()` parses `stream` values `tool`, `plan`, `approval`, `patch`
-- Constructs `ActivityBubble` (from `models/activity.py`) and fires the callback
-- ChatHandler's `render_activity_bubble()` renders via `ChatRenderHandler.render_activity()`
+**Activity bubbles — removed (SPEC-58 §2c):** ActivityHandler no longer fires an activity-bubble callback and no longer builds `ActivityBubble` instances for gateway events (SPEC-smarter-chat-ux Phase 2). The consumer chain — `ActivityDrawer.append_event(bubble.to_drawer_row())`, the `activity_wiring_handler.py` adapter, and ChatHandler's `render_activity_bubble()` — is deleted; activity surfaces only through the 6-state machine and the pill. `models/activity.py:ActivityBubble` survives as dataclass state for the pill paths.
 
 Tab routing uses `agent_to_project` (AgentRoutingTable). In ChatHandler this is passed via constructor; in ActivityHandler it's injected via `set_agent_routing(routing_table)`. Lazy import of `models.activity` inside method body to avoid circular deps.
 
@@ -3493,11 +3335,9 @@ class FeedTab(Gtk.Box):
         # Phase 5: wires FeedHandler's batch-accept handler into the bar's button
 ```
 
-**Geometry primitives (SPEC-MEMORY-WIDGET-RATCHET §2.2):** `get_vadjustment()` returns the feed `ScrolledWindow`'s vadjustment, `is_near_bottom(slack=80)` reports whether the viewport sits within `slack` px of the feed bottom, and `is_above_viewport(widget)` reports whether a card widget lies **entirely** above the visible region — the three accessors `FeedHandler._evict_surplus_card_widgets` uses to decide what it may release. `is_near_bottom` returns `True` when geometry is unavailable (nothing rendered → eviction is safe); `is_above_viewport` returns `False` (never evict).
+**Geometry primitives (SPEC-58 §2f):** `is_near_bottom(slack=80)` reports whether the feed document's viewport sits within `slack` px of the feed bottom, and `is_above_viewport(...)` reports whether a card row lies **entirely** above the visible region — the two accessors `FeedHandler._evict_surplus_rows` uses to decide what it may release. `is_near_bottom` returns `True` when geometry is unavailable (nothing rendered → eviction is safe); `is_above_viewport` returns `False` (never evict).
 
-**Fail-safe contract — "unknown" is never "above".** A widget that has never been allocated is unmeasurable, and GTK 4.14 reports that as `compute_bounds -> (True, zero rect)`: verified under Xvfb, an unrealized/unmapped `Gtk.Label` in the card container gives `ok=True` with `origin.y=0.0, size.height=0.0`. The naive test `origin.y + height <= vadj.value` therefore answers **True — "above the viewport"** for every such widget and would destroy cards that merely have not been laid out yet (e.g. while the Feed sub-tab is unmapped). The guard is consequently `not ok` **or** a non-positive extent (`rect.size.height <= 0`), and the `<= 0` half is load-bearing, not defensive padding — the eviction loop relies on the same condition, since a zero-height victim contributes no height to the scroll compensation. The same `ok is False` path covers a **non-ancestor** target: a widget parented outside `_card_container` yields `ok=False` with a zero rect, so it too is classified "unknown" and never evicted. Widgets with no `compute_bounds` at all (test doubles) hit the `AttributeError`/`TypeError` branch and also return `False`. Detail: `SPEC-MEMORY-WIDGET-RATCHET.md` §2.2 / §7.
-
-**`get_vadjustment` correction (P2-audit finding):** the method's "or None before first map" wording describes only the `_feed_scroll is None` case, not pre-layout state. A freshly constructed `FeedTab` **does** own a real `Gtk.ScrolledWindow`, so `get_vadjustment()` returns a real (zeroed: `upper == 0.0`) `Gtk.Adjustment` before any layout has run; `None` occurs only when `_feed_scroll` is absent (the explicit `None` branch, and `MockFeedTab`-style doubles). Both paths still land on the fail-safe answers above, because a zeroed adjustment yields the same "nothing rendered" arithmetic.
+**Fail-safe contract — "unknown" is never "above".** A row that has never been laid out is unmeasurable, and WebKit's geometry probe answers "unknown" for it. The naive `y + height <= scroll` test would classify such a row as "above the viewport" and drop cards that merely have not been laid out yet (e.g. while the Feed sub-tab is unmapped). The guard is therefore `not ok` **or** a non-positive extent (`height <= 0`), and the `<= 0` half is load-bearing, not defensive padding — a zero-height row contributes no height to the scroll compensation. The same "unknown" path covers a non-ancestor target, and rows with no geometry at all (test doubles) also return `False`. Detail: `docs/specs/SPEC-58-UI-LEAN.md` §2f.
 
 ---
 
@@ -4120,15 +3960,13 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_diff_parser.py` — unified diff parsing → FileDiff/ParsedDiff
 - `tests/test_enforcement.py` — enforcement tier execution: syntax, tests, lint
 - `tests/test_escaping.py` — escape_for_pango(), xml_escape_text()
-- `tests/test_feed_card.py` — FeedCardData dataclass + css_class_for_type()
+- `tests/test_feed_card.py` — FeedCardData dataclass + css_class_for_type() (dataclass pins; the deleted `ui/views/feed_card.py` GTK-factory pins went with it in SPEC-58 §2c)
 - `tests/test_feed_handler.py` — FeedHandler: card lifecycle, echo suppression, background persist writer, compaction trigger + prune surfacing
 - `tests/test_feed_store.py` — feed JSON + journal persistence: load/save/append/update, journal replay, bounded lock, window pruning + pins
 - `tests/test_git_ops.py` — git operations: stage, commit, diff, checkout
 - `tests/test_mcp_client.py` — MCP client: asyncio bridge, connection pooling, tool discovery
 - `tests/test_mcp_config.py` — MCP server config loading + validation
 - `tests/test_mcp_integration.py` — end-to-end MCP tool execution flow
-- `tests/test_missing_message_fix.py` — regression test for missing message recovery
-- `tests/test_phase4.py` — Phase 4 event card rendering
 - `tests/test_project_awareness.py` — project awareness system: .develcakes/ management
 - `tests/test_project_handler.py` — ProjectHandler: tab lifecycle, membership routing
 - `tests/test_project_list_handler.py` — ProjectListHandler: project card data
@@ -4136,7 +3974,6 @@ pytest              # auto-discovers tests/ via pytest.ini
 - `tests/test_prompt_loader.py` — prompt template loading + composition
 - `tests/test_quoting.py` — quoted-payload parsing with escapes
 - `tests/test_review_log.py` — review log persistence
-- `tests/test_review_state.py` — ReviewState dataclass
 - `tests/test_routing.py` — AgentRoutingTable: add/remove/lookup
 - `tests/test_special_agents.py` — SpecialAgentDef loading, auto-open, auto-add
 - `tests/test_streaming.py` — StreamingBubble dataclass
@@ -4205,10 +4042,10 @@ The `ui/handlers/` directory contains self-contained logic modules extracted fro
 ### 8.8 Agent Dashboard (SPEC-AGENT-DASHBOARD)
 
 The activity drawer's paned slot now hosts an agent dashboard. The paned end
-child is `AgentDashboard` (`ui/views/agent_dashboard.py`); `ActivityDrawer`
-still exists in `ui/views/activity_drawer.py` with its tests, but `window.py`
-no longer constructs it. `ActivityWiringHandler` is not started from `_build`,
-so `wire()` never runs and never calls `append_event` on a missing drawer.
+child is `AgentDashboard` (`ui/views/agent_dashboard.py`). `ActivityDrawer` was
+deleted in SPEC-58 §2c (`ui/views/activity_drawer.py` is gone, with its wiring
+handler and tests). The 6-state activity machine renders to the activity pill —
+see §3.23.
 
 - Directory tree: `ui/views/agent_dashboard.py` (view) and
   `ui/agent_dashboard_model.py` (pure helpers, no GTK).
@@ -4427,7 +4264,6 @@ develcakes/
 │   ├── conversation_snapshot.py  # 83 lines — ConversationSnapshot, SnapshotMessage
 │   ├── feed_card.py              # 198 lines — FeedCardData + css_class_for_type() (Phase 5)
 │   ├── providers.py              # 54 lines — ProviderConfig + caller_default_max_tokens()
-│   ├── review_state.py           # 26 lines — ReviewState dataclass (Phase 7)
 │   ├── routing.py                # 41 lines — AgentRoutingTable (session_key → project_name)
 │   ├── streaming.py              # 30 lines — StreamingBubble dataclass (Phase 5)
 │   └── team.py                   # 103 lines — TeamMember, ProjectTeam
@@ -4479,32 +4315,26 @@ develcakes/
 │   │   ├── connection_sync_handler.py # ~234 lines — post-connect wiring (Phase 3a)
 │   │   ├── crabwatch_handler.py  # ~364 lines — CrabWatchHandler filesystem watcher (Phase 5)
 │   │   ├── feed_handler.py       # ~2276 lines — FeedHandler — feed card lifecycle, background persist writer, compaction + prune surfacing (SPEC-UI-RESPONSIVENESS-2 P1/P3)
-│   │   ├── forward_handler.py    # ~194 lines — ForwardHandler (Phase 3b)
 │   │   ├── gateway_handler.py    # ~234 lines — connect, agents, lifecycle (Phase 2)
 │   │   ├── input_toolbar_handler.py # ~485 lines — find/replace, spell check, word count
 │   │   ├── media_handler.py      # ~104 lines — STT + improve (Phase 4)
 │   │   ├── project_handler.py    # ~568 lines — active project + routing
 │   │   ├── project_list_handler.py # ~86 lines — project card data
 │   │   ├── prompts_handler.py    # ~208 lines — favorites, search, last-used
-│   │   ├── review_handler.py     # ~523 lines — review session lifecycle (Phase 7)
 │   │   ├── session_handler.py    # ~164 lines — session switching (Phase 7)
 │   │   ├── settings_handler.py   # ~231 lines — settings dialog logic (provider CRUD, test connection)
 │   │   ├── auxilium_wizard_handler.py # ~449 lines — Auxilium wizard handler (Tier 1, D7)
 │   │   └── file_tree_handler.py  # ~93 lines — FileTree sort prefs + git status cache (no GTK)
 │   └── views/
 │       ├── __init__.py           # 1 line
-│       ├── activity_drawer.py    # ~764 lines — collapsible activity event panel
 │       ├── agent_builder.py      # ~770 lines — AgentBuilderDialog
 │       ├── auxilium_wizard.py    # ~452 lines — Auxilium wizard view (Tier 1, D7)
 │       ├── chat_bubble.py        # ~1059 lines — build_role_bubble() factory (Phase 1 + 2)
 │       ├── chat_input_toolbar.py # ~588 lines — find/replace bar + spell check (view only)
-│       ├── diff_card.py          # ~356 lines — diff card factories (Phase 7)
-│       ├── feed_card.py          # ~616 lines — feed_card widget factory (Phase 5)
 │       ├── feed_tab.py           # ~387 lines — FeedTab (view only)
 │       ├── file_tree.py          # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
 │       ├── left_panel.py         # LeftPanel (Prompts/Agents/Projects/Settings notebook)
-│       ├── main_content.py       # ~942 lines — MainContent (tabs + input + review bar)
-│       ├── review_bar.py         # ~166 lines — ReviewBar widget (Phase 7)
+│       ├── main_content.py       # ~942 lines — MainContent (tabs + input)
 │       ├── session_menu.py       # ~216 lines — session/project switcher popover
 │       └── settings_dialog.py    # ~487 lines — GTK4 provider settings dialog
 │
@@ -4583,7 +4413,6 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── generate_synthetic_conversations.py  # Test data generator
     ├── fixtures/
     ├── test_activity_bubbles.py
-    ├── test_activity_drawer.py
     ├── test_agent_builder_handler.py
     ├── test_agent_command_handler.py
     ├── test_agent_defs.py
@@ -4615,7 +4444,6 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── test_feed_card.py
     ├── test_feed_handler.py
     ├── test_feed_store.py
-    ├── test_forward_handler.py
     ├── test_gateway_handler.py
     ├── test_git_ops.py
     ├── test_icons.py
@@ -4626,8 +4454,6 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── test_mcp_config.py
     ├── test_mcp_integration.py
     ├── test_media_handler.py
-    ├── test_missing_message_fix.py
-    ├── test_phase4.py
     ├── test_project_awareness.py
     ├── test_project_handler.py
     ├── test_project_list_handler.py
@@ -4636,7 +4462,6 @@ tests/                           # 100 files (verified 2026-06-27)
     ├── test_prompt_loader.py
     ├── test_quoting.py
     ├── test_review_log.py
-    ├── test_review_state.py
     ├── test_routing.py
     ├── test_runtime_compaction.py    # Runtime compaction integration
     ├── test_special_agents.py

@@ -156,49 +156,11 @@ The legacy task/work-unit command set (`/task`, `/done`, `/start`, `/blocked`,
 `/cancel`, `/tasks`, `/assign`, `/priority`) was removed in SPEC-49. Those
 tokens now fall through to normal chat send like any unregistered command.
 
----
-
-## Review Commands
-
-Review commands are handled by `ReviewHandler` (in `ui/handlers/review_handler.py`). They manage git-backed code review sessions for project tabs.
-
-### `/review`
-
-Start a review checkpoint. Creates a git checkpoint (auto-commits current state) so changes can be diffed.
-
-```
-/review
-```
-
-### `/review stop`
-
-End the current review session. Switches review mode off and removes the ReviewBar widget.
-
-### `/check`
-
-Show the diff of all changes since the last checkpoint. Displays file-by-file diffs in the chat.
-
-```
-/check
-```
-
-### `/accept`
-
-Accept all pending changes since the checkpoint. The changes are kept (committed).
-
-```
-/accept
-```
-
-To accept a single file: `/accept <filename>`.
-
-### `/reject`
-
-Reject all pending changes. The changes are reverted to the checkpoint state (git checkout). A rejection message is sent to all project member agents so they know their changes were rolled back.
-
-```
-/reject
-```
+The review command set (`/review`, `/review stop`, `/check`, `/accept`,
+`/reject`) was removed in SPEC-58 along with the `ReviewHandler` and the review
+checkpoint machinery. Those tokens now fall through to normal chat send;
+reviewing agent writes happens on the project feed (accept/reject on feed
+cards).
 
 ---
 

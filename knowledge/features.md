@@ -33,37 +33,9 @@ Special agents (Coder, Debugger, custom agents) are routed through `AgentRuntime
 
 ---
 
-## Code Review System
-
-CrabCakes includes a git-backed code review system for agent file writes. When review mode is enabled, agent code changes are tracked through a checkpoint → diff → accept/reject workflow.
-
-### Review Lifecycle
-
-1. **`/review`** — Creates a git checkpoint (auto-commits current state). Review mode activates and a ReviewBar widget appears above the chat.
-2. **Agent writes code** — The Coder or other file-writing agents make changes to project files.
-3. **`/check`** — Shows the diff of all changes since the checkpoint, file by file.
-4. **`/accept`** — Keeps all changes (commits them). Or `/accept <filename>` for a single file.
-5. **`/reject`** — Reverts all changes to the checkpoint state via `git checkout`. A rejection message is sent to all project member agents.
-6. **`/review stop`** — Ends the review session and removes the ReviewBar.
-
-### Review State
-
-Review state is tracked per-project in `ReviewState` dataclass instances (from `models/review_state.py`):
-
-- `review_mode`: `"off"` or `"review"`
-- `checkpoint_sha`: The git commit SHA at checkpoint time
-- `is_dirty`: Whether changes exist since the checkpoint
-- `last_check_files`: List of files changed since last `/check`
-
-### Review Bar
-
-The `ReviewBar` widget (in `ui/views/review_bar.py`) provides a dropdown to toggle review mode and buttons to start review, check changes, accept, or reject.
-
----
-
 ## Feed Cards
 
-The project feed is a visual timeline of events in a project tab. Feed cards are managed by `FeedHandler` (in `ui/handlers/feed_handler.py`) and rendered by `feed_card.py`.
+The project feed is a visual timeline of events in a project tab. Feed cards are managed by `FeedHandler` (in `ui/handlers/feed_handler.py`) and rendered as one WebKit document (`render/feed_html.py` + `ui/views/feed_surface.py`).
 
 ### Card Types
 
@@ -71,7 +43,6 @@ The project feed is a visual timeline of events in a project tab. Feed cards are
 |------|--------|-------------|
 | `git_commit` | git | Shows commit SHA, message, and files changed |
 | `file_edit` | agent | Shows file path and edit details |
-| `review` | review | Shows review events (accept/reject) |
 | `task` | agent | Shows task creation and status updates |
 | `audit_report` | agent | Shows structured audit report with severity |
 
@@ -106,20 +77,10 @@ The old `FeedBar` widget (`ui/views/feedbar.py`) was deleted in SPEC-07 (R4);
 5. **Complete** — Agent finished responding
 6. **Error** — An error occurred
 
-### Activity Drawer
+### Activity Drawer — removed
 
-The `ActivityDrawer` (in `ui/views/activity_drawer.py`) is a collapsible panel below the chat that displays detailed activity events:
-
-- Tool calls with names and arguments
-- Plan summaries
-- Approval requests
-- Command output (click to expand last 10 lines)
-- Patches and diffs
-- Lifecycle separators with per-agent stats
-
-**Counter-collapse:** Consecutive events with the same `(agent_name, activity_type)` are merged — count increments and duration sums. The first event of a new pair opens a new row.
-
-**Filters:** Two dropdowns (agent, type) with AND semantics filter the event list. Empty set = all pass.
+The `ActivityDrawer` panel was removed in SPEC-58. Activity surfaces only
+through the activity pill above.
 
 ---
 

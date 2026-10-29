@@ -194,7 +194,7 @@ When agents write files and the enforcement layer runs, feed cards surface these
 - The result (success, error, pending approval)
 - Duration and tool details
 
-For `exec_command`, the activity drawer also captures command output, exit code, and duration.
+For `exec_command`, the feed card also captures command output, exit code, and duration.
 
 ### Enforcement Layer
 
@@ -205,17 +205,12 @@ After each `write_file` or `edit_file` tool execution, the enforcement layer run
 
 Results are appended to the tool result and dispatched via `on_enforcement_status`. Failed checks appear in the feed with ❌ icons.
 
-### Checkpoint-Based Review (Secondary)
+### Checkpoint-Based Review — removed
 
-The `/review` command system provides explicit checkpoint-based code review:
-
-1. **`/review`** — Start a review session: `git add -A && git commit` creates a checkpoint SHA
-2. **`/check`** — Diff against the checkpoint: shows what changed (additions, deletions, per-file diffs)
-3. **`/accept "message"`** — Accept all changes: `git add -A && git commit -m "[review] accepted: message"`
-4. **`/reject "reason"`** — Reject all changes: `git checkout <sha> -- .` reverts files to checkpoint; sends rejection messages to all team members
-5. **Per-file reject** — Individual files can be reverted without rejecting everything
-
-Review state is per-project, tracked in `ReviewState` objects. The ReviewBar widget shows current state (idle, reviewing with SHA, has changes).
+The `/review` checkpoint system (`/review`, `/check`, `/accept`, `/reject`,
+`ReviewState`, ReviewBar) was removed in SPEC-58. Reviewing agent writes now
+happens on the project feed: accept/reject on feed cards, plus the standalone
+`ProjectHandler.revert_file_to_sha` git checkout from the file drawer.
 
 ---
 
@@ -247,20 +242,6 @@ When an agent calls `exec_command`, a pending-approval card appears with:
 - **Approve** and **Deny** buttons
 
 Clicking either resolves the approval via `AgentRuntimeHandler.approve_exec()`, which forwards the decision to the runtime.
-
----
-
-## Activity Drawer
-
-The activity drawer provides a log of command execution events. For each `exec_command`:
-
-- **Command** — The shell command string
-- **Output** — Last 10 lines of stdout/stderr
-- **Exit code** — Integer (0 = success)
-- **Duration** — Execution time in milliseconds
-- **Agent** — Which agent ran the command
-
-Events are fired via the `on_command_output` callback wired in `connection_sync_handler.sync()`.
 
 ---
 
