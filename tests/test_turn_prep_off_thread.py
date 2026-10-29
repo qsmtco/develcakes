@@ -328,59 +328,87 @@ class TestPrepTConcurrency:
         assert fake_rt.cancel_calls == 1
 
     def test_newer_send_is_the_last_writer_when_stale_prep_is_in_flight(self):
-        """Two concurrent sends for one session cannot interleave mutations.
-
-        The stale prep is parked inside the prep lock; the newer send's prep
-        must wait, so the newer agent-state sync is the FINAL write. Without
-        the per-session lock the stale prep's writes could land last and
-        silently revert an agent edit.
+        """Queued-send contract (SPEC-WIRE-CONTEXT-PRESSURE §2.3): a second
+        send while the session is CLAIMED is queued by begin_send — it
+        creates no prep and does NOT rotate the turn token. The single
+        in-flight prep (the first send's) is therefore the only and last
+        writer of agent state; the mid-flight role edit never reaches the
+        conv. Falsifier: a second prep + token rotation at send #2 →
+        agent_role would flip to "debugger" and prep_completed to [0, 1].
         """
         fake_rt = _FakeRuntime(conv_exists=True)
-        fake_rt.get_gate = threading.Event()  # parks the FIRST get_conversation
+        fake_rt.get_gate = threading.Event()  # parks the ONLY get_conversation
         handler, agent_def = _make_handler(fake_rt)
 
         handler.send_to_special_agent("agent:coder", "first")
-        assert fake_rt.get_gate_entered.wait(timeout=2), "stale prep should be parked"
+        assert fake_rt.get_gate_entered.wait(timeout=2), "prep should be parked"
 
-        # The agent is edited between the two sends.
+        # The agent is edited while send #1's prep is parked in flight.
         agent_def.role = "debugger"
+        # Send #2 lands on a CLAIMED session: queued — no prep, no rotation.
+        token_after_first = fake_rt.turn_token
         handler.send_to_special_agent("agent:coder", "second")
 
         fake_rt.get_gate.set()
-        deadline = time.monotonic() + 3.0
-        while len(fake_rt.prep_completed) < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-
-        assert fake_rt.prep_errors == [], f"prep raised: {fake_rt.prep_errors!r}"
-        assert len(fake_rt.prep_completed) == 2, "both preps should complete"
-        assert fake_rt.conv.agent_role == "debugger", (
-            "the newer send's sync must be the last writer "
-            f"(conv.agent_role={fake_rt.conv.agent_role!r})"
-        )
-        assert fake_rt.conv.step_count == 0
-
-    def test_superseded_prep_is_skipped_entirely(self):
-        """A prep that starts AFTER a newer send rotated the token does nothing."""
-        fake_rt = _FakeRuntime(conv_exists=False, auto_run_prepare=False)
-        handler, _ = _make_handler(fake_rt)
-
-        # Send #1 — its prep is stored, not run (simulates a late-starting thread).
-        handler.send_to_special_agent("agent:coder", "first")
-        # Send #2 rotates the token and runs its prep.
-        fake_rt.auto_run_prepare = True
-        handler.send_to_special_agent("agent:coder", "second")
         deadline = time.monotonic() + 2.0
         while not fake_rt.prep_completed and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert fake_rt.prep_completed == [1], "the newer prep should have run"
+
+        assert fake_rt.prep_errors == [], f"prep raised: {fake_rt.prep_errors!r}"
+        assert fake_rt.prep_completed == [0], (
+            "the claim owner's prep is the ONLY prep that runs")
+        assert len(fake_rt.loops) == 1, "no second loop for a claimed session"
+        assert fake_rt.turn_token == token_after_first, (
+            "a queued send must not rotate the turn token")
+        assert fake_rt.loops[0][2] == token_after_first, (
+            "the one loop still runs under the un-rotated token")
+        # The first prep is the last writer — the edit stays unseen.
+        assert fake_rt.conv.agent_role == "coder", (
+            "send #2 must not run a prep that would sync the edited role "
+            f"(conv.agent_role={fake_rt.conv.agent_role!r})"
+        )
+        assert fake_rt.conv.step_count == 0
+        # Both sends reached the runtime; the second is queued behind the claim.
+        assert fake_rt.send_calls == [
+            ("agent:coder", "first"),
+            ("agent:coder", "second"),
+        ]
+
+    def test_superseded_prep_is_skipped_entirely(self):
+        """Queued-send contract (SPEC-WIRE-CONTEXT-PRESSURE §2.3): with the
+        session claimed by send #1, send #2 is QUEUED — it creates no prep
+        and does not rotate the token, so there is no newer send to
+        supersede anything. The claim owner's stored prep runs when its
+        loop starts; a replay of it stays a no-op (existence guard).
+        Falsifier: a second prep + token rotation at send #2 →
+        prep_completed would be [1] and the token would move.
+        """
+        fake_rt = _FakeRuntime(conv_exists=False, auto_run_prepare=False)
+        handler, _ = _make_handler(fake_rt)
+
+        # Send #1 claims the session — its prep is stored, not run
+        # (simulates a late-starting loop thread).
+        handler.send_to_special_agent("agent:coder", "first")
+        assert len(fake_rt.prepares) == 1
+
+        # Send #2 lands on a CLAIMED session: queued behind the claim —
+        # no second prep, no token rotation.
+        token_after_first = fake_rt.turn_token
+        handler.send_to_special_agent("agent:coder", "second")
+        assert fake_rt.turn_token == token_after_first, (
+            "a queued send must not rotate the turn token")
+        assert len(fake_rt.loops) == 1, "send #2 is queued — no second loop"
+
+        # The ONLY prep (send #1's, the claim owner's) runs.
+        fake_rt.run_prepare(0)
+        assert fake_rt.prep_completed == [0]
         assert len(fake_rt.load_calls) == 1
         assert len(fake_rt.create_calls) == 1
 
-        # Now the stale prep finally starts → it must be a no-op.
+        # A replay of the stored prep is still a no-op (existence guard).
         fake_rt.run_prepare(0)
-
-        assert len(fake_rt.load_calls) == 1, "superseded prep must not load"
-        assert len(fake_rt.create_calls) == 1, "superseded prep must not create"
+        assert len(fake_rt.load_calls) == 1, "replay must not load again"
+        assert len(fake_rt.create_calls) == 1, "replay must not create again"
         assert fake_rt.prep_errors == []
 
     def test_set_active_project_skips_rebuild_while_prep_is_in_flight(self):

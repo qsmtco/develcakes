@@ -646,6 +646,7 @@ class TestSurfaceMountLifecycle:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "sk"}
         mc._tab_chat_boxes = {0: Gtk.Box()}
+        mc._project_settings = MagicMock()  # _close_tab shows the bar when the notebook empties
         mc._bulk_closing = False
         mc._chat_render_handler = handler
 
@@ -671,6 +672,7 @@ class TestSurfaceMountLifecycle:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "project:alpha"}
         mc._tab_chat_boxes = {0: Gtk.Box()}
+        mc._project_settings = MagicMock()  # _close_tab shows the bar when the notebook empties
         mc._bulk_closing = False
         mc._chat_render_handler = handler
         # Stub the notebook scan (MagicMock notebook has no real pages):
@@ -966,6 +968,7 @@ class TestSurfaceAllocationAndCaps:
         mc._chat_notebook.get_n_pages.return_value = 0
         mc._tab_sessions = {0: "sk-a", 1: "sk-b", 2: "sk-c"}
         mc._tab_chat_boxes = {0: Gtk.Box(), 1: Gtk.Box(), 2: Gtk.Box()}
+        mc._project_settings = MagicMock()  # _close_tab shows the bar when the notebook empties
         mc._bulk_closing = False
         mc._chat_render_handler = handler
         for sk in ("sk-a", "sk-b", "sk-c"):
