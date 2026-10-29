@@ -10,9 +10,9 @@
 #   - apply_styles() is called once at startup from main.py
 
 import gi
-gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gdk
 
+gi.require_version('Gtk', '4.0')
+from gi.repository import Gdk, Gtk
 
 # -- Feed bar --------------------------------------------------------------
 # Applied to the thin strip between chat notebook and control bar.
@@ -335,10 +335,14 @@ button.lib-fav-star {
     color: #6b6b7a;
 }
 
-/* (SPEC-58 §2h: the .chat-bubble-* / .agent-bg-* Pango bubble families and
-   the .agent-bg-*/.agent-dot-* per-color pairs' backgrounds were deleted with
-   event_cards.py. The bare .agent-dot-* color rules survive — AgentDashboard
-   applies agent-dot / agent-dot-{color}.) */
+/* (SPEC-58 §2h: the .chat-bubble and .agent-bg Pango bubble families, and
+   the per-color .agent-bg and .agent-dot pairs' backgrounds, were deleted
+   with event_cards.py. The bare .agent-dot color rules survive — the
+   AgentDashboard applies agent-dot and agent-dot-{color}. NOTE: never
+   write a literal ".agent-bg-*" slash-star inside a comment — the
+   embedded close-comment sequence terminated the comment early and GTK's
+   parser swallowed the next rule, silently dropping .agent-dot-6366f1
+   (fixed 2026-10-29).) */
 .agent-dot-6366f1 { background: #6366f1; }
 .agent-dot-10b981 { background: #10b981; }
 .agent-dot-f59e0b { background: #f59e0b; }
