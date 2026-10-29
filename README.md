@@ -549,7 +549,7 @@ openclaw gateway start
 | `DEVELCAKES_INCLUDE_DOCS` | _(off)_ | Include docs/ in file context |
 | `DEVELCAKES_MIGRATE_STORE` | `1` | JSON→store migration at launch (0 skips) |
 | `DEVELCAKES_PROMPT_DEBUG` | _(off)_ | Dump the full composed prompt to stderr |
-| `DEVELCAKES_NO_WEBKIT` | _(off)_ | **Feed only** — set truthy to force the feed's "Feed requires WebKit (unset NO_WEBKIT)" notice; chat ignores it (chat hard-fails at boot without WebKit, by design) |
+| `DEVELCAKES_NO_WEBKIT` | _(off)_ | Read only by the feed (`ui/views/feed_surface.py`) — truthy shows the feed's "requires WebKit" notice. Chat never reads this variable; chat's boot `RuntimeError("chat requires WebKit")` fires only when the WebKit import itself fails |
 | `STT_PHRASES` | `DevelCakes,Crabcakes,crabcakes` | comma-separated OpenRouter STT keyword-bias phrases; any all-blank value (empty, whitespace-only, commas-only) disables biasing |
 | `STT_MODEL` | — | overrides the configured dictation model for THIS process (debug/testing; never written to disk) |
 

@@ -169,7 +169,7 @@ develcakes/
 │       ├── file_tree.py        # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
 │       ├── left_panel.py         # LeftPanel (Prompts/Agents/Projects/Settings notebook)
 │       ├── main_content.py     # MainContent — chat notebook + input + button bar
-│       ├── session_menu.py     # Right-click session switcher popover
+│       ├── session_menu.py     # Right-click project-member solo-DM menu (show_project_menu)
 │       ├── chat_input_toolbar.py # ~480 lines — ChatInputToolbar — find/replace bar + spell check toggle (view only)
 │       ├── feed_tab.py          # ~167 lines — FeedTab — project feed card container (view only)
 │       ├── settings_dialog.py   # GTK4 dialog for managing LLM provider settings
@@ -769,7 +769,7 @@ toggle_favorite(filepath) -> bool   # True if now favorited
 | `fill_template(template, variables)` | `prompt_loader.py` | Replace `{{KEY}}` markers with values from dict |
 | `compose_system_prompt(agent_name, ...)` | `prompt_loader.py` | Compose full system prompt from templates: (1) default.md, (1b) collab.md, (1c) develcakes-context.md, (2) project-awareness.md, (3) develcakes-commands.md, (4) project-onboarding.md, (5) code-review.md, (6) coder.md/debugger.md, (7) {role}-bugs.md/{role}-rules.md |
 | `STTEngine` class | `stt.py` | Push-to-talk STT via OpenRouter cloud — arecord (16kHz mono WAV) → base64 → POST `/api/v1/audio/transcriptions` (model resolved per-call from `stt_config`, SPEC-37; Azure `phraseList` biasing gated on `is_bias_supported`) → stop_async callback |
-| `show_session_menu(parent, agent_name, sessions, on_select)` | `session_menu.py` | GTK popover menu listing sessions; clicking fires `on_select(session_key)` |
+| `show_project_menu(parent, project_name, member_names, current_solo, on_select)` | `session_menu.py` | GTK popover for project-tab right-click solo-DM targeting (All + members); clicking fires `on_select(session_key or None)` |
 
 ### 3.11a `utils/provider_test.py` — LLM Provider Connectivity Probe + Context Window Discovery
 
@@ -1365,13 +1365,14 @@ class ProjectListHandler:
     def on_project_clicked(name: str, path: str)
 ```
 
-### 3.21 `ui/views/session_menu.py` — Session Switcher Popover
+### 3.21 `ui/views/session_menu.py` — Project Member Solo-DM Menu
 
-**Responsibility:** GTK popover listing active sessions for an agent. Right-click to switch.
+**Responsibility:** GTK popover for the project-tab right-click — sets the solo-DM target (All + one entry per member; SPEC-39).
+
+(The agent **session switcher** — `show_session_menu`, right-click to switch an agent's session — was deleted with the gateway in SPEC-58 §2g; see §3.10's removal note. Only `show_project_menu` remains.)
 
 **Public API:**
 ```python
-show_session_menu(parent, agent_name, sessions, on_select)
 show_project_menu(parent, project_name, member_names, current_solo, on_select)
 ```
 
