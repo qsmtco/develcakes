@@ -917,10 +917,18 @@ class FeedHandler(
 
     def _extract_messages_from_chat_box(self, chat_box) -> list[tuple[str, str]]:
         """
-        Extract (role, text) pairs from a Gtk.Box containing chat bubbles.
+        Extract (role, text) pairs from a chat_box, oldest-first.
 
-        Walks child widgets and reads _crabcakes_role / _crabcakes_text
-        attributes set by build_agent_bubble(). Returns oldest-first.
+        Walks the GTK container's children and reads the private
+        `_crabcakes_role` / `_crabcakes_text` attributes.
+
+        Vestigial since SPEC-58: those attributes were set by the deleted
+        `ui/views/chat_bubble.py` bubble factories, and the HTML chat
+        surface (`ui/views/chat_surface.py`) keeps no GTK bubble children,
+        so in practice no widget carries them and this returns []. Kept
+        (unmodified) pending a separate removal decision; its callers and
+        the conversation-store snapshot path they serve still treat an
+        empty result as "nothing to snapshot".
 
         This is the ONLY place GTK widget methods are called for snapshot
         extraction — keeping utils/conversation_store.py GTK-free.

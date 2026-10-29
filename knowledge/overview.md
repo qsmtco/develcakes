@@ -27,11 +27,11 @@ CrabCakes is built for developers who want AI agents that participate in real pr
 |---------|--------------------------|-----------|
 | **Project tabs** | No project concept | Open multiple projects as tabs; each has its own team, feed, and chat |
 | **File access** | Upload files manually | Agents read/write files directly from your project directory |
-| **Code review** | Copy-paste diffs | Git-backed checkpoint → diff → accept/reject workflow |
+| **Code review** | Copy-paste diffs | Enforcement results as feed cards with accept/reject, plus standalone git-backed revert |
 | **Agent collaboration** | One assistant | Multiple agents (Coder, Debugger, gateway agents) work in the same project |
 | **Feed cards** | Linear chat | Structured feed cards for audit reports, file diffs, tool calls, and task assignments |
 | **Multi-agent teams** | Not supported | Add/remove agents to project teams; fan-out messages to all members |
-| **Slash commands** | Limited or none | Full command system: `/ask`, `/review`, `/status`, and more |
+| **Slash commands** | Limited or none | Full command system: `/ask`, `/status`, and more |
 | **Offline help** | Requires API | Auxilium answers from local knowledge base without any external LLM call |
 
 ---
@@ -163,14 +163,14 @@ Here's a quick tour of major features:
 - Messages fan out to all team members; responses route back to the project tab
 
 ### Code review
-- Enter review mode to create a git checkpoint
-- Agents write to a staging directory (`.crabcakes_review_staging/`)
-- Review diffs file-by-file with syntax-highlighted diff cards
-- Accept or reject changes individually or in batch
+- Agents' writes produce enforcement results; problems surface as feed cards
+- Accept or reject each change right on its feed card
+- File diffs can also be reverted to an earlier commit from the file drawer
+  (`ProjectHandler.revert_file_to_sha`; see knowledge/projects.md,
+  "Checkpoint-Based Review — removed")
 
 ### Slash commands
 - `/ask @agent question` — ask a specific agent something
-- `/review` — start a review session
 
 ### Prompt library
 - Load `.md` files from `prompts/` as reusable prompts
@@ -178,9 +178,12 @@ Here's a quick tour of major features:
 - Favorites, search, and usage tracking built in
 
 ### Activity tracking
-- Real-time activity drawer shows tool calls, plans, and approvals
-- Per-agent event counters with collapsible detail
-- Lifecycle separators show when agents start/stop
+- Collapsible Agents panel (collapsed by default) with one row per agent:
+  colored dot, name and role, usage percent with a context meter, and a
+  working/idle state, plus Compact and Clear buttons per agent
+- Collapsed header shows a one-line summary ("name N% · …") per agent
+- Shared activity pill on the project bar mirrors the live agent state machine
+  (idle, sending, reasoning, streaming, tool_use, done)
 
 ### Voice input
 - Push-to-talk speech-to-text via faster-whisper

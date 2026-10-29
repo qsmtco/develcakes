@@ -164,7 +164,6 @@ develcakes/
 │       ├── __init__.py
 │       ├── (activity_drawer.py removed in SPEC-58 §2c — see §3.14j)
 │       ├── agent_dashboard.py  # AgentDashboard — per-agent rows in the paned end child (SPEC-AGENT-DASHBOARD)
-│       ├── chat_bubble.py      # build_role_bubble() — chat bubble widget factories (Phase 1)
 │       ├── chat_surface.py     # ChatSurface — WebKit chat surface. The transcript WebView is a direct child of ChatSurface; the notebook page is the chat box; the page scrolls in the document — there is no GTK scrollbar on that page (SPEC-06/07/58)
 │       ├── (views/feed_card.py, diff_card.py, review_bar.py removed in SPEC-58 §2c — the feed is render/feed_html.py + FeedSurface)
 │       ├── file_tree.py        # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)
@@ -522,7 +521,7 @@ self._agent_to_project = AgentRoutingTable()  # shared with ProjectHandler (writ
 
 **Right-click spell suggestions:** The `_on_input_right_click` closure (defined in `MainWindow._build()`) consumes `InputToolbarHandler.is_spell_enabled()` (FRAGILE-1) and `get_word_at_iter()` (STALE-1) from `InputToolbarHandler`. The closure captures the clicked word's text at right-click time and verifies it at suggestion-click time to avoid replacing a different word if the buffer changed in between. See `SPEC-SPELL-POPOVER-FOLLOWUP.md` for details.
 
-**Project settings bar wiring (Spec PROJECT-SETTINGS-BAR-ENHANCED):** `window.py` wires the settings-bar callbacks in `_build()` (named lifecycle methods registered as ADDITIONAL `set_on_project_opened`/`set_on_project_closed` callbacks — the handler is append-based, so they coexist with the existing feed/crabwatch/review lambdas):
+**Project settings bar wiring (Spec PROJECT-SETTINGS-BAR-ENHANCED):** `window.py` wires the settings-bar callbacks in `_build()` (named lifecycle methods registered as ADDITIONAL `set_on_project_opened`/`set_on_project_closed` callbacks — the handler is append-based, so they coexist with the existing feed/crabwatch lambdas; the review lambda died with SPEC-58):
 
 | Setter | Window impl | Action |
 |--------|-------------|--------|
@@ -1017,24 +1016,21 @@ def make_safe_label(markup: str, ...) -> Gtk.Label  # pre-wired label
 **Architecture:** This file imports `gi.repository.Gtk` and `Pango` (lazy,
 inside functions). See §2 GTK carve-out for `utils/` for rationale.
 
-### 3.14c `ui/views/chat_bubble.py` — Chat Bubble Widget Factories
+### 3.14c (removed) `ui/views/chat_bubble.py` — Chat Bubble Widget Factories
 
-**Responsibility:** Create styled GTK bubble widgets for chat messages.
-
-**Public API:**
-```python
-from ui.views.chat_bubble import build_role_bubble
-
-# "You" bubbles are right-aligned, agent bubbles left-aligned.
-# CSS classes: .chat-bubble-you / .chat-bubble-agent
-widget = build_role_bubble("Agent", "<b>Hello</b> and **bold** text")
-```
-
-**Architecture:** A **view** — only creates widgets. No state, no callbacks, no logic.
+**Removed in SPEC-58 §2c** together with the Pango card pipeline. Chat
+messages no longer render as GTK bubble widgets — bubbles are now rows on the
+HTML chat surface (`ui/views/chat_surface.py`, rendered by
+`ChatRenderHandler`, §3.14d). (History: this module held pure widget-factory
+views — `build_role_bubble(role, text)` produced right-aligned "You" and
+left-aligned agent bubbles with `.chat-bubble-you` / `.chat-bubble-agent`.)
 
 ### 3.14d `ui/handlers/chat_render_handler.py` — Chat Render Orchestrator
 
-**Responsibility:** Owns bubble creation. Calls `build_role_bubble()` which owns the full text processing pipeline (extract_blocks → per-segment escape/markdown/highlight). Exposes `render_sync()` for synchronous use and `render()` for thread-safe async use.
+**Responsibility:** Composes chat rows and appends them to the HTML chat
+surface. `_compose_text()` owns the text pipeline (whole-message
+```html/```live fences, else markdown → sanitized HTML). Exposes
+`render_async()` (thread-safe) and `render_sync()`.
 
 **Public API:**
 ```python
@@ -1042,27 +1038,35 @@ from ui.handlers.chat_render_handler import ChatRenderHandler
 
 handler = ChatRenderHandler(GLib_module=GLib)
 
-# Async (thread-safe): dispatch work to main thread, call callback with bubble
+# Async (thread-safe): compose off-thread, append on main. on_bubble_ready
+# fires with None (SPEC-12 R1 — the surface already displayed the row).
 # session_key enables reentrancy guarding — concurrent renders for the same
 # session_key are skipped to prevent visual glitches.
 handler.render(role, text, session_key, on_bubble_ready, on_error=None)
+handler.render_async(role, text, session_key, on_bubble_ready,
+                     on_error=None, mount_key=None)
 
-# Sync (main thread only): return bubble immediately
-widget = handler.render_sync(role, text, session_key=None)
-
-# Phase 4: special event card (file_read, edit_proposal, tool_call, error, thinking)
-handler.render_event_card(event_type, container, **fields)
+# Sync (main thread only)
+handler.render_sync(role, text, session_key=None)
 ```
-
-**Phase 4 — `render_event_card(event_type, container, **fields)`:**
-Dispatches to the appropriate event card factory in `chat_bubble.py`. Thread-safe via `_dispatch()`. Unknown event types are silently ignored.
 
 **Reentrancy guard (`_ReentrancySet`):** Tracks which session keys are currently being rendered. If a render is already in-flight for a key, subsequent calls with that same key are skipped.
 
-**Processing pipeline:**
-1. `escape_for_pango(text)` — protect existing Pango markup tags
-2. `format_markdown(text)` — convert markdown → Pango inline markup
-3. `build_role_bubble(role, text)` — create styled GTK bubble widget
+**Row pipeline (post-SPEC-58):**
+1. `_compose_text(text, role)` — whole-message ```html / ```live fences →
+   (live_payload, html_fragment); otherwise markdown → HTML
+   (`render/markdown.py`) → nh3 sanitize, fail-closed, always in the path
+2. `ChatSurface.append_message(role, html_fragment, agent_name, agent_color,
+   ts)` — display-keyed windowed deque; agent_color resolved via
+   `_resolve_agent_color` (SPEC-14 §2b.2) and frozen into the row
+3. coalesced re-render via `GLib.idle_add` (`_schedule_render`) — the deque
+   is the source of truth; the WebView renders it wholesale
+
+**Event cards — removed:** the Phase 4 `render_event_card(event_type, ...)`
+dispatch to the `chat_bubble.py` factories died with the Pango card pipeline
+in SPEC-58 §2c (see §3.14c / §3.14i). Replies and events are HTML rows on the
+chat surface; activity surfaces through the HTML feed
+(`render/feed_html.py` + `FeedSurface`) and the activity pill (§3.23).
 
 **HTML transcript (SPEC-13, SPEC-CHAT-MIXED-HTML):** `_compose_text` is the
 composer. A whole-message ```html fence renders for every role. Agent rows
@@ -1071,19 +1075,16 @@ stays markdown. User and system rows promote only a whole-message fence.
 A ```live fence is whole-message only. The Supervisor phone mirror flattens
 those same html fences to text and keeps the surrounding prose.
 
-### 3.14e `ui/views/chat_bubble.py` — Bubble Widget Factories (Phase 2–5)
+### 3.14e (removed) `ui/views/chat_bubble.py` — Bubble Widget Factories (Phase 2–5)
 
-**Responsibility:** Pure widget factories — create GTK bubble widgets for all message types. No state, no callbacks beyond widget signals.
-
-**Phase 5 additions:**
-- `build_role_bubble(role, text, on_forward_click=None, tight=False)`:
-  - `on_forward_click`: optional callback; when set, agent bubbles get Copy+Forward buttons
-  - `tight`: reduces margin_top from 4→1 for consecutive same-role messages (message grouping)
-  - Action buttons row (Copy/Forward) only on agent bubbles — revealed via CSS hover (opacity 0 → 1)
-  - Copy button: `_copy_to_clipboard(text)` copies full bubble text
-  - Forward button: calls `on_forward_click()` if registered, else logs stub
-
-**Message grouping:** Consecutive messages from same role+session get tight spacing (1px top margin instead of 4px). Tracked in `ChatRenderHandler._last_message_key`.
+**Removed in SPEC-58 §2c** together with the Pango card pipeline. Chat
+messages are now rows on the HTML chat surface, not GTK bubble widgets.
+(History: pure widget factories — no state, no callbacks beyond widget
+signals. Phase 5 added `build_role_bubble(role, text, on_forward_click=None,
+tight=False)`: `on_forward_click` attached Copy+Forward buttons to agent
+bubbles (hover-revealed; Copy via `_copy_to_clipboard(text)`), `tight`
+reduced `margin_top` 4→1 for consecutive same-role messages. Grouping was
+tracked in `ChatRenderHandler._last_message_key`.)
 
 ### 3.14f `ui/views/main_content.py` — Chat Page Structure (SPEC-58 §2a)
 
@@ -1144,51 +1145,21 @@ markup = highlight("def foo(): pass", "python")
 
 **Security:** All output is HTML-escaped before span wrapping. Safe for untrusted code content.
 
-### 3.14i `ui/views/chat_bubble.py` — Block-Aware Bubble Factory (Phase 2+4)
+### 3.14i (removed) `ui/views/chat_bubble.py` — Block-Aware Bubble Factory (Phase 2+4)
 
-**Responsibility:** Build styled GTK bubble widgets for any message content. Handles both inline (Phase 1) and block-level (Phase 2) rendering.
-
-**Phase 1** (unchanged API):
-- `build_role_bubble(role, text)` — creates bubble, routes text through extract_blocks internally
-- Text segments → `format_markdown()` → bold/italic/code links
-
-**New helper (Phase 5 — shared header factory):**
-
-```python
-def _make_block_header(
-    label_text: str,
-    content_for_copy: str,
-    header_css: str,
-    copy_btn_css: str = "code-copy-btn",
-) -> tuple[Gtk.Box, Gtk.Button]:
-    """
-    Shared header bar factory for code/terminal block widgets.
-    Returns (header_box, copy_btn) — copy_btn is pre-wired.
-    """
-```
-
-Used by `_build_code_segment` and `_build_terminal_segment`. Eliminates copy-paste between block builders.
-
-**Phase 5 — Project Solo DM (per-project direct message override):**
-
-Right-clicking a project tab now shows a project-specific menu (All / member entries) instead of the generic session switcher. This allows routing messages to a single project member rather than broadcasting to all.
-
-- `ProjectHandler._solo_targets: dict[str, str | None]` — maps project_name → solo target session_key, or None for group broadcast
-- `ProjectHandler.get_solo_target(project_name) -> str | None`
-- `ProjectHandler.set_solo_target(project_name, member_session_key | None)`
-- `ChatHandler.on_send()` queries `get_solo_target()` before fan-out; if set, sends to only that member
-- `MainContent._on_tab_right_click()` detects `session_key.startswith("project:")` and routes to `show_project_menu()` instead of `show_session_menu()`
-- `session_menu.show_project_menu(parent, project_name, member_names, current_solo, on_select)` — builds the popover with checkmark on current selection
-
-**Phase 4 additions** — Event card widget factories:
-- `create_file_card(file_path, snippet, line_range)` → `.bubble-file-read` card (green border, 📄 icon)
-- `create_edit_card(file_path, diff)` → `.bubble-edit-proposal` card (amber border, ✏️ icon)
-- `create_tool_card(tool_name, detail)` → `.bubble-tool-call` card (slate border, 🔧 icon)
-- `create_error_bubble(error_msg)` → `.bubble-error` bubble (red border + tint, ❌ icon)
-- All user content is Pango-escaped via `escape_for_pango()`
-- All content is `set_selectable(True)` for copy
-
-**Architecture:** Each segment becomes a child widget inside a vertical `Gtk.Box`. The bubble's CSS class (`.chat-bubble-you` / `.chat-bubble-agent`) controls bubble background.
+**Removed in SPEC-58 §2c** together with the Pango card pipeline; rendering
+lives on the HTML chat surface (§3.14d). (History: block-aware GTK bubble
+factories — Phase 1 `build_role_bubble(role, text)` routed text through
+`extract_blocks` with inline segments via `format_markdown()`; Phase 4 added
+event card factories `create_file_card` / `create_edit_card` /
+`create_tool_card` / `create_error_bubble` (`.bubble-file-read` green /
+`.bubble-edit-proposal` amber / `.bubble-tool-call` slate / `.bubble-error`
+red) with `escape_for_pango()` and selectable content; a shared
+`_make_block_header()` factory served `_build_code_segment` /
+`_build_terminal_segment`. The Phase 5 "Project Solo DM" notes that followed
+here described live `ProjectHandler` behavior and live with their owners —
+see §3.13 (`_solo_targets`, `get_solo_target`, `set_solo_target`,
+`show_project_menu`) and the SPEC-39 ALL-branch notes in §3.10/§3.13.)
 
 
 ### 3.14j (removed) `ui/views/activity_drawer.py` — Activity Drawer
@@ -2346,13 +2317,16 @@ wiring for the image viewer:
 ```python
 ACTIVE_PROJECT_ENV = "DEVELCAKES_ACTIVE_PROJECT_PATH"
 
-def set_active_project_path(project_path: str) -> None   # publish for chat_bubble.py
+def set_active_project_path(project_path: str) -> None   # publish on project open
 def clear_active_project_path() -> None                   # clear on project close
 ```
-These set/clear a process-global env var that `chat_bubble.py`'s
-`_is_path_in_allowed_roots()` reads to determine the active project root.
-Without this wiring, the image viewer only ever has the home + `/tmp`
-fallback roots.
+`ui/window.py` calls these from its project open/close callbacks. The
+consumer is `utils/image_paths.py` (`get_allowed_roots()` /
+`is_path_in_allowed_roots()`), which resolves the env var via
+`utils.config.get_env` to scope the path sandbox for image blocks rendered by
+`render/html.py` and read back by `utils/live_reader.py`. Without this
+wiring, the image viewer only ever has the home + `/tmp` fallback roots.
+(The original consumer, `ui/views/chat_bubble.py`, was removed in SPEC-58 §2c.)
 
 ### 3.21u.a.1 `utils/env_security.py` — Subprocess Environment Scrubbing (MED-2 / CRIT-2)
 
@@ -3452,50 +3426,43 @@ Gateway sends events → ChatHandler.on_chat_event(event, payload)
 
   event="chat", state="delta":
     → _handle_streaming_delta(session_key, target_tab, delta_text)
-      → ChatRenderHandler.start_streaming(session_key, chat_box)  # first delta only
-        → build_streaming_bubble() — pending bubble with cursor (▍)
+      → ChatRenderHandler.start_streaming(session_key)   # first delta only
+        → buffers deltas (no pending bubble; the HTML surface renders rows atomically)
       → ChatRenderHandler.update_streaming(session_key, delta_text)
-        → update label with gateway's cumulative delta text (no local accumulation)
+        → appends the gateway's cumulative delta text (no local accumulation)
 
   event="chat", state="final":
     → _handle_final_response(tab, session_key, final_text)
-      → ChatRenderHandler.end_streaming(session_key)
-        → remove cursor, replace with final bubble via build_role_bubble()
-      → chat_box.record("Agent", final_text)
+      → ChatRenderHandler.end_streaming(session_key, agent_name, render=True)
+        → flushes the buffered stream as one final sanitized row via
+          ChatSurface.append_message()
 ```
 
-### 4.6 Special Event Cards — Phase 4
+### 4.6 (removed) Special Event Cards — Phase 4
 
-```
-Gateway sends special events → ChatHandler.on_chat_event(event, payload)
+**Removed in SPEC-58 §2c** with the Pango card pipeline (§3.14c / §3.14i).
+The `render_event_card` dispatch and the widget factories below have no
+successors — replies and events are HTML rows on the chat surface (§3.14d),
+and activity surfaces through the HTML feed (`render/feed_html.py` +
+`FeedSurface`) and the activity pill (§3.23). (History: non-"chat" gateway
+events routed through `ChatRenderHandler.render_event_card(event, chat_box,
+**fields)` to `create_file_card` / `create_edit_card` / `create_tool_card` /
+`create_error_bubble` — green/amber/slate/red bordered Pango cards — with
+`"thinking"` rendered as a plain `build_role_bubble` text bubble and unknown
+events silently ignored. The CSS classes `.bubble-file-read`,
+`.bubble-edit-proposal`, `.bubble-tool-call`, `.bubble-error`,
+`.bubble-thinking`, `.bubble-streaming` lived in `ui/styles.py`.)
 
-  (non-"chat" events only)
+### 4.7 (removed) Forward Callback Wiring Chain
 
-  event in ("file_read", "edit_proposal", "tool_call", "error", "thinking"):
-    → _handle_special_event(event, session_key, target_tab, payload)
-      → switch_to_tab(target_tab)        # route to project or agent tab
-      → chat_box = get_chat_box_for_session(target_tab)
-      → ChatRenderHandler.render_event_card(event, chat_box, **fields)
-        → route to factory:
-            "file_read"       → create_file_card(file_path, snippet, line_range)
-            "edit_proposal"   → create_edit_card(file_path, diff)
-            "tool_call"       → create_tool_card(tool_name, detail)
-            "error"           → create_error_bubble(error_msg)
-            "thinking"        → build_role_bubble("Agent", thought_text)  # plain text
-            (unknown)         → no-op (silently ignored)
-```
-
-**New widget factories** (Phase 4 additions to `ui/views/chat_bubble.py`):
-- `create_file_card(file_path, snippet, line_range)` — green left border, 📄 icon
-- `create_edit_card(file_path, diff)` — amber left border, ✏️ icon
-- `create_tool_card(tool_name, detail)` — slate left border, 🔧 icon
-- `create_error_bubble(error_msg)` — red left border + tint, ❌ icon
-
-**New CSS classes** (`ui/styles.py`):
-- `.bubble-file-read`, `.bubble-edit-proposal`, `.bubble-tool-call`
-- `.bubble-error`, `.bubble-thinking`, `.bubble-streaming`
-
-### 4.7 Forward Callback Wiring Chain
+**Removed in SPEC-58 §2c** — ForwardHandler deleted, and the whole forward
+plumbing (the `on_forward_click` parameter and the per-row Forward buttons)
+with it (see the `ui/handlers/chat_render_handler.py` module docstring,
+ruling R2). The toolbar's own Forward flow never used this chain, and no
+popover exists to open. This section is retained for history only. (The
+diagram below previously named `build_agent_bubble`, a function that exists
+nowhere — a post-SPEC-58 edit artifact reverted here to the historical
+`build_role_bubble`.)
 
 ```
 window._build()
@@ -3505,7 +3472,7 @@ window._build()
 On render_sync() call:
   → ChatHandler.render_sync(role, text, session_key, on_forward_click=self._on_forward_message)
     → ChatRenderHandler.render_sync(role, text, session_key, on_forward_click=cb)
-      → build_agent_bubble(role, text, on_forward_click=cb, tight=...)
+      → build_role_bubble(role, text, on_forward_click=cb, tight=...)
         → creates Forward button → on click → cb(text, anchor_widget)
 
 On forward click (user clicks Forward button on agent bubble):
@@ -4329,7 +4296,6 @@ develcakes/
 │       ├── __init__.py           # 1 line
 │       ├── agent_builder.py      # ~770 lines — AgentBuilderDialog
 │       ├── auxilium_wizard.py    # ~452 lines — Auxilium wizard view (Tier 1, D7)
-│       ├── chat_bubble.py        # ~1059 lines — build_role_bubble() factory (Phase 1 + 2)
 │       ├── chat_input_toolbar.py # ~588 lines — find/replace bar + spell check (view only)
 │       ├── feed_tab.py           # ~387 lines — FeedTab (view only)
 │       ├── file_tree.py          # ~2272 lines — FileTree (ColumnView directory browser, 22-property model, sort/filter/search)

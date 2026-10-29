@@ -1,6 +1,6 @@
 # Projects in CrabCakes
 
-Projects are the primary unit of work in CrabCakes. They organize code, agents, conversations, and review sessions into self-contained workspaces. Every special agent (except Auxilium) requires an active project to operate.
+Projects are the primary unit of work in CrabCakes. They organize code, agents, and conversations into self-contained workspaces. Every special agent (except Auxilium) requires an active project to operate.
 
 ---
 
@@ -184,7 +184,7 @@ This forwards the question to all team members.
 
 ### Overview
 
-CrabCakes includes a git-based code review system. The primary review workflow uses **feed cards** — the review mode (checkpoint/diff/accept/reject) is a secondary, older mechanism.
+CrabCakes reviews agent writes through **feed cards**: enforcement results surface as cards and are accepted or rejected right on the project feed, with a standalone git-backed revert available from the file drawer. (The older checkpoint/diff/accept/reject review mode was removed — see "Checkpoint-Based Review — removed" below.)
 
 ### Feed Card Review (Primary)
 
@@ -222,7 +222,7 @@ Feed cards are the primary UI element for surfacing agent activity, tool results
 
 - **`agent_action`** — Agent tool calls (reading, writing, executing commands). Shows running → complete/error states.
 - **`pending_approval`** — When an agent requests `exec_command` approval. Has Approve/Deny buttons.
-- **`git_commit`** — Git commits made during review sessions (accept/reject).
+- **`git_commit`** — Automatic git commits made by CrabWatch as agents change files.
 - **`diff` / `audit_report`** — Posted by the `feed_card` tool (file changes and audit results).
 
 ### When Cards Appear
@@ -231,7 +231,6 @@ Cards are added to the feed whenever:
 - An agent starts a tool call (`_on_tool_call_start`)
 - A tool call completes (`_on_tool_call_result`)
 - An agent requests exec approval (`_on_tool_call_approval_needed`)
-- A review session accepts or rejects changes
 - An agent calls the `feed_card` tool
 
 ### Approval Cards
@@ -268,7 +267,7 @@ When the active project changes, `AgentRuntimeHandler.set_active_project()`:
 
 ## Audit Reports
 
-Audit reports are structured feedback blocks (`## Audit Report`) that log bugs and issues to the target agent's bug journal. They're part of the SPEC-3 structured feedback protocol, which supplements the older checkpoint-based review system.
+Audit reports are structured feedback blocks (`## Audit Report`) that log bugs and issues to the target agent's bug journal. They're part of the SPEC-3 structured feedback protocol.
 
 When the enforcement layer catches issues (syntax errors, test failures, lint violations):
 1. Results appear in feed cards with ❌ icons
