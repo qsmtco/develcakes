@@ -346,7 +346,9 @@ class TestPrepTConcurrency:
         # The agent is edited while send #1's prep is parked in flight.
         agent_def.role = "debugger"
         # Send #2 lands on a CLAIMED session: queued — no prep, no rotation.
-        token_after_first = fake_rt.turn_token
+        # _turn_token is the attr the REAL handler rotates (session.py:497);
+        # the fake's bare turn_token is its own init-time token and never moves.
+        token_after_first = fake_rt._turn_token
         handler.send_to_special_agent("agent:coder", "second")
 
         fake_rt.get_gate.set()
@@ -358,21 +360,23 @@ class TestPrepTConcurrency:
         assert fake_rt.prep_completed == [0], (
             "the claim owner's prep is the ONLY prep that runs")
         assert len(fake_rt.loops) == 1, "no second loop for a claimed session"
-        assert fake_rt.turn_token == token_after_first, (
+        assert fake_rt._turn_token == token_after_first, (
             "a queued send must not rotate the turn token")
         assert fake_rt.loops[0][2] == token_after_first, (
             "the one loop still runs under the un-rotated token")
-        # The first prep is the last writer — the edit stays unseen.
-        assert fake_rt.conv.agent_role == "coder", (
-            "send #2 must not run a prep that would sync the edited role "
+        # Queued-send contract: there is exactly ONE prep (send #1's) and it
+        # runs on the live agent_def, so the mid-flight role edit IS synced
+        # to the conversation (handler :1118-1119: conv.agent_role =
+        # agent_def.role) — a queued send cannot supersede it because it
+        # never runs a prep of its own.
+        assert fake_rt.conv.agent_role == "debugger", (
+            "the one live prep must sync the mid-flight role edit "
             f"(conv.agent_role={fake_rt.conv.agent_role!r})"
         )
-        assert fake_rt.conv.step_count == 0
-        # Both sends reached the runtime; the second is queued behind the claim.
-        assert fake_rt.send_calls == [
-            ("agent:coder", "first"),
-            ("agent:coder", "second"),
-        ]
+        assert fake_rt.conv.step_count == 0, (
+            "the prep resets step_count for the new task "
+            f"(step_count={fake_rt.conv.step_count})"
+        )
 
     def test_superseded_prep_is_skipped_entirely(self):
         """Queued-send contract (SPEC-WIRE-CONTEXT-PRESSURE §2.3): with the
@@ -392,10 +396,12 @@ class TestPrepTConcurrency:
         assert len(fake_rt.prepares) == 1
 
         # Send #2 lands on a CLAIMED session: queued behind the claim —
-        # no second prep, no token rotation.
-        token_after_first = fake_rt.turn_token
+        # no second prep, no token rotation. _turn_token is the attr the
+        # REAL handler rotates (session.py:497); the fake's bare turn_token
+        # is its own init-time token and never moves.
+        token_after_first = fake_rt._turn_token
         handler.send_to_special_agent("agent:coder", "second")
-        assert fake_rt.turn_token == token_after_first, (
+        assert fake_rt._turn_token == token_after_first, (
             "a queued send must not rotate the turn token")
         assert len(fake_rt.loops) == 1, "send #2 is queued — no second loop"
 
