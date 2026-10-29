@@ -269,10 +269,12 @@ class MainContent(Gtk.Box):
 
         self.append(paned)
 
-        # Pill-only shape, visible, hosted above the notebook until the
-        # first chat tab overlays it under the tab strip.
+        # Pill-only shape, visible. A permanent _top_box row (SPEC-58 §2a):
+        # never reparented on tab switch. Sits directly above the input
+        # toolbar, below the chat notebook (PM order, 2026-10-29).
         self.update_project_settings("", 0, None, "off", None)
-        self._top_box.prepend(self._project_settings)
+        self._top_box.insert_child_after(
+            self._project_settings, self._chat_notebook)
 
     def _build_transport_cluster(self) -> None:
         """Icon connect, state pip, and stop-all. Built once and reparented."""
