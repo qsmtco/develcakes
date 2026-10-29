@@ -53,7 +53,7 @@ body { margin: 0; background: #1a1b26; color: #c0caf5;
              padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.35);
              overflow-wrap: anywhere; position: relative;
              transition: transform .15s ease, box-shadow .15s ease; }
-.feed-card-enter { animation: feed-card-in .25s ease-out; }
+.feed-card-enter { animation: feed-card-in .35s ease-out; }
 .feed-card:hover { transform: translateY(-1px);
                    box-shadow: 0 4px 14px rgba(0,0,0,.42); }
 @keyframes feed-card-in {
