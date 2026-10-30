@@ -41,6 +41,13 @@ class AgentBuilderWidget(Gtk.Box):
             mode (button="Create").
         on_save: Callback with the form dict when user clicks Save.
         on_cancel: Callback when user clicks Cancel.
+        scrollable: True (default) wraps the form in an internal
+            Gtk.ScrolledWindow — right for the fixed-height modal-dialog
+            hosting of the past. False appends the form box directly so the
+            widget's natural height is the FULL form; inside the row-owned
+            left-panel drawer a ScrolledWindow's natural height is its
+            viewport minimum (~0), which collapsed the drawer to a few
+            pixels. The drawer's own outer scroll handles overflow.
     """
 
     def __init__(
@@ -50,6 +57,7 @@ class AgentBuilderWidget(Gtk.Box):
         is_edit: bool = False,
         on_save=None,
         on_cancel=None,
+        scrollable: bool = True,
     ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -57,6 +65,7 @@ class AgentBuilderWidget(Gtk.Box):
         self._on_save = on_save
         self._on_cancel = on_cancel
         self._is_edit = is_edit
+        self._scrollable = scrollable
         self._original_si = {}  # preserved SI overrides from edit source
         self._tool_checks: dict[str, Gtk.CheckButton] = {}
         self._tool_count_label: Gtk.Label | None = None
@@ -69,10 +78,12 @@ class AgentBuilderWidget(Gtk.Box):
         self._providers: list = []  # list[ProviderConfig] — populated via set_provider_options()
 
         # ── Build form ────────────────────────────────────────────────
-        # Scrollable form body
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # Scrollable form body (skipped when scrollable=False — see ctor doc)
+        scroll: Gtk.ScrolledWindow | None = None
+        if self._scrollable:
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_vexpand(True)
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         form_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         form_box.set_margin_start(20)
@@ -130,8 +141,13 @@ class AgentBuilderWidget(Gtk.Box):
         strat_row = self._labeled_box("Compaction strategy", self._compaction_strategy_combo)
         form_box.append(strat_row)
 
-        scroll.set_child(form_box)
-        self.append(scroll)
+        if scroll is not None:
+            scroll.set_child(form_box)
+            self.append(scroll)
+        else:
+            # scrollable=False — natural-height child so the drawer reveal
+            # grows to fit the full form (no vexpand inside a ListBox row).
+            self.append(form_box)
 
         # Error label (hidden by default)
         self._error_label = Gtk.Label()

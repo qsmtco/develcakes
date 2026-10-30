@@ -439,6 +439,14 @@ class TestPrepTConcurrency:
         loop starts; a replay of it stays a no-op (existence guard).
         Falsifier: a second prep + token rotation at send #2 →
         prep_completed would be [1] and the token would move.
+
+        Scope note (audit follow-up): despite the name, this does NOT pin the
+        RACE-FIX v4 token guard — the sends here are serialized by begin_send's
+        claim, so no token rotation can ever supersede the stored prep, and the
+        guard is unreachable. What the replay asserts below prove is the
+        EXISTENCE guard (:1037/:1051, "conversation already exists → skip").
+        Deleting the token guard leaves this test green; the token guard is
+        pinned by test_prepare_skips_mutation_when_the_turn_was_superseded.
         """
         fake_rt = _FakeRuntime(conv_exists=False, auto_run_prepare=False)
         handler, _ = _make_handler(fake_rt)
@@ -469,6 +477,107 @@ class TestPrepTConcurrency:
         assert len(fake_rt.load_calls) == 1, "replay must not load again"
         assert len(fake_rt.create_calls) == 1, "replay must not create again"
         assert fake_rt.prep_errors == []
+
+    def test_prepare_skips_mutation_when_the_turn_was_superseded(self):
+        """The RACE-FIX v4 token guard itself (agent_runtime_handler.py:1016):
+        a prep whose token no longer matches _turn_tokens performs NO mutation.
+
+        Scope note — why this is a direct call and not a send: on the handler
+        path the guard is UNREACHABLE. _turn_tokens[sk] has one writer
+        (session.py:496) and only runs when begin_send returned True; a send
+        that finds the session claimed returns at session.py:440-441 BEFORE
+        that rotation. So no send can ever rotate the token under an in-flight
+        prep, and test_superseded_prep_is_skipped_entirely's "no-op replay"
+        proves the EXISTENCE guard (:1037/:1051), not this one — deleting
+        :1016 leaves that whole suite green. This test pins the guard as the
+        unit it actually is; it would fail if :1016 were removed.
+
+        Differential: the SAME fixture, the ONLY difference being which token
+        is current. Stale -> zero loads/creates/rebuilds/syncs. Current ->
+        normal preparation. A "skip" that skips in both cases would not pass.
+        """
+        from ui.handlers.agent_runtime_handler import AgentRuntimeHandler
+
+        def _run(current_is_stale: bool):
+            fake_rt = _FakeRuntime(conv_exists=True)
+            handler, agent_def = _make_handler(fake_rt)
+            current = object()
+            stale = object()
+            handler._turn_tokens["agent:coder"] = current
+            handler._prepare_turn_conversation(
+                rt=fake_rt,
+                session_key="agent:coder",
+                agent_def=agent_def,
+                project_path="/tmp/proj",
+                project_name="proj",
+                agent_model=None,
+                si_enforcement=None,
+                turn_token=stale if current_is_stale else current,
+            )
+            return handler, fake_rt
+
+        _h, stale_rt = _run(current_is_stale=True)
+        assert stale_rt.load_calls == [], "superseded prep must not load"
+        assert stale_rt.create_calls == [], "superseded prep must not create"
+        assert stale_rt.rebuild_calls == [], "superseded prep must not rebuild"
+        assert stale_rt.conv.agent_role == "stale", (
+            "superseded prep must not sync agent state "
+            f"(agent_role={stale_rt.conv.agent_role!r})")
+        assert stale_rt.conv.step_count == 7, (
+            "superseded prep must not reset step_count "
+            f"(step_count={stale_rt.conv.step_count})")
+
+        _h2, current_rt = _run(current_is_stale=False)
+        assert current_rt.conv.agent_role == "coder", (
+            "control: a CURRENT token must prepare normally — otherwise the "
+            "stale assertions above would pass vacuously")
+        assert current_rt.conv.step_count == 0, "control: step_count reset"
+        assert AgentRuntimeHandler is not None  # import used for the contract
+
+    def test_prepare_takes_the_prep_lock(self):
+        """The other half of RACE-FIX v4 (:1014): a prep HOLDS the per-session
+        lock for its whole body, so a second prep for the same session cannot
+        interleave with it and observe a half-prepared conversation.
+
+        Differential: hold the lock on the test thread and call the prep from
+        a worker. Locked -> the prep must not complete until the lock is
+        released. Delete `with self._prep_lock(session_key)` and the prep
+        returns immediately, so the "must not complete" assert fails. (This is
+        what test_superseded_prep_is_skipped_entirely does NOT prove: its
+        sends are serialized by begin_send's claim, so the lock is inert
+        there and its removal leaves that test green.)
+        """
+        fake_rt = _FakeRuntime(conv_exists=True)
+        handler, agent_def = _make_handler(fake_rt)
+        handler._turn_tokens["agent:coder"] = object()
+        lock = handler._prep_lock("agent:coder")
+        finished = threading.Event()
+
+        def _prep():
+            handler._prepare_turn_conversation(
+                rt=fake_rt,
+                session_key="agent:coder",
+                agent_def=agent_def,
+                project_path="/tmp/proj",
+                project_name="proj",
+                agent_model=None,
+                si_enforcement=None,
+                turn_token=handler._turn_tokens["agent:coder"],
+            )
+            finished.set()
+
+        lock.acquire()
+        try:
+            threading.Thread(target=_prep, daemon=True).start()
+            assert not finished.wait(timeout=0.25), (
+                "prep must block while another prep holds the session lock")
+            assert fake_rt.load_calls == [], (
+                "no I/O may start before the lock is acquired")
+        finally:
+            lock.release()
+
+        assert finished.wait(timeout=2), "prep must proceed once the lock frees"
+        assert fake_rt.prep_errors == [], "the freed prep must complete cleanly"
 
     def test_set_active_project_skips_rebuild_while_prep_is_in_flight(self):
         """The main-thread reconcile must never block on the prep lock."""

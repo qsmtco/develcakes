@@ -276,20 +276,6 @@ class MainContent(Gtk.Box):
         self._top_box.insert_child_after(
             self._project_settings, self._chat_notebook)
 
-        # Agent-edit drawer row — permanent, like the pill bar. Sits ABOVE
-        # the notebook so the slide-down form pushes the chat area down.
-        # The revealer itself stays unparented until add_drawer() wires it.
-        self._agent_edit_drawer = None
-
-    def add_drawer(self, drawer) -> None:
-        """Insert a top drawer row (the agent-edit revealer) above the chat
-        notebook. Permanent _top_box row — added once at window build, never
-        reparented; open/close is reveal True/False."""
-        if self._agent_edit_drawer is not None:
-            return  # already wired — idempotent
-        self._agent_edit_drawer = drawer
-        self._top_box.insert_child_after(drawer, None)  # first row, above notebook
-
     def _build_transport_cluster(self) -> None:
         """Icon connect, state pip, and stop-all. Built once and reparented."""
         self._transport_cluster = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)

@@ -6,16 +6,17 @@ from __future__ import annotations
 import logging
 
 import gi
+
 # Require GTK 4.0 — must be called before importing Gtk
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio, GLib, Gdk
-
 from typing import TYPE_CHECKING
 
-from utils.projects import load_members
+from gi.repository import Gdk, Gio, GLib, Gtk
+
+from ui.views.file_tree import FileTree
 from utils.agent_defs import agent_slug
 from utils.icons import render_agent_icon
-from ui.views.file_tree import FileTree
+from utils.projects import load_members
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,17 @@ class LeftPanel(Gtk.Box):
         self._on_create_agent = None  # set via set_on_create_agent()
         self._on_edit_agent = None    # set via set_on_edit_agent()
         self._on_delete_agent = None  # set via set_on_delete_agent()
+
+        # Agent-edit drawer state. The revealer lives INSIDE an agent row's
+        # _drawer_container (row-owned, like the file-tree drawer), never in
+        # a pane-level box. _agent_drawer_factory builds the form widget.
+        self._agent_drawer_factory = None
+        self._agent_drawer = None           # the single Gtk.Revealer
+        self._agent_drawer_row = None       # row it is currently parented into
+        self._agent_drawer_edit_name = None  # None = create mode
+        self._agent_drawer_widget = None    # last-built form widget
+        self._agent_drawer_title = None     # header label (Edit: X / New agent)
+        self._agent_drawer_body = None      # content box holding the form
 
         # Prompts tab state — built once in _build_prompts_tab()
         self._prompts_handler = None     # set via set_prompts_handler()
@@ -258,6 +270,178 @@ class LeftPanel(Gtk.Box):
         """Set callback for deleting a local agent (right-click → Delete)."""
         self._on_delete_agent = cb
 
+    # ── Agent-edit drawer (row-owned, like the file-tree drawer) ──────────
+
+    def set_agent_drawer_factory(self, cb):
+        """Set the factory that builds a fresh form widget.
+
+        ``cb(name)`` returns a widget for edit mode when *name* is a string,
+        or a create-mode form when *name* is None. Called on every open so
+        the form is never reused across agents.
+        """
+        self._agent_drawer_factory = cb
+
+    @property
+    def agent_drawer_widget(self):
+        """The form widget most recently built by the factory (or None)."""
+        return self._agent_drawer_widget
+
+    def _find_agent_row(self, name):
+        """Return the agent row whose ``_agent_name`` == *name*, else None."""
+        if self._agents_list_box is None:
+            return None
+        child = self._agents_list_box.get_first_child()
+        while child is not None:
+            if getattr(child, "_agent_name", None) == name:
+                return child
+            child = child.get_next_sibling()
+        return None
+
+    def open_agent_drawer(self, name, row=None):
+        """Reveal the agent-edit drawer under *row* (or the row for *name*).
+
+        The revealer is created lazily once and parented INTO the target
+        row's ``_drawer_container`` — never into a pane-level box. Opening a
+        different row while the drawer is open MOVES the revealer to that
+        row's container and keeps it open. Returns False when no row could be
+        resolved (and no name given), so the caller can bail.
+        """
+        if self._agent_drawer_factory is None:
+            return False
+
+        target = row if row is not None else self._find_agent_row(name)
+        if target is None:
+            return False
+
+        container = getattr(target, "_drawer_container", None)
+        if container is None:
+            return False
+
+        # Same row + same agent while already open → toggle closed.
+        if (
+            self._agent_drawer is not None
+            and self._agent_drawer_row is target
+            and self._agent_drawer_edit_name == name
+            and self._agent_drawer.get_reveal_child()
+        ):
+            self.close_agent_drawer()
+            return True
+
+        widget = self._agent_drawer_factory(name)
+        if widget is None:
+            return False
+        self._agent_drawer_widget = widget
+
+        if self._agent_drawer is None:
+            self._agent_drawer = Gtk.Revealer(
+                transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
+            )
+            self._agent_drawer.set_transition_duration(150)
+            # The CSS class goes on the REVEALER (the drawer itself), not on
+            # the form: the drawer is what sits directly under the agent row,
+            # so the hairline top border reads as attached to that row.
+            self._agent_drawer.add_css_class("agent-edit-drawer")
+
+        # Detach from the previous row's container with remove() per child.
+        # NEVER unparent() a live widget — that was a prior SEGFAULT.
+        old_container = None
+        if (
+            self._agent_drawer_row is not None
+            and self._agent_drawer_row is not target
+        ):
+            old_container = getattr(
+                self._agent_drawer_row, "_drawer_container", None
+            )
+        if old_container is not None:
+            while old_container.get_first_child() is not None:
+                old_container.remove(old_container.get_first_child())
+            old_container.set_visible(False)
+
+        # Swap the form: empty the revealer child box, append the new form.
+        # The revealer's child is a vertical box: [header row][form widget].
+        # The header carries the title ("Edit: X" / "New agent") and a ✕
+        # close button — the drawer lives inside a narrow left-panel row,
+        # so it needs its own header (the old chat-pane drawer had one too).
+        body = self._agent_drawer.get_child()
+        if body is None:
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            self._agent_drawer.set_child(body)
+        while body.get_first_child() is not None:
+            body.remove(body.get_first_child())
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        header.set_margin_start(10)
+        header.set_margin_end(6)
+        header.set_margin_top(6)
+
+        title = Gtk.Label()
+        title.set_hexpand(True)
+        title.set_halign(Gtk.Align.START)
+        title.add_css_class("agent-name-label")
+        header.append(title)
+
+        close_btn = Gtk.Button(label="✕")
+        close_btn.add_css_class("flat")
+        close_btn.set_tooltip_text("Close")
+        close_btn.connect("clicked", lambda *_: self.close_agent_drawer())
+        header.append(close_btn)
+
+        body.append(header)
+        body.append(widget)
+
+        self._agent_drawer_title = title
+        self._agent_drawer_body = body
+        title.set_text(f"Edit: {name}" if name else "New agent")
+
+        # Parent into the target row's own container. Append only when the
+        # revealer is not already parented there (same-row reopen leaves it
+        # in place). A container holding a foreign child is cleared with
+        # Gtk.Box.remove() per child first — never unparent() a live widget
+        # (prior SEGFAULT), and never skip the append (that would leave the
+        # revealer with no parent at all).
+        if self._agent_drawer.get_parent() is not container:
+            while container.get_first_child() is not None:
+                container.remove(container.get_first_child())
+            container.append(self._agent_drawer)
+        container.set_visible(True)
+
+        self._agent_drawer_row = target
+        self._agent_drawer_edit_name = name
+        self._agent_drawer.set_reveal_child(True)
+        self._agent_drawer.set_visible(True)
+
+        focus = getattr(widget, "focus_name_entry", None)
+        if callable(focus):
+            focus()
+        return True
+
+    def close_agent_drawer(self):
+        """Hide the drawer. Form state is discarded; row container hidden."""
+        if self._agent_drawer is not None:
+            self._agent_drawer.set_reveal_child(False)
+        if self._agent_drawer_row is not None:
+            container = getattr(self._agent_drawer_row, "_drawer_container", None)
+            if container is not None:
+                container.set_visible(False)
+
+    def _reset_agent_drawer(self):
+        """Drop drawer state before the list is rebuilt (stale-container guard)."""
+        if self._agent_drawer is not None:
+            self._agent_drawer.set_reveal_child(False)
+            old_container = None
+            if self._agent_drawer_row is not None:
+                old_container = getattr(
+                    self._agent_drawer_row, "_drawer_container", None
+                )
+            if old_container is not None:
+                while old_container.get_first_child() is not None:
+                    old_container.remove(old_container.get_first_child())
+                old_container.set_visible(False)
+        self._agent_drawer = None
+        self._agent_drawer_row = None
+        self._agent_drawer_edit_name = None
+        self._agent_drawer_widget = None
+
     def set_prompts_handler(self, handler):
         """Set the PromptsHandler and refresh the prompts tab."""
         self._prompts_handler = handler
@@ -270,15 +454,15 @@ class LeftPanel(Gtk.Box):
 
     # ── Projects tab — nested Notebook sub-tabs (FileTree / Feed) ─────────────────────
 
-    def set_feed_tab(self, feed_tab: "FeedTab") -> None:
+    def set_feed_tab(self, feed_tab: FeedTab) -> None:
         """Store FeedTab reference. Called by window before any project opens."""
         self._feed_tab = feed_tab
 
-    def get_feed_tab(self) -> "FeedTab | None":
+    def get_feed_tab(self) -> FeedTab | None:
         """Return the FeedTab reference."""
         return self._feed_tab
 
-    def open_project_view(self, feed_tab: "FeedTab") -> None:
+    def open_project_view(self, feed_tab: FeedTab) -> None:
         """
         Open project view: create nested Notebook in Projects tab, reparent FileTree into it.
 
@@ -383,6 +567,11 @@ class LeftPanel(Gtk.Box):
         Rebuild the agents tab content from current _agent_names.
         Called on initial population and on subsequent refreshes.
         """
+        # The rows (and their _drawer_container widgets) are about to be
+        # destroyed — drop drawer state first so no stale container is
+        # referenced after the rebuild.
+        self._reset_agent_drawer()
+
         # Find the agents tab page (index 1)
         notebook = self.get_first_child()
         if notebook is None:
@@ -413,7 +602,11 @@ class LeftPanel(Gtk.Box):
 
         # List box for agent rows
         self._agents_list_box = Gtk.ListBox()
-        self._agents_list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        # Selection mode NONE — click-1 of the double-click must not SELECT
+        # the row: the selected background floods the whole row including the
+        # open agent-edit drawer (theme default, not covered by .agent-row).
+        # Activation (+/−, row_activated) never reads selection state.
+        self._agents_list_box.set_selection_mode(Gtk.SelectionMode.NONE)
 
         # Load project members if a project is active
         project_members = []
@@ -491,20 +684,37 @@ class LeftPanel(Gtk.Box):
 
         row_box.append(plus_lbl)
         row_box.append(text_lbl)
-        row.set_child(row_box)
+
+        # Row-owned drawer slot — same shape as _build_agent_row so the
+        # create-mode drawer opens directly under the Create Agent card.
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.append(row_box)
+        drawer_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        drawer_container.set_visible(False)
+        outer.append(drawer_container)
+        row._drawer_container = drawer_container
+        row.set_child(outer)
 
         # Single-click gesture — list box activate_on_single_click is False
         # (agent rows need double-click to avoid accidental opens),
         # but this button-like card should respond immediately.
         click = Gtk.GestureClick()
         click.set_button(1)
-        click.connect("pressed", lambda *_: self._on_create_agent_click())
+        click.connect(
+            "pressed", lambda *_: self._on_create_agent_click(row=row)
+        )
         row.add_controller(click)
 
         return row
 
-    def _on_create_agent_click(self) -> None:
-        """Handle single-click on Create Agent card."""
+    def _on_create_agent_click(self, row=None) -> None:
+        """Handle single-click on Create Agent card.
+
+        Opens the drawer in create mode under the card itself; falls back to
+        the window callback when no factory has been wired.
+        """
+        if row is not None and self.open_agent_drawer(None, row=row):
+            return
         if self._on_create_agent:
             self._on_create_agent()
 
@@ -590,7 +800,21 @@ class LeftPanel(Gtk.Box):
         row_box.append(avatar_picture)
         row_box.append(name_col)
         row_box.append(buttons_box)
-        row.set_child(row_box)
+
+        # Row-owned drawer slot. The agent-edit drawer is parented INTO this
+        # container on open (same shape as the file-tree drawer: the drawer
+        # lives inside the list, directly under its row — never in a
+        # pane-level box). Empty + invisible until the drawer is attached.
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.append(row_box)
+        drawer_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        drawer_container.set_visible(False)
+        outer.append(drawer_container)
+        row._drawer_container = drawer_container
+
+        row.set_child(outer)
+        # Hover reminder — the edit affordance is the row double-click.
+        row.set_tooltip_text("Double-click to edit")
         row.show()
         return row
 
@@ -600,11 +824,18 @@ class LeftPanel(Gtk.Box):
         drawer in create mode; gateway rows are no-ops."""
         # Check if this is the Create Agent card
         if getattr(row, '_is_create_agent_card', False):
+            # The drawer opens in create mode UNDER the create row itself.
+            if self.open_agent_drawer(None, row=row):
+                return
             if self._on_create_agent:
                 self._on_create_agent()
             return
 
         if getattr(row, '_session_key', '').startswith("agent:"):
+            # Drawer lives in the row's own container; fall back to the
+            # window callback only when no factory has been wired yet.
+            if self.open_agent_drawer(row._agent_name, row=row):
+                return
             if self._on_edit_agent:
                 self._on_edit_agent(row._agent_name)
 
@@ -1040,10 +1271,10 @@ class LeftPanel(Gtk.Box):
         self._prompt_copy_status_label.set_text(message)
         # Cancel any pending clear, then schedule a new one.
         if self._prompt_copy_status_timeout_id is not None:
-            try:
-                GLib.source_remove(self._prompt_copy_status_timeout_id)
-            except Exception:
-                pass
+            # _clear() nulls the id when the timeout fires, so a non-None id is
+            # always live here — no try/except needed (source_remove returns
+            # False, not raises, on a stale id).
+            GLib.source_remove(self._prompt_copy_status_timeout_id)
             self._prompt_copy_status_timeout_id = None
         def _clear():
             if self._prompt_copy_status_label is not None:

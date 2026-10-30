@@ -265,13 +265,13 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
         # Wire left panel agent builder callbacks. Create (card click) and
-        # edit (row double-click) both open the SAME slide-down drawer.
+        # edit (row double-click) both open the SAME slide-down drawer, which
+        # the left panel parents into the row's own container (file-tree
+        # drawer shape) — NOT into the chat pane.
         self._left_panel.set_on_create_agent(lambda: self._open_agent_builder())
         self._left_panel.set_on_edit_agent(lambda name: self._open_agent_builder(name))
         self._left_panel.set_on_delete_agent(lambda name: self._agent_builder_handler.delete_agent_with_confirmation(name))
-
-        # Agent-edit drawer — the slide-down form surface (Create + Edit)
-        self._build_agent_edit_drawer()
+        self._left_panel.set_agent_drawer_factory(self._build_agent_form)
 
         # Settings handler — manages provider list, save/delete/test operations
         from ui.handlers.settings_handler import SettingsHandler
@@ -298,7 +298,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self._settings_handler,
             self._left_panel,
             settings_dialog_factory=lambda: self._settings_pane,
-            agent_builder_factory=lambda: getattr(self, "_agent_edit_drawer_widget", None),
+            agent_builder_factory=lambda: getattr(
+                self._left_panel, "agent_drawer_widget", None
+            ),
             on_runtimes_refresh=self._on_providers_changed,  # SPEC-01
         )
 
@@ -2446,131 +2448,60 @@ class MainWindow(Gtk.ApplicationWindow):
 
     # ── Agent-edit drawer (slide-down) ─────────────────────────────────────
 
-    def _build_agent_edit_drawer(self) -> None:
-        """Build the agent-edit drawer once and park it in main content.
+    # ── Agent-edit drawer (row-owned in the left panel) ────────────────────
 
-        Same pattern as the settings pill (permanent `_top_box` row,
-        2026-10-29): the Gtk.Revealer is a permanent row of MainContent's
-        top box and is never reparented — reveal True/False slides it open
-        (pushing content below down) and closed. Child: header row (title +
-        Close ✕) + a stable content box holding the AgentBuilderWidget.
-        The widget itself is self-contained: it builds and parents its own
-        Cancel/Save row inside its own box. Repopulation (edit another
-        agent while open) empties the stable content box with remove()
-        per child — never unparent() on a live widget.
+    def _build_agent_form(self, name: str | None = None):
+        """Factory the left panel calls to build a fresh agent form.
+
+        ``name`` is a string for edit mode and None for create mode. The
+        returned AgentBuilderWidget is parented by the left panel INTO the
+        clicked row's own container (file-tree drawer shape), so the drawer
+        slides down under the row rather than over the chat pane. A fresh
+        widget is built on every open — forms are never reused across agents.
         """
         from ui.views.agent_builder import AgentBuilderWidget
 
-        self._agent_edit_drawer = Gtk.Revealer(
-            transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
-        )
-        # Reserve no vertical space when closed.
-        self._agent_edit_drawer.set_visible(False)
-
-        # Header row: title + Close ✕
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.set_margin_start(16)
-        header.set_margin_end(16)
-        header.set_margin_top(10)
-        header.set_margin_bottom(4)
-        self._agent_edit_drawer_title = Gtk.Label(label="New agent")
-        self._agent_edit_drawer_title.add_css_class("title-2")
-        self._agent_edit_drawer_title.set_hexpand(True)
-        self._agent_edit_drawer_title.set_xalign(0.0)
-        header.append(self._agent_edit_drawer_title)
-        close_btn = Gtk.Button(label="✕")
-        close_btn.add_css_class("flat")
-        close_btn.connect("clicked", lambda *_: self._close_agent_edit_drawer())
-        header.append(close_btn)
-
-        # Form widget (owns its own Cancel/Save row).
-        self._agent_edit_drawer_widget = AgentBuilderWidget(
-            self._agent_builder_handler,
-            on_save=lambda values: self._on_builder_save(values),
-            on_cancel=lambda: self._close_agent_edit_drawer(),
-        )
-        self._agent_edit_drawer_widget.add_css_class("agent-edit-drawer")
-
-        # Stable content box: the only part of the body that is emptied
-        # and refilled on repopulate. Header stays put.
-        self._agent_edit_drawer_content = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=0
-        )
-        self._agent_edit_drawer_content.append(self._agent_edit_drawer_widget)
-
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        body.append(header)
-        body.append(self._agent_edit_drawer_content)
-
-        self._agent_edit_drawer.set_child(body)
-        self._main_content.add_drawer(self._agent_edit_drawer)
-
-    def _open_agent_builder(self, edit_name: str | None = None) -> None:
-        """Open the agent-edit drawer for creating or editing an agent.
-
-        Double-clicking a DIFFERENT agent while open repopulates the form
-        and stays open; the same agent (or Cancel / Close ✕) closes it.
-        """
-        from ui.views.agent_builder import AgentBuilderWidget
-
-        if edit_name:
-            # Same agent while already open → just close the drawer.
-            if (
-                self._agent_edit_drawer.get_reveal_child()
-                and getattr(self, "_agent_edit_drawer_edit_name", None) == edit_name
-            ):
-                self._close_agent_edit_drawer()
-                return
-            agent_def = self._agent_builder_handler.load_for_edit(edit_name)
+        if name:
+            agent_def = self._agent_builder_handler.load_for_edit(name)
             if agent_def is None:
-                logger.warning("Agent not found for editing: %s", edit_name)
-                return
+                logger.warning("Agent not found for editing: %s", name)
+                return None
             is_edit = True
-            self._agent_edit_drawer_title.set_text(f"Edit: {edit_name}")
         else:
             # New agent — use template with sensible defaults
             agent_def = self._agent_builder_handler.create_new()
             is_edit = False
-            self._agent_edit_drawer_title.set_text("New agent")
 
-        self._agent_edit_drawer_edit_name = edit_name
-
-        # Repopulate the form in place (single drawer instance, both modes).
-        new = AgentBuilderWidget(
+        return AgentBuilderWidget(
             self._agent_builder_handler,
             agent_def=agent_def,
             is_edit=is_edit,
             on_save=lambda values: self._on_builder_save(values),
             on_cancel=lambda: self._close_agent_edit_drawer(),
+            scrollable=False,
         )
-        new.add_css_class("agent-edit-drawer")
 
-        # Swap the form inside the STABLE content box (header never moves).
-        # Empty it child by child with Gtk.Box.remove() — GTK4-safe removal.
-        # NEVER unparent() a live parented widget: that was the SEGFAULT at
-        # the old :2553-2554 (verified under xvfb in TestDrawerRepopulate).
-        # The widget is self-contained — its own box carries the Cancel/Save
-        # row, so nothing else needs appending here.
-        content = self._agent_edit_drawer_content
-        while content.get_first_child() is not None:
-            content.remove(content.get_first_child())
-        content.append(new)
+    def _open_agent_builder(self, edit_name: str | None = None) -> None:
+        """Open the agent-edit drawer under the agent's row in the left panel.
 
-        self._agent_edit_drawer_widget = new
-        self._agent_edit_drawer.set_reveal_child(True)
-        self._agent_edit_drawer.set_visible(True)
-        new.focus_name_entry()
+        Double-clicking a DIFFERENT agent while open moves the drawer to
+        that row and stays open; the same agent (or Cancel / Close ✕)
+        closes it. Create mode targets the Create Agent card row.
+        """
+        self._left_panel.open_agent_drawer(edit_name)
 
     def _close_agent_edit_drawer(self) -> None:
         """Hide the drawer (Cancel / Close ✕). Form is discarded."""
-        self._agent_edit_drawer.set_reveal_child(False)
+        self._left_panel.close_agent_drawer()
 
     def _on_builder_save(self, values: dict) -> None:
         """Called when the drawer's form fires save. Validation errors stay
         visible in the drawer (no dialog to dismiss)."""
         ok, errors = self._agent_builder_handler.save(values)
         if not ok:
-            self._agent_edit_drawer_widget.show_errors(errors)
+            widget = self._left_panel.agent_drawer_widget
+            if widget is not None:
+                widget.show_errors(errors)
             return
         self._close_agent_edit_drawer()
 

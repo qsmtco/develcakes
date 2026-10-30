@@ -188,6 +188,13 @@ button.flat:hover {
     outline: none;
     box-shadow: none;
 }
+/* Agent-edit drawer: row-owned slide-down form. The revealer lives INSIDE
+   the agent row's _drawer_container, so the hairline top border reads as
+   attached to the row above it. */
+.agent-edit-drawer {
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 8px 10px 10px 10px;
+}
 .agent-name-label {
     color: #e8e8ec;
     font-size: 14px;
