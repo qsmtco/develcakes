@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
 import time
 import unittest.mock
@@ -76,8 +78,16 @@ def _resp(content="Done."):
 class _FakeConv:
     """Minimal Conversation stand-in for the handler's sync writes."""
 
-    def __init__(self, project_path="/tmp/old-proj"):
+    def __init__(self, project_path=None):
+        # Default to a real EMPTY temp dir, never a bare "/tmp": the fake's
+        # conv lands in real-runtime paths too (test #9's
+        # create_conversation project_path), and a bare "/tmp" makes the
+        # runtime's repo-map walk parse every .py file under /tmp (2.1 GB on
+        # this box) — a multi-minute stall that reads as a hang.
+        if project_path is None:
+            project_path = tempfile.mkdtemp(prefix="prep-conv-")
         self.project_path = project_path
+        self._owned_path = project_path
         self.agent_role = "stale"
         self.system_prompt = "stale prompt"
         self.api_key = None
@@ -87,6 +97,9 @@ class _FakeConv:
         self.mcp_servers = []
         self.si_enforcement = None
         self.step_count = 7
+
+    def cleanup(self):
+        shutil.rmtree(self._owned_path, ignore_errors=True)
 
 
 class _FakeRuntime:
@@ -178,7 +191,10 @@ class _FakeRuntime:
                 return
             try:
                 prepare()
-            except BaseException as exc:   # mirrors _run_loop's guard, but records
+            except Exception as exc:  # noqa: BLE001 — mirrors _run_loop's
+                # guard (runtime.py:1985): record, do not re-raise on the
+                # loop thread; BaseException (SystemExit/KeyboardInterrupt)
+                # would crash the daemon thread and hang the test.
                 self.prep_errors.append(exc)
             else:
                 self.prep_completed.append(idx)
@@ -200,7 +216,9 @@ class _FakeRuntime:
             return
         try:
             prepare()
-        except BaseException as exc:
+        except Exception as exc:  # noqa: BLE001 — mirrors _run_loop's guard
+            # (runtime.py:1985): record the failure so the test can assert
+            # on it instead of crashing the thread.
             self.prep_errors.append(exc)
         else:
             self.prep_completed.append(idx)
@@ -331,25 +349,52 @@ class TestPrepTConcurrency:
         """Queued-send contract (SPEC-WIRE-CONTEXT-PRESSURE §2.3): a second
         send while the session is CLAIMED is queued by begin_send — it
         creates no prep and does NOT rotate the turn token. The single
-        in-flight prep (the first send's) is therefore the only and last
-        writer of agent state; the mid-flight role edit never reaches the
-        conv. Falsifier: a second prep + token rotation at send #2 →
-        agent_role would flip to "debugger" and prep_completed to [0, 1].
+        in-flight prep (send #1's) is therefore the only and last writer
+        of agent state: it closed over the def captured at
+        session.py:409, so a PRODUCTION-style mid-flight edit never
+        reaches that conversation. (The agent builder REPLACES the
+        registry entry — window.py:259 → reload_agents_and_mcp →
+        _agents.clear() + re-register fresh defs — it never mutates the
+        old def in place. The new def is what the NEXT turn's own prep
+        captures.) The mid-flight role edit lands in the registry but is
+        NOT synced to the in-flight conversation.
         """
         fake_rt = _FakeRuntime(conv_exists=True)
         fake_rt.get_gate = threading.Event()  # parks the ONLY get_conversation
-        handler, agent_def = _make_handler(fake_rt)
+        handler, original_def = _make_handler(fake_rt)
 
         handler.send_to_special_agent("agent:coder", "first")
         assert fake_rt.get_gate_entered.wait(timeout=2), "prep should be parked"
 
-        # The agent is edited while send #1's prep is parked in flight.
-        agent_def.role = "debugger"
-        # Send #2 lands on a CLAIMED session: queued — no prep, no rotation.
-        # _turn_token is the attr the REAL handler rotates (session.py:497);
-        # the fake's bare turn_token is its own init-time token and never moves.
+        # The agent is edited mid-flight, PRODUCTION-style: the registry
+        # entry is replaced wholesale, the old def object is never
+        # touched. The in-flight prep keeps the def it closed over at
+        # session.py:409.
+        handler._agents["agent:coder"] = SpecialAgentDef(
+            conv_id_prefix="agent:coder",
+            display_name="Coder",
+            role="debugger",
+            emoji="🛠️",
+            tools=["read_file"],
+            can_write=True,
+        )
+        # Send #2 lands on a CLAIMED session: queued — no prep, no
+        # rotation. _turn_token is the attr the REAL handler rotates
+        # (session.py:497); the fake deliberately does NOT define it at
+        # init, so the handler's `rt._turn_token = new_token` write is
+        # the only thing that creates it — the token asserts below fail
+        # closed (AttributeError) if a rotation goes missing. (The fake's
+        # bare `turn_token` is its own init-time convenience token,
+        # never moved by anything.)
         token_after_first = fake_rt._turn_token
         handler.send_to_special_agent("agent:coder", "second")
+        # Send #2 DID reach the runtime (begin_send recorded both sends)
+        # and was QUEUED there — claimed → False → return at
+        # session.py:440-441, before any rotation:
+        assert fake_rt.send_calls == [
+            ("agent:coder", "first"),
+            ("agent:coder", "second"),
+        ], "send #2 must reach the runtime before being queued"
 
         fake_rt.get_gate.set()
         deadline = time.monotonic() + 2.0
@@ -364,14 +409,22 @@ class TestPrepTConcurrency:
             "a queued send must not rotate the turn token")
         assert fake_rt.loops[0][2] == token_after_first, (
             "the one loop still runs under the un-rotated token")
-        # Queued-send contract: there is exactly ONE prep (send #1's) and it
-        # runs on the live agent_def, so the mid-flight role edit IS synced
-        # to the conversation (handler :1118-1119: conv.agent_role =
-        # agent_def.role) — a queued send cannot supersede it because it
-        # never runs a prep of its own.
-        assert fake_rt.conv.agent_role == "debugger", (
-            "the one live prep must sync the mid-flight role edit "
+        # The in-flight prep synced the def it CLOSED OVER (captured at
+        # session.py:409), not whatever the registry holds now — so the
+        # mid-flight replacement must NOT reach the conversation.
+        assert original_def.role == "coder", (
+            "the ORIGINAL def object is untouched — the builder replaces "
+            "registry entries, it never mutates a live def in place"
+        )
+        assert fake_rt.conv.agent_role == "coder", (
+            "the in-flight prep must sync the def it closed over, not the "
+            "mid-flight registry replacement "
             f"(conv.agent_role={fake_rt.conv.agent_role!r})"
+        )
+        # The replacement DID land in the registry — it is what the NEXT
+        # turn's own prep would capture.
+        assert handler._agents["agent:coder"].role == "debugger", (
+            "the production-style replacement must land in the registry"
         )
         assert fake_rt.conv.step_count == 0, (
             "the prep resets step_count for the new task "
@@ -451,25 +504,32 @@ class TestRuntimePrepareHook:
         rt.start()
         sk = _uniq()
         events = []
+        # EMPTY temp dir, never a bare "/tmp": the runtime's repo-map walk
+        # (runtime.py:3855) parses every .py under conv.project_path, and a
+        # bare "/tmp" walks 2.1 GB / ~19k files on this box — a multi-minute
+        # stall that reads as a hang.
+        proj = tempfile.mkdtemp(prefix="prep-runtime-")
+        try:
+            def prepare():
+                events.append("prepare")
+                rt.create_conversation(
+                    "Coder", sk, proj,
+                    allowed_tools=["read_file"],
+                    defer_prompt_build=True,
+                )
+                events.append("created")
 
-        def prepare():
-            events.append("prepare")
-            rt.create_conversation(
-                "Coder", sk, "/tmp",
-                allowed_tools=["read_file"],
-                defer_prompt_build=True,
-            )
-            events.append("created")
+            with unittest.mock.patch.object(
+                rt, "_call_llm", lambda sk_, msgs, tools, **kw: _resp("Done.")
+            ):
+                rt._run_loop(sk, "hello", prepare=prepare)
 
-        with unittest.mock.patch.object(
-            rt, "_call_llm", lambda sk_, msgs, tools, **kw: _resp("Done.")
-        ):
-            rt._run_loop(sk, "hello", prepare=prepare)
-
-        assert events == ["prepare", "created"]
-        assert rt.get_conversation(sk) is not None, "prepare must run before the lookup"
-        assert rt.get_turn_state(sk) == TurnStatus.COMPLETED
-        rt.stop()
+            assert events == ["prepare", "created"]
+            assert rt.get_conversation(sk) is not None, "prepare must run before the lookup"
+            assert rt.get_turn_state(sk) == TurnStatus.COMPLETED
+        finally:
+            shutil.rmtree(proj, ignore_errors=True)
+            rt.stop()
 
     def test_prepare_failure_terminates_the_turn_failed(self):
         """A raising prepare fails the turn instead of crashing the thread."""

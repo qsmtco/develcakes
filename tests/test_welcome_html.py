@@ -24,6 +24,8 @@ from ui.handlers.chat_render_handler import (
     _WELCOME_MARKDOWN,
     ChatRenderHandler,
 )
+
+
 class SpySurface(Gtk.Box):
     """Local stand-in for the chat surface (no WebKit).
 
@@ -192,7 +194,7 @@ class TestWelcomeReopenSemantics:
         WebKit surface exists to leak."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -280,7 +282,7 @@ class TestWelcomeSanitizerGuard:
         discard → the final assert sees 0 rows."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s
@@ -310,7 +312,7 @@ class TestCreateChatTabEmitsWelcome:
         (needs a display — runs under xvfb-run like the GUI suite)."""
         created: list = []
 
-        def factory():
+        def factory(**kwargs):
             s = SpySurface()
             created.append(s)
             return s

@@ -236,7 +236,7 @@ def test_surface_for_key_readonly(monkeypatch):
 
     created: list = []
 
-    def factory():
+    def factory(**kwargs):
         s = RegisteredFakeSurface()
         created.append(s)
         return s
@@ -319,7 +319,7 @@ def test_project_tab_resolver_uses_display_key(monkeypatch):
 
     created: list = []
 
-    def factory():
+    def factory(**kwargs):
         s = RegisteredFakeSurface()
         created.append(s)
         return s
