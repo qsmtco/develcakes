@@ -383,13 +383,34 @@ def test_case4_middle_band(tmp_path, monkeypatch):
     _tool(conv, "c1", "X" * 600, tool_name="exec_command", path="")
     for i in range(1, 7):
         _tool(conv, f"n{i}", f"N{i}" * 10)
-    rt._compact_before_llm(sk, conv, *rt._compute_compaction_threshold(conv))
+    # Flagger HIGH #1: post-offload the estimate is far under
+    # transcript_target, so the real compact no-ops and the kwargs could be
+    # dropped silently. Record the call and pin the middle band's shape.
+    soft, hard = rt._compute_compaction_threshold(conv)
+    _msgs, pressure = rt._wire_messages_and_count(sk, conv, hard)
+    transcript_target = max(
+        1, rt._compute_landing_goal(hard) - max(0, pressure - 3_000),
+    )
+    assert 2_500 < pressure <= soft  # fixture is genuinely in the middle band
+    compact_calls = []
+    monkeypatch.setattr(
+        rt._context_strategy, "compact",
+        lambda c, budget, **kw: compact_calls.append((budget, kw)),
+    )
+    rt._compact_before_llm(sk, conv, soft, hard)
     bodies = _bodies(conv)
     assert "offloaded to" in bodies[0]
     # §2.1 second pass: ALL tools at the resolved threshold (100 chars in
     # this fixture) — exec_command (600) is offloaded too, never lossy-stubbed.
     assert "offloaded to" in bodies[1]
     assert not any(b == "[compacted \u2014 exec_command 600]" for b in bodies)
+    # The delete form ran exactly once, with the §2.1 middle-band kwargs.
+    assert len(compact_calls) == 1
+    budget, kwargs = compact_calls[0]
+    assert budget == transcript_target
+    assert kwargs.get("preserve_current_turn") is True
+    assert kwargs.get("allow_lossy_stub") is False
+    assert kwargs.get("protect_paths") == ()
 
 
 def test_case5_compile_packet_blocks_deletion(tmp_path, monkeypatch):
@@ -397,14 +418,66 @@ def test_case5_compile_packet_blocks_deletion(tmp_path, monkeypatch):
     rt, sk, conv = _rt_with_lines(tmp_path)
     conv.add_user_message("old request")
     conv.add_assistant_message("old answer " + ("A" * 600))
-    conv.add_user_message("goal")
-    wire_from = len(conv.messages)
+    # Flagger HIGH #2: the off-wire body. c0's 9,000-char tool result sits
+    # BELOW wire_from, so a real packet must exclude it via min_index. The
+    # old fixture kept every result on or above wire_from (so min_index=0
+    # hardcoding was invisible) and its ~2400 estimate ran the EARLY band.
     _tool(conv, "c0", "B" * 9_000)
-    for i in range(1, 7):
-        _tool(conv, f"n{i}", f"N{i}" * 10)
+    wire_from = len(conv.messages)  # call msg 2, result msg 3 → wire_from 4
+    conv.add_user_message("goal")
+    # Chunky ON-wire bodies: the packet branch counts ONLY this slice
+    # (get_token_estimate is bypassed for the band decision), so the band
+    # is set here. 10 × 2401 chars ≈ 24k chars ≈ 6k tokens — above
+    # transcript_target (4832 - goal/schemas) so the middle pass actually
+    # fires, and inside (middle 2500, soft 8000] under both estimators.
+    # Ten results so keep_last (6) cannot protect them all.
+    _wire_body = "abcdefghij" * 240
+    for i in range(1, 11):
+        _tool(conv, f"n{i}", f"{i}:" + _wire_body)
     rt._compile[sk] = _packet(conv, wire_from)
     before_len = len(conv.messages)
-    rt._compact_before_llm(sk, conv, *rt._compute_compaction_threshold(conv))
+    soft, hard = rt._compute_compaction_threshold(conv)
+    _msgs, pressure = rt._wire_messages_and_count(sk, conv, hard)
+    assert 2_500 < pressure <= soft  # genuinely the middle band, not early
+    seen_indexes = []
+    real_offload_tool_results = rt._context_strategy.offload_tool_results
+
+    def spy_offload(c, **kwargs):
+        min_index = kwargs.get("min_index", 0)
+        for idx, msg in enumerate(c.messages):
+            if (
+                idx >= min_index
+                and getattr(msg, "role", None) == MessageRole.TOOL_RESULT
+                and isinstance(msg.content, str)
+                and len(msg.content) > 100
+            ):
+                seen_indexes.append(idx)
+        return real_offload_tool_results(c, **kwargs)
+
+    monkeypatch.setattr(
+        rt._context_strategy, "offload_tool_results", spy_offload,
+    )
+    compact_calls = []
+    monkeypatch.setattr(
+        rt._context_strategy, "compact",
+        lambda c, budget, **kw: compact_calls.append((budget, kw)),
+    )
+    rt._compact_before_llm(sk, conv, soft, hard)
+    bodies = _bodies(conv)
+    # The off-wire result (index wire_from - 1) is never offered to the
+    # offload callback and never rewritten: min_index is honored on every
+    # tier pass, not just the hard-coded 0. Under a min_index=0 regression
+    # this body is the oldest big candidate and both asserts below fail.
+    assert wire_from - 1 not in seen_indexes
+    assert bodies[0] == "B" * 9_000
+    # The middle pass ran for real: the oldest unprotected ON-wire bodies
+    # went to the store, while the off-wire one stayed verbatim.
+    assert _OFFLOAD_MARKER in bodies[1]
+    # keep_last still protects the newest six on-wire results.
+    assert bodies[-6:] == [f"{i}:" + _wire_body for i in range(5, 11)]
+    # Packet present → the deletion form never runs; offload rewrites bodies
+    # in place, so the transcript length is unchanged.
+    assert compact_calls == []
     assert len(conv.messages) == before_len
 
 
@@ -479,6 +552,9 @@ def test_case9_collapsed_middle(tmp_path, monkeypatch):
     conv.get_token_estimate = lambda: 2_100
     rt._compact_before_llm(sk, conv, soft, hard)
     assert called["panic"] == 1
+    # §7 panic shape: compact runs exactly once, aimed at the landing goal.
+    assert len(called["compact"]) == 1
+    assert called["compact"][0][0] == rt._compute_landing_goal(hard)
 
 
 def test_case10_manual_budget(tmp_path, monkeypatch):
@@ -517,4 +593,56 @@ def test_case10_manual_budget(tmp_path, monkeypatch):
     handler.compact_conversation("agent:coder", "")
     assert seen["budget"] == 19_200
     assert seen["budget"] != 64_000
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Runtime-level _offload_tool_output (SPEC-59 §5 step 2)
+# ═══════════════════════════════════════════════════════════════════
+
+def test_runtime_min_chars_lowers_the_bar(tmp_path):
+    """Flagger HIGH #3a: the 500-bar and the refusal, on the real store.
+
+    §5 step 2: a body between the resolved threshold (100 in this fixture)
+    and the §5 default 500 proves the bar moves — the same body is
+    offloaded with no per-request override and refused when the request
+    carries min_chars=500 > body. The conv body itself is never rewritten
+    here: stubbing is the strategy's job, not the runtime callback's.
+    """
+    rt, sk, conv = _rt_with_lines(tmp_path)
+    conv.project_path = str(tmp_path)
+    body = "M" * 150  # > resolved 100, < §5 bar 500
+    _tool(conv, "c0", body)
+    # min_chars=500 > body → refused.
+    assert rt._offload_tool_output(
+        conv, OffloadRequest(tool_name="read_file", content=body, min_chars=500),
+    ) is None
+    # No min_chars → the resolved 100-char bar governs → offloaded.
+    meta = rt._offload_tool_output(
+        conv, OffloadRequest(tool_name="read_file", content=body),
+    )
+    assert isinstance(meta, dict)
+    assert meta["path"].startswith(".crabcakes/tool-outputs/")
+    assert meta["bytes"] == 150
+    assert (tmp_path / meta["path"]).read_text(encoding="utf-8") == body
+    assert _bodies(conv)[0] == body
+
+
+def test_runtime_disabled_store_refuses_min_chars(tmp_path):
+    """Flagger HIGH #3b: tool_output_offload_chars=0 refuses min_chars=500.
+
+    §5 step 2: the disabled check runs BEFORE min_chars is applied, so a
+    positive per-request min_chars must not turn the store back on. The
+    body (600) exceeds min_chars (500) so a re-enabling regression would
+    write a real file; the store dir must not even exist afterwards.
+    """
+    rt, sk, conv = _rt_with_lines(tmp_path)
+    rt._config.tool_output_offload_chars = 0
+    conv.project_path = str(tmp_path)
+    body = "M" * 600
+    _tool(conv, "c0", body)
+    assert rt._offload_tool_output(
+        conv, OffloadRequest(tool_name="read_file", content=body, min_chars=500),
+    ) is None
+    assert not (tmp_path / ".crabcakes" / "tool-outputs").exists()
+    assert _bodies(conv)[0] == body  # stays verbatim
 
