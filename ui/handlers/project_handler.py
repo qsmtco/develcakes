@@ -845,7 +845,8 @@ class ProjectHandler:
 
         Spec: docs/specs/SPEC-CONTEXT-UI-COMPACT-LLM-2026-07-10.md §3.2.
 
-        Forces a compact(conv, model_max // 2) call regardless of current
+        Forces a compact(conv, AgentRuntime._compute_landing_goal(model_max)) call
+        (15% of the real window, uncapped — SPEC-59) regardless of current
         size. Mirrors cmd_clear's structure: validate session, dispatch
         to injected callback.
 

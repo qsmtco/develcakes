@@ -308,9 +308,16 @@ from agent.llm.streaming import (
 # The socket timeout is then min(attempt cap, remaining), so the try ends
 # inside the budget.
 _FAILOVER_ATTEMPT_FLOOR_S = 1.0
-# Ordinary masking starts here. Heavy compact lands here. Not a provider setting.
+# Early line and landing budget: 15% of the real window. Not a provider setting.
 _LANDING_FRACTION = 0.15
-_LANDING_CAP = 24_000
+# Middle line. Collapses into panic when it is not strictly below soft_ceiling.
+_MIDDLE_FRACTION = 0.25
+# Newest tool results left verbatim by an offload pass.
+_TIER_KEEP_LAST = 6
+# Middle-tier floor for read_file and search_files only. The resolved
+# offload threshold still applies to every other tool.
+_MIDDLE_MIN_CHARS = 500
+_MIDDLE_TOOLS = ("read_file", "search_files")
 
 # Label prefixed to the repo-map block at every attachment point (normal
 # turns via _prefix_repo_map, SPEC-24 compiled packets via _compiled_messages).
@@ -1885,15 +1892,27 @@ class AgentRuntime:
         return (soft_ceiling, hard_ceiling)
 
     def _compute_landing_goal(self, hard_ceiling: int) -> int:
-        """Token budget ordinary masking starts at, and heavy compact lands at.
+        """15% of the real window. The early line, and where heavy compact lands.
 
-        ``min(15% of the real window, 24_000)``. Not the provider threshold.
+        Not the provider threshold. Not capped at 24_000.
         """
         if not isinstance(hard_ceiling, int) or isinstance(hard_ceiling, bool):
             return 0
         if hard_ceiling <= 0:
             return 0
-        return min(int(hard_ceiling * _LANDING_FRACTION), _LANDING_CAP)
+        return int(hard_ceiling * _LANDING_FRACTION)
+
+    def _compute_middle_line(self, hard_ceiling: int) -> int:
+        """25% of the real window. The middle line (SPEC-59).
+
+        Not stored on the provider. Collapses into the panic band when it
+        is not strictly below soft_ceiling.
+        """
+        if not isinstance(hard_ceiling, int) or isinstance(hard_ceiling, bool):
+            return 0
+        if hard_ceiling <= 0:
+            return 0
+        return int(hard_ceiling * _MIDDLE_FRACTION)
 
     @property
     def _last_trim_removed(self) -> int:
@@ -4349,26 +4368,124 @@ class AgentRuntime:
         off-wire audit log stays; compact() still records a fresh no-op
         last_result so the previous iteration's event does not stick.
         """
-        landing_goal = self._compute_landing_goal(hard_ceiling)
+        landing = self._compute_landing_goal(hard_ceiling)
+        middle = self._compute_middle_line(hard_ceiling)
         _messages, pressure = self._wire_messages_and_count(
             session_key, conv, hard_ceiling, tools,
         )
-        if pressure <= soft_ceiling:
-            # Fresh no-op last_result. Budget >= the transcript estimate means
-            # prune_tool_outputs returns 0 and the trim loop does not run.
-            # max(..., soft_ceiling) keeps the under-threshold call at `soft`
-            # when the transcript is already under the line (existing tests).
-            ceiling = max(soft_ceiling, conv.get_token_estimate())
+        estimate = conv.get_token_estimate()
+        addon = pressure - estimate
+        if addon < 0:
+            addon = 0
+
+        def _noop() -> None:
+            # Keyword-free on purpose. test_compact_under_threshold_uses_soft_ceiling
+            # asserts kwargs == {}.
+            ceiling = max(soft_ceiling, estimate)
             self._context_strategy.compact(conv, ceiling)
+
+        # Provider line at or below 15%: keep today's two-way behavior.
+        if landing <= 0 or landing >= soft_ceiling:
+            if pressure <= soft_ceiling:
+                _noop()
+                return
+            if soft_ceiling > landing:
+                protect = self._protect_paths(session_key, conv)
+                self._context_strategy.panic_prune(conv, protect_paths=protect)
+                self._context_strategy.compact(
+                    conv, landing, protect_paths=protect, preserve_current_turn=True,
+                )
+                return
+            self._context_strategy.compact(conv, soft_ceiling)
             return
-        if soft_ceiling > landing_goal:
-            protect = self._protect_paths(session_key, conv)
+
+        if middle >= soft_ceiling:
+            middle = soft_ceiling
+
+        if pressure <= landing:
+            _noop()
+            return
+
+        protect = self._protect_paths(session_key, conv)
+        transcript_target = landing - addon
+        if transcript_target <= 0:
+            transcript_target = 1
+        packet = self._compile.get(session_key)
+        can_delete = packet is None
+        # wire_from is the first on-wire message. Early and middle must not
+        # rewrite the off-wire audit log. Panic still walks the whole transcript.
+        min_index = 0
+        if isinstance(packet, dict):
+            raw_from = packet.get("wire_from", 0)
+            if isinstance(raw_from, int) and not isinstance(raw_from, bool) and raw_from > 0:
+                min_index = raw_from
+
+        if pressure <= middle:
+            self._context_strategy.offload_tool_results(
+                conv,
+                target_tokens=transcript_target,
+                keep_last=_TIER_KEEP_LAST,
+                protect_paths=protect,
+                tool_names=None,
+                min_chars=None,
+                min_index=min_index,
+            )
+            _noop()
+            return
+
+        if pressure <= soft_ceiling:
+            self._context_strategy.offload_tool_results(
+                conv,
+                target_tokens=transcript_target,
+                keep_last=_TIER_KEEP_LAST,
+                protect_paths=protect,
+                tool_names=_MIDDLE_TOOLS,
+                min_chars=_MIDDLE_MIN_CHARS,
+                min_index=min_index,
+            )
+            self._context_strategy.offload_tool_results(
+                conv,
+                target_tokens=transcript_target,
+                keep_last=_TIER_KEEP_LAST,
+                protect_paths=protect,
+                tool_names=None,
+                min_chars=None,
+                min_index=min_index,
+            )
+            if can_delete:
+                self._context_strategy.compact(
+                    conv,
+                    transcript_target,
+                    protect_paths=protect,
+                    preserve_current_turn=True,
+                    allow_lossy_stub=False,
+                )
+            else:
+                _noop()
+            return
+
+        # Panic. Offload first so a long current turn can shrink. panic_prune
+        # still only stubs results from before the latest user message.
+        self._context_strategy.offload_tool_results(
+            conv,
+            target_tokens=landing,
+            keep_last=_TIER_KEEP_LAST,
+            protect_paths=protect,
+            tool_names=_MIDDLE_TOOLS,
+            min_chars=_MIDDLE_MIN_CHARS,
+        )
+        self._context_strategy.offload_tool_results(
+            conv,
+            target_tokens=landing,
+            keep_last=_TIER_KEEP_LAST,
+            protect_paths=protect,
+            tool_names=None,
+            min_chars=None,
+        )
+        if soft_ceiling > landing:
             self._context_strategy.panic_prune(conv, protect_paths=protect)
             self._context_strategy.compact(
-                conv,
-                landing_goal,
-                protect_paths=protect,
-                preserve_current_turn=True,
+                conv, landing, protect_paths=protect, preserve_current_turn=True,
             )
             return
         self._context_strategy.compact(conv, soft_ceiling)
@@ -4418,7 +4535,16 @@ class AgentRuntime:
         if not project_path:
             return None
         threshold = self._resolve_offload_threshold(conv)
-        if threshold <= 0 or len(request.content) <= threshold:
+        if threshold <= 0:
+            return None
+        # SPEC-59: a per-request min_chars may only lower the size bar while
+        # the switch is on. It must not turn a disabled store back on.
+        # getattr so an OffloadRequest built before the field existed still
+        # works; True must not pass the int test (bool is an int).
+        requested = getattr(request, "min_chars", None)
+        if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0:
+            threshold = requested
+        if len(request.content) <= threshold:
             return None
         from utils.tool_output_store import offload_tool_output
         try:

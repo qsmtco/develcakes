@@ -75,9 +75,16 @@ class OffloadRequest:
     Deliberately minimal: neither stubbing site (prune_tool_outputs,
     panic_prune) has a session key in scope, and the store's filename is
     content-derived, not session-derived.
+
+    SPEC-59: ``min_chars`` optionally lowers the runtime callback's size
+    bar for this one body (the resolved threshold stays the on/off switch,
+    and a disabled store never turns back on). ``None`` means "use the
+    resolved threshold". The strategy does not read the provider; the
+    runtime callback does.
     """
     tool_name: str
     content: str
+    min_chars: int | None = None
 
 
 # ── Pluggable strategy protocol ────────────────────────────────────────────────
@@ -145,6 +152,7 @@ class DefaultContextStrategy:
         protect_is_summary: bool = True,    # noqa: ARG002 — Phase 4 wires this
         protect_paths: tuple[str, ...] = (),
         preserve_current_turn: bool = False,
+        allow_lossy_stub: bool = True,
     ) -> None:
         """Compact the conversation to fit within ``token_budget``.
 
@@ -152,6 +160,12 @@ class DefaultContextStrategy:
         (removed in SPEC-AUDIT-CLEANUP-2 Phase 4). ``self`` → ``conv``
         throughout. ``protect_paths`` and ``preserve_current_turn`` default
         off, which keeps the historical trim. The heavy compact passes both.
+
+        SPEC-59: ``allow_lossy_stub`` (keyword-only) is forwarded to
+        ``prune_tool_outputs``. When ``False``, Layer 1 is skipped entirely —
+        the trim loop, orphan sweep, and summary injection still run, and no
+        lossy one-line stub is ever written. Default ``True`` keeps every
+        existing ``compact()`` caller byte-identical.
         """
         # Audit-Fix-31 (Bug #8): guard against non-positive budgets. A
         # token_budget <= 0 would cause the trim loop to aggressively
@@ -177,13 +191,16 @@ class DefaultContextStrategy:
         # Runs before the trim loop (Layer 2) to preserve conversation structure
         # while reducing token usage. Returns tokens freed; we just call it for
         # its side effect.
-        self.prune_tool_outputs(
-            conv,
-            token_budget,
-            protect_turns=2,
-            protect_paths=protect_paths,
-            preserve_current_turn=preserve_current_turn,
-        )
+        # SPEC-59: allow_lossy_stub=False skips Layer 1 entirely. The trim
+        # loop, orphan sweep, and summary injection below still run.
+        if allow_lossy_stub:
+            self.prune_tool_outputs(
+                conv,
+                token_budget,
+                protect_turns=2,
+                protect_paths=protect_paths,
+                preserve_current_turn=preserve_current_turn,
+            )
         # Re-snapshot tokens_after after Layer 1 for telemetry accuracy.
         tokens_after_layer1 = conv.get_token_estimate()
 
@@ -401,6 +418,8 @@ class DefaultContextStrategy:
         protect_turns: int = 2,
         protect_paths: tuple[str, ...] = (),
         preserve_current_turn: bool = False,
+        *,
+        allow_lossy_stub: bool = True,
     ) -> int:
         """Stub old tool results to free token budget. Returns tokens freed.
 
@@ -414,6 +433,11 @@ class DefaultContextStrategy:
         Idempotent: detects already-stubbed messages by their
         "[compacted —" or "[masked —" prefix and skips them.
 
+        SPEC-59: ``allow_lossy_stub`` (keyword-only) is forwarded to
+        ``_stub_tool_result`` as ``allow_lossy``. When ``False``, a refused
+        offload leaves the original body in place instead of writing the
+        lossy one-line stub.
+
         **Cache invalidation contract:** This method mutates ``msg.content``
         in place. The token estimate cache is keyed on
         ``(len(messages), hash(system_prompt), hash(task_card))`` — none of
@@ -424,6 +448,7 @@ class DefaultContextStrategy:
         Args:
             target_tokens: Stop pruning when token estimate drops to this.
             protect_turns: Number of most recent TOOL_RESULT messages to skip.
+            allow_lossy_stub: Forwarded to ``_stub_tool_result`` (SPEC-59).
 
         Returns:
             Number of tokens freed (estimate before - estimate after).
@@ -490,7 +515,14 @@ class DefaultContextStrategy:
                                 break
                         if parent is not None:
                             break  # Found the parent; stop searching.
-            stub = self._stub_tool_result(conv, msg, tool_name)
+            stub = self._stub_tool_result(
+                conv, msg, tool_name, allow_lossy=allow_lossy_stub,
+            )
+            if stub is None:
+                # SPEC-59: the offload callback refused the body and lossy
+                # stubbing is off. Leave the original content verbatim; do
+                # not assign, do not clear tc.result, do not invalidate.
+                continue
             msg.content = stub
             # The tool message is the copy the meter counts. Drop the
             # duplicate string kept on the parent call.
@@ -524,28 +556,44 @@ class DefaultContextStrategy:
         conv: Conversation,
         msg,
         tool_name: str,
-    ) -> str:
+        *,
+        min_chars: int | None = None,
+        allow_lossy: bool = True,
+    ) -> str | None:
         """Return the stub that replaces one tool result's body.
 
         The body is offloaded to disk when the runtime's callback accepts
         it; otherwise the plain lossy stub is returned. The caller writes
         the returned text to ``msg.content`` and updates the parent call
         and the token cache exactly as it does today.
+
+        SPEC-59: ``min_chars`` rides on the ``OffloadRequest`` so the
+        runtime callback may lower its size bar (never raise it, and never
+        re-enable a disabled store). ``allow_lossy=False`` turns a refusal
+        into ``None`` — the caller must then leave the body verbatim.
+
+        A non-dict ``meta`` is a refusal. An empty or non-str ``path`` is a
+        refusal. The callback's own ``except Exception`` is what stops a
+        disk error from reaching this method; it adds no ``try`` of its own.
         """
         content = msg.content or ""
         n_chars = len(content)
-        stub = self._compacted_stub(tool_name, n_chars)
         if self._offload is not None:
             meta = self._offload(
                 conv,
                 OffloadRequest(
                     tool_name=tool_name,
                     content=content,
+                    min_chars=min_chars,
                 ),
             )
-            if meta and meta.get("path"):
-                stub = self._offloaded_stub(tool_name, n_chars, meta["path"])
-        return stub
+            if isinstance(meta, dict):
+                path = meta.get("path")
+                if isinstance(path, str) and path:
+                    return self._offloaded_stub(tool_name, n_chars, path)
+        if not allow_lossy:
+            return None
+        return self._compacted_stub(tool_name, n_chars)
 
     @staticmethod
     def _offloaded_stub(tool_name: str, n_chars: int, rel_path: str) -> str:
@@ -589,6 +637,115 @@ class DefaultContextStrategy:
             if path and path in protected:
                 continue
             stub = self._stub_tool_result(conv, msg, tool_name)
+            msg.content = stub
+            if parent is not None:
+                for tc in parent.tool_calls:
+                    if tc.call_id == msg.tool_call_id:
+                        tc.result = None
+            msg.tokens_used = len(stub) // 4
+            conv.invalidate_token_estimate()
+            replaced += 1
+        return replaced
+
+    def offload_tool_results(
+        self,
+        conv: Conversation,
+        *,
+        target_tokens: int,
+        keep_last: int,
+        protect_paths: tuple[str, ...] = (),
+        tool_names: tuple[str, ...] | None = None,
+        min_chars: int | None = None,
+        min_index: int = 0,
+    ) -> int:
+        """SPEC-59: replace old tool-result bodies with offloaded stubs.
+
+        Tier-1/2 compaction. Only bodies the SPEC-48 store accepted are
+        replaced — a refused offload leaves the body verbatim; this method
+        NEVER writes the lossy one-line stub (``allow_lossy=False``).
+
+        Behavior (SPEC-59 §2.2 rules 1-10):
+            1. ``target_tokens <= 0`` → 0.
+            2. Negative ``keep_last`` / ``min_index`` are treated as 0.
+            3. ``get_token_estimate() <= target_tokens`` → 0.
+            4. Candidates are TOOL_RESULT indexes ``>= min_index``, ascending;
+               the newest ``keep_last`` are protected. Fewer results than
+               ``keep_last`` protects them all → 0. Indexes below ``min_index``
+               are not candidates and do not count toward ``keep_last``.
+            5. Oldest → newest; re-check the stop line at the start of each
+               index and stop early with the count so far.
+            6. Skip non-str content and bodies already starting with
+               ``"[compacted —"`` / ``"[masked —"`` (U+2014 dash).
+            7. ``_tool_result_meta`` resolves the tool name; when
+               ``tool_names`` is not None the name must be in it (exact).
+            8. Skip a non-empty ``path`` in ``protect_paths``. Empty paths are
+               never protected. Neither side is absolutized.
+            9. ``_stub_tool_result(..., min_chars=..., allow_lossy=False)``;
+               ``None`` means skip.
+            10. On a string: assign content, clear the parent ``tc.result``,
+                set ``tokens_used = len(stub) // 4``, invalidate the token
+                cache (the cache key ignores body text — a missed invalidate
+                makes the stop check lie), count it.
+
+        This method does not look at ``_last_user_index``: the newest
+        ``keep_last`` results are protected whether they sit in the current
+        turn or an older one, and a user message is never a TOOL_RESULT.
+        It does not stat files (``protect_paths`` arrives precomputed), and
+        per the §2.2 must-not-do list it never pops/inserts, never sets
+        ``self._last_result``, never calls ``panic_prune``/``compact``, and
+        never imports ``utils.tool_output_store``.
+
+        Returns the number of bodies replaced. The runtime ignores it.
+        """
+        # Rule 1
+        if target_tokens <= 0:
+            return 0
+        # Rule 2
+        if keep_last < 0:
+            keep_last = 0
+        if min_index < 0:
+            min_index = 0
+        # Rule 3
+        if conv.get_token_estimate() <= target_tokens:
+            return 0
+
+        # Rule 4: ascending candidates; the newest keep_last are protected.
+        tool_indexes = [
+            i
+            for i, m in enumerate(conv.messages)
+            if m.role == MessageRole.TOOL_RESULT and i >= min_index
+        ]
+        if keep_last > 0 and len(tool_indexes) <= keep_last:
+            # Fewer tool results than keep_last: all of them are protected.
+            return 0
+        candidates = (
+            tool_indexes if keep_last == 0
+            else tool_indexes[: len(tool_indexes) - keep_last]
+        )
+
+        # Rules 5-10: oldest → newest, stop line re-checked per index.
+        replaced = 0
+        for idx in candidates:
+            if conv.get_token_estimate() <= target_tokens:
+                break
+            msg = conv.messages[idx]
+            content = msg.content or ""
+            if not isinstance(content, str):
+                continue
+            if content.startswith("[compacted \u2014") or content.startswith("[masked \u2014"):
+                continue
+            tool_name, path, _offset, parent = self._tool_result_meta(conv, idx)
+            if tool_names is not None and tool_name not in tool_names:
+                continue
+            if path and path in (protect_paths or ()):
+                continue
+            stub = self._stub_tool_result(
+                conv, msg, tool_name, min_chars=min_chars, allow_lossy=False,
+            )
+            if stub is None:
+                # Store refused (disabled, under the bar, or write failed):
+                # the body stays verbatim. Never write a lossy stub here.
+                continue
             msg.content = stub
             if parent is not None:
                 for tc in parent.tool_calls:

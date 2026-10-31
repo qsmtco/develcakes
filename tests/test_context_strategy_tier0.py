@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from agent.config import LLMProviderConfig
-from agent.runtime import _LANDING_CAP, AgentRuntime
+from agent.runtime import AgentRuntime
 from models.conversation import Conversation
 from models.providers import ProviderConfig
 from tests.test_agent_runtime import _make_cfg
@@ -35,9 +35,8 @@ def test_fat_max_tokens_is_uncapped_without_context_window():
     soft, hard = runtime._compute_compaction_threshold(conv)
     assert hard == 1_300_000
     assert soft == int(1_300_000 * 0.80) == 1_040_000
-    # Landing goal unchanged: min(15% of window, 24_000).
-    assert min(int(1_300_000 * 0.15), 24_000) == 24_000
-    assert runtime._compute_landing_goal(hard) == 24_000
+    # SPEC-59: the 24_000 cap is gone — 15% of the real window, uncapped.
+    assert runtime._compute_landing_goal(hard) == 195_000
 
 
 def test_context_window_wins_over_fat_max_tokens():
@@ -54,7 +53,8 @@ def test_minimax_zero_max_tokens_stays_on_caller_table():
     runtime = _make_runtime({"minimax": provider}, default_provider="minimax")
     _soft, hard = runtime._compute_compaction_threshold(_conv("minimax/m"))
     assert hard == 1_048_576
-    assert runtime._compute_landing_goal(hard) == _LANDING_CAP
+    # SPEC-59: int(1_048_576 * 0.15) == 157_286.
+    assert runtime._compute_landing_goal(hard) == 157_286
 
 
 def test_default_128k_threshold_and_landing_goal():

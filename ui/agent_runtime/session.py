@@ -187,7 +187,10 @@ class RuntimeSessionMixin:
             )
             hard_ceiling = 128_000
 
-        target_budget = max(4_000, hard_ceiling // 2)
+        # SPEC-59: manual compact aims at the landing goal (15% of the real
+        # window, uncapped) — 19_200 on the 128K fallback, not 64_000.
+        landing = rt._compute_landing_goal(hard_ceiling)
+        target_budget = landing if landing > 0 else max(4_000, hard_ceiling // 2)
         messages_before = len(conv.messages)
         tokens_before = conv.get_token_estimate()
 
