@@ -1865,10 +1865,17 @@ for large projects.
 - `"hybrid"` — one stub line per existing core file (`[N bytes — use read_file(...)]`) plus `build_file_index`. It does not inline file bodies.
 
 The periodic observation-mask sweep is gone. Context control on every LLM
-call is `_compact_before_llm`: under the soft ceiling, `compact` is a no-op;
-over it, `panic_prune` replaces previous-turn tool bodies with
+call is `_compact_before_llm`, tiered by wire pressure (SPEC-59): at or under
+the early line it only calls `compact`; between the early and middle lines it
+offloads old tool-result bodies to the SPEC-48 store (never the lossy stub);
+between the middle line and the soft ceiling it offloads
+`read_file`/`search_files` bodies over 500 chars, then compacts with
+`allow_lossy_stub=False` and `preserve_current_turn=True`; over the soft
+ceiling, `panic_prune` replaces previous-turn tool bodies with
 `[compacted — {tool} output, {N} chars removed]` and `compact` aims at the
-landing goal. That stub does not keep the body. The current turn and a
+landing goal. Under the soft ceiling compaction still acts — it offloads and
+rewrites bodies in place without deleting messages. That stub does not keep
+the body. The current turn and a
 protected path are not stubbed. A `read_file` pin is stored on the first
 successful read, so that path survives the prune. `exec_command` is not
 path-protected. The SPEC-32 walk still treats `[masked —` and
@@ -1952,9 +1959,15 @@ class ContextStrategy(Protocol):
     def last_result(self) -> CompactionEvent | None: ...
 
 class DefaultContextStrategy:
-    def compact(self, conv, token_budget, *, keep_first=2, protect_is_summary=True) -> None
-    def prune_tool_outputs(self, conv, target_tokens, protect_turns=2) -> int
-    # Private: _find_split_index, _fit_summary, _select_prune_candidate, _summary
+    def compact(self, conv, token_budget, *, keep_first=2, protect_is_summary=True,
+                allow_lossy_stub=True) -> None
+    def prune_tool_outputs(self, conv, target_tokens, protect_turns=2, *,
+                           allow_lossy_stub=True) -> int
+    def offload_tool_results(self, conv, *, target_tokens, keep_last,
+                             protect_paths=(), tool_names=None,
+                             min_chars=None, min_index=0) -> int
+    # Private: _find_split_index, _fit_summary, _select_prune_candidate, _summary,
+    #          _stub_tool_result (min_chars=, allow_lossy=)
 ```
 
 **Compaction flow:**
