@@ -475,9 +475,13 @@ def test_case5_compile_packet_blocks_deletion(tmp_path, monkeypatch):
     assert _OFFLOAD_MARKER in bodies[1]
     # keep_last still protects the newest six on-wire results.
     assert bodies[-6:] == [f"{i}:" + _wire_body for i in range(5, 11)]
-    # Packet present → the deletion form never runs; offload rewrites bodies
-    # in place, so the transcript length is unchanged.
-    assert compact_calls == []
+    # Packet present → the deletion form never runs; §7 row 4: keyword-free
+    # compact at max(soft, pre-offload estimate). Offload rewrites bodies in
+    # place, so the transcript length is unchanged.
+    assert len(compact_calls) == 1
+    _budget, _kw = compact_calls[0]
+    assert _kw == {}
+    assert _budget >= soft
     assert len(conv.messages) == before_len
 
 
@@ -553,8 +557,9 @@ def test_case9_collapsed_middle(tmp_path, monkeypatch):
     rt._compact_before_llm(sk, conv, soft, hard)
     assert called["panic"] == 1
     # §7 panic shape: compact runs exactly once, aimed at the landing goal.
-    assert len(called["compact"]) == 1
-    assert called["compact"][0][0] == rt._compute_landing_goal(hard)
+    panic_compacts = [c for c in called["compact"] if c[1]]
+    assert len(panic_compacts) == 1
+    assert panic_compacts[0][0] == rt._compute_landing_goal(hard)
 
 
 def test_case10_manual_budget(tmp_path, monkeypatch):
@@ -608,7 +613,7 @@ def test_runtime_min_chars_lowers_the_bar(tmp_path):
     carries min_chars=500 > body. The conv body itself is never rewritten
     here: stubbing is the strategy's job, not the runtime callback's.
     """
-    rt, sk, conv = _rt_with_lines(tmp_path)
+    rt, _sk, conv = _rt_with_lines(tmp_path)
     conv.project_path = str(tmp_path)
     body = "M" * 150  # > resolved 100, < §5 bar 500
     _tool(conv, "c0", body)
@@ -635,7 +640,7 @@ def test_runtime_disabled_store_refuses_min_chars(tmp_path):
     body (600) exceeds min_chars (500) so a re-enabling regression would
     write a real file; the store dir must not even exist afterwards.
     """
-    rt, sk, conv = _rt_with_lines(tmp_path)
+    rt, _sk, conv = _rt_with_lines(tmp_path)
     rt._config.tool_output_offload_chars = 0
     conv.project_path = str(tmp_path)
     body = "M" * 600
