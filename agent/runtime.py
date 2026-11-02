@@ -2545,12 +2545,15 @@ class AgentRuntime:
                     # pass — the position the legacy post-loop block occupied
                     # relative to the body — so every mid-body guard (cancel
                     # checks, cost/step limits, stream errors) fires first.
-                    # `continue` re-enters the loop AFTER this check, so the
-                    # cancel checks run first on the resumed pass, exactly as
-                    # spec §2.3 requires. On the final clamp (max_iter ==
-                    # hard_cap) grants_used is spent, so this closes via
+                    # Gated on judge_armed: a disarmed run's final pass also
+                    # lands here with iteration == max_iter, and it must fall
+                    # through to the guard/legacy block unchanged. `continue`
+                    # re-enters AFTER this check, so the cancel checks run
+                    # first on the resumed pass, exactly as spec §2.3
+                    # requires. On the final clamp (max_iter == hard_cap)
+                    # grants_used is spent, so this closes via
                     # _graceful_iteration_close with hit_hard_cap=True.
-                    if iteration >= max_iter:
+                    if judge_armed and iteration >= max_iter:
                         if grants_used < _ITERATION_MAX_GRANTS and max_iter < hard_cap:
                             verdict, confidence = self._iteration_judge(
                                 session_key, iteration, tool_errors)
