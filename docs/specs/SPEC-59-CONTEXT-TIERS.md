@@ -131,7 +131,7 @@ New method, same guards, `int(hard_ceiling * _MIDDLE_FRACTION)`. `hard_ceiling <
 
 #### `_offload_tool_output`
 
-The resolved threshold stays the on/off switch. A per-request `min_chars` may only lower the size bar while the switch is on. It must not turn a disabled store back on.
+The resolved threshold stays the on/off switch. A per-request `min_chars` replaces the size bar for that request when set (the resolved threshold applies when it is unset). It must not turn a disabled store back on — the disabled check runs before the override.
 
 Current order is: resolve threshold, return `None` when `threshold <= 0` or `len(content) <= threshold`, else write. Insert the override between those two checks:
 

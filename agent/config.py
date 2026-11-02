@@ -84,7 +84,8 @@ class AgentConfig:
     # Settings → Providers or the first-run wizard.
     default_provider: str = ""
     default_model: str = ""
-    max_tool_iterations: int = 50
+    max_tool_iterations: int = 50          # soft line — judge consulted here
+    tool_iteration_hard_cap: int = 100     # non-negotiable ceiling; <= soft disables the judge
     tool_timeout_seconds: int = 120
     auto_save_conversations: bool = True
     cost_limit: float | None = None    # per-conversation USD limit
@@ -297,6 +298,7 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
         default_provider=raw.get("default_provider", ""),
         default_model=raw.get("default_model", ""),
         max_tool_iterations=raw.get("max_tool_iterations", 50),
+        tool_iteration_hard_cap=raw.get("tool_iteration_hard_cap", 100),
         tool_timeout_seconds=raw.get("tool_timeout_seconds", 120),
         auto_save_conversations=raw.get("auto_save_conversations", True),
         cost_limit=raw.get("cost_limit"),
@@ -419,6 +421,7 @@ def _create_default_config(path: str) -> None:
         "default_provider": "",
         "default_model": "",
         "max_tool_iterations": 50,
+        "tool_iteration_hard_cap": 100,
         "tool_timeout_seconds": 120,
         "cost_limit": 5.0,
         "step_limit": 100,
