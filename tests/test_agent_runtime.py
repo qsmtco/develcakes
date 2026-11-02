@@ -5536,8 +5536,13 @@ class TestTurnStateMachine:
         assert rt.get_turn_state(sk) == TurnStatus.COMPLETED
         rt.stop()
 
-    def test_run_loop_terminates_with_failed_on_max_iterations(self, tmp_path):
-        """When max_tool_iterations is reached with no text response, terminal is FAILED."""
+    def test_run_loop_completes_on_max_iterations_default_config(self, tmp_path):
+        """SPEC-60 (PM ruling 2026-11-02, option i): _make_cfg() leaves
+        tool_iteration_hard_cap at its default 100, which arms the iteration
+        judge — so max iterations with no text response now closes COMPLETED
+        with reason "iteration_judge" instead of FAILED. The disarmed legacy
+        FAILED/max_iterations path is covered by tests/test_iteration_judge.py
+        case 1 (hard_cap <= soft, judge patched to explode if consulted)."""
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
@@ -5560,8 +5565,8 @@ class TestTurnStateMachine:
             rt._run_loop(sk, "hello")
         result = rt.get_last_turn_result(sk)
         assert result is not None
-        assert result.status == TurnStatus.FAILED
-        assert result.metadata.get("reason") == "max_iterations"
+        assert result.status == TurnStatus.COMPLETED
+        assert result.metadata.get("reason") == "iteration_judge"
         rt.stop()
 
     def test_run_loop_terminates_with_cancelled_on_cancel_signal(self, tmp_path):
