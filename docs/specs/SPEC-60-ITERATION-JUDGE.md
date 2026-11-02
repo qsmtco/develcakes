@@ -37,6 +37,8 @@
 
 **Principles.** Judge raises the ceiling intelligently; it never removes it. No card configured ⇒ byte-identical legacy behavior. Decision failure fails SAFE (stop), never open.
 
+> **PM RULING 2026-11-02 (option i), superseding the "byte-identical / unedited" gates.** Keeping `tool_iteration_hard_cap` at the default 100 arms the judge in every default config, including no-card environments: there the turn stops at the soft line **COMPLETED** with `reason="iteration_judge"` (test_iteration_judge case 2), not FAILED. The exact legacy FAILED/`max_iterations` behavior survives only on the explicitly disarmed path (`hard_cap <= max_tool_iterations`, case 1). Consequently `tests/test_agent_runtime.py` was **edited once** with the ruling's authorization: `test_run_loop_terminates_with_failed_on_max_iterations` → `test_run_loop_completes_on_max_iterations_default_config` (commit 292f8167). Every "legacy green, unedited" gate below reads as "legacy green, with the one authorized option-(i) edit."
+
 ---
 
 ## 2. Changes by File
@@ -194,17 +196,17 @@ Model on `tests/test_agent_runtime.py:630-665` (`_make_cfg`, mock `_call_llm`, `
 1. config fields → py_compile + config round-trip test.
 2. `_iteration_judge` + `_graceful_iteration_close` with unit tests (no loop change yet).
 3. Loop wiring + nudge → tests 1-6.
-4. Full `tests/test_agent_runtime.py` + `tests/test_iteration_judge.py` under xvfb. Gate: legacy file unedited and green.
+4. Full `tests/test_agent_runtime.py` + `tests/test_iteration_judge.py` under xvfb. Gate: legacy file green with the one authorized option-(i) edit (ruling above).
 
 ## 6. Acceptance Criteria
 
-- [ ] No card configured → behavior byte-identical to today (test 2 + legacy suite green, unedited).
-- [ ] Judge-stop → COMPLETED (no FAILED card), `metadata.reason=="iteration_judge"`.
-- [ ] Grant → exactly +25, max 2 grants, clamped by hard cap.
-- [ ] Hard cap → COMPLETED, `reason=="hard_cap"`, never exceeded even if the judge always says continue.
-- [ ] Nudge at soft−5 only when judge armed.
-- [ ] `post_decision` failure/unavailable → fail-safe stop, no exception escapes the loop.
-- [ ] Legacy `tests/test_agent_runtime.py` green without edits.
+- [x] No card configured → judge armed by default: stops at soft line COMPLETED, `reason="iteration_judge"` (case 2); byte-identical FAILED only on disarmed path (case 1). Amended by ruling above.
+- [x] Judge-stop → COMPLETED (no FAILED card), `metadata.reason=="iteration_judge"`.
+- [x] Grant → exactly +25, max 2 grants, clamped by hard cap.
+- [x] Hard cap → COMPLETED, `reason=="hard_cap"`, never exceeded even if the judge always says continue.
+- [x] Nudge at soft−5 only when judge armed.
+- [x] `post_decision` failure/unavailable → fail-safe stop, no exception escapes the loop.
+- [x] Legacy `tests/test_agent_runtime.py` green with the one authorized option-(i) edit (ruling above).
 
 ## 7. Edge Cases
 
