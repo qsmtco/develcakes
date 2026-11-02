@@ -688,6 +688,11 @@ class AgentRuntime:
         # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.3 (BUG #4 fix).
         self._pending_stuck_messages: dict[str, list[str]] = {}
 
+        # SPEC-60: per-session tool-error tally for the iteration judge.
+        # Session-keyed (same pattern as _pending_stuck_messages) because the
+        # increment site lives in _execute_tool_batch, not _run_loop.
+        self._iteration_tool_errors: dict[str, int] = {}
+
         self._running = False
         self._stopped = False
 
@@ -2100,9 +2105,13 @@ class AgentRuntime:
                 if (not isinstance(hard_cap, int) or isinstance(hard_cap, bool)
                         or hard_cap <= max_iter):
                     hard_cap = max_iter  # judge disabled → legacy exactly
+                # SPEC-60: exhaustion. tool_errors is tallied per turn in
+                # self._iteration_tool_errors (session-keyed, like
+                # _pending_stuck_messages) because the increment site — the
+                # read-dedup REFUSED demotion — lives in _execute_tool_batch,
+                # a different method scope; a local would be F821 there.
+                self._iteration_tool_errors[session_key] = 0
                 grants_used = 0
-                tool_errors = 0  # incremented where ToolResult.success is False
-
                 # SPEC-60: the guard admits ONE extra pass at the soft line
                 # (and at each granted ceiling) so the judge's grant decision
                 # — and the hard-cap close-out — run INSIDE the loop, where
@@ -2556,7 +2565,8 @@ class AgentRuntime:
                     if judge_armed and iteration >= max_iter:
                         if grants_used < _ITERATION_MAX_GRANTS and max_iter < hard_cap:
                             verdict, confidence = self._iteration_judge(
-                                session_key, iteration, tool_errors)
+                                session_key, iteration,
+                                self._iteration_tool_errors.get(session_key, 0))
                             if verdict == "continue":
                                 grants_used += 1
                                 max_iter = min(max_iter + _ITERATION_GRANT, hard_cap)
@@ -2568,7 +2578,8 @@ class AgentRuntime:
                                 continue  # loop resumes; cancel checks re-run first
                             # stop / no-decision → graceful close-out, never FAILED.
                         self._graceful_iteration_close(
-                            session_key, conv, turn_token, iteration, tool_errors,
+                            session_key, conv, turn_token, iteration,
+                            self._iteration_tool_errors.get(session_key, 0),
                             grants_used, hit_hard_cap=(max_iter >= hard_cap),
                         )
                         return
@@ -2882,7 +2893,10 @@ class AgentRuntime:
                     )
                     # SPEC-60: a demoted read counts as a tool error for the
                     # iteration judge (no new parsing — same inspection point).
-                    tool_errors += 1
+                    # Session-keyed dict, not a local: this scope is
+                    # _execute_tool_batch, a different method from _run_loop.
+                    self._iteration_tool_errors[session_key] = (
+                        self._iteration_tool_errors.get(session_key, 0) + 1)
             if result.success:
                 self._note_tool_path(session_key, conv, tool_name, args)
             tc.result = None
@@ -5049,6 +5063,7 @@ class AgentRuntime:
             self._tool_history.pop(session_key, None)
             self._read_fingerprints.pop(session_key, None)
             self._reread_notices.pop(session_key, None)
+            self._iteration_tool_errors.pop(session_key, None)
             self._hot_windows.pop(session_key, None)
         # Phase CB-3: also clean up pending stuck messages
         self._pending_stuck_messages.pop(session_key, None)
