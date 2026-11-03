@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -251,9 +252,14 @@ def _backup_existing(path: str) -> None:
         _logger.warning("providers_store: could not write %s.bak: %s", path, e)
 
 
+# (path, text, parsed). Content-keyed so an edit is always seen; callers get copies.
+_PARSE_CACHE: tuple[str, str, list[ProviderConfig]] | None = None
+
+
 def load_providers() -> list[ProviderConfig]:
     """Read providers.yaml → list[ProviderConfig]. Empty list if missing.
     Tolerates malformed lines (logs warning, skips)."""
+    global _PARSE_CACHE
     path = get_providers_path()
     if not os.path.isfile(path):
         return []
@@ -263,7 +269,13 @@ def load_providers() -> list[ProviderConfig]:
     except OSError as e:
         _logger.warning("providers_store: failed to read %s: %s", path, e)
         return []
-    return _parse(text)
+    cached = _PARSE_CACHE
+    if cached is not None and cached[0] == path and cached[1] == text:
+        parsed = cached[2]
+    else:
+        parsed = _parse(text)
+        _PARSE_CACHE = (path, text, parsed)
+    return [dataclasses.replace(p) for p in parsed]
 
 
 def save_providers(providers: list[ProviderConfig], *,

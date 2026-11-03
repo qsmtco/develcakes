@@ -233,7 +233,7 @@ class TestConfig:
     naming_pattern: str = "test_{module}.py"  # Test file naming pattern ({module} placeholder)
     venv_path: str = ".venv"                 # Venv directory (relative to project root)
     run_full_suite: bool = False             # If true, always run full suite instead of related test
-    timeout_seconds: int = 60                # Per-project test timeout override
+    timeout_seconds: int | None = None       # Per-project override; None uses EnforcementConfig.test_timeout_seconds
     extra_args: str = "-x -q"                # Extra pytest/jest arguments
 
     @classmethod
@@ -276,7 +276,9 @@ class TestConfig:
             naming_pattern=data.get("naming_pattern", "test_{module}.py"),
             venv_path=data.get("venv_path", ".venv"),
             run_full_suite=_bool("run_full_suite", False),
-            timeout_seconds=_int("timeout_seconds", 60),
+            timeout_seconds=(
+                _int("timeout_seconds", 60) if "timeout_seconds" in data else None
+            ),
             extra_args=data.get("extra_args", "-x -q"),
         )
 

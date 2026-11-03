@@ -37,6 +37,10 @@ from agent.enforcement import (
 from agent.config import EnforcementConfig
 from agent.tools import ToolResult
 
+from models.providers import ProviderConfig
+
+import utils.providers_store as ps
+
 
 def _run_git(cwd, args: list[str]) -> None:
     """Run a git command in *cwd* (SP0 V3 worktree-matrix helper).
@@ -175,7 +179,7 @@ class TestTestConfig:
         tc = TestConfig.from_dict({})
         assert tc.command is None
         assert tc.test_dir == "tests"
-        assert tc.timeout_seconds == 60
+        assert tc.timeout_seconds is None
 
     def test_from_dict_non_dict(self):
         tc = TestConfig.from_dict("not a dict")
@@ -194,7 +198,7 @@ class TestTestConfig:
         assert tc.naming_pattern == "test_{module}.py"
         assert tc.venv_path == ".venv"
         assert tc.run_full_suite is False
-        assert tc.timeout_seconds == 60
+        assert tc.timeout_seconds is None
         assert tc.extra_args == "-x -q"
 
     def test_from_dict_string_false_bool_coercion(self):
@@ -219,6 +223,68 @@ class TestTestConfig:
         tc = TestConfig.from_dict({"timeout_seconds": "30"})
         assert tc.timeout_seconds == 30
         assert isinstance(tc.timeout_seconds, int)
+
+    def test_from_dict_no_timeout_key_is_none(self):
+        """SPEC-61 A5: absent timeout_seconds → None, so enforcement.py:1215
+        falls back to EnforcementConfig.test_timeout_seconds."""
+        tc = TestConfig.from_dict({"test_dir": "t"})
+        assert tc.timeout_seconds is None
+
+    def test_from_dict_explicit_timeout_preserved(self):
+        """SPEC-61 A5: present timeout_seconds is still parsed as an int."""
+        tc = TestConfig.from_dict({"timeout_seconds": 5})
+        assert tc.timeout_seconds == 5
+        assert isinstance(tc.timeout_seconds, int)
+
+
+class TestSpec61B6ParseCache:
+    """SPEC-61 B6 — load_providers() content-keyed _PARSE_CACHE.
+
+    Isolation: conftest's autouse _isolate_config_resolution redirects HOME
+    and XDG_CONFIG_HOME into per-test tmp dirs, so the module-level cache
+    never crosses tests (its path component differs per test).
+    """
+
+    def _make_provider(self, name: str = "test", **overrides) -> ProviderConfig:
+        defaults = dict(
+            name=name,
+            base_url=f"https://api.{name}.example.com/v1",
+            api_key=f"sk-{name}-key",
+            default_model=f"openai/{name}-model",
+        )
+        defaults.update(overrides)
+        return ProviderConfig(**defaults)
+
+    def test_two_loads_same_file_parse_once(self, tmp_path, monkeypatch):
+        ps.save_providers([self._make_provider("alpha")])
+        calls = []
+        orig_parse = ps._parse
+
+        def spy(text):
+            calls.append(1)
+            return orig_parse(text)
+
+        monkeypatch.setattr(ps, "_parse", spy)
+        first = ps.load_providers()
+        second = ps.load_providers()
+        assert len(calls) == 1
+        assert first[0].name == "alpha"
+        assert second[0].name == "alpha"
+
+    def test_save_rewrite_seen_on_next_load(self, tmp_path):
+        ps.save_providers([self._make_provider("a")])
+        assert ps.load_providers()[0].name == "a"
+        ps.save_providers([self._make_provider("b")])
+        loaded = ps.load_providers()
+        assert len(loaded) == 1
+        assert loaded[0].name == "b"
+
+    def test_mutating_returned_card_does_not_affect_next_load(self, tmp_path):
+        ps.save_providers([self._make_provider("x")])
+        first = ps.load_providers()
+        first[0].api_key = "mutated"
+        second = ps.load_providers()
+        assert second[0].api_key == "sk-x-key"
 
 
 # ── _detect_venv_prefix ────────────────────────────────────────────────────
