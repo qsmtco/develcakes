@@ -221,6 +221,25 @@ def test_turn_state_prunes_older_entries_on_new_turn(tmp_path):
     rt.stop()
 
 
+def test_turn_state_prune_is_session_scoped(tmp_path):
+    """A new turn for one session must not prune another session's records."""
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    rt.start()
+    sk_a = _uniq()
+    sk_b = _uniq()
+    rt.create_conversation("Coder", sk_a, str(tmp_path))
+    rt.create_conversation("Coder", sk_b, str(tmp_path))
+    with patch.object(rt, "_call_llm", return_value=_resp("ok")):
+        rt._run_loop(sk_a, "a1", turn_token="a1")
+        rt._run_loop(sk_b, "b1", turn_token="b1")
+        # A new turn for session A must not prune session B's records.
+        rt._run_loop(sk_a, "a2", turn_token="a2")
+    assert [k for k in rt._turn_state if k[0] == sk_a] == [(sk_a, "a2")]
+    assert [k for k in rt._turn_state if k[0] == sk_b] == [(sk_b, "b1")]
+    assert [k for k in rt._turn_results if k[0] == sk_b] == [(sk_b, "b1")]
+    rt.stop()
+
+
 # ── A6: summary calls pass the full provider/model id ─────────────────────────
 
 
@@ -236,21 +255,52 @@ class _CapturingProvider:
 def test_summary_passes_full_model_id():
     from agent.config import LLMProviderConfig
     providers = {
-        "p1": LLMProviderConfig(
-            name="p1",
+        "openrouter": LLMProviderConfig(
+            name="openrouter",
             base_url="https://x.example.com/v1",
             api_key="sk-p1",
-            default_model="p1/m1",
+            default_model="openrouter/deepseek/deepseek-v4-pro",
             caller="openrouter",
             reasoning_effort="off",
             supports_reasoning=False,
         )
     }
-    rt = AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
+    rt = AgentRuntime(config=AgentConfig(providers=providers, default_provider="openrouter"))
     cap = _CapturingProvider()
     with patch("agent.runtime._get_provider", return_value=cap):
-        rt._call_for_summary("sys", "user", model_id="p1/m1")
-    assert cap.calls[0]["model"] == "p1/m1"
+        rt._call_for_summary("sys", "user", model_id="openrouter/deepseek/deepseek-v4-pro")
+    assert cap.calls[0]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+
+
+def test_summary_parses_anthropic_shaped_response():
+    """A summary response shaped for the anthropic parser (no 'choices') parses.
+
+    Pins the A7 shape-first format pick in _call_for_summary: a response
+    without 'choices' must fall through to the caller key and be parsed
+    with the anthropic extractor. If the pick reverts to prefix-first
+    (provider_name="p1" → "openai"), extraction returns "".
+    """
+    from agent.config import LLMProviderConfig
+    providers = {
+        "p1": LLMProviderConfig(
+            name="p1",
+            base_url="https://x.example.com/v1",
+            api_key="sk-p1",
+            default_model="p1/m1",
+            caller="anthropic",
+            reasoning_effort="off",
+            supports_reasoning=False,
+        )
+    }
+    rt = AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
+
+    class _AnthropicShapedProvider:
+        def call(self, **kwargs):
+            return {"content": [{"type": "text", "text": "summary text"}]}
+
+    with patch("agent.runtime._get_provider", return_value=_AnthropicShapedProvider()):
+        text = rt._call_for_summary("sys", "user", model_id="p1/m1")
+    assert text == "summary text"
 
 
 # ── A7: Anthropic streaming folds usage into OpenAI keys ──────────────────────
@@ -301,3 +351,106 @@ def test_anthropic_usage_merge_message_start_and_delta():
         "prompt_tokens": 11,
         "completion_tokens": 7,
     }
+
+
+def test_run_loop_parses_anthropic_shaped_response(tmp_path):
+    """A non-streamed anthropic-caller response without 'choices' surfaces text.
+
+    Pins the A7 shape-first format pick in _run_loop: a response with no
+    'choices' key must fall through to the caller key ("anthropic") and be
+    parsed with the anthropic extractor. If the pick reverts to prefix-first
+    (loop_provider="claude-3-5-sonnet" → "openai"), extraction returns ""
+    and the turn fails with empty_content.
+    """
+    from agent.config import LLMProviderConfig
+    providers = {
+        "anthropic": LLMProviderConfig(
+            name="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_key="sk-ant-test",
+            default_model="claude-3-5-sonnet",
+            caller="anthropic",
+            reasoning_effort="off",
+            supports_reasoning=False,
+        )
+    }
+    rt = AgentRuntime(config=AgentConfig(providers=providers, default_provider="anthropic"), GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation(
+        "Coder", sk, str(tmp_path),
+        model="claude-3-5-sonnet", provider="anthropic",
+    )
+    anthropic_shape = {"content": [{"type": "text", "text": "Hello from Claude"}]}
+    with patch.object(rt, "_call_llm", return_value=anthropic_shape):
+        rt._run_loop(sk, "hello")
+    result = rt.get_last_turn_result(sk)
+    assert result.status == TurnStatus.COMPLETED
+    assert result.text == "Hello from Claude"
+    rt.stop()
+
+
+def test_anthropic_malformed_usage_does_not_fail_turn(tmp_path):
+    """A non-dict usage payload in message_start must not kill the turn.
+
+    The provider's usage payload is not guaranteed to be a JSON object.
+    _merge_usage must ignore a malformed payload (string/list/int) exactly
+    as the pre-fix code did. Without the type guard, AttributeError escapes
+    the streaming path and the turn FAILED with reason 'exception'.
+    """
+    from agent.llm.anthropic_provider import AnthropicProvider
+
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":"boom"}}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"Hello"}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+
+    class _FakeResp:
+        def __init__(self, buf):
+            self._buf = buf
+
+        def __iter__(self):
+            return iter(self._buf.splitlines(keepends=True))
+
+    class _Ctx:
+        def __enter__(self):
+            return _FakeResp(raw_sse)
+
+        def __exit__(self, *_a):
+            pass
+
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path))
+
+    def _stream_lambda(*a, **kw):
+        return rt._call_llm_streaming(
+            session_key=a[0],
+            base_url="https://api.anthropic.com/v1",
+            api_key="***",
+            model="claude-3-5-sonnet",
+            caller_key="anthropic",
+            messages=a[1],
+            tools=a[2] if len(a) > 2 else None,
+            timeout=30.0,
+        )
+
+    with patch(
+        "agent.llm.anthropic_provider.urlopen_with_ssl_retry",
+        lambda req, timeout: _Ctx(),
+    ), patch(
+        "agent.runtime._get_provider",
+        return_value=AnthropicProvider(),
+    ), patch.object(rt, "_call_llm", _stream_lambda):
+        rt._run_loop(sk, "hello")
+
+    result = rt.get_last_turn_result(sk)
+    assert result.status == TurnStatus.COMPLETED
+    assert result.text == "Hello"
+    rt.stop()

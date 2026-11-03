@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 def _merge_usage(acc: dict, raw: dict) -> bool:
-    """Fold Anthropic usage into OpenAI keys. True when a value changed."""
+    """Fold Anthropic usage into OpenAI keys.
+
+    True when at least one OpenAI-shaped key was written. Values are
+    assigned, not added (Anthropic's output_tokens is cumulative).
+    """
+    if not isinstance(raw, dict):
+        return False
     changed = False
     if isinstance(raw.get("input_tokens"), int):
         acc["prompt_tokens"] = raw["input_tokens"]
