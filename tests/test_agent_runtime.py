@@ -5570,11 +5570,14 @@ class TestTurnStateMachine:
         rt.stop()
 
     def test_run_loop_terminates_with_cancelled_on_cancel_signal(self, tmp_path):
-        """When _cancel_requested is set, the next loop iteration's cancel check fires CANCELLED.
+        """When cancel() marks a live session, the next loop iteration's cancel
+        check fires CANCELLED.
 
-        The trigger returns a tool call (not text) so the loop iterates again,
-        where the cancel check at the top of the while loop fires and routes
-        through _terminate_turn(CANCELLED).
+        SPEC-61 A1: the trigger calls rt.cancel(sk) (the real API) — the
+        session is in _active_loops, so it is marked. The trigger returns a
+        tool call (not text) so the loop iterates again, where the cancel
+        check at the top of the while loop fires and routes through
+        _terminate_turn(CANCELLED).
         """
         from agent.runtime import TurnStatus
         rt = AgentRuntime(_make_cfg(), GLib=None)
@@ -5585,7 +5588,7 @@ class TestTurnStateMachine:
 
         def trigger_cancel(*args, **kwargs):
             call_count[0] += 1
-            rt._cancel_requested = True
+            rt.cancel(sk)
             # Return a tool call so the loop iterates (does not exit via text-success).
             return _resp(tool_calls=[{
                 "id": "call_1",

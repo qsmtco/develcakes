@@ -944,8 +944,8 @@ class MainWindow(Gtk.ApplicationWindow):
         """Install agent_context, canvas, talk, and feed_card callbacks.
 
         agent_context runs on the caller's tool-loop thread. A peer edit uses
-        cancel_peer (not cancel) so the global _cancel_requested flag stays
-        down, then waits until that loop is idle. A self-edit does not cancel:
+        cancel_peer (not cancel): cancel_peer marks only the peer session,
+        then waits until that loop is idle. A self-edit does not cancel:
         the caller is the loop, and waiting for idle would deadlock. It edits
         the in-memory conversation and writes that back to the conversation file.
         Canvas hops to the GTK thread and waits. Talk does not touch GTK.

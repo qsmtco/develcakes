@@ -268,23 +268,20 @@ class TestStopAllRuntime:
         """Fix round 2, BUG#2(a) — auditor probe dbg_sp3fix_bug2bypass:
         the loop's own cancellation branch DISCARDS sk from _cancelled
         (runtime.py `self._cancelled.discard(session_key)`). If the loop
-        exits via that branch (not via _cancel_requested — the GLOBAL
-        flag can be consumed by another session's loop), a late approval
-        registering afterwards used to bypass the registration guard and
-        hang the full 60s. The guard must key on the per-session
-        cancellation EPOCH (cleared only by _terminate_turn's terminal
-        transition), never on _cancelled bookkeeping."""
+        exits via that branch, a late approval registering afterwards used
+        to bypass the registration guard and hang the full 60s. The guard
+        must key on the per-session cancellation EPOCH (cleared only by
+        _terminate_turn's terminal transition), never on _cancelled
+        bookkeeping."""
         rt = AgentRuntime(_make_cfg(), GLib=None)
         rt.start()
         sk = _uniq()
         rt.create_conversation("Coder", sk, str(_tmpdir()))
         rt._on_error = lambda *a, **k: None
 
-        # The exact bypass shape: sk marked cancelled, but the GLOBAL
-        # _cancel_requested already consumed (another session's loop) —
-        # the loop exits via the _cancelled branch, which discards sk.
+        # The exact bypass shape: sk marked cancelled while its loop is
+        # live — the loop exits via the _cancelled branch, which discards sk.
         rt._cancelled.add(sk)
-        rt._cancel_requested = False
 
         text_resp = {
             "choices": [{"message": {"content": "hi"}}],
@@ -469,10 +466,6 @@ class TestStopAllRuntime:
         # CANCELLED terminal re-arms — the epoch is the durable trace).
         rt._active_loops.add(sk)
         rt._cancelled.add(sk)
-        rt._cancel_requested = True
-        # Explicitly reset the GLOBAL consumed flag so the loop's turn-2
-        # cancellation branch doesn't self-cancel (see the bypass test).
-        rt._cancel_requested = False
         rt._terminate_turn(TurnResult(
             status=TurnStatus.CANCELLED,
             session_key=sk,
@@ -483,11 +476,9 @@ class TestStopAllRuntime:
         assert sk in rt._cancelled_epochs, "epoch not armed"
 
         # The loop consumed the cancellation: _cancelled discarded (the
-        # branch's own bookkeeping), _cancel_requested consumed by some
-        # session's loop. ONLY the epoch remembers the cancel now — the
-        # exact state the epoch exists to cover.
+        # branch's own bookkeeping). ONLY the epoch remembers the cancel
+        # now — the exact state the epoch exists to cover.
         rt._cancelled.discard(sk)
-        rt._cancel_requested = False
         assert sk in rt._cancelled_epochs, "epoch must outlive _cancelled bookkeeping"
 
         # Turn 2's approval callback: the PM click, through the REAL

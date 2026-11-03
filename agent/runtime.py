@@ -208,7 +208,7 @@ class TurnResult:
         metadata: Free-form dict. Keys vary by status:
             - COMPLETED: ``{"stream_error": dict|None}``
             - FAILED: ``{"reason": str, "iteration": int, ...}``
-            - CANCELLED: ``{"reason": "user"|"shutdown", "iteration": int,
+            - CANCELLED: ``{"reason": "user", "iteration": int,
               "persist": bool}``  (``persist`` defaults False; only True
               when the caller explicitly wants the partial state on disk.)
     """
@@ -556,7 +556,7 @@ class AgentRuntime:
 
       Synchronized state (under self._lock):
         - _conversations (read in many places, written in create_conversation)
-        - _cancelled, _cancel_requested (cancellation signals)
+        - _cancelled (per-session mark; only set for live loops)
         - _cancelled_epochs (SP3 fix round 2, BUG#2: per-session
           cancellation epochs — the approval-registration guard reads
           THESE, never _cancelled, because the loop's cancellation branch
@@ -705,17 +705,12 @@ class AgentRuntime:
         # and the CANCELLED terminal transition ARM these; the NEXT turn's
         # start and COMPLETED/FAILED terminals CLEAR them. _dispatch_approval's
         # registration guard reads THIS, never _cancelled — the loop's own
-        # cancellation branch DISCARDS its _cancelled entry (and the global
-        # _cancel_requested flag is shared across sessions), so _cancelled
+        # cancellation branch DISCARDS its _cancelled entry, so _cancelled
         # bookkeeping cannot survive long enough to gate late registrations.
         # A SET, not a counter: only membership matters (the epoch either
         # gates the session or it does not); monotonicity buys nothing.
         self._cancelled_epochs: set[str] = set()
-        self._cancel_requested: bool = False  # immediate cancel signal for running thread
         self._lock = threading.Lock()
-        # (_running is initialized at :561, BEFORE the migration call — the
-        # BUG#2 fix-round-2 init-order requirement; this line left in place
-        # would otherwise be the first assignment.)
         # RACE-FIX v4b: turn token set by the handler before send_message.
         # Captured by _dispatch at call time (background thread, stable per turn).
         # Passed to handler callbacks so they can reject stale cross-turn events.
@@ -1529,6 +1524,7 @@ class AgentRuntime:
         except Exception:
             with self._lock:
                 self._active_loops.discard(session_key)
+                self._cancelled.discard(session_key)
                 self._inbox.pop(session_key, None)
                 self._stranded.pop(session_key, None)
             raise
@@ -1626,19 +1622,14 @@ class AgentRuntime:
         session-scoped active token under ``_state_lock``.
         """
         with self._lock:
-            # Mark as cancelled so _run_loop's check will catch it
-            self._cancelled.add(session_key)
-            # SP3 fix round 2 (BUG#2): arm the cancellation epoch. This —
-            # with the loop's registration-time arm on the CANCELLED
-            # terminal — is what the approval registration guard reads;
-            # _cancelled alone is too fragile (the loop's cancellation
-            # branch DISCARDS its entry; _cancel_requested is a shared
-            # global). Cleared at the next turn's start and on
-            # COMPLETED/FAILED terminals; never cleared by the loop's
-            # _cancelled.discard bookkeeping.
+            # Only a live loop consumes _cancelled; a mark on an idle session
+            # would cancel the user's next turn.
+            if session_key in self._active_loops:
+                self._cancelled.add(session_key)
+            # SP3 fix round 2 (BUG#2): arm the cancellation epoch. The approval
+            # registration guard reads it. Cleared at the next turn's start and
+            # on COMPLETED/FAILED terminals.
             self._cancelled_epochs.add(session_key)
-            # Signal the running thread to break out of the loop immediately
-            self._cancel_requested = True
             # SPEC-WIRE-CONTEXT-PRESSURE §2.1: queued and stranded text is
             # dropped on cancel; the loop's finally is what releases the
             # active-loop claim, so we do not discard it here.
@@ -1676,19 +1667,20 @@ class AgentRuntime:
         )
 
     def cancel_peer(self, session_key: str) -> None:
-        """Ask one other session's loop to stop. Does not set _cancel_requested.
+        """Ask one other session's loop to stop. Marks only a live loop.
 
-        The global flag is consumed by whichever _run_loop reaches the
-        immediate-cancel check first, including the caller. A tool running
-        inside the supervisor's loop must not arm it. The target loop notices
-        via ``_cancelled`` at its next iteration and emits CANCEL_MESSAGE
-        itself. Pending approvals for this session are flushed the same way
-        ``cancel`` flushes them (``result`` + event + pop).
+        cancel_peer marks only the peer session, and only when its loop is
+        live: an idle peer must not have its next turn cancelled. The target
+        loop notices via ``_cancelled`` at its next iteration and emits
+        CANCEL_MESSAGE itself; the epoch is armed either way so a late
+        approval still denies. Pending approvals for this session are flushed
+        the same way ``cancel`` flushes them (``result`` + event + pop).
         """
         if not isinstance(session_key, str) or not session_key:
             return
         with self._lock:
-            self._cancelled.add(session_key)
+            if session_key in self._active_loops:
+                self._cancelled.add(session_key)
             self._cancelled_epochs.add(session_key)
             for sk in list(self._pending_approvals):
                 if sk.startswith(session_key):
@@ -1696,18 +1688,17 @@ class AgentRuntime:
                     self._pending_approvals[sk]["result"] = None
                     ev.set()
                     self._pending_approvals.pop(sk, None)
-            logger.info("cancel_peer: marked %s (global cancel flag left alone)", session_key)
+            logger.info("cancel_peer: marked %s (only if its loop was live)", session_key)
 
     def stop_all(self) -> dict[str, str]:
         """Cancel every in-flight turn + kill every registered process. sk -> outcome.
 
         SPEC-09 SP3 stop-all core. Per session: cancel() FIRST (the existing
-        per-session machinery — cancelled-set + _cancel_requested + the
-        approval deny-flush that unblocks _dispatch_approval waiters as
-        DENIED), THEN tools.cancel_all_processes(session_key) so a killed
-        process returns into a turn already marked cancelled (no zombie
-        dispatch: _terminate_turn's duplicate-terminal dedup absorbs the
-        late result).
+        per-session machinery — the _cancelled mark + the approval deny-flush
+        that unblocks _dispatch_approval waiters as DENIED), THEN
+        tools.cancel_all_processes(session_key) so a killed process returns
+        into a turn already marked cancelled (no zombie dispatch:
+        _terminate_turn's duplicate-terminal dedup absorbs the late result).
 
         Outcomes: "no_turn" (no in-flight loop), "cancelled" (cancel()
         dispatched; process kill result appended), "cancelled+killed:N",
@@ -2122,22 +2113,6 @@ class AgentRuntime:
                 # grows, so it cannot re-arm after a disable.
                 judge_armed = hard_cap > max_iter
                 while iteration < max_iter or judge_armed:
-                    if self._cancel_requested:
-                        self._cancel_requested = False
-                        self._terminate_turn(TurnResult(
-                            status=TurnStatus.CANCELLED,
-                            session_key=session_key,
-                            turn_token=turn_token,
-                            # SPEC-02 fix round 2 (audit #6): CANCEL_MESSAGE,
-                            # never a bare literal — the handler skips the
-                            # "Turn failed" card by exact constant compare, so
-                            # the short form would emit a spurious failure
-                            # card on every deliberate mid-loop cancel
-                            # (probe: "Cancelled" → 1 card, constant → 0).
-                            error=CANCEL_MESSAGE,
-                            metadata={"reason": "shutdown", "iteration": iteration},
-                        ))
-                        return
                     # Check cancellation before each iteration
                     with self._lock:
                         if session_key in self._cancelled:
@@ -2146,11 +2121,12 @@ class AgentRuntime:
                                 status=TurnStatus.CANCELLED,
                                 session_key=session_key,
                                 turn_token=turn_token,
-                                # SPEC-02 fix round 2 (audit #6): same as the
-                                # _cancel_requested site above — CANCEL_MESSAGE
-                                # constant, not the short form, so the handler
-                                # skips the turn-error card for user cancels
-                                # reaching the loop's own cancellation check.
+                                # SPEC-02 fix round 2 (audit #6): CANCEL_MESSAGE,
+                                # never a bare literal — the handler skips the
+                                # "Turn failed" card by exact constant compare, so
+                                # the short form would emit a spurious failure
+                                # card on every deliberate mid-loop cancel
+                                # (probe: "Cancelled" → 1 card, constant → 0).
                                 error=CANCEL_MESSAGE,
                                 metadata={"reason": "user", "iteration": iteration},
                             ))
@@ -2674,6 +2650,7 @@ class AgentRuntime:
             with self._lock:
                 pending = self._inbox.pop(session_key, [])
                 self._active_loops.discard(session_key)
+                self._cancelled.discard(session_key)
                 if pending:
                     self._stranded[session_key] = pending
                 self._flush_pending_room_lines(session_key)
@@ -3757,6 +3734,9 @@ class AgentRuntime:
             )
 
         full_content = ""
+        # SPEC-61 B7: chunks collect in a list; `_last_stream_text` is written
+        # once on exit. Its readers all run after this function returns.
+        parts: list[str] = []
         # tool_call_index → {name, arguments, done}
         tool_calls_partial: dict[int, dict] = {}
         # Phase CB-3: usage captured from SSE "usage" event (BUG #3 fix).
@@ -3776,96 +3756,114 @@ class AgentRuntime:
             reasoning_effort=reasoning_effort,
         )
 
-        for ev in _stream:
-            if ev.type == "text_delta":
-                text = ev.data.get("content") or ""
-                full_content += text
-                self._last_stream_text[session_key] = full_content
-                if self._on_text_delta:
-                    self._dispatch(self._on_text_delta, session_key, text, _turn_token=turn_token)
+        try:
+            for ev in _stream:
+                # SPEC-61 A2: one lock-free check per SSE event. Cancel ends
+                # the stream at the next event instead of after the full reply.
+                inactive = self._inactive_turn_reason(session_key, turn_token)
+                if inactive is not None:
+                    parts.clear()
+                    _stream.close()
+                    self._last_stream_text.pop(session_key, None)
+                    raise TurnInactive(inactive)
+                if ev.type == "text_delta":
+                    text = ev.data.get("content") or ""
+                    parts.append(text)
+                    if self._on_text_delta:
+                        self._dispatch(self._on_text_delta, session_key, text, _turn_token=turn_token)
 
-            elif ev.type == "tool_call_delta":
-                # PHASE-11.5: default to 0 if streamer omits 'index' (e.g. Anthropic
-                # single-tool responses). Without this, the runtime crashes mid-stream.
-                # STREAM-ID-PRES: capture provider-assigned id from first delta;
-                # subsequent deltas (which carry argument fragments) do not overwrite.
-                idx = ev.data.get("index", 0)
-                if idx not in tool_calls_partial:
-                    tool_calls_partial[idx] = {"name": "", "arguments": "", "id": ""}
-                tc = tool_calls_partial[idx]
-                if ev.data.get("name"):
-                    tc["name"] = ev.data["name"]
-                if ev.data.get("arguments"):
-                    tc["arguments"] += ev.data["arguments"]
-                incoming_id = ev.data.get("id") or ""
-                if incoming_id and not tc["id"]:
-                    tc["id"] = incoming_id
+                elif ev.type == "tool_call_delta":
+                    # PHASE-11.5: default to 0 if streamer omits 'index' (e.g. Anthropic
+                    # single-tool responses). Without this, the runtime crashes mid-stream.
+                    # STREAM-ID-PRES: capture provider-assigned id from first delta;
+                    # subsequent deltas (which carry argument fragments) do not overwrite.
+                    idx = ev.data.get("index", 0)
+                    if idx not in tool_calls_partial:
+                        tool_calls_partial[idx] = {"name": "", "arguments": "", "id": ""}
+                    tc = tool_calls_partial[idx]
+                    if ev.data.get("name"):
+                        tc["name"] = ev.data["name"]
+                    if ev.data.get("arguments"):
+                        tc["arguments"] += ev.data["arguments"]
+                    incoming_id = ev.data.get("id") or ""
+                    if incoming_id and not tc["id"]:
+                        tc["id"] = incoming_id
 
-            elif ev.type == "usage":
-                # Provider sent a usage chunk (e.g., OpenAI's "final" frame).
-                # Capture the most recent one; the final response uses it.
-                # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.2 (BUG #3 fix).
-                usage_data = ev.data.get("usage", {})
-                if isinstance(usage_data, dict) and usage_data:
-                    captured_usage = usage_data
+                elif ev.type == "usage":
+                    # Provider sent a usage chunk (e.g., OpenAI's "final" frame).
+                    # Capture the most recent one; the final response uses it.
+                    # See SPEC-CONTEXT-BLOAT-PHASE-3.md §2.2 (BUG #3 fix).
+                    usage_data = ev.data.get("usage", {})
+                    if isinstance(usage_data, dict) and usage_data:
+                        captured_usage = usage_data
 
-            elif ev.type == "error":
-                # OpenRouter mid-stream error (finish_reason="error").
-                # Captures the error details so they can be surfaced
-                # to the user instead of the generic "no content" message.
-                error_data = ev.data.get("error", {})
-                if isinstance(error_data, dict) and error_data:
-                    captured_error = error_data
-                    logger.warning(
-                        "[stream] sk=%s OpenRouter mid-stream error: code=%s message=%s",
-                        session_key,
-                        error_data.get("code", "?"),
-                        error_data.get("message", "")[:200],
-                    )
+                elif ev.type == "error":
+                    # OpenRouter mid-stream error (finish_reason="error").
+                    # Captures the error details so they can be surfaced
+                    # to the user instead of the generic "no content" message.
+                    error_data = ev.data.get("error", {})
+                    if isinstance(error_data, dict) and error_data:
+                        captured_error = error_data
+                        logger.warning(
+                            "[stream] sk=%s OpenRouter mid-stream error: code=%s message=%s",
+                            session_key,
+                            error_data.get("code", "?"),
+                            error_data.get("message", "")[:200],
+                        )
 
-            elif ev.type == "done":
-                # STREAM-ID-PRES: the helper keeps the provider id captured
-                # during SSE assembly and falls back to a synthetic id.
-                tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
-                logger.debug("[stream] sk=%s done: text_len=%d tool_calls=%d usage_captured=%s error_captured=%s",
-                             session_key, len(full_content), len(tool_calls),
-                             bool(captured_usage), bool(captured_error))
-                result = {
-                    "choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}],
-                    "usage": captured_usage,
-                }
-                if captured_error:
-                    result["_stream_error"] = captured_error
-                # Drain remaining events after done (defense in depth).
-                # Some providers may send trailing usage frames, error events,
-                # or duplicate done events. Drain and capture late error events
-                # so they don't get silently discarded.
-                for ev in _stream:
-                    if ev.type == "error":
-                        error_data = ev.data.get("error", {})
-                        if isinstance(error_data, dict) and error_data and not captured_error:
-                            captured_error = error_data
-                    elif ev.type == "usage":
-                        usage_data = ev.data.get("usage", {})
-                        if isinstance(usage_data, dict) and usage_data:
-                            captured_usage = usage_data
-                # Write back late-captured values — the drain updates local
-                # variables only; the `result` dict was built before the drain.
-                if captured_error and "_stream_error" not in result:
-                    result["_stream_error"] = captured_error
-                if captured_usage and not result.get("usage"):
-                    result["usage"] = captured_usage
-                return result
+                elif ev.type == "done":
+                    # STREAM-ID-PRES: the helper keeps the provider id captured
+                    # during SSE assembly and falls back to a synthetic id.
+                    # SPEC-61 B7: join once at the end of the reply.
+                    tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
+                    full_content = "".join(parts)
+                    logger.debug("[stream] sk=%s done: text_len=%d tool_calls=%d usage_captured=%s error_captured=%s",
+                                 session_key, len(full_content), len(tool_calls),
+                                 bool(captured_usage), bool(captured_error))
+                    result = {
+                        "choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}],
+                        "usage": captured_usage,
+                    }
+                    if captured_error:
+                        result["_stream_error"] = captured_error
+                    # Drain remaining events after done (defense in depth).
+                    # Some providers may send trailing usage frames, error events,
+                    # or duplicate done events. Drain and capture late error events
+                    # so they don't get silently discarded.
+                    for ev in _stream:
+                        if ev.type == "error":
+                            error_data = ev.data.get("error", {})
+                            if isinstance(error_data, dict) and error_data and not captured_error:
+                                captured_error = error_data
+                        elif ev.type == "usage":
+                            usage_data = ev.data.get("usage", {})
+                            if isinstance(usage_data, dict) and usage_data:
+                                captured_usage = usage_data
+                    # Write back late-captured values — the drain updates local
+                    # variables only; the `result` dict was built before the drain.
+                    if captured_error and "_stream_error" not in result:
+                        result["_stream_error"] = captured_error
+                    if captured_usage and not result.get("usage"):
+                        result["usage"] = captured_usage
+                    return result
 
-        # Fallback — stream ended without explicit done event (e.g. provider doesn't send [DONE])
-        # STREAM-ID-PRES: same id-preservation logic as the done-event path.
-        tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
-        logger.debug("[stream-fallback] sk=%s text_len=%d tool_calls=%d error_captured=%s (no done event)",
-                     session_key, len(full_content), len(tool_calls), bool(captured_error))
-        result = {"choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}], "usage": captured_usage}
-        if captured_error:
-            result["_stream_error"] = captured_error
-        return result
+            # Fallback — stream ended without explicit done event (e.g. provider doesn't send [DONE])
+            # STREAM-ID-PRES: same id-preservation logic as the done-event path.
+            # SPEC-61 B7: join once at loop end.
+            full_content = "".join(parts)
+            tool_calls = _assemble_streamed_tool_calls(tool_calls_partial)
+            logger.debug("[stream-fallback] sk=%s text_len=%d tool_calls=%d error_captured=%s (no done event)",
+                         session_key, len(full_content), len(tool_calls), bool(captured_error))
+            result = {"choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}], "usage": captured_usage}
+            if captured_error:
+                result["_stream_error"] = captured_error
+            return result
+        finally:
+            # SPEC-61 B7: one write instead of one per chunk. An empty parts
+            # (cancel before the first delta) leaves no entry behind.
+            if parts:
+                self._last_stream_text[session_key] = "".join(parts)
+
 
     def _check_stuck(self, session_key: str, tool_name: str, args: dict, iteration: int) -> str | None:
         """

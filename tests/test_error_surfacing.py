@@ -670,17 +670,19 @@ class TestEmptyMessageRollback:
 
 
 class TestMidLoopCancelDispatchConstants:
-    """SPEC-02 fix round 2, audit #6: the two MID-LOOP cancel sites in
-    _run_loop (the ``_cancel_requested`` shutdown check and the
-    ``session_key in _cancelled`` user check) previously dispatched the
-    short form ``error="Cancelled"``, which bypasses the handler's
-    CANCEL_MESSAGE skip and emits a spurious "Turn failed" card on every
-    deliberate mid-loop cancel (supervisor probe: "Cancelled" → 1 card,
-    "Cancelled by user" → 0 cards). Both sites must emit the constant —
-    these tests FAIL against the bare literals (falsifier) and pin the
-    exact per-site metadata so the two sites stay distinguishable.
+    """SPEC-02 fix round 2, audit #6: the MID-LOOP cancel site in
+    _run_loop (the ``session_key in _cancelled`` user check) previously
+    dispatched the short form ``error="Cancelled"``, which bypasses the
+    handler's CANCEL_MESSAGE skip and emits a spurious "Turn failed" card
+    on every deliberate mid-loop cancel (supervisor probe: "Cancelled" →
+    1 card, "Cancelled by user" → 0 cards). The site must emit the
+    constant — these tests FAIL against the bare literals (falsifier) and
+    pin the exact metadata so the site stays distinguishable.
 
-    Deterministic by construction: both checks run at the top of the tool
+    SPEC-61 A1: the shared global-flag shutdown check (and its
+    "shutdown" reason) is gone; CANCELLED's only reason is "user".
+
+    Deterministic by construction: the check runs at the top of the tool
     loop BEFORE the first _call_llm, so pre-seeding the signal and calling
     _run_loop directly needs no threads and no real cancel() dispatch."""
 
@@ -695,28 +697,6 @@ class TestMidLoopCancelDispatchConstants:
             errors.append(message)
 
         return _collect
-
-    def test_cancel_requested_site_dispatches_cancel_message(self, tmp_path):
-        errors = []
-        rt = _make_runtime(on_error=self._collector(errors))
-        sk = _uniq()
-        _seed_conversation(rt, sk, [_user("q")], str(tmp_path))
-
-        call_llm = unittest.mock.MagicMock(return_value={})
-        rt._cancel_requested = True  # pre-seed: first loop check fires
-        with unittest.mock.patch.object(rt, "_call_llm", call_llm):
-            rt._run_loop(sk, "hello")
-
-        assert rt.get_turn_state(sk) is TurnStatus.CANCELLED
-        result = rt.get_last_turn_result(sk)
-        assert result is not None
-        assert result.metadata["reason"] == "shutdown"
-        # The constant, never the short form — this is the audit #6 pin.
-        assert errors == [CANCEL_MESSAGE]
-        # The cancel check precedes the first LLM call: the turn died
-        # before any provider traffic.
-        call_llm.assert_not_called()
-        rt.stop()
 
     def test_cancelled_set_site_dispatches_cancel_message(self, tmp_path):
         errors = []
