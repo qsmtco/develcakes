@@ -1737,13 +1737,10 @@ class TestStreaming:
         raw_sse = (
             b'event: content_block_start\n'
             b'data: {"type":"content_block_start","index":0,"content_block":'
-            b'{"type":"tool_use","id":"' + ANTHROPIC_ID.encode() + b'"}}\n\n'
+            b'{"type":"tool_use","id":"' + ANTHROPIC_ID.encode() + b'","name":"read_file","input":{}}}\n\n'
             b'event: content_block_delta\n'
             b'data: {"type":"content_block_delta","index":0,"delta":'
-            b'{"type":"tool_use_delta","name":"read_file","input":""}}\n\n'
-            b'event: content_block_delta\n'
-            b'data: {"type":"content_block_delta","index":0,"delta":'
-            b'{"type":"tool_use_delta","input":"{\\"path\\":\\"/tmp/bar.py\\"}"}}\n\n'
+            b'{"type":"input_json_delta","partial_json":"{\\"path\\":\\"/tmp/bar.py\\"}"}}\n\n'
             b'event: message_stop\n'
             b'data: {"type":"message_stop"}\n\n'
         )

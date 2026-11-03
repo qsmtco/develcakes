@@ -1968,6 +1968,12 @@ class AgentRuntime:
         # early-exit paths are added in Phase 2b; Phase 2a only registers
         # the state so observability (get_turn_state) works.
         with self._state_lock:
+            # SPEC-61 A3: drop this session's older per-turn entries when a
+            # new turn registers, so _turn_state/_turn_results stay bounded by
+            # the number of sessions, not the accumulated turn count.
+            for key in [k for k in self._turn_state if k[0] == session_key]:
+                self._turn_state.pop(key, None)
+                self._turn_results.pop(key, None)
             self._turn_tokens[session_key] = turn_token
             self._turn_state[(session_key, turn_token)] = TurnStatus.RUNNING
             # SP3 fix round 2 (BUG#2): a NEW turn for this session ends the
@@ -2263,7 +2269,11 @@ class AgentRuntime:
                     # Determine provider from conversation model
                     model = conv.model or self._config.default_model
                     loop_provider = model.split("/")[0] if "/" in model else model
-                    loop_fmt = _RESPONSE_FORMAT.get(loop_provider, "openai")
+                    if "choices" in response:
+                        loop_fmt = "openai"
+                    else:
+                        caller = self._resolve_caller_key(self._resolve_provider_cfg(conv), model)
+                        loop_fmt = _RESPONSE_FORMAT.get(caller) or _RESPONSE_FORMAT.get(loop_provider, "openai")
                     text_content = extract_text_content(response, response_format=loop_fmt)
                     tool_calls_raw = extract_tool_calls(response, response_format=loop_fmt)
 
@@ -5291,18 +5301,10 @@ class AgentRuntime:
         """Force an LLM-summarization compact on ``conv``.
 
         Spec: docs/specs/SPEC-CONTEXT-UI-COMPACT-LLM-2026-07-10.md §3.3.2.
-
-        FIX-BUG-3: swap self._context_strategy to the LLM strategy for
-        the duration of the call, run compact, then swap back. This
-        ensures self._context_strategy.last_result reflects the LLM
-        compaction, which the runtime's breakdown dispatcher (line 2116)
-        reads into self._compaction_events.
         """
         from agent.context_strategy import LLMSummarizeStrategy
 
         with self._compaction_lock:
-            original_strategy = self._context_strategy
-
             # Resolve model_id with precedence: agent_def.llm_name > conv.model > global default.
             resolved_model = None
             if agent_def is not None:
@@ -5327,7 +5329,6 @@ class AgentRuntime:
                         conv=conv,
                     ),
             )
-            self._context_strategy = strat
 
             original_sp = conv.system_prompt
             if focus_text:
@@ -5339,7 +5340,6 @@ class AgentRuntime:
                     conv, token_budget, preserve_current_turn=preserve_current_turn,
                 )
             finally:
-                self._context_strategy = original_strategy
                 conv.system_prompt = original_sp
                 conv.invalidate_token_estimate()
 
@@ -5423,7 +5423,7 @@ class AgentRuntime:
             response_dict = provider.call(
                 base_url=provider_cfg.base_url,
                 api_key=api_key,
-                model=model,
+                model=model_id,
                 messages=messages,
                 tools=None,
                 timeout=float(self._config.tool_timeout_seconds),
@@ -5437,6 +5437,8 @@ class AgentRuntime:
             self._record_attached_failure(exc)
             raise
         from agent.llm.extractors import extract_text_content
-        fmt = _RESPONSE_FORMAT.get(provider_name, "openai")
+        # SPEC-61 A7: pick the parser by response shape first (streamed replies
+        # are always OpenAI-shaped for every provider), then by caller key.
+        fmt = "openai" if "choices" in response_dict else _RESPONSE_FORMAT.get(caller_key, "openai")
         text = extract_text_content(response_dict, response_format=fmt)
         return text

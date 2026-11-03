@@ -201,3 +201,103 @@ def test_streaming_delta_dispatch_unchanged_three_chunks(tmp_path):
     assert result.status == TurnStatus.COMPLETED
     assert result.text == "Hello world!"
     rt.stop()
+
+
+# ── A3: per-turn records are pruned when a new turn registers ────────────────
+
+
+def test_turn_state_prunes_older_entries_on_new_turn(tmp_path):
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path))
+    with patch.object(rt, "_call_llm", return_value=_resp("ok")):
+        rt._run_loop(sk, "one", turn_token="t1")
+        rt._run_loop(sk, "two", turn_token="t2")
+        rt._run_loop(sk, "three", turn_token="t3")
+    remaining = [k for k in rt._turn_state if k[0] == sk]
+    assert len(remaining) == 1
+    assert remaining == [(sk, "t3")]
+    rt.stop()
+
+
+# ── A6: summary calls pass the full provider/model id ─────────────────────────
+
+
+class _CapturingProvider:
+    def __init__(self):
+        self.calls = []
+
+    def call(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"content": "captured"}
+
+
+def test_summary_passes_full_model_id():
+    from agent.config import LLMProviderConfig
+    providers = {
+        "p1": LLMProviderConfig(
+            name="p1",
+            base_url="https://x.example.com/v1",
+            api_key="sk-p1",
+            default_model="p1/m1",
+            caller="openrouter",
+            reasoning_effort="off",
+            supports_reasoning=False,
+        )
+    }
+    rt = AgentRuntime(config=AgentConfig(providers=providers, default_provider="p1"))
+    cap = _CapturingProvider()
+    with patch("agent.runtime._get_provider", return_value=cap):
+        rt._call_for_summary("sys", "user", model_id="p1/m1")
+    assert cap.calls[0]["model"] == "p1/m1"
+
+
+# ── A7: Anthropic streaming folds usage into OpenAI keys ──────────────────────
+
+
+def test_anthropic_usage_merge_message_start_and_delta():
+    from agent.llm.anthropic_provider import AnthropicProvider
+
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":11,"output_tokens":1}}}\n\n'
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+
+    class _FakeResp:
+        def __init__(self, buf):
+            self._buf = buf
+
+        def __iter__(self):
+            return iter(self._buf.splitlines(keepends=True))
+
+    class _Ctx:
+        def __enter__(self):
+            return _FakeResp(raw_sse)
+
+        def __exit__(self, *_a):
+            pass
+
+    with patch(
+        "agent.llm.anthropic_provider.urlopen_with_ssl_retry",
+        lambda req, timeout: _Ctx(),
+    ):
+        events = list(AnthropicProvider().stream(
+            base_url="https://api.anthropic.com/v1",
+            api_key="***",
+            model="claude-3-5-sonnet",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            timeout=30.0,
+            x_title="",
+        ))
+    usage_events = [ev for ev in events if ev.type == "usage"]
+    assert usage_events, "expected at least one usage event"
+    assert usage_events[-1].data["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+    }

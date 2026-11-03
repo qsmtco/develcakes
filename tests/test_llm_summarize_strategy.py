@@ -4,6 +4,27 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+from agent.config import AgentConfig
+
+
+def _make_cfg():
+    from agent.config import LLMProviderConfig
+    return AgentConfig(
+        providers={
+            "openai": LLMProviderConfig(
+                name="openai",
+                base_url="https://api.openai.com/v1",
+                api_key="test-key",
+                default_model="gpt-4o",
+            )
+        },
+        default_provider="openai",
+        default_model="openai/gpt-4o",
+        max_tool_iterations=5,
+        tool_timeout_seconds=30,
+        auto_save_conversations=False,
+    )
+
 
 class TestLLMSummarizeStrategy:
 
@@ -99,28 +120,41 @@ class TestLLMSummarizeStrategy:
 class TestForceLlmCompact:
     """Tests for AgentRuntime.force_llm_compact."""
 
-    def test_strategy_swapped_and_restored(self):
-        """force_llm_compact must restore _context_strategy after call."""
-        from agent.context_strategy import DefaultContextStrategy
+    def test_shared_strategy_untouched_during_llm_compact(self):
+        """SPEC-61 A4: force_llm_compact must not swap _context_strategy."""
         from agent.runtime import AgentRuntime
-        rt = AgentRuntime.__new__(AgentRuntime)
-        original = DefaultContextStrategy()
-        rt._context_strategy = original
+        from models.conversation import Message, MessageRole
+        rt = AgentRuntime(_make_cfg())
+        original = rt._context_strategy
 
+        # A conversation over budget so compact() actually trims messages and
+        # fires the LLM summary call (the provider is only invoked when
+        # messages were removed).
         conv = MagicMock()
-        conv.messages = []
+        conv.messages = [
+            Message(role=MessageRole.USER, content="hello", tokens_used=10)
+            for _ in range(10)
+        ]
         conv.system_prompt = "test"
         conv.model = "openai/gpt-4o"
-        conv.get_token_estimate.return_value = 100
+        conv.get_token_estimate.return_value = 10000
 
-        # _call_for_summary will fail (no real provider), but strategy
-        # should still be restored
-        with patch.object(rt, "_call_for_summary", side_effect=RuntimeError("no provider")):
+        recorded = []
+
+        def fake_summary(*a, **kw):
+            # Record whether the runtime-wide strategy is still the original
+            # DURING the LLM summary call, then fail like a bad provider.
+            recorded.append(rt._context_strategy is original)
+            raise RuntimeError("no provider")
+
+        with patch.object(rt, "_call_for_summary", side_effect=fake_summary):
             try:
                 rt.force_llm_compact(conv, 5000, "")
             except Exception:
-                pass
+                pass  # the strategy falls back to a textual summary
 
+        assert recorded, "expected the LLM summary call to run during compact"
+        assert recorded[0] is True
         assert rt._context_strategy is original
 
     def test_system_prompt_restored(self):

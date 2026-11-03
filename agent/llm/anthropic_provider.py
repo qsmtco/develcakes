@@ -20,6 +20,18 @@ from agent.llm.streaming import (
 logger = logging.getLogger(__name__)
 
 
+def _merge_usage(acc: dict, raw: dict) -> bool:
+    """Fold Anthropic usage into OpenAI keys. True when a value changed."""
+    changed = False
+    if isinstance(raw.get("input_tokens"), int):
+        acc["prompt_tokens"] = raw["input_tokens"]
+        changed = True
+    if isinstance(raw.get("output_tokens"), int):
+        acc["completion_tokens"] = raw["output_tokens"]
+        changed = True
+    return changed
+
+
 class AnthropicProvider:
     """Anthropic Messages API.
 
@@ -135,6 +147,7 @@ class AnthropicProvider:
             },
             method="POST",
         )
+        usage: dict = {}
         with urlopen_with_ssl_retry(req, timeout=timeout) as resp:
             for line in sse_lines(resp):
                 ev = parse_sse_line(line)
@@ -147,12 +160,15 @@ class AnthropicProvider:
                     continue
                 d = ev.data
                 etype = d.get("type", "")
-                if etype == "content_block_start":
+                if etype == "message_start":
+                    if _merge_usage(usage, (d.get("message") or {}).get("usage") or {}):
+                        yield SSEEvent(type="usage", data={"usage": dict(usage)})
+                elif etype == "content_block_start":
                     block = d.get("content_block") or {}
                     if block.get("type") == "tool_use":
                         yield SSEEvent(type="tool_call_delta", data={
                             "index": d.get("index", 0),
-                            "name": "",
+                            "name": block.get("name", "") or "",
                             "arguments": "",
                             "id": block.get("id", "") or "",
                         })
@@ -161,18 +177,16 @@ class AnthropicProvider:
                     dtype = delta.get("type", "")
                     if dtype == "text_delta":
                         yield SSEEvent(type="text_delta", data={"content": delta.get("text", "")})
-                    elif dtype == "tool_use_delta":
-                        idx = d.get("index", 0)
-                        fname = delta.get("name") or ""
-                        fargs = delta.get("input", "") or ""
+                    elif dtype == "input_json_delta":
                         yield SSEEvent(type="tool_call_delta", data={
-                            "index": idx, "name": fname, "arguments": fargs,
+                            "index": d.get("index", 0),
+                            "name": "",
+                            "arguments": delta.get("partial_json", "") or "",
                             "id": "",
                         })
                 elif etype == "message_delta":
-                    usage = d.get("usage")
-                    if usage:
-                        yield SSEEvent(type="usage", data={"usage": usage})
+                    if _merge_usage(usage, d.get("usage") or {}):
+                        yield SSEEvent(type="usage", data={"usage": dict(usage)})
                 elif etype == "message_stop":
                     yield SSEEvent(type="done", data={})
                     return
