@@ -1336,12 +1336,10 @@ Transcript:
     def __init__(
         self,
         llm_provider: Callable[[str, str], str] | None = None,
-        llm_model_override: str | None = None,
         offload: Callable[[Conversation, OffloadRequest], dict | None] | None = None,
     ) -> None:
         super().__init__(offload=offload)
         self._llm_provider = llm_provider
-        self._llm_model_override = llm_model_override
 
     def _summary(
         self,

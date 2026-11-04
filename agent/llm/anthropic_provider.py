@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import urllib.error
 import urllib.request
 from typing import Any, Iterator
@@ -16,8 +15,6 @@ from agent.llm.streaming import (
     parse_sse_line,
     urlopen_with_ssl_retry,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _merge_usage(acc: dict, raw: dict) -> bool:

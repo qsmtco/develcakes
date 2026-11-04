@@ -159,7 +159,6 @@ These fields control the agent runtime behavior (defined in `agent/config.py`):
 | `auto_save_conversations` | bool | `true` | Save conversation history |
 | `cost_limit` | float \| null | `null` | Per-conversation USD spending cap (null = no limit) |
 | `step_limit` | int \| null | `null` | Per-conversation turn limit (null = no limit) |
-| `review_staging_dirname` | str | `".crabcakes_review_staging"` | Shadow directory for review-mode writes |
 | `enforcement` | object | (see below) | Post-write verification settings |
 | `fallback_provider` | str \| null | `null` | KB provider fallback (e.g., `"openrouter"`) |
 | `fallback_model` | str \| null | `null` | KB provider fallback model (e.g., `"openrouter/owl-alpha"`) |

@@ -90,7 +90,6 @@ class AgentConfig:
     auto_save_conversations: bool = True
     cost_limit: float | None = None    # per-conversation USD limit
     step_limit: int | None = None      # per-conversation turn limit
-    review_staging_dirname: str = ".crabcakes_review_staging"  # shadow dir for review-mode writes
     enforcement: EnforcementConfig = field(default_factory=EnforcementConfig)
     fallback_provider: str | None = None   # plain provider fallback (user-set, e.g. "openrouter")
     fallback_model: str | None = None      # plain provider fallback model

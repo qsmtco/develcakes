@@ -297,7 +297,6 @@ MAX_READ_SIZE = 16 * 1024       # 16 KB — matches CONV_OUTPUT_CAP
                                  # offset= continuation notice survives; the
                                  # window itself no longer overhangs what the
                                  # conversation keeps.
-MAX_READ_LINES = 2000
 LINE_WINDOW = 200
 # A search with one content hit shows this many lines on either side.
 # Two or three hits show the smaller window. More than three keep the

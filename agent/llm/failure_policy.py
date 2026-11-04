@@ -24,8 +24,6 @@ class RetryConfig:
 class Decision:
     action: Literal["retry", "advance_chain", "halt"]
     provider: str
-    backoff_s: float
-    reason: str
 
 
 def decide(
@@ -50,8 +48,6 @@ def decide(
         return Decision(
             action="halt",
             provider=current,
-            backoff_s=0.0,
-            reason=f"malformed request on {current} — develcakes bug, no failover",
         )
 
     if kind in (FailureClass.PERMANENT_AUTH, FailureClass.PERMANENT_MODEL):
@@ -59,14 +55,10 @@ def decide(
             return Decision(
                 action="advance_chain",
                 provider=nxt,
-                backoff_s=0.0,
-                reason=f"{kind.value} on {current} (attempt {attempt}) → advance to {nxt}",
             )
         return Decision(
             action="halt",
             provider=current,
-            backoff_s=0.0,
-            reason=f"{kind.value} on {current} and no distinct fallback",
         )
 
     if kind == FailureClass.TRANSIENT:
@@ -74,21 +66,15 @@ def decide(
             return Decision(
                 action="retry",
                 provider=current,
-                backoff_s=cfg.backoff_base_s,
-                reason=f"transient on {current} (attempt {attempt}) → retry",
             )
         if nxt:
             return Decision(
                 action="advance_chain",
                 provider=nxt,
-                backoff_s=0.0,
-                reason=f"transient retries exhausted on {current} → advance to {nxt}",
             )
         return Decision(
             action="halt",
             provider=current,
-            backoff_s=0.0,
-            reason=f"transient retries exhausted on {current} and no fallback",
         )
 
     # UNKNOWN, including an ambiguous 400. One same-provider retry, then halt.
@@ -97,12 +83,8 @@ def decide(
         return Decision(
             action="retry",
             provider=current,
-            backoff_s=cfg.backoff_base_s,
-            reason=f"unknown on {current} (attempt {attempt}) → single retry",
         )
     return Decision(
         action="halt",
         provider=current,
-        backoff_s=0.0,
-        reason=f"unknown on {current} (attempt {attempt}) → halt",
     )
