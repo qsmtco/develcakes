@@ -1700,7 +1700,7 @@ rt.get_last_turn_result(session_key) -> TurnResult | None # active turn's termin
 
 **Cost tracking:** Provider-specific pricing tables. Fires `on_token_usage(session_key, tokens, cost)` after each LLM call. Stops loop if `cost_limit` exceeded.
 
-**Thread safety:** All callbacks dispatched via `GLib.idle_add()`. `_tool_history` protected by dedicated `_tool_history_lock` (separate from `self._lock` to avoid deadlock with `cancel()`).
+**Thread safety:** All callbacks dispatched via `GLib.idle_add()`. `_tool_history` protected by dedicated `_tool_history_lock` (separate from `self._lock` to avoid deadlock with `cancel()`). SPEC-61 B3: each tool batch may prefetch runs of 2+ adjacent read-only calls (`read_file`, `read_tool_output`, `search_files`, `list_files`, `web_fetch`; `web_search` is excluded for rate limits) on a per-batch `ThreadPoolExecutor` capped at 4 workers; futures are consumed in call order on the loop thread, so results append exactly as serial execution would, and `pool.shutdown(wait=True)` bounds the threads to the batch.
 
 ### 3.21m.1 `agent/tool_middleware.py` — Tool Middleware Chain (Phase A1)
 

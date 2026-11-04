@@ -148,8 +148,8 @@ class DefaultContextStrategy:
         conv: Conversation,
         token_budget: int,
         *,
-        keep_first: int = 2,                # noqa: ARG002 — Phase 4 wires this
-        protect_is_summary: bool = True,    # noqa: ARG002 — Phase 4 wires this
+        keep_first: int = 2,
+        protect_is_summary: bool = True,
         protect_paths: tuple[str, ...] = (),
         preserve_current_turn: bool = False,
         allow_lossy_stub: bool = True,

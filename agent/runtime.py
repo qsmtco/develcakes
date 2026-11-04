@@ -88,14 +88,13 @@ __all__ = [
     "SSEEvent",
     "StreamingCallKwargs",
     # _PROVIDER_CALLERS retained: used by _call_llm's non-streaming
-    # dispatch (line ~2125) and by get_valid_callers() for the
-    # provider-caller taxonomy. _PROVIDER_STREAMERS removed: dead
+    # dispatch and by get_valid_callers() for the provider-caller
+    # taxonomy. _PROVIDER_STREAMERS removed: dead
     # since Phase B6; consumers migrated to OpenAIProvider(stream=...)/MiniMaxProvider(stream=...)
     # /AnthropicProvider(stream=...) or to get_provider(caller_key).stream.
     # (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 Edit J.)
     "_PROVIDER_CALLERS",
-    # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2 Edit A;
-    # added in Phase 2a; full terminal-path routing is Phase 2b).
+    # Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2).
     "TurnStatus",
     "TurnResult",
     # SPEC-02: single source of truth for the cancel dispatch text — the
@@ -106,12 +105,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# ── Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2 Edit A) ──
+# ── Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.2) ──
 # Per-turn state machine. All terminal transitions in _run_loop funnel
 # through a single chokepoint function (`_terminate_turn`, Edit C) which
 # reads/writes `_turn_state` and `_turn_results` under `_state_lock` (Edit B).
-# Phase 2a adds the data structures only; Phase 2b wires the existing
-# terminal dispatch sites to the chokepoint.
 #
 # Invariant: a turn transitions RUNNING → STREAMING → exactly one of
 # {COMPLETED, FAILED, CANCELLED}. STREAMING is non-terminal.
@@ -625,14 +622,9 @@ class AgentRuntime:
       no TurnResult is recorded for the new turn."
 
       Phase 2a NOTE: this threading model section is the authoritative
-      description of the state-machine synchronization. The accessors
-      (get_turn_state, get_last_turn_result) and the RUNNING / STREAMING
-      transitions in _run_loop are wired; the actual _terminate_turn
-      call sites for the 5+ ad-hoc terminal blocks in _run_loop are
-      added in Phase 2b. Until Phase 2b lands, the existing terminal
-      dispatch sites continue to fire self._dispatch(self._on_*) +
-      self._auto_save directly; the state machine observes the
-      transitions but does not own them yet.
+      description of the state-machine synchronization. All terminal
+      dispatch sites in _run_loop route through `_terminate_turn`
+      (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION Phase 2b).
 
     Args:
         config: AgentConfig with provider credentials and limits.
@@ -1971,9 +1963,8 @@ class AgentRuntime:
         # the per-turn state to RUNNING. This happens BEFORE the
         # missing-conversation and prompt-build-failure early-exit paths
         # so every terminal path has a well-defined starting state
-        # (BUG #2 fix). The actual `_terminate_turn` calls for those
-        # early-exit paths are added in Phase 2b; Phase 2a only registers
-        # the state so observability (get_turn_state) works.
+        # (BUG #2 fix); those early-exit paths terminal through
+        # `_terminate_turn` like every other exit.
         with self._state_lock:
             # SPEC-61 A3: drop this session's older per-turn entries when a
             # new turn registers, so _turn_state/_turn_results stay bounded by
@@ -3573,27 +3564,9 @@ class AgentRuntime:
         # on `not effective_api_key`, so a corrected base_url never reached agents
         # with per-agent keys). The key itself is chosen after this lookup:
         # an explicit agent override, else the card actually being called.
-        live_card = None
-        try:
-            from utils.providers_store import load_providers
-            # Match by display name (p.name) OR by the provider-prefix derived from
-            # its default_model (e.g. name 'glm5.2' with default_model 'zai/glm-5.2'
-            # → prefix 'zai'). The match does NOT require a key: a keyless card
-            # still carries a valid base_url fix.
-            live_providers = load_providers()
-            for p in live_providers:
-                if p.name == provider_name:
-                    live_card = p
-                    break
-            if live_card is None:
-                for p in live_providers:
-                    pm = (p.default_model or "")
-                    live_prefix = pm.split("/")[0] if "/" in pm else pm
-                    if live_prefix == provider_name:
-                        live_card = p
-                        break
-        except Exception as e:
-            logger.warning("Cannot load providers.yaml for %s: %s", provider_name, e)
+        # (SPEC-61 Phase C: this block was a line-for-line copy of
+        # _live_provider_card — now delegated.)
+        live_card = self._live_provider_card(provider_name)
 
         if live_card is not None:
             # Live base_url/caller override (SPEC-01). provider_cfg is this
