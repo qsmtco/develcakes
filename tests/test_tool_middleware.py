@@ -317,32 +317,22 @@ class TestToolContext:
     def test_default_fields(self):
         """Defaults match spec §A.2.1."""
         ctx = ToolContext(session_key="sk", project_path="/p", iteration=0)
-        assert ctx.bypass_approval is False
-        assert ctx.audit_log is None
-        assert ctx.user_id == ""
         assert ctx.enforcement_config is None
         assert ctx.si_enforcement is None
 
     def test_all_fields(self):
         """All fields settable via constructor."""
-        audit_log = object()
         enf_cfg = object()
         ctx = ToolContext(
             session_key="sk",
             project_path="/p",
             iteration=5,
-            bypass_approval=True,
-            audit_log=audit_log,
-            user_id="alice",
             enforcement_config=enf_cfg,
             si_enforcement=False,
         )
         assert ctx.session_key == "sk"
         assert ctx.project_path == "/p"
         assert ctx.iteration == 5
-        assert ctx.bypass_approval is True
-        assert ctx.audit_log is audit_log
-        assert ctx.user_id == "alice"
         assert ctx.enforcement_config is enf_cfg
         assert ctx.si_enforcement is False
 

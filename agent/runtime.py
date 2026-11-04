@@ -230,44 +230,31 @@ from agent.llm.cost import cost_for_model
 from agent.llm.convert import normalize_tool_history
 
 # ── LLM providers (extracted to agent/llm/, Phase B4) ───────────────────────
-# Re-exported under legacy names for backward compatibility.
-from agent.llm.openai_provider import OpenAIProvider
-from agent.llm.minimax_provider import MiniMaxProvider
-from agent.llm.anthropic_provider import AnthropicProvider
 from agent.llm.registry import get_provider as _get_provider
 
-# ── Provider dispatch (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 Edit I) ──
+# ── Provider dispatch (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 Edit I;
+# values deleted in SPEC-61 Phase C) ─────────────────────────────────────────
 # _call_llm's non-streaming path uses _get_provider(caller_key).call(...).
 # _call_llm_streaming uses _get_provider(caller_key).stream.
-# The previous bound-method aliases _call_openai / _call_minimax /
-# _call_anthropic were preserved for test-patch compatibility but have
-# been removed (see Edit J below for the stream-side equivalents). The
-# values in _PROVIDER_CALLERS below are now direct lookups into the
-# provider registry. Tests in tests/test_agent_runtime.py that
-# `from agent.runtime import _call_minimax` / `_call_anthropic` have
-# been rewritten to call MiniMaxProvider().call(...) /
-# AnthropicProvider().call(...) directly (Edit O).
-#
-# _PROVIDER_CALLERS is retained for backward compatibility with test
-# patches and get_valid_callers(). Do not add new dispatch logic here —
-# use agent.llm.registry.get_provider().
-# SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION §2.3 Edit I: values are
-# direct lookups into the provider registry (not bound-method aliases).
-_PROVIDER_CALLERS: dict[str, Any] = {
-    "openai": OpenAIProvider("openai").call,
-    "minimax": MiniMaxProvider().call,
-    "anthropic": AnthropicProvider().call,
-    "openrouter": OpenAIProvider("openrouter").call,
-    "zai": OpenAIProvider("zai").call,
-}
+# The former bound-method dict values were write-only — both consumers only
+# None-checked the lookup and then dispatched through the registry. Only the
+# caller KEYS are read (membership + iteration), so this is a frozenset now.
+_PROVIDER_CALLER_NAMES: frozenset[str] = frozenset({
+    "anthropic",
+    "minimax",
+    "openai",
+    "openrouter",
+    "zai",
+})
+_PROVIDER_CALLERS = _PROVIDER_CALLER_NAMES
 
 
 def get_valid_callers() -> frozenset[str]:
     """Return the frozenset of valid caller keys for ProviderConfig.caller.
 
     Single source of truth for the provider-caller taxonomy. The set is
-    derived from _PROVIDER_CALLERS.keys() at module level — adding a new
-    adapter to the dict automatically extends the valid set.
+    derived from _PROVIDER_CALLER_NAMES at module level — adding a new
+    adapter to the frozenset automatically extends the valid set.
 
     Used by:
       - ui/handlers/settings_handler.py (save-time validation, Test Connection)
@@ -283,7 +270,7 @@ def get_valid_callers() -> frozenset[str]:
         frozenset of strings: {"anthropic", "minimax", "openai",
         "openrouter", "zai"} (alphabetically sorted; order is irrelevant).
     """
-    return frozenset(_PROVIDER_CALLERS.keys())
+    return _PROVIDER_CALLER_NAMES
 
 
 # Response format families — derived from caller key (BUG #1 fix: was
@@ -701,7 +688,6 @@ class AgentRuntime:
         # _last_trim_removed field. The _last_trim_removed property below reads
         # the most recent layer==2 event from this history.
         self._compaction_events: list = []
-        self._compaction_this_iteration: bool = False
         # Audit-Fix-26 (Bug #3): tracks the session_key of the most recent
         # breakdown dispatch so _last_trim_removed can filter _compaction_events
         # by session. Read+written only inside _run_loop's breakdown block.
@@ -2226,10 +2212,10 @@ class AgentRuntime:
                     # Audit-Fix-8: Guard append+truncate with _compaction_lock.
                     # Audit-Fix-19: Only mark iteration as having compacted when messages or
                     # tokens were actually freed (filter out no-op compact() calls).
-                    # Audit-Fix-26 (Bug #1): capture the result into a LOCAL variable.
-                    # Reading self._compaction_this_iteration in the breakdown block
-                    # below was a TOCTOU race: another session's thread could overwrite
-                    # the flag between compact() and the breakdown dispatch.
+                    # Audit-Fix-26 (Bug #1): capture the result into a LOCAL variable
+                    # (the former shared _compaction_this_iteration flag was a TOCTOU
+                    # race: another session's thread could overwrite it between
+                    # compact() and the breakdown dispatch; deleted in SPEC-61 Phase C).
                     # Audit-Fix-26 (Bug #3): tag the event with session_key so
                     # _last_trim_removed can filter per-session when called from
                     # the breakdown block (events from other sessions on the same
@@ -2251,14 +2237,6 @@ class AgentRuntime:
                             # Cap history at 100 events (prevents unbounded growth).
                             if len(self._compaction_events) > 100:
                                 self._compaction_events = self._compaction_events[-100:]
-                    # NOTE: self._compaction_this_iteration is intentionally NO LONGER
-                    # written here. Bug #1 was caused by treating a per-runtime flag as
-                    # if it were per-session/per-iteration; the breakdown block now
-                    # uses the local _compaction_happened instead. The attribute is
-                    # retained on the instance for backward-compat reads (e.g. tests)
-                    # but no longer carries meaningful state. See tests for the
-                    # deprecation notice.
-
                     # The wire built before compaction stays valid unless compaction
                     # rewrote it (every compaction write path bumps _token_gen).
                     # Rebuild only then, so the payload and the over-budget count
@@ -2318,7 +2296,8 @@ class AgentRuntime:
                     # Reuses the model_max that the trim call above already computed.
                     # Audit-Fix-26 (Bugs #1, #2, #3): use LOCAL variables
                     # (_compaction_happened, _ev_for_breakdown) instead of re-reading
-                    # the shared _compaction_this_iteration flag or
+                    # shared state (the former _compaction_this_iteration flag,
+                    # deleted in SPEC-61 Phase C) or
                     # self._context_strategy.last_result. The shared state could be
                     # mutated by another session's thread between the gate and the
                     # breakdown dispatch, causing this session to report the wrong
@@ -2364,11 +2343,8 @@ class AgentRuntime:
                                 "summary_tokens_injected": _ev_for_breakdown.summary_tokens_injected,
                             }
                         self._dispatch(self._on_token_breakdown, session_key, breakdown)
-                        # Bug #1 fix: no longer reset self._compaction_this_iteration
-                        # here — the breakdown used the local _compaction_happened,
-                        # so there's no shared flag to reset. The attribute is kept
-                        # for backward-compat (read by tests) but is no longer the
-                        # source of truth for breakdown state.
+                        # Bug #1 fix: the breakdown used the local
+                        # _compaction_happened; no shared flag to reset.
 
                     logger.debug("[tool-loop] sk=%s llm response: text_len=%d tool_calls=%d tokens=%d cost=%.4f",
                                  session_key, len(text_content or ""), len(tool_calls_raw),
@@ -2884,9 +2860,6 @@ class AgentRuntime:
                     session_key=session_key,
                     project_path=conv.project_path,
                     iteration=iteration,
-                    bypass_approval=bypass_approval,
-                    audit_log=self._audit_log,
-                    user_id=getattr(self._config, "user_id", ""),
                     enforcement_config=enf,
                     si_enforcement=conv.si_enforcement,
                 )
@@ -3723,8 +3696,7 @@ class AgentRuntime:
                 raise
 
         caller_key = self._resolve_caller_key(provider_cfg, model)
-        caller = _PROVIDER_CALLERS.get(caller_key)
-        if caller is None:
+        if caller_key not in _PROVIDER_CALLERS:
             raise ValueError(
                 f"No caller for provider {provider_cfg.name if provider_cfg else provider_name} "
                 f"(caller_key={caller_key!r}). "
@@ -5457,8 +5429,7 @@ class AgentRuntime:
         ]
 
         caller_key = self._resolve_caller_key(provider_cfg, model)
-        caller = _PROVIDER_CALLERS.get(caller_key)
-        if caller is None:
+        if caller_key not in _PROVIDER_CALLERS:
             raise ValueError(
                 f"_call_for_summary: no caller for {caller_key!r}"
             )

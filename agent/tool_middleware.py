@@ -52,11 +52,6 @@ class ToolContext:
         session_key: Conversation session key (e.g. ``"agent:coder"``).
         project_path: Absolute path to the project root (sandbox base).
         iteration: Current tool-loop iteration (0-indexed).
-        bypass_approval: When True, the approval middleware skips PM
-            dispatch (runtime already obtained approval before entering
-            the chain).
-        audit_log: Optional AuditLog instance for recording tool executions.
-        user_id: User identity for audit trail (from AgentConfig).
         enforcement_config: The ``EnforcementConfig`` from ``AgentConfig``,
             or None if enforcement is globally disabled.
         si_enforcement: Per-conversation self-improvement enforcement flag
@@ -65,9 +60,6 @@ class ToolContext:
     session_key: str
     project_path: str
     iteration: int
-    bypass_approval: bool = False
-    audit_log: Any = None
-    user_id: str = ""
     enforcement_config: Any = None
     si_enforcement: bool | None = None
 

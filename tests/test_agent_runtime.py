@@ -5766,7 +5766,7 @@ class TestTurnStateMachine:
     # ── Group 5: callback protocol exports (1 test) ─────────────────
 
     def test_callbacks_module_exports_protocols(self):
-        """agent.callbacks exports all 10 callback Protocols + AgentRuntimeCallbacks alias.
+        """agent.callbacks exports all 10 callback Protocols.
 
         Smoke test: each Protocol class has a __call__ (they're callable
         structural-typing contracts).
@@ -5775,7 +5775,6 @@ class TestTurnStateMachine:
             OnTextDelta, OnTurnStart, OnToolCallStart, OnToolCallResult,
             OnToolCallApprovalNeeded, OnResponseComplete, OnTokenUsage,
             OnTokenBreakdown, OnError, OnEnforcementStatus,
-            AgentRuntimeCallbacks,
         )
         for cls in (
             OnTextDelta, OnTurnStart, OnToolCallStart, OnToolCallResult,
@@ -5785,8 +5784,6 @@ class TestTurnStateMachine:
             assert hasattr(cls, "__call__"), (
                 f"{cls.__name__} is missing __call__ — not a callable Protocol"
             )
-        # AgentRuntimeCallbacks is a dict alias; just verify it's accessible.
-        assert AgentRuntimeCallbacks is not None
 
     # ── Group 6: send_message token rotation (1 test) ───────────────
 

@@ -30,7 +30,6 @@ def _make_runtime(providers: dict, default_provider: str = "openai") -> AgentRun
     runtime._config = config
     # Initialize the new §2.8 fields so tests can exercise the property/flag.
     runtime._compaction_events = []
-    runtime._compaction_this_iteration = False
     # Audit-Fix-26 (Bug #3): _last_trim_removed filters by session_key using
     # _last_breakdown_session as the target session.
     runtime._last_breakdown_session = ""

@@ -278,15 +278,3 @@ class OnEnforcementStatus(Protocol):
         _turn_token: object | None = None,
     ) -> None: ...
 
-
-# Convenience type alias for the full callback bundle.
-# Maps runtime attribute name → callable (or None if not registered).
-# Used as a structural type for code that wants to pass all 10 callbacks
-# as a single dict (e.g. test fixtures, dependency-injection setups).
-#
-# This is a LOOSE helper type, NOT the callback contract. It does not
-# reference the On* Protocols above and does not enforce per-key typing —
-# a dict with a typo'd key (e.g. "on_text_dleta") type-checks against
-# this alias. The authoritative contract is the individual On* Protocol
-# classes; use them directly when you want per-callback type safety.
-AgentRuntimeCallbacks = dict[str, Callable | None]

@@ -56,7 +56,6 @@ def _make_runtime_with_lock() -> AgentRuntime:
     runtime = AgentRuntime.__new__(AgentRuntime)
     runtime._config = config
     runtime._compaction_events = []
-    runtime._compaction_this_iteration = False
     runtime._last_breakdown_session = ""
     runtime._compaction_lock = threading.Lock()
     runtime._context_strategy = DefaultContextStrategy()
