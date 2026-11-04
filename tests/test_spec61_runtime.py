@@ -454,3 +454,173 @@ def test_anthropic_malformed_usage_does_not_fail_turn(tmp_path):
     assert result.status == TurnStatus.COMPLETED
     assert result.text == "Hello"
     rt.stop()
+
+
+def _run_anthropic_stream_turn(tmp_path, raw_sse, expected_text="Hello"):
+    """Run one turn through the real Anthropic streaming path with the given SSE bytes.
+
+    Exercises the full wire surface: AnthropicProvider().stream() parses
+    the SSE frames, _call_llm_streaming assembles the OpenAI-shaped
+    response, and _run_loop picks the format by shape. This mirrors the
+    plumbing of test_anthropic_malformed_usage_does_not_fail_turn.
+    """
+    from agent.config import LLMProviderConfig
+    from agent.llm.anthropic_provider import AnthropicProvider
+
+    class _FakeResp:
+        def __init__(self, buf):
+            self._buf = buf
+
+        def __iter__(self):
+            return iter(self._buf.splitlines(keepends=True))
+
+    class _Ctx:
+        def __enter__(self):
+            return _FakeResp(raw_sse)
+
+        def __exit__(self, *_a):
+            pass
+
+    cfg = _make_cfg()
+    # Bind the conversation to an anthropic-caller card so the loop's caller
+    # resolution returns "anthropic". Without this the card lookup misses,
+    # the caller key resolves to "" and _RESPONSE_FORMAT falls back to
+    # "openai" via the model prefix — the shape-first branch becomes
+    # unobservable and this helper pins nothing (mutant survives).
+    cfg.providers["anthropic"] = LLMProviderConfig(
+        name="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        api_key="test-key",
+        default_model="claude-3-5-sonnet",
+        caller="anthropic",
+    )
+    rt = AgentRuntime(cfg, GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path))
+    rt.get_conversation(sk).provider = "anthropic"
+
+    def _stream_lambda(*a, **kw):
+        return rt._call_llm_streaming(
+            session_key=a[0],
+            base_url="https://api.anthropic.com/v1",
+            api_key="***",
+            model="claude-3-5-sonnet",
+            caller_key="anthropic",
+            messages=a[1],
+            tools=a[2] if len(a) > 2 else None,
+            timeout=30.0,
+        )
+
+    with patch(
+        "agent.llm.anthropic_provider.urlopen_with_ssl_retry",
+        lambda req, timeout: _Ctx(),
+    ), patch(
+        "agent.runtime._get_provider",
+        return_value=AnthropicProvider(),
+    ), patch.object(rt, "_call_llm", _stream_lambda):
+        rt._run_loop(sk, "hello")
+
+    result = rt.get_last_turn_result(sk)
+    assert result.status == TurnStatus.COMPLETED
+    assert result.text == expected_text
+    rt.stop()
+
+
+def test_anthropic_message_start_null_usage_does_not_fail_turn(tmp_path):
+    """A null usage field in message_start must not kill the turn.
+
+    The real-world failure mode behind the audit is a missing/failed usage
+    field, not only a string one: {"message":{"usage":null}}. It must fall
+    back to {} without raising, and the text delta must still surface.
+    """
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":null}}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"Hello"}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    _run_anthropic_stream_turn(tmp_path, raw_sse)
+
+
+def test_anthropic_usage_bool_tokens_are_rejected():
+    """F4: bool is an int subclass — True must not fold as prompt_tokens=1.
+
+    Drops the ``not isinstance(..., bool)`` terms in _merge_usage and this
+    fails: {"input_tokens": True} folds prompt_tokens=True (== 1).
+    """
+    from agent.llm.anthropic_provider import _merge_usage
+
+    acc: dict = {}
+    assert _merge_usage(acc, {"input_tokens": True, "output_tokens": False}) is False
+    assert acc == {}
+    assert _merge_usage(acc, {"input_tokens": 5, "output_tokens": 2}) is True
+    assert acc == {"prompt_tokens": 5, "completion_tokens": 2}
+
+
+def test_anthropic_message_start_non_dict_message_does_not_fail_turn(tmp_path):
+    """A non-object 'message' field in message_start must not kill the turn.
+
+    The pre-fix call site (d.get("message") or {}).get("usage") raised
+    AttributeError when d["message"] was a *truthy* non-dict (e.g. a JSON
+    string), because a non-empty string skips the {} fallback. The usage
+    extraction must be type-checked before .get, and the turn must still
+    complete and stream its text.
+    """
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":"boom"}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"Hello"}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    _run_anthropic_stream_turn(tmp_path, raw_sse)
+
+
+def test_anthropic_message_delta_non_dict_usage_does_not_fail_turn(tmp_path):
+    """A non-dict usage payload on message_delta must not kill the turn.
+
+    Covers both fallback paths at the message_delta call site: a truthy
+    non-dict usage (int 7) must be ignored, and a missing usage key must
+    fall back to {}. The text delta is still surfaced.
+    """
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":11,"output_tokens":1}}}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"Hello"}}\n\n'
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":7}\n\n'
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    _run_anthropic_stream_turn(tmp_path, raw_sse)
+
+
+def test_run_loop_streamed_anthropic_reply_surfaces_text(tmp_path):
+    """A streamed Anthropic reply routes by shape and surfaces its text.
+
+    Real wire path: AnthropicProvider().stream() parses the SSE frames and
+    _call_llm_streaming assembles an OpenAI-shaped response ({"choices":
+    ...}). _run_loop must pick openai from the shape and extract the text
+    — not parse the assembled response with the anthropic extractor (which
+    yields "" and fails the turn with empty_content).
+    """
+    raw_sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":11,"output_tokens":1}}}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"text_delta","text":"Hello from Claude"}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    _run_anthropic_stream_turn(tmp_path, raw_sse, expected_text="Hello from Claude")

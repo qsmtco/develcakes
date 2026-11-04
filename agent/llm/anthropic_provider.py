@@ -29,10 +29,10 @@ def _merge_usage(acc: dict, raw: dict) -> bool:
     if not isinstance(raw, dict):
         return False
     changed = False
-    if isinstance(raw.get("input_tokens"), int):
+    if isinstance(raw.get("input_tokens"), int) and not isinstance(raw.get("input_tokens"), bool):
         acc["prompt_tokens"] = raw["input_tokens"]
         changed = True
-    if isinstance(raw.get("output_tokens"), int):
+    if isinstance(raw.get("output_tokens"), int) and not isinstance(raw.get("output_tokens"), bool):
         acc["completion_tokens"] = raw["output_tokens"]
         changed = True
     return changed
@@ -167,7 +167,9 @@ class AnthropicProvider:
                 d = ev.data
                 etype = d.get("type", "")
                 if etype == "message_start":
-                    if _merge_usage(usage, (d.get("message") or {}).get("usage") or {}):
+                    msg = d.get("message")
+                    msg_usage = msg.get("usage") if isinstance(msg, dict) else {}
+                    if _merge_usage(usage, msg_usage if isinstance(msg_usage, dict) else {}):
                         yield SSEEvent(type="usage", data={"usage": dict(usage)})
                 elif etype == "content_block_start":
                     block = d.get("content_block") or {}
@@ -191,7 +193,8 @@ class AnthropicProvider:
                             "id": "",
                         })
                 elif etype == "message_delta":
-                    if _merge_usage(usage, d.get("usage") or {}):
+                    usage_raw = d.get("usage")
+                    if _merge_usage(usage, usage_raw if isinstance(usage_raw, dict) else {}):
                         yield SSEEvent(type="usage", data={"usage": dict(usage)})
                 elif etype == "message_stop":
                     yield SSEEvent(type="done", data={})
