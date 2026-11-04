@@ -87,10 +87,8 @@ class _WalkInputs:
         "defs",
         "deleted",
         "dirty",
-        "edge_index",
         "edges",
         "graph_nodes",
-        "node_pos",
         "nodes",
         "out_degree",
         "present",
@@ -111,12 +109,6 @@ class _WalkInputs:
         self.edges: list[tuple[str, str]] = []
         self.graph_nodes: list[str] = []
         self.out_degree: dict[str, int] = {}
-        # SPEC-§6 warm-path index, derived once per tree fingerprint so
-        # ``_rank_inputs`` never re-resolves node names inside the PageRank
-        # loop. ``edge_index`` is (src_pos, dst_pos, out_degree) aligned with
-        # ``edges``; ``node_pos`` maps a graph node to its vector slot.
-        self.edge_index: list[tuple[int, int, int]] = []
-        self.node_pos: dict[str, int] = {}
 
 
 def _tree_fingerprint(project_path: str) -> str:
@@ -576,68 +568,6 @@ def _rank_inputs(inputs: _WalkInputs, goal: str) -> list:
             score[node] = score.get(node, 0.0) * _TEST_DIR_PENALTY
     ordered = sorted(nodes, key=lambda node: (-score.get(node, 0.0), node))
     return [nodes[node] for node in ordered]
-
-
-def _rank(defs: list, refs: list, goal: str, git_meta=None, anchors=None, deleted=None) -> list:
-    """Score every def. Returns ``(rel, name, signature, line_no)`` best first.
-
-    The direct-list entry point, kept for callers and tests that hand it raw
-    ``defs``/``refs``. It assembles the same ``_WalkInputs`` the cached path
-    uses and defers to ``_rank_inputs``, so both share one ranking.
-    """
-    del anchors
-    inputs = _WalkInputs()
-    inputs.defs = defs
-    inputs.refs = refs
-    if git_meta:
-        inputs.dirty, inputs.recent = git_meta
-    if deleted:
-        inputs.deleted = set(deleted)
-    _derive_graph(inputs)
-    return _rank_inputs(inputs, goal)
-
-
-def _derive_graph(inputs: _WalkInputs) -> None:
-    """Populate nodes/by_name/edges/graph_nodes/out_degree from defs+refs+deleted.
-
-    Split out of ``_build_walk_inputs`` so the direct ``_rank`` path builds the
-    identical graph the cached path serves. An edge source is the *calling
-    file* path and an edge target is a ``rel:name`` def node, so the
-    self-reference test compares the caller's path against the target's path,
-    not against the node string.
-    """
-    nodes = inputs.nodes
-    by_name = inputs.by_name
-    for rel, name, line, line_no in inputs.defs:
-        node = f"{rel}:{name}"
-        nodes[node] = (rel, name, line, line_no)
-        by_name.setdefault(name, []).append(node)
-    for rel in inputs.deleted:
-        if not isinstance(rel, str) or not rel:
-            continue
-        node = f"{rel}:{_DELETED_SIG}"
-        nodes.setdefault(node, (rel, _DELETED_SIG, _DELETED_SIG, 0))
-    edges: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for rel, name in inputs.refs:
-        targets = by_name.get(name) or []
-        if len(targets) != 1:
-            continue
-        dst = targets[0]
-        if rel == nodes[dst][0]:
-            continue
-        key = (rel, dst)
-        if key in seen:
-            continue
-        seen.add(key)
-        edges.append(key)
-    inputs.edges = edges
-    graph_nodes = set(nodes)
-    graph_nodes.update(src for src, _dst in edges)
-    inputs.graph_nodes = sorted(graph_nodes)
-    out_degree = inputs.out_degree
-    for src, _dst in edges:
-        out_degree[src] = out_degree.get(src, 0) + 1
 
 
 def _overlap(line_no: int, end: int | None, start: int, stop: int) -> int:
