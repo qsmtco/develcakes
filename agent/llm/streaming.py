@@ -194,9 +194,12 @@ def _ssl_retry_limit(explicit: int | None) -> int:
         return MAX_SSL_RETRIES
     return bound
 
-# SPEC-21 SP3: per-host keep-alive. Default OFF (DEVELCAKES_HTTP_KEEPALIVE=1
-# to enable). Idle connections only — a request checks a socket out of the
-# pool so two agent threads never share one HTTPSConnection.
+# SPEC-21 SP3 / SPEC-61 B1: per-host keep-alive, default ON (set
+# DEVELCAKES_HTTP_KEEPALIVE=0 to disable). Idle connections only — a request
+# checks a socket out of the pool so two agent threads never share one
+# HTTPSConnection. Measured live against openrouter 2026-11-03: pooled
+# median 604ms vs 665ms unpooled (~61ms/call saved), zero stale-socket
+# errors in 6 pooled calls.
 _POOL: dict[tuple[str, str, int], list[tuple[http.client.HTTPSConnection, float]]] = {}
 _POOL_LOCK = threading.Lock()
 _POOL_MAX_IDLE = 8
@@ -213,12 +216,13 @@ _STALE_REUSED = (
 
 
 def _keepalive_enabled() -> bool:
-    """SPEC-21 SP3: DEVELCAKES_HTTP_KEEPALIVE=1 enables the pooled fast path.
+    """SPEC-21 SP3 / SPEC-61 B1: pooled fast path unless DEVELCAKES_HTTP_KEEPALIVE=0.
 
-    Default OFF until measured against a live provider. =1 pools; anything
-    else (including unset) is today's urllib urlopen path.
+    Measured live against openrouter 2026-11-03 (see B1 Step 1): pooled
+    median 604ms vs 665ms unpooled per call, no stale-socket errors, so the
+    default flipped to ON. get_env returns None when unset, which is on.
     """
-    return get_env("HTTP_KEEPALIVE") == "1"
+    return get_env("HTTP_KEEPALIVE") != "0"
 
 
 def _pool_idle_count() -> int:

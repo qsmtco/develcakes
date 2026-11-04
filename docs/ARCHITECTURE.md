@@ -1991,7 +1991,7 @@ class DefaultContextStrategy:
 `self._last_result`. The runtime reads this and appends it to
 `_compaction_events` history for debugging and dashboards.
 
-**Hot-path costs (SPEC-21):** `Conversation` counts each string's tokens once (`_count_text`, keyed by encoding, length, and hash, using `encode_ordinary`), so recounts after an append, stub, or pop cost lookups; compaction no longer wipes the estimate cache speculatively. `.gitignore` patterns are compiled once into one predicate shared by every project walker. YAML is parsed with libyaml when present. Optional per-host HTTP keep-alive sits behind DEVELCAKES_HTTP_KEEPALIVE (default off): connections are checked out per thread, drained before reuse, and errors map to urllib's exceptions.
+**Hot-path costs (SPEC-21):** `Conversation` counts each string's tokens once (`_count_text`, keyed by encoding, length, and hash, using `encode_ordinary`), so recounts after an append, stub, or pop cost lookups; compaction no longer wipes the estimate cache speculatively. `.gitignore` patterns are compiled once into one predicate shared by every project walker. YAML is parsed with libyaml when present. Optional per-host HTTP keep-alive sits behind DEVELCAKES_HTTP_KEEPALIVE (default on; `0` disables — SPEC-61 B1): connections are checked out per thread, drained before reuse, and errors map to urllib's exceptions.
 
 ---
 

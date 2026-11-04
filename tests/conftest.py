@@ -189,14 +189,15 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(autouse=True)
 def _clear_http_keepalive_gate(request, monkeypatch):
-    """SPEC-21 SP3: an exported DEVELCAKES_HTTP_KEEPALIVE=1 in a developer
-    shell must not route urlopen-patched suites through HTTPSConnection.
-    The keep-alive tests set the gate themselves.
+    """SPEC-61 B1: keep-alive is default-ON, so an urlopen-patched suite
+    would hit HTTPSConnection unless we force the gate off. Suites opt out
+    by running under test_http_keepalive.py. The keep-alive tests set the
+    gate themselves.
     """
     path = str(getattr(request.node, "path", request.node.fspath))
     if path.endswith("test_http_keepalive.py"):
         return
-    monkeypatch.delenv("DEVELCAKES_HTTP_KEEPALIVE", raising=False)
+    monkeypatch.setenv("DEVELCAKES_HTTP_KEEPALIVE", "0")
     monkeypatch.delenv("CRABCAKES_HTTP_KEEPALIVE", raising=False)
 
 

@@ -17,9 +17,17 @@ from agent.llm import streaming
 from agent.llm.streaming import (
     _POOL,
     _POOL_IDLE_S,
+    _keepalive_enabled,
     _try_pooled,
     urlopen_with_ssl_retry,
 )
+
+
+def test_gate_default_on(monkeypatch):
+    """SPEC-61 B1: unset env means the pooled fast path is active."""
+    monkeypatch.delenv("DEVELCAKES_HTTP_KEEPALIVE", raising=False)
+    monkeypatch.delenv("CRABCAKES_HTTP_KEEPALIVE", raising=False)
+    assert _keepalive_enabled() is True
 
 
 def _certs(dirpath: Path) -> tuple[str, str]:
@@ -158,7 +166,7 @@ def _post(url: str, data: bytes = b"{}"):
 
 
 def test_gate_off_never_pools(monkeypatch, https_server):
-    monkeypatch.delenv("DEVELCAKES_HTTP_KEEPALIVE", raising=False)
+    monkeypatch.setenv("DEVELCAKES_HTTP_KEEPALIVE", "0")
     monkeypatch.delenv("CRABCAKES_HTTP_KEEPALIVE", raising=False)
     called = []
 
