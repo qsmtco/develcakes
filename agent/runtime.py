@@ -3791,11 +3791,6 @@ class AgentRuntime:
         # the non-streaming path.
         provider = _get_provider(caller_key)
         streamer = provider.stream
-        if streamer is None:
-            raise ValueError(
-                f"No streaming caller for caller_key={caller_key!r} "
-                f"(model={model!r}). Check provider's 'caller' field in Settings → Providers."
-            )
 
         full_content = ""
         # SPEC-61 B7: chunks collect in a list; `_last_stream_text` is written

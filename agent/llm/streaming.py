@@ -643,7 +643,6 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=None):
     docs/specs/SPEC-DNS-RETRY-1.md for the design.
     """
     max_retries = _ssl_retry_limit(max_retries)
-    last_exc = None
     for attempt in range(max_retries + 1):
         try:
             return _open(req, timeout)
@@ -658,7 +657,6 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=None):
             # raw. Both paths must retry.
             if attempt == max_retries:
                 raise
-            last_exc = e
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
                 "[ssl-retry] attempt %d/%d for %s — %s; retrying in %.1fs",
@@ -670,7 +668,6 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=None):
             # Walk the chain via is_retryable_ssl_error to decide.
             if not is_retryable_ssl_error(e) or attempt == max_retries:
                 raise
-            last_exc = e
             reason_str = str(e)
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
@@ -686,20 +683,16 @@ def urlopen_with_ssl_retry(req, timeout, *, max_retries=None):
             is_retryable = any(tok in reason for tok in RETRYABLE_SSL_ERRORS)
             if not is_retryable or attempt == max_retries:
                 raise
-            last_exc = e
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
                 "[ssl-retry] attempt %d/%d for %s — %s; retrying in %.1fs",
                 attempt + 1, max_retries, req.full_url, reason, wait_s,
             )
             time.sleep(wait_s)
-    raise last_exc  # should not reach here
 
 
 def stream_with_ssl_retry(
     streamer,
-    *,
-    max_retries: int | None = None,
     **kwargs,
 ):
     """Wrap an SSE-event generator and retry the entire stream on transient
@@ -722,7 +715,6 @@ def stream_with_ssl_retry(
             `MiniMaxProvider().stream` / `AnthropicProvider().stream` signature:
             keyword arguments `base_url`, `api_key`, `model`, `messages`,
             `tools`, `timeout`, `x_title`. Called once per attempt.
-        max_retries: Total retry budget (default `MAX_SSL_RETRIES`).
         **kwargs: Forwarded verbatim to `streamer`.
 
     Yields:
@@ -736,8 +728,7 @@ def stream_with_ssl_retry(
 
     See docs/specs/SPEC-SSL-RETRY-FIX.md Layer 2 for the design.
     """
-    max_retries = _ssl_retry_limit(max_retries)
-    last_exc: BaseException | None = None
+    max_retries = _ssl_retry_limit(None)
     for attempt in range(max_retries + 1):
         streamed_text = False
         try:
@@ -753,7 +744,6 @@ def stream_with_ssl_retry(
             # slow, under load, or the connection is stalling.
             if streamed_text or attempt == max_retries:
                 raise
-            last_exc = e
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
                 "[ssl-retry-stream] attempt %d/%d — %s; retrying in %.1fs",
@@ -767,7 +757,6 @@ def stream_with_ssl_retry(
             # the chain to decide whether this is a transient SSL drop.
             if not is_retryable_ssl_error(e):
                 raise
-            last_exc = e
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
                 "[ssl-retry-stream] attempt %d/%d — %s; retrying in %.1fs",
@@ -779,16 +768,9 @@ def stream_with_ssl_retry(
             is_retryable = any(tok in reason for tok in RETRYABLE_SSL_ERRORS)
             if streamed_text or not is_retryable or attempt == max_retries:
                 raise
-            last_exc = e
             wait_s = (SSL_RETRY_BASE_MS / 1000) * (2 ** attempt)
             logger.warning(
                 "[ssl-retry-stream] attempt %d/%d — %s; retrying in %.1fs",
                 attempt + 1, max_retries, reason, wait_s,
             )
             time.sleep(wait_s)
-    # All retries exhausted; last_exc is guaranteed to be set because the
-    # only way to exit the loop without returning/raising is via the
-    # `if attempt == max_retries: raise` branches above (which raise before
-    # reassigning last_exc). Defensive raise anyway.
-    if last_exc is not None:
-        raise last_exc
