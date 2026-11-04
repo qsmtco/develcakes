@@ -340,6 +340,12 @@ second implementation — a long-poll HTTP client (`connect`/`disconnect`/`send_
 from every log line. The Connect button is now REAL (it toggles the Telegram bridge),
 not a stub.
 
+`TelegramTransport.connect()` starts the poll thread and returns; the GTK
+thread does no Telegram HTTP on that call. The poll thread runs `getMe`,
+then one `getUpdates` with `timeout` 0, then long-polls at 50 seconds.
+The toolbar stays on Connecting until that short poll succeeds
+(`on_connect`) or `getMe` / `getUpdates` fails (`on_error`).
+
 **`ui/handlers/telegram_bridge_handler.py`** — `TelegramBridgeHandler`, the remote-in
 handler node. The phone is a **thin client for the Supervisor only**:
 

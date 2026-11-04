@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import threading
 import time
 
 import httpx
@@ -128,13 +129,14 @@ def test_connect_getme_401_fail_closed_no_loop():
         return _ok()
 
     t, client, ev, _s = _make(handler)
-    with pytest.raises(TelegramAuthError):
-        asyncio.run(t.connect())
+    asyncio.run(t.connect())  # does not raise
+    assert _wait(lambda: ev["error"]), ev
     assert not t.is_connected()
     assert ev["connect"] == []          # no on_connect
-    assert t._thread is None or not t._thread.is_alive()  # no poll loop
+    assert _wait(lambda: t._thread is not None and not t._thread.is_alive())
     # Only getMe was called — the loop never started.
     assert all("/getMe" in c["path"] for c in client.calls)
+    assert client.closed is True
 
 
 def test_connect_getme_not_ok_fail_closed():
@@ -143,16 +145,19 @@ def test_connect_getme_not_ok_fail_closed():
             return FakeResponse(200, {"ok": False, "description": "bad token"})
         return _ok()
 
-    t, _c, _ev, _s = _make(handler)
-    with pytest.raises(TelegramAuthError):
-        asyncio.run(t.connect())
+    t, client, ev, _s = _make(handler)
+    asyncio.run(t.connect())  # does not raise
+    assert _wait(lambda: ev["error"]), ev
+    assert client.closed is True
+    assert not any(c["path"].endswith("/getUpdates") for c in client.calls)
+    assert not t.is_connected()
 
 
 def test_connect_getme_ok_fires_on_connect():
     t, _c, ev, _s = _make(_getme_ok_handler())
     asyncio.run(t.connect())
     try:
-        assert t.is_connected()
+        assert _wait(lambda: t.is_connected()), ev
         assert ev["connect"] == [1]      # fired from the poll thread
     finally:
         asyncio.run(t.disconnect())
@@ -435,24 +440,73 @@ def test_connect_auth_failure_closes_client():
             return FakeResponse(401, {"ok": False, "description": "Unauthorized"})
         return _ok()
 
-    t, client, _ev, _s = _make(handler)
-    with pytest.raises(TelegramAuthError):
-        asyncio.run(t.connect())
+    t, client, ev, _s = _make(handler)
+    asyncio.run(t.connect())  # does not raise
+    assert _wait(lambda: ev["error"]), ev
     assert client.closed is True, "auth-failure connect must close the client"
 
 
 def test_connect_getme_exception_closes_client():
     """BUG#3 (transport-error path): a getMe network failure also closes the
-    client before raising."""
+    client and fires on_error (no raise — connect returns before getMe)."""
     def handler(http, path, kw):
         if path.endswith("/getMe"):
             raise httpx.ConnectError("boom")
         return _ok()
 
-    t, client, _ev, _s = _make(handler)
-    with pytest.raises(TelegramAuthError):
-        asyncio.run(t.connect())
+    t, client, ev, _s = _make(handler)
+    asyncio.run(t.connect())  # does not raise
+    assert _wait(lambda: ev["error"]), ev
+    assert any("getMe failed" in m for m in ev["error"])
     assert client.closed is True, "getMe exception must close the client"
+    assert not any(c["path"].endswith("/getUpdates") for c in client.calls)
+
+
+def test_connect_returns_while_getme_is_blocked():
+    """Connect must return to the GTK caller before getMe finishes."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    def handler(http, path, kw):
+        if path.endswith("/getMe"):
+            entered.set()
+            release.wait(timeout=2.0)
+            return _ok({"id": 1, "username": "testbot", "is_bot": True})
+        return _ok([])
+
+    t, _c, ev, _s = _make(handler)
+    started = time.monotonic()
+    asyncio.run(t.connect())
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.5, elapsed
+    assert _wait(lambda: entered.is_set())
+    release.set()
+    try:
+        assert _wait(lambda: t.is_connected()), ev
+        assert ev["error"] == []
+    finally:
+        asyncio.run(t.disconnect())
+
+
+def test_first_get_updates_drains_then_long_polls():
+    """An empty queue must not cost a 50s hold or a connect-timeout error."""
+    from transport.telegram import DRAIN_POLL_TIMEOUT_SEC, LONG_POLL_TIMEOUT_SEC
+
+    t, client, ev, _s = _make(_getme_ok_handler())
+    asyncio.run(t.connect())
+    try:
+        assert _wait(
+            lambda: len(
+                [c for c in client.calls if c["path"].endswith("/getUpdates")]
+            ) >= 2
+        ), client.calls
+        gu = [c for c in client.calls if c["path"].endswith("/getUpdates")]
+        assert gu[0]["json"]["timeout"] == DRAIN_POLL_TIMEOUT_SEC
+        assert gu[1]["json"]["timeout"] == LONG_POLL_TIMEOUT_SEC
+        assert ev["connect"] == [1]
+        assert not any("not connected after" in m for m in ev["error"])
+    finally:
+        asyncio.run(t.disconnect())
 
 
 def test_connect_success_does_not_close_client():

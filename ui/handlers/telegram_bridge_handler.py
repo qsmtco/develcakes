@@ -316,8 +316,10 @@ class TelegramBridgeHandler:
         """Validate the store, construct the transport, and connect.
 
         Fail-closed: no token or no paired chat_id → ERROR state, no transport.
-        The connect() call runs on the transport's own thread; state advances
-        to CONNECTING now and to CONNECTED on the on_connect signal.
+        ``connect()`` starts the poll thread and returns. getMe and getUpdates
+        run on that thread, so this call does not block on the network.
+        CONNECTING is set before ``connect()`` returns. CONNECTED arrives
+        later on on_connect. A getMe or poll failure arrives on on_error.
 
         F1a (audit): tear down any existing transport FIRST. A soft on_error
         leaves the old poll loop running; without this, start-after-error
@@ -702,7 +704,6 @@ class TelegramBridgeHandler:
         that was sent before this change still resolves in
         ``_handle_callback_query``.
         """
-        return None
 
     def _clear_approval_msgs(self) -> None:
         self._approval_msgs.clear()

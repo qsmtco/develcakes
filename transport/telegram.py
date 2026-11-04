@@ -7,11 +7,13 @@
 # signal-thread discipline) WITHOUT importing or reusing its WebSocket
 # internals.
 #
-# Scope (SPEC-15 §3 SP1): pure transport, no UI. connect() validates the bot
-# token via getMe (fail-closed: bad token → TelegramAuthError, NO poll loop).
-# The poll loop long-polls getUpdates (timeout=50, allowed_updates
-# message/callback_query), tracks the offset (last update_id + 1), and backs
-# off on 429 (respecting retry_after), 5xx, and network errors. send_message /
+# Scope (SPEC-15 §3 SP1): pure transport, no UI. connect() starts the poll
+# thread and returns; getMe validation runs on THAT thread (fail-closed: a
+# bad token or a getMe failure fires on_error from the poll thread; the
+# empty-token raise happens before any thread). The poll loop long-polls
+# getUpdates — a drain poll (timeout=0) first, then 50s holds once the link
+# has announced — tracks the offset (last update_id + 1), and backs off on
+# 429 (respecting retry_after), 5xx, and network errors. send_message /
 # answer_callback_query / edit_message_text send PLAIN text — parse_mode is
 # deliberately NOT set (HTML rendering is OUR surface's job; the bridge strips
 # to text per SPEC-15 §5, the transport sends verbatim).
@@ -45,8 +47,10 @@ _BACKOFF_INITIAL_SEC = 1.0
 _BACKOFF_MAX_SEC = 30.0
 _BACKOFF_MULTIPLIER = 2.0
 
-# Bounded wait inside connect() for the poll thread to go live.
-CONNECT_TIMEOUT_SEC = 10.0
+# First getUpdates before the link is announced, and the first poll after a
+# soft failure clears the latch. Telegram returns immediately. The 50s hold
+# is only for a link that has already announced.
+DRAIN_POLL_TIMEOUT_SEC = 0
 
 # Telegram long-poll: the getUpdates `timeout` param (seconds the server may
 # hold the request open) — SPEC-15 §2.
@@ -148,52 +152,25 @@ class TelegramTransport(Transport):
     # ── Transport ABC ────────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Validate the token (getMe) then start the long-poll loop.
+        """Start the poll thread and return.
 
-        Fail-closed: no token or a failed getMe → TelegramAuthError, NO poll
-        loop started. Bounded wait for the thread to go live (CONNECT_TIMEOUT
-        _SEC); on timeout fires on_error and returns (not connected).
+        The caller (the GTK thread, via asyncio.run) does no HTTP. The poll
+        thread runs getMe, then getUpdates. Empty token raises
+        TelegramAuthError and starts nothing. A getMe failure or a poll
+        failure is on_error from that thread. Idempotent while the thread
+        is alive.
         """
         if self._thread is not None and self._thread.is_alive():
-            return  # already running — idempotent
+            return
         if not self.token:
             raise TelegramAuthError("connect: no bot token configured")
         self._client = self._client_factory()
-        # getMe validation runs synchronously on the caller's thread (it is a
-        # one-shot, non-blocking-relative-to-poll check) — fail-closed BEFORE
-        # any thread/loop is spawned.
-        client: Any = self._client
-        try:
-            resp = client.post(f"/bot{self.token}/getMe", json={})
-            data = resp.json()
-        except Exception as e:  # any transport failure is a connect failure
-            # BUG#3 fix: close the just-created client before raising so a
-            # failed connect does not leak an httpx connection pool.
-            self._close_client()
-            raise TelegramAuthError(
-                f"connect: getMe failed: {redact_log_preview(str(e))}"
-            ) from e
-        if resp.status_code == 401 or not data.get("ok"):
-            # BUG#3 fix: same cleanup on the auth-rejection path.
-            self._close_client()
-            raise TelegramAuthError(
-                "connect: getMe rejected the token "
-                f"(status={resp.status_code})"
-            )
         self._stopping = False
         self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        loop = asyncio.get_running_loop()
-        connected = await loop.run_in_executor(
-            None, self._connected.wait, CONNECT_TIMEOUT_SEC
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="telegram-poll"
         )
-        if not connected:
-            self._dispatch(  # fires on transport thread — consumers marshal
-                self.on_error,
-                f"connect: not connected after {CONNECT_TIMEOUT_SEC}s",
-                kind="on_error",
-            )
+        self._thread.start()
 
     async def disconnect(self) -> None:
         """Stop the poll loop and close the client (idempotent).
@@ -327,22 +304,73 @@ class TelegramTransport(Transport):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._poll_loop())
+            self._loop.run_until_complete(self._session())
         finally:
             self._loop.close()
+
+    async def _session(self) -> None:
+        try:
+            ok = self._authenticate()
+        except Exception as e:
+            self._close_client()
+            self._fail_connect(
+                f"connect: getMe failed: {redact_log_preview(str(e))}"
+            )
+            return
+        if not ok or not self._running:
+            return
+        await self._poll_loop()
+
+    def _authenticate(self) -> bool:
+        """getMe on the poll thread. False → do not poll. Does not raise
+        for the two handled outcomes. Closes the client on failure.
+        """
+        client: Any = self._client
+        try:
+            resp = client.post(f"/bot{self.token}/getMe", json={})
+            data = resp.json()
+        except Exception as e:
+            self._close_client()
+            self._fail_connect(
+                f"connect: getMe failed: {redact_log_preview(str(e))}"
+            )
+            return False
+        if resp.status_code == 401 or not data.get("ok"):
+            self._close_client()
+            self._fail_connect(
+                "connect: getMe rejected the token "
+                f"(status={resp.status_code})"
+            )
+            return False
+        return True
+
+    def _fail_connect(self, message: str) -> None:
+        """Record a connect failure. No poll loop. No callback during disconnect.
+
+        Return value is None. _running is cleared so _session and _poll_loop
+        stop. disconnect() sets _stopping before it closes the client; a
+        getMe aborted by that close must not surface as a bridge error.
+        """
+        self._running = False
+        if self._stopping:
+            return
+        self._dispatch(self.on_error, message, kind="on_error")
 
     async def _poll_loop(self) -> None:
         """Long-poll getUpdates with offset tracking + backoff.
 
-        On the FIRST successful getUpdates the link is live → on_connect fires
-        and _connected is set. Failures (429/5xx/network) back off and fire
-        on_error (redacted); 429 respects the server's retry_after.
+        The first getUpdates of an unannounced link is a DRAIN poll
+        (timeout=0) so on_connect fires in one round trip; once announced,
+        requests use the 50s hold. Failures (429/5xx/network) back off and
+        fire on_error (redacted); 429 respects the server's retry_after.
         """
         retry_delay = _BACKOFF_INITIAL_SEC
         announced = False
         while self._running:
             try:
-                updates = self._get_updates()
+                updates = self._get_updates(
+                    timeout=DRAIN_POLL_TIMEOUT_SEC if not announced else None
+                )
             except _Conflict:
                 # SPEC-15b B2: a second getUpdates consumer holds the bot.
                 # Surface it DISTINCTLY (the generic soft-failure path was
@@ -408,11 +436,15 @@ class TelegramTransport(Transport):
                 with self._lock:
                     self._offset = int(uid) + 1  # confirmed after processing
 
-    def _get_updates(self) -> list | None:
-        """One getUpdates call. Raises _RetryAfter on 429; returns None on 5xx
-        / non-ok soft failure; returns the update list on success."""
+    def _get_updates(self, timeout: int | None = None) -> list | None:
+        """One getUpdates. timeout None → self.poll_timeout (the 50s hold).
+
+        A passed 0 must be sent as 0. `timeout or self.poll_timeout` is wrong:
+        0 is the drain poll. Raises _RetryAfter on 429; returns None on 5xx /
+        non-ok soft failure; returns the update list on success.
+        """
         params: dict = {
-            "timeout": self.poll_timeout,
+            "timeout": self.poll_timeout if timeout is None else timeout,
             "allowed_updates": list(ALLOWED_UPDATES),
         }
         if self._offset is not None:
