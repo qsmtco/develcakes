@@ -21,6 +21,8 @@ import time
 
 import pytest
 
+from unittest.mock import patch
+
 from agent.enforcement import (
     TestConfig,
     _APP_ROOT,
@@ -31,6 +33,7 @@ from agent.enforcement import (
     _check_tests,
     _resolve_tests_python,
     check,
+    EnforcementCheck,
     _TEST_CONFIG_CACHE,
     _ENFORCEMENT_CONFIG_CACHE,
 )
@@ -777,6 +780,40 @@ class TestCheckEndToEnd:
         tmpl_cmd = tmpl["test"]["command"]
         assert "activate" not in tmpl_cmd, f"template command contains 'activate': {tmpl_cmd}"
         assert tmpl_cmd == "python3 -m pytest {test_file} -v --tb=short"
+
+    def test_b5_tests_and_lint_run_concurrently(self, tmp_path):
+        """SPEC-61 B5: tests and lint run concurrently once syntax passes."""
+        config = _make_config(syntax_check=False, test_run=True, lint_check=True)
+
+        def slow_tests(*_a, **_k):
+            time.sleep(0.3)
+            return EnforcementCheck(
+                tier="tests", tool="write_file", file="myapp.py",
+                passed=True, detail="ok", output="", duration_ms=300,
+            )
+
+        def slow_lint(*_a, **_k):
+            time.sleep(0.3)
+            return EnforcementCheck(
+                tier="lint", tool="write_file", file="myapp.py",
+                passed=True, detail="ok", output="", duration_ms=300,
+            )
+
+        with patch("agent.enforcement._check_tests", side_effect=slow_tests), \
+             patch("agent.enforcement._check_lint", side_effect=slow_lint):
+            start = time.monotonic()
+            result = check(
+                "write_file",
+                {"path": "myapp.py"},
+                ToolResult(success=True, output="written", error="", duration_ms=10,
+                           stdout="", stderr="", exit_code=0),
+                str(tmp_path),
+                config,
+            )
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5, f"tests+lint should overlap: {elapsed:.3f}s"
+        assert [c.tier for c in result.checks] == ["tests", "lint"]
 
     def test_check_non_write_tool_skips(self, tmp_path):
         """check() returns empty result for non-write tools."""

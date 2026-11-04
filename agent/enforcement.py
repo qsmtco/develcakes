@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import dataclasses
 import fnmatch
 import glob
@@ -1628,17 +1630,28 @@ def check(
     no_syntax_check = all(c.tier != "syntax" for c in checks)
     syntax_gate = syntax_passed or no_syntax_check
 
-    # Tier 2: Test runner
-    if config.test_run and syntax_gate:
-        tests_result = _check_tests(file_path, project_path, config, syntax_passed, verbose=verbose)
-        if tests_result is not None:
-            checks.append(tests_result)
-
-    # Tier 3: Lint check
-    if config.lint_check and syntax_gate:
-        lint_result = _check_lint(file_path, project_path, config, syntax_passed, verbose=verbose)
-        if lint_result is not None:
-            checks.append(lint_result)
+    # Tier 2+Tier 3 (SPEC-61 B5): once the syntax gate has passed, tests and
+    # lint are independent — run them concurrently. `checks` keeps the order
+    # tests, then lint, so `_format_result` output is unchanged.
+    run_tests = config.test_run and syntax_gate
+    run_lint = config.lint_check and syntax_gate
+    tests_result = lint_result = None
+    if run_tests and run_lint:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="enf-lint") as pool:
+            lint_future = pool.submit(
+                _check_lint, file_path, project_path, config, syntax_passed, verbose=verbose,
+            )
+            tests_result = _check_tests(file_path, project_path, config, syntax_passed, verbose=verbose)
+            lint_result = lint_future.result()
+    else:
+        if run_tests:
+            tests_result = _check_tests(file_path, project_path, config, syntax_passed, verbose=verbose)
+        if run_lint:
+            lint_result = _check_lint(file_path, project_path, config, syntax_passed, verbose=verbose)
+    if tests_result is not None:
+        checks.append(tests_result)
+    if lint_result is not None:
+        checks.append(lint_result)
 
     if not checks:
         return EnforcementResult()
