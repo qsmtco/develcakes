@@ -6,6 +6,9 @@
 # reply at the next SSE event. B7: streamed chunks collect in a list and join
 # once, so per-chunk dispatch is unchanged.
 
+import os
+import threading
+import time
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +17,7 @@ import pytest
 from agent.config import AgentConfig
 from agent.runtime import AgentRuntime, TurnInactive, TurnStatus
 from agent.tools import ToolResult
+from models.conversation import MessageRole
 
 
 def _uniq():
@@ -624,3 +628,96 @@ def test_run_loop_streamed_anthropic_reply_surfaces_text(tmp_path):
         b'data: {"type":"message_stop"}\n\n'
     )
     _run_anthropic_stream_turn(tmp_path, raw_sse, expected_text="Hello from Claude")
+
+
+# ── B3: parallel adjacent read-only tool calls ───────────────────────────────
+
+
+def test_parallel_read_run_overlaps_and_preserves_order(tmp_path):
+    """Two adjacent reads run concurrently; a write still fences later reads.
+
+    [read a, read b, write c, read c] forms run {0: 2}. The first two
+    reads must overlap (total wall time under 0.35 s with 0.2 s sleeps),
+    the read of c must start only after the write returned, and
+    conv.messages keeps tool results in call order.
+    """
+    target_a = tmp_path / "a.txt"
+    target_b = tmp_path / "b.txt"
+    target_c = tmp_path / "c.txt"
+    target_a.write_text("A" * 100)
+    target_b.write_text("B" * 100)
+    target_c.write_text("C" * 100)
+
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
+    conv = rt.get_conversation(sk)
+
+    recorded = []
+    lock = threading.Lock()
+
+    def fake_execute_tool(tool_name, args, project_path, session_key, **kwargs):
+        path = args.get("path", "")
+        thread = threading.current_thread().name
+        start = time.monotonic()
+        if tool_name == "read_file":
+            time.sleep(0.2)
+        with lock:
+            recorded.append((tool_name, path, thread, start))
+        if tool_name == "read_file":
+            return ToolResult(success=True, output=f"read:{os.path.basename(path)}")
+        return ToolResult(success=True, output=f"wrote:{os.path.basename(path)}")
+
+    batch = [
+        ("c1", "read_file", {"path": str(target_a)}),
+        ("c2", "read_file", {"path": str(target_b)}),
+        ("c3", "write_file", {"path": str(target_c), "content": "C"}),
+        ("c4", "read_file", {"path": str(target_c)}),
+    ]
+    with patch("agent.tools.execute_tool", side_effect=fake_execute_tool):
+        assert rt._execute_tool_batch(sk, None, conv, "reading", batch, 1) is False
+
+    # First two reads ran on distinct pool threads and overlapped.
+    read_events = [(p, t, s) for (n, p, t, s) in recorded if n == "read_file"]
+    a, b = read_events[0], read_events[1]
+    assert a[1] != b[1], f"reads should run on different threads: {a[1]} vs {b[1]}"
+    span = max(a[2], b[2]) + 0.2 - min(a[2], b[2])
+    assert span < 0.35, f"adjacent reads did not overlap: span={span:.3f}s"
+
+    # The read of c starts only after the write of c returned.
+    def _idx(name, path):
+        for i, (n, p, _t, _s) in enumerate(recorded):
+            if n == name and p == path:
+                return i
+        raise AssertionError(f"{name} {path} not recorded")
+
+    assert _idx("write_file", str(target_c)) < _idx("read_file", str(target_c))
+
+    # conv.messages carries tool results in call order.
+    bodies = [m.content for m in conv.messages if m.role == MessageRole.TOOL_RESULT]
+    assert bodies == ["read:a.txt", "read:b.txt", "wrote:c.txt", "read:c.txt"]
+
+
+# ── B2: build the wire once per iteration ────────────────────────────────────
+
+
+def test_parallel_prefetched_read_exception_propagates(tmp_path):
+    """An exception from a prefetched read surfaces like a serial one."""
+    target = tmp_path / "a.txt"
+    target.write_text("A")
+
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
+    conv = rt.get_conversation(sk)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    batch = [
+        ("c1", "read_file", {"path": str(target)}),
+        ("c2", "read_file", {"path": str(target)}),
+    ]
+    with patch("agent.tools.execute_tool", side_effect=boom):
+        with pytest.raises(RuntimeError, match="boom"):
+            rt._execute_tool_batch(sk, None, conv, "reading", batch, 1)

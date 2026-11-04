@@ -296,6 +296,34 @@ _RESPONSE_FORMAT: dict[str, str] = {
     for pk in _PROVIDER_CALLERS
 }
 
+from concurrent.futures import Future, ThreadPoolExecutor
+
+# Handlers with no shared mutable state in agent/tools.py. web_search is
+# excluded: the Brave free tier allows one query per second.
+_PARALLEL_SAFE_TOOLS = frozenset({
+    "read_file", "read_tool_output", "search_files", "list_files", "web_fetch",
+})
+_PARALLEL_TOOL_WORKERS = 4
+
+
+def _parallel_runs(tool_calls_raw, is_truncated) -> dict[int, int]:
+    """Map the start index of each run of 2+ adjacent read-only calls to its end (exclusive)."""
+    runs: dict[int, int] = {}
+    count = len(tool_calls_raw)
+    start = 0
+    while start < count:
+        end = start
+        while (
+            end < count
+            and tool_calls_raw[end][1] in _PARALLEL_SAFE_TOOLS
+            and not is_truncated(tool_calls_raw[end][2])
+        ):
+            end += 1
+        if end - start >= 2:
+            runs[start] = end
+        start = max(end, start + 1)
+    return runs
+
 
 # ── SSE streaming helpers (extracted to agent/llm/streaming.py, Phase B5) ──
 from agent.llm.streaming import (
@@ -2705,82 +2733,78 @@ class AgentRuntime:
 
         from agent.llm.extractors import TRUNCATED_ARGUMENTS, is_truncated_arguments
 
-        for call_id, tool_name, args in tool_calls_raw:
-            tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
+        runs = _parallel_runs(tool_calls_raw, is_truncated_arguments)
+        prefetched: dict[int, Future] = {}
+        pool: ThreadPoolExecutor | None = None
+        try:
+            for index, (call_id, tool_name, args) in enumerate(tool_calls_raw):
+                run_end = runs.get(index)
+                if run_end is not None:
+                    if pool is None:
+                        pool = ThreadPoolExecutor(
+                            max_workers=_PARALLEL_TOOL_WORKERS,
+                            thread_name_prefix="tool-read",
+                        )
+                    for k in range(index, run_end):
+                        _k_id, k_name, k_args = tool_calls_raw[k]
+                        prefetched[k] = pool.submit(
+                            execute_tool, k_name, k_args, conv.project_path, session_key,
+                            approval_callback=None,
+                            allowed_tools=conv.allowed_tools,
+                        )
+                tc = next(tc for tc in tool_call_objects if tc.call_id == call_id)
 
-            # SPEC-43: Coder may not use the shell as a reader. Refuse
-            # before approval so a denied grep never opens a card.
-            if tool_name == "exec_command" and getattr(conv, "agent_role", "") == "coder":
-                command = args.get("command") if isinstance(args, dict) else None
-                refusal = _coder_shell_allowed(
-                    command if isinstance(command, str) else "",
-                    conv.project_path or "",
-                )
-                if refusal is not None:
-                    tc.mark_failed(refusal)
-                    tc.result = None
-                    conv.add_tool_result(call_id, refusal)
-                    self._dispatch(
-                        self._on_tool_call_result, session_key, tool_name, refusal, False,
+                # SPEC-43: Coder may not use the shell as a reader. Refuse
+                # before approval so a denied grep never opens a card.
+                if tool_name == "exec_command" and getattr(conv, "agent_role", "") == "coder":
+                    command = args.get("command") if isinstance(args, dict) else None
+                    refusal = _coder_shell_allowed(
+                        command if isinstance(command, str) else "",
+                        conv.project_path or "",
                     )
-                    continue
+                    if refusal is not None:
+                        tc.mark_failed(refusal)
+                        tc.result = None
+                        conv.add_tool_result(call_id, refusal)
+                        self._dispatch(
+                            self._on_tool_call_result, session_key, tool_name, refusal, False,
+                        )
+                        continue
 
-            # A shell dump of a file already read this turn is how the
-            # read-loop avoids the unchanged notice.
-            if tool_name == "exec_command":
-                blocked = self._block_file_reprint(session_key, conv, args)
-                if blocked:
-                    tc.mark_failed(blocked)
-                    tc.result = None
-                    conv.add_tool_result(call_id, blocked)
-                    self._dispatch(
-                        self._on_tool_call_result, session_key, tool_name, blocked, False,
+                # A shell dump of a file already read this turn is how the
+                # read-loop avoids the unchanged notice.
+                if tool_name == "exec_command":
+                    blocked = self._block_file_reprint(session_key, conv, args)
+                    if blocked:
+                        tc.mark_failed(blocked)
+                        tc.result = None
+                        conv.add_tool_result(call_id, blocked)
+                        self._dispatch(
+                            self._on_tool_call_result, session_key, tool_name, blocked, False,
+                        )
+                        continue
+
+                if is_truncated_arguments(args):
+                    fragment = args.get(TRUNCATED_ARGUMENTS, "")
+                    fragment = fragment if isinstance(fragment, str) else str(fragment)
+                    text = (
+                        f"{tool_name} was not run because its arguments were cut off. "
+                        f"Call {tool_name} again. Fragment: {fragment[:200]!r}"
                     )
-                    continue
-
-            if is_truncated_arguments(args):
-                fragment = args.get(TRUNCATED_ARGUMENTS, "")
-                fragment = fragment if isinstance(fragment, str) else str(fragment)
-                text = (
-                    f"{tool_name} was not run because its arguments were cut off. "
-                    f"Call {tool_name} again. Fragment: {fragment[:200]!r}"
-                )
-                tc.arguments = {}
-                tc.mark_failed(text)
-                tc.result = None
-                conv.add_tool_result(call_id, text)
-                self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
-                continue
-
-            # Approval gating for exec_command — fires BEFORE tool_call_start
-            # so the approval card appears first. Non-approval tools skip this.
-            if tool_name == "exec_command":
-                approved = self._dispatch_approval(session_key, tool_name, args)
-                logger.debug("[tool-loop] sk=%s exec_command approval: %s", session_key, approved)
-                if approved is False or approved is None:  # None = timeout = denial
-                    tc.mark_failed("exec_command requires PM approval — request denied or timed out")
-                    text = tc.result or "denied"
+                    tc.arguments = {}
+                    tc.mark_failed(text)
                     tc.result = None
                     conv.add_tool_result(call_id, text)
                     self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
-                    self._audit_log.record(tool_name, args, approved=False,
-                                            user=getattr(self._config, "user_id", ""),
-                                            result="denied")  # A-4
                     continue
 
-            # HIGH-1: Sensitive-path write/edit also requires PM approval.
-            # Fires before tool_call_start so the PM sees the card.
-            if tool_name in ("write_file", "edit_file"):
-                path_arg = args.get("path", "")
-                if agent_tools_module.is_sensitive_path(path_arg):
+                # Approval gating for exec_command — fires BEFORE tool_call_start
+                # so the approval card appears first. Non-approval tools skip this.
+                if tool_name == "exec_command":
                     approved = self._dispatch_approval(session_key, tool_name, args)
-                    logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
-                                 session_key, tool_name, approved)
-                    if approved is False or approved is None:
-                        tc.mark_failed(
-                            f"{tool_name} blocked: {path_arg} is a sensitive path\n"
-                            "PM approval denied or timed out."
-                        )
+                    logger.debug("[tool-loop] sk=%s exec_command approval: %s", session_key, approved)
+                    if approved is False or approved is None:  # None = timeout = denial
+                        tc.mark_failed("exec_command requires PM approval — request denied or timed out")
                         text = tc.result or "denied"
                         tc.result = None
                         conv.add_tool_result(call_id, text)
@@ -2790,122 +2814,149 @@ class AgentRuntime:
                                                 result="denied")  # A-4
                         continue
 
-            # Tool call start — fires AFTER approval (for exec_command and sensitive write/edit)
-            # so the "running" card is truthful: the tool is actually about to run.
-            self._dispatch(self._on_tool_call_start, session_key, tool_name, args)
-            tc.mark_executing()
+                # HIGH-1: Sensitive-path write/edit also requires PM approval.
+                # Fires before tool_call_start so the PM sees the card.
+                if tool_name in ("write_file", "edit_file"):
+                    path_arg = args.get("path", "")
+                    if agent_tools_module.is_sensitive_path(path_arg):
+                        approved = self._dispatch_approval(session_key, tool_name, args)
+                        logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
+                                     session_key, tool_name, approved)
+                        if approved is False or approved is None:
+                            tc.mark_failed(
+                                f"{tool_name} blocked: {path_arg} is a sensitive path\n"
+                                "PM approval denied or timed out."
+                            )
+                            text = tc.result or "denied"
+                            tc.result = None
+                            conv.add_tool_result(call_id, text)
+                            self._dispatch(self._on_tool_call_result, session_key, tool_name, text, False)
+                            self._audit_log.record(tool_name, args, approved=False,
+                                                    user=getattr(self._config, "user_id", ""),
+                                                    result="denied")  # A-4
+                            continue
 
-            # Execute tool
-            logger.debug("[tool-loop] sk=%s executing tool: %s args_keys=%s",
-                         session_key, tool_name, list(args.keys()))
-            # Bypass exec_command's internal approval check — the runtime already
-            # confirmed PM approval via _dispatch_approval above (returned True).
-            # HIGH-1: write_file/edit_file with sensitive paths — runtime already
-            # dispatched to PM above, so bypass the tool's internal check.
-            # MED-1: Use per-call approval_callback (bypass = lambda True, normal = None).
-            bypass_approval = (tool_name == "exec_command" or
-                               (tool_name in ("write_file", "edit_file") and
-                                agent_tools_module.is_sensitive_path(args.get("path", ""))))
-            per_call_cb = (lambda *a: True) if bypass_approval else None
-            # LOW-2: validate the session workspace. The return value
-            # is unread (dead binding removed) — the required side
-            # effects are the LOW-2 validation (raises ValueError if
-            # project_path is empty or session_key is malformed) and
-            # the per-session scratch-dir creation with 0o700
-            # permissions (.crabcakes/tmp/<session>/).
-            resolve_session_workspace(conv.project_path, session_key)
-            # project_path is the sandbox base for all tools AND exec_command cwd.
-            # The scratch dir above exists for future use but no longer
-            # overrides exec_command CWD — see exec-cwd-fix spec.
-            # Allowed-tools enforcement gate (§3.21n).
-            # Forward conv.allowed_tools so execute_tool can deny tools the agent
-            # was configured without. conv.allowed_tools is the single source of
-            # truth — set in create_conversation() from agent_def["tools"] and
-            # persisted on the conversation object.
-            #
-            # Execute through the tool middleware chain.
-            # The chain wraps execute_tool with EnforcementMiddleware
-            # (post-write verification) and StuckDetectionMiddleware
-            # (loop detection). Approval was already resolved inline
-            # above (before on_tool_call_start) per spec §A.2.4.
-            enf = self._config.enforcement
-            if getattr(conv, "agent_role", "") == "coder":
-                enf = dataclasses.replace(enf, lint_check=False, test_run=False)
-            ctx = ToolContext(
-                session_key=session_key,
-                project_path=conv.project_path,
-                iteration=iteration,
-                bypass_approval=bypass_approval,
-                audit_log=self._audit_log,
-                user_id=getattr(self._config, "user_id", ""),
-                enforcement_config=enf,
-                si_enforcement=conv.si_enforcement,
-            )
-            result = self._tool_chain.run(
-                tool_name=tool_name,
-                args=args,
-                ctx=ctx,
-                executor=lambda: execute_tool(
-                    tool_name, args, conv.project_path, session_key,
-                    approval_callback=per_call_cb,
-                    allowed_tools=conv.allowed_tools,
-                ),
-            )
-            logger.debug("[tool-loop] sk=%s tool %s result: success=%s output_len=%d",
-                         session_key, tool_name, result.success, len(result.output or ""))
+                # Tool call start — fires AFTER approval (for exec_command and sensitive write/edit)
+                # so the "running" card is truthful: the tool is actually about to run.
+                self._dispatch(self._on_tool_call_start, session_key, tool_name, args)
+                tc.mark_executing()
 
-            # Record tool result — ToolResult dataclass stays clean.
-            # mark_completed sets status and completed_at. The tool message
-            # is the copy that is kept; tc.result is cleared before
-            # add_tool_result so the body is not stored twice.
-            # On failure keep the error, and when the tool still captured
-            # output (exec_command stdout/stderr) append it — otherwise a
-            # failed pytest run reads back as a silent 'Exit 1' with the
-            # captured output lost. The success path is unchanged.
-            if result.success:
-                tool_body = result.output
-            elif result.output:
-                tool_body = (result.error or "") + "\n" + result.output
-            else:
-                tool_body = result.error or ""
-            tc.mark_completed(tool_body)
-            tool_result_text = tc.result or ""
-            if tool_name == "read_file" and result.success:
-                tool_result_text = self._dedup_read_output(
-                    session_key, conv, args, tool_result_text,
+                # Execute tool
+                logger.debug("[tool-loop] sk=%s executing tool: %s args_keys=%s",
+                             session_key, tool_name, list(args.keys()))
+                # Bypass exec_command's internal approval check — the runtime already
+                # confirmed PM approval via _dispatch_approval above (returned True).
+                # HIGH-1: write_file/edit_file with sensitive paths — runtime already
+                # dispatched to PM above, so bypass the tool's internal check.
+                # MED-1: Use per-call approval_callback (bypass = lambda True, normal = None).
+                bypass_approval = (tool_name == "exec_command" or
+                                   (tool_name in ("write_file", "edit_file") and
+                                    agent_tools_module.is_sensitive_path(args.get("path", ""))))
+                per_call_cb = (lambda *a: True) if bypass_approval else None
+                # LOW-2: validate the session workspace. The return value
+                # is unread (dead binding removed) — the required side
+                # effects are the LOW-2 validation (raises ValueError if
+                # project_path is empty or session_key is malformed) and
+                # the per-session scratch-dir creation with 0o700
+                # permissions (.crabcakes/tmp/<session>/).
+                resolve_session_workspace(conv.project_path, session_key)
+                # project_path is the sandbox base for all tools AND exec_command cwd.
+                # The scratch dir above exists for future use but no longer
+                # overrides exec_command CWD — see exec-cwd-fix spec.
+                # Allowed-tools enforcement gate (§3.21n).
+                # Forward conv.allowed_tools so execute_tool can deny tools the agent
+                # was configured without. conv.allowed_tools is the single source of
+                # truth — set in create_conversation() from agent_def["tools"] and
+                # persisted on the conversation object.
+                #
+                # Execute through the tool middleware chain.
+                # The chain wraps execute_tool with EnforcementMiddleware
+                # (post-write verification) and StuckDetectionMiddleware
+                # (loop detection). Approval was already resolved inline
+                # above (before on_tool_call_start) per spec §A.2.4.
+                enf = self._config.enforcement
+                if getattr(conv, "agent_role", "") == "coder":
+                    enf = dataclasses.replace(enf, lint_check=False, test_run=False)
+                ctx = ToolContext(
+                    session_key=session_key,
+                    project_path=conv.project_path,
+                    iteration=iteration,
+                    bypass_approval=bypass_approval,
+                    audit_log=self._audit_log,
+                    user_id=getattr(self._config, "user_id", ""),
+                    enforcement_config=enf,
+                    si_enforcement=conv.si_enforcement,
                 )
-                if tool_result_text.startswith("REFUSED:"):
-                    result = dataclasses.replace(
-                        result, success=False, error=tool_result_text, output="",
+                future = prefetched.pop(index, None)
+                result = self._tool_chain.run(
+                    tool_name=tool_name,
+                    args=args,
+                    ctx=ctx,
+                    executor=future.result if future is not None else (
+                        lambda: execute_tool(
+                            tool_name, args, conv.project_path, session_key,
+                            approval_callback=per_call_cb,
+                            allowed_tools=conv.allowed_tools,
+                        )
+                    ),
+                )
+                logger.debug("[tool-loop] sk=%s tool %s result: success=%s output_len=%d",
+                             session_key, tool_name, result.success, len(result.output or ""))
+
+                # Record tool result — ToolResult dataclass stays clean.
+                # mark_completed sets status and completed_at. The tool message
+                # is the copy that is kept; tc.result is cleared before
+                # add_tool_result so the body is not stored twice.
+                # On failure keep the error, and when the tool still captured
+                # output (exec_command stdout/stderr) append it — otherwise a
+                # failed pytest run reads back as a silent 'Exit 1' with the
+                # captured output lost. The success path is unchanged.
+                if result.success:
+                    tool_body = result.output
+                elif result.output:
+                    tool_body = (result.error or "") + "\n" + result.output
+                else:
+                    tool_body = result.error or ""
+                tc.mark_completed(tool_body)
+                tool_result_text = tc.result or ""
+                if tool_name == "read_file" and result.success:
+                    tool_result_text = self._dedup_read_output(
+                        session_key, conv, args, tool_result_text,
                     )
-                    # SPEC-60: a demoted read counts as a tool error for the
-                    # iteration judge (no new parsing — same inspection point).
-                    # Session-keyed dict, not a local: this scope is
-                    # _execute_tool_batch, a different method from _run_loop.
-                    self._iteration_tool_errors[session_key] = (
-                        self._iteration_tool_errors.get(session_key, 0) + 1)
-            if result.success:
-                self._note_tool_path(session_key, conv, tool_name, args)
-            tc.result = None
+                    if tool_result_text.startswith("REFUSED:"):
+                        result = dataclasses.replace(
+                            result, success=False, error=tool_result_text, output="",
+                        )
+                        # SPEC-60: a demoted read counts as a tool error for the
+                        # iteration judge (no new parsing — same inspection point).
+                        # Session-keyed dict, not a local: this scope is
+                        # _execute_tool_batch, a different method from _run_loop.
+                        self._iteration_tool_errors[session_key] = (
+                            self._iteration_tool_errors.get(session_key, 0) + 1)
+                if result.success:
+                    self._note_tool_path(session_key, conv, tool_name, args)
+                tc.result = None
 
-            conv.add_tool_result(call_id, tool_result_text)
-            self._maybe_compile(session_key, conv, tool_name, args, result)
-            if result.success and tool_name in ("write_file", "edit_file"):
-                with self._repo_map_lock:
-                    self._repo_map_tree_version += 1
-            self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
+                conv.add_tool_result(call_id, tool_result_text)
+                self._maybe_compile(session_key, conv, tool_name, args, result)
+                if result.success and tool_name in ("write_file", "edit_file"):
+                    with self._repo_map_lock:
+                        self._repo_map_tree_version += 1
+                self._dispatch(self._on_tool_call_result, session_key, tool_name, tool_result_text, result.success)
 
-            # A-4: Record in audit log
-            _audit_user = getattr(self._config, "user_id", "")
-            self._audit_log.record(
-                tool_name=tool_name,
-                args=args,
-                approved=True if bypass_approval else None,
-                user=_audit_user,
-                result=tool_result_text,
-                exit_code=result.exit_code,
-            )
-
+                # A-4: Record in audit log
+                _audit_user = getattr(self._config, "user_id", "")
+                self._audit_log.record(
+                    tool_name=tool_name,
+                    args=args,
+                    approved=True if bypass_approval else None,
+                    user=_audit_user,
+                    result=tool_result_text,
+                    exit_code=result.exit_code,
+                )
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True, cancel_futures=True)
         return False
 
     def is_loop_active(self, session_key: str) -> bool:
