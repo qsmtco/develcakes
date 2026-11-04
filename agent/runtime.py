@@ -1564,13 +1564,6 @@ class AgentRuntime:
             conv.add_user_message(item)
         return len(pending)
 
-    def _finish_loop(self, session_key: str) -> None:
-        with self._lock:
-            pending = self._inbox.pop(session_key, [])
-            self._active_loops.discard(session_key)
-            if pending:
-                self._stranded[session_key] = pending
-
     def note_room_line(self, session_key: str, line: str) -> str:
         """Store one overheard room line on this session.
 

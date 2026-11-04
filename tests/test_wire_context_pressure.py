@@ -130,7 +130,13 @@ def test_begin_send_while_active_queues():
     assert rt.begin_send(sk, "second") is False
     assert rt._inbox[sk] == ["second"]
     assert rt.is_loop_active(sk)
-    rt._finish_loop(sk)
+    # _finish_loop was deleted (SPEC-61 B3 wave); the real loop exit inlines
+    # this lock block, so run it inline here.
+    with rt._lock:
+        pending = rt._inbox.pop(sk, [])
+        rt._active_loops.discard(sk)
+        if pending:
+            rt._stranded[sk] = pending
     assert not rt.is_loop_active(sk)
     assert rt.take_stranded(sk) == ["second"]
     assert rt.take_stranded(sk) == []
