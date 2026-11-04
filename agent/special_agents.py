@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SPECIAL_AGENTS", "SpecialAgentDef", "get_special_agents", "get_special_agent", "is_local_agent_key", "unregister_special_agent", "get_auto_open_agents", "get_project_onboarding_agents"]
+__all__ = ["SPECIAL_AGENTS", "SpecialAgentDef", "get_special_agents", "get_special_agent", "is_local_agent_key", "get_project_onboarding_agents"]
 
 
 @dataclass
@@ -172,35 +172,6 @@ def is_local_agent_key(session_key: str) -> bool:
     session keys are not local.
     """
     return isinstance(session_key, str) and session_key.startswith("agent:")
-
-
-def unregister_special_agent(prefix: str) -> bool:
-    """Remove a special agent from the registry by its session key prefix.
-
-    Args:
-        prefix: The agent's conv_id_prefix (e.g. "agent:coder").
-
-    Returns:
-        True if the agent was found and removed, False otherwise.
-    """
-    registry = _ensure_loaded()
-    if prefix in registry:
-        del registry[prefix]
-        logger.info("special_agents: unregistered agent %s", prefix)
-        return True
-    return False
-
-
-def get_auto_open_agents() -> list[SpecialAgentDef]:
-    """Return all agents with auto_open=True.
-
-    SPEC-12 SP5 (R3): the window.py startup caller was REMOVED — agent tabs
-    are no longer auto-opened at launch (the Chat button opens the active
-    project's group tab instead). This helper is retained as inert module
-    surface for a future caller; it currently has none (dead-export sweep
-    candidate — see the SP5 audit note).
-    """
-    return [agent for agent in get_special_agents() if agent.auto_open]
 
 
 def get_project_onboarding_agents() -> list[SpecialAgentDef]:
