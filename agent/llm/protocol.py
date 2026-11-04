@@ -7,7 +7,13 @@ from typing import Any, Iterator, Protocol, runtime_checkable
 
 @dataclass
 class LLMResponse:
-    """Normalized response from any LLM provider."""
+    """Normalized response from any LLM provider.
+
+    Currently unused by callers (SPEC-61 Phase C recount: definition +
+    re-exports only). Kept deliberately: SPEC-61 Phase D4 "thin provider
+    layer" adopts it as the single return type, deleting _RESPONSE_FORMAT
+    and the extractor format switches. Do not re-flag as dead code.
+    """
     text: str = ""
     tool_calls: list[tuple[str, str, dict]] = field(default_factory=list)
     usage: tuple[int, int] = (0, 0)
