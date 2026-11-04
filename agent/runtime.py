@@ -2216,8 +2216,16 @@ class AgentRuntime:
                         except Exception as e:
                             logger.warning(f"Failed to load MCP tools for {session_key}: {e}")
 
+                    # SPEC-61 B2: build the wire ONCE per iteration and hand its
+                    # count to compaction as `pressure`; rebuild only when
+                    # compaction bumped the token generation (_token_gen).
+                    messages, wire_tokens = self._wire_messages_and_count(
+                        session_key, conv, model_max, tools,
+                    )
+                    wire_gen = conv._token_gen
                     self._compact_before_llm(
-                        session_key, conv, soft_ceiling, hard_ceiling, tools=tools,
+                        session_key, conv, soft_ceiling, hard_ceiling,
+                        tools=tools, pressure=wire_tokens,
                     )
                     # §2.8: Telemetry — read strategy.last_result, append to history.
                     # Audit-Fix-7: Patch hard_ceiling — strategy doesn't know the real value
@@ -2258,10 +2266,15 @@ class AgentRuntime:
                     # but no longer carries meaningful state. See tests for the
                     # deprecation notice.
 
-                    # Build the wire once AFTER compact so the payload reflects the
-                    # trimmed conversation. The count is the same number the meter
-                    # and the over-budget raise use; keep it local for the breakdown
-                    # overwrite below (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
+                    # The wire built before compaction stays valid unless compaction
+                    # rewrote it (every compaction write path bumps _token_gen).
+                    # Rebuild only then, so the payload and the over-budget count
+                    # reflect the trimmed conversation (SPEC-WIRE-CONTEXT-PRESSURE
+                    # §2.1; SPEC-61 B2).
+                    if conv._token_gen != wire_gen:
+                        messages, wire_tokens = self._wire_messages_and_count(
+                            session_key, conv, model_max, tools,
+                        )
 
                     # Pre-call budget guard: if the conversation still exceeds
                     # the model's context window after compaction, raise a clear
@@ -2269,9 +2282,6 @@ class AgentRuntime:
                     # HTTP 400 rejections (which corrupt conversation state because
                     # the assistant message is already added by the time the error
                     # surfaces). Response reserve accounts for output tokens.
-                    messages, wire_tokens = self._wire_messages_and_count(
-                        session_key, conv, model_max, tools,
-                    )
                     if wire_tokens >= model_max - self._RESPONSE_RESERVE_TOKENS:
                         raise self._over_budget_error(wire_tokens, model_max)
 
@@ -4568,6 +4578,7 @@ class AgentRuntime:
         soft_ceiling: int,
         hard_ceiling: int,
         tools: list | None = None,
+        pressure: int | None = None,
     ) -> None:
         """Under the provider line, compact toward that line (usually a no-op).
 
@@ -4578,12 +4589,17 @@ class AgentRuntime:
         not the stored transcript. When the wire is under the ceiling the
         off-wire audit log stays; compact() still records a fresh no-op
         last_result so the previous iteration's event does not stick.
+
+        SPEC-61 B2: the caller may pass the wire count it already built
+        (`pressure=`) to skip the second build. The precondition is that it
+        was computed with `model_max == hard_ceiling` and the same `tools`.
         """
         landing = self._compute_landing_goal(hard_ceiling)
         middle = self._compute_middle_line(hard_ceiling)
-        _messages, pressure = self._wire_messages_and_count(
-            session_key, conv, hard_ceiling, tools,
-        )
+        if pressure is None:
+            _messages, pressure = self._wire_messages_and_count(
+                session_key, conv, hard_ceiling, tools,
+            )
         estimate = conv.get_token_estimate()
         addon = pressure - estimate
         if addon < 0:

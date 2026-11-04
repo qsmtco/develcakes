@@ -701,6 +701,62 @@ def test_parallel_read_run_overlaps_and_preserves_order(tmp_path):
 # ── B2: build the wire once per iteration ────────────────────────────────────
 
 
+def test_b2_wire_built_once_when_under_budget(tmp_path):
+    """Under budget, compaction is a no-op and the wire is built exactly once."""
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path))
+    calls = {"n": 0}
+    real = rt._wire_messages_and_count
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    with patch.object(rt, "_wire_messages_and_count", side_effect=counting), \
+         patch.object(rt, "_call_llm", lambda *a, **kw: _resp("done")):
+        rt._run_loop(sk, "hello")
+
+    result = rt.get_last_turn_result(sk)
+    assert result.status == TurnStatus.COMPLETED
+    assert calls["n"] == 1, f"expected one wire build, got {calls['n']}"
+    rt.stop()
+
+
+def test_b2_wire_rebuilt_when_compaction_bumps_gen(tmp_path):
+    """When compaction trims (bumps _token_gen), the wire is rebuilt: two builds."""
+    rt = AgentRuntime(_make_cfg(), GLib=None)
+    rt.start()
+    sk = _uniq()
+    rt.create_conversation("Coder", sk, str(tmp_path), defer_prompt_build=True)
+    conv = rt.get_conversation(sk)
+    # A fat transcript so the (tiny) compaction ceiling forces a real trim.
+    for _ in range(15):
+        conv.add_user_message("u" * 2000)
+        conv.add_assistant_message("a" * 2000, [])
+
+    calls = {"n": 0}
+    real = rt._wire_messages_and_count
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    with patch.object(rt, "_wire_messages_and_count", side_effect=counting), \
+         patch.object(rt, "_compute_compaction_threshold", return_value=(4000, 5000)), \
+         patch.object(rt, "_call_llm", lambda *a, **kw: _resp("done")):
+        try:
+            rt._run_loop(sk, "fix bar")
+        except RuntimeError as exc:
+            # The post-compaction wire may still exceed the tiny ceiling;
+            # the rebuild happens before that raise, so the count stands.
+            assert "after compaction" in str(exc)
+
+    assert calls["n"] == 2, f"expected two wire builds (rebuild after compaction), got {calls['n']}"
+    rt.stop()
+
+
 def test_parallel_prefetched_read_exception_propagates(tmp_path):
     """An exception from a prefetched read surfaces like a serial one."""
     target = tmp_path / "a.txt"
