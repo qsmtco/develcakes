@@ -4307,9 +4307,10 @@ class AgentRuntime:
         the count comes from _compile_token_count() — the card added once,
         the map covered by the wire, one estimator for all of it.
         """
-        block = self._repo_map_block_for(session_key, conv)
         if getattr(conv, "agent_role", "") == "coder":
             block = ""
+        else:
+            block = self._repo_map_block_for(session_key, conv)
         packet = self._compile.get(session_key)
         if packet is None:
             schema_tokens = self._schema_tokens(conv, tools)

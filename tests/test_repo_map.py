@@ -106,6 +106,46 @@ def test_coder_role_wire_omits_the_repo_map(tmp_path):
     assert user["content"] == "fix bar"
 
 
+def test_coder_role_never_builds_the_repo_map(tmp_path):
+    """B4: coder blanks the map BEFORE building — zero builder calls."""
+    _fixture(tmp_path)
+    rt = AgentRuntime(_make_cfg())
+    sk = "agent:coder-no-map"
+    conv = Conversation(
+        agent_name="Coder",
+        agent_role="coder",
+        system_prompt="SYS",
+        project_path=str(tmp_path),
+    )
+    conv.add_user_message("fix bar")
+    rt._conversations[sk] = conv
+    calls = {"n": 0}
+
+    def fake_map(project, goal):
+        calls["n"] += 1
+        return "MAPBLOCK"
+
+    with patch("agent.repo_map.build_repo_map", side_effect=fake_map):
+        rt._messages_for_model(sk, conv, 128_000)
+    assert calls["n"] == 0
+
+    # A non-coder role (debugger) still builds exactly once.
+    sk2 = "agent:debugger-one-map"
+    conv2 = Conversation(
+        agent_name="Debugger",
+        agent_role="debugger",
+        system_prompt="SYS",
+        project_path=str(tmp_path),
+    )
+    conv2.add_user_message("fix bar")
+    rt._conversations[sk2] = conv2
+    with patch("agent.repo_map.build_repo_map", side_effect=fake_map):
+        wired = rt._messages_for_model(sk2, conv2, 128_000)
+    assert calls["n"] == 1
+    user = next(m for m in wired if m["role"] == "user")
+    assert REPO_MAP_HEADER in user["content"]
+
+
 def test_two_iterations_call_build_repo_map_once(tmp_path):
     _fixture(tmp_path)
     rt = AgentRuntime(_make_cfg())
