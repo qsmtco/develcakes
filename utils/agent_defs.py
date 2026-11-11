@@ -22,6 +22,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# SPEC-62 migration target: the shipped pre-0.2 placeholder llm_name in
+# prompts/default_agents/*.yaml. Kept as a module constant so the migration
+# below never spells the literal inline. (Adjudicated in
+# tests/test_no_kb_residuals.py::test_source_tree_free_of_kb_strings — the
+# ONLY product file permitted to contain this string.)
+_LEGACY_PLACEHOLDER_LLM_NAME = "local-kb"
+
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
 
@@ -177,6 +184,10 @@ def _seed_defaults() -> None:
 
     Only copies files from prompts/default_agents/ that don't already exist
     in <config_dir>/agents/. Never overwrites existing user files.
+
+    After the copy loop, runs the SPEC-62 one-time migration for installs
+    that already seeded the pre-0.2 placeholder llm_name (the per-file
+    isfile guard means a fixed shipped default never reaches them).
     """
     agents_dir = _get_agents_dir()
     src_dir = _get_default_agents_src()
@@ -206,9 +217,102 @@ def _seed_defaults() -> None:
                 except OSError as e:
                     logger.warning("Failed to seed default agent %s: %s", fname, e)
 
+    # SPEC-62 one-time migration: existing installs already copied the
+    # pre-0.2 defaults, whose llm_name named the unconfigured placeholder
+    # provider (see _LEGACY_PLACEHOLDER_LLM_NAME). The per-file isfile guard
+    # above never overwrites their copy, so rewrite ONLY that key here.
+    # Gating on the placeholder string makes this self-idempotent: a second
+    # run finds nothing to change. A user-customized llm_name is never
+    # touched. Never raises — seeding must not break boot.
+    # Order (Debugger #10): this runs BEFORE the ensure_builtin_tool loop so
+    # the migration sees the original on-disk line layout — ensure_builtin_tool's
+    # yaml.dump fallback rewrites the whole file and would destroy line surgery.
+    for fname in _BUILTIN_AGENT_FILES.values():
+        _migrate_legacy_placeholder_llm_name(
+            os.path.join(agents_dir, fname)
+        )
+
     for tool in _BUILTIN_TOOL_MIGRATION:
         for agent_name in ("Coder", "Debugger", "Supervisor"):
             ensure_builtin_tool(agent_name, tool)
+
+
+def _migrate_legacy_placeholder_llm_name(path: str) -> None:
+    """SPEC-62: rewrite ``llm_name: <legacy placeholder>`` → ``llm_name: ""``.
+
+    Line-level rewrite of the ONE llm_name line; every other line (fields,
+    comments, order) is preserved byte-for-byte. The placeholder VALUE is
+    matched exactly across the three YAML scalar spellings — unquoted,
+    double-quoted, single-quoted (``local-kb``, ``"local-kb"``,
+    ``'local-kb'``) — by unquoting before comparison. Any other value is
+    user customization and stays (near-misses like ``local-kb-v2`` never
+    match). Atomic write (temp file + os.replace, the agent/config.py
+    set_agent_setting pattern). Wrapped by the caller so OSError never
+    propagates: seeding must not break boot.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return  # file absent (fresh install already seeded the fixed default) — nothing to migrate
+    except OSError as e:
+        logger.warning("SPEC-62 migration: cannot read %s: %s", path, e)
+        return
+
+    legacy = _LEGACY_PLACEHOLDER_LLM_NAME
+
+    def _is_legacy_llm_name(line: str) -> bool:
+        """True iff this is a top-level ``llm_name:`` line whose VALUE,
+        after YAML scalar unquoting and stripping, equals the placeholder
+        exactly. Indented entries and near-misses (``local-kb-v2``,
+        ``local_kb``) never match. JSON agent files are NOT a target — the
+        migration runs over _BUILTIN_AGENT_FILES (the three YAMLs) only.
+        """
+        stripped = line.strip()
+        prefix = "llm_name:"
+        if not stripped.startswith(prefix):
+            return False
+        rest = stripped[len(prefix):]
+        # A comment must be separated from the value; ``#`` with no space
+        # is part of a plain scalar, so cut comments conservatively.
+        if "#" in rest and not rest.lstrip().startswith("#"):
+            hash_pos = rest.index(" #")
+            rest = rest[:hash_pos]
+        value = rest.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]  # drop matched YAML quotes
+        return value == legacy
+
+    replacement = 'llm_name: ""  # user picks a primary provider in Settings / the Agent Builder'
+    updated_lines: list[str] = []
+    replaced = False
+    for line in text.splitlines(keepends=True):
+        if _is_legacy_llm_name(line):
+            indent = line[: len(line) - len(line.lstrip())]
+            eol = "\r\n" if line.endswith("\r\n") else "\n"
+            updated_lines.append(indent + replacement + eol)
+            replaced = True
+            continue
+        updated_lines.append(line)
+    if not replaced:
+        return
+
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("".join(updated_lines))
+        os.replace(tmp_path, path)
+    except OSError as e:
+        logger.warning("SPEC-62 migration: write failed for %s: %s", path, e)
+        if os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return
+    logger.info(
+        "SPEC-62 migration: cleared legacy placeholder llm_name in %s", path
+    )
 
 
 _BUILTIN_AGENT_FILES = {
@@ -599,6 +703,14 @@ def validate_agent_def(agent_def: dict) -> list[str]:
 
     Checks required fields, prompt file existence, tool name validity.
     Returns list of error strings (empty if valid).
+
+    ``llm_name`` is OPTIONAL per docs/ARCHITECTURE.md §3.2a + §3.21 and
+    agent/special_agents.py: absent/empty/None means the def resolves to the
+    global default provider at runtime (SPEC-62). A NON-EMPTY llm_name must
+    name a configured provider card — unknown names still error. An empty
+    ``display_names`` set (no providers configured yet) skips that check so a
+    fresh install can seed and load its built-ins. ``fallback_provider``
+    remains required for every def.
     """
     errors: list[str] = []
 
@@ -609,8 +721,9 @@ def validate_agent_def(agent_def: dict) -> list[str]:
         errors.append("Missing required field: prompts (must be a non-empty list)")
     if not agent_def.get("tools"):
         errors.append("Missing required field: tools (must be a non-empty list)")
-    if not agent_def.get("llm_name"):
-        errors.append("Missing required field: llm_name")
+    # llm_name is deliberately NOT a required field (SPEC-62): absent/empty
+    # resolves to the global default provider at runtime. The non-empty
+    # unknown-name check stays below.
     if not agent_def.get("fallback_provider"):
         errors.append("Missing required field: fallback_provider (every agent must have a fallback)")
 

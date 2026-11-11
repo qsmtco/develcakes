@@ -18,6 +18,19 @@ RUNTIME = os.path.join(REPO_ROOT, "agent", "runtime.py")
 CONFIG = os.path.join(REPO_ROOT, "agent", "config.py")
 STORE = os.path.join(REPO_ROOT, "utils", "providers_store.py")
 
+# SPEC-62 adjudication: utils/agent_defs.py must carry the pre-0.2
+# placeholder string ONCE, as the module constant
+# _LEGACY_PLACEHOLDER_LLM_NAME, so it can recognize and migrate existing
+# installs whose seeded agent YAML still says `llm_name: local-kb`.
+# One file, one needle, one reason — no broadening. (If another hit is
+# ever legitimately needed, add an explicit entry here with its own
+# citation, per the SPEC-04 SP3 pin in the docstrings below.)
+_SPEC62_ADJUDICATED = {
+    os.path.normcase(os.path.join(REPO_ROOT, "utils", "agent_defs.py")): {
+        "local-kb",  # SPEC-62 legacy-placeholder migration constant
+    },
+}
+
 
 def _read(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
@@ -74,8 +87,9 @@ def test_runtime_imports_clean() -> None:
 def test_source_tree_free_of_kb_strings() -> None:
     """Whole-tree grep: no auxilium/kb_server/kb_lookup/local-kb anywhere.
 
-    Whitelists nothing — if a hit is ever legitimately needed, this test must
-    be revisited with an explicit adjudication (SPEC-04 SP3 pin).
+    Whitelists one adjudicated exception — if another hit is ever legitimately
+    needed, this test must be revisited with an explicit adjudication
+    (SPEC-04 SP3 pin; SPEC-62 adjudication lives at module top).
     """
     needles = ("auxilium", "kb_server", "kb_lookup", "local-kb")
     roots = [
@@ -97,8 +111,11 @@ def test_source_tree_free_of_kb_strings() -> None:
             with open(path, "r", encoding="utf-8") as f:
                 src = f.read()
             low = src.lower()
+            allowed = _SPEC62_ADJUDICATED.get(os.path.normcase(os.path.abspath(path)), set())
             for needle in needles:
                 if needle in low:
+                    if needle in allowed:
+                        continue  # SPEC-62 adjudicated migration constant
                     hits.append(f"{path}: contains {needle!r}")
     assert not hits, "KB residue found:\n" + "\n".join(hits)
 

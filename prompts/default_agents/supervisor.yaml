@@ -4,8 +4,8 @@
 name: Supervisor
 emoji: "🎩"
 role: supervisor
-llm_name: local-kb  # placeholder; user configures their own in Settings → Providers
-fallback_provider: openrouter  # cloud fallback when local-kb is unavailable
+# No primary provider is pre-selected: pick one in Settings → Providers or the Agent Builder.
+fallback_provider: openrouter  # cloud fallback when the primary is unavailable
 prompts:
   - system/supervisor.md
 tools:

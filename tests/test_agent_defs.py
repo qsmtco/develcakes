@@ -16,8 +16,15 @@ import utils.agent_defs as ad
 
 @pytest.fixture
 def tmp_agents_dir(monkeypatch, tmp_path):
-    """Redirect agent defs to a temp directory."""
+    """Redirect agent defs to a temp directory.
+
+    SPEC-62 Fix Round 1 (Debugger #5): creates the directory, not just the
+    path string — callers like test_migration_is_line_surgical_and_noop_when_clean
+    write coder.yaml straight into it and hit FileNotFoundError otherwise
+    (the redirect monkeypatch never materialized the dir).
+    """
     agents_dir = str(tmp_path / "agents")
+    os.makedirs(agents_dir, exist_ok=True)
     monkeypatch.setattr(ad, "_get_agents_dir", lambda: agents_dir)
     return agents_dir
 
@@ -312,12 +319,43 @@ class TestValidateAgentDef:
         assert errors == []
 
     def test_missing_required_fields(self):
+        """SPEC-62: llm_name is OPTIONAL (absent → global default at
+        runtime). Every other required field still errors, and an absent
+        llm_name produces no llm_name error at all."""
         errors = ad.validate_agent_def({})
         assert any("name" in e for e in errors)
         assert any("prompts" in e for e in errors)
         assert any("tools" in e for e in errors)
-        assert any("llm_name" in e for e in errors)
         assert any("fallback_provider" in e for e in errors)
+        assert not any("llm_name" in e for e in errors), (
+            f"llm_name must be optional — got errors: {errors}"
+        )
+
+    def test_absent_llm_name_no_errors_when_prompt_and_tools_exist(self):
+        """A def without any llm_name key validates clean (SPEC-62)."""
+        agent = {
+            "name": "NoLlmName",
+            "prompts": ["system/coder.md"],
+            "tools": ["read_file"],
+            "fallback_provider": "openrouter",
+        }
+        errors = ad.validate_agent_def(agent)
+        assert errors == [], f"unexpected errors: {errors}"
+
+    def test_empty_llm_name_is_also_accepted(self):
+        """Both falsy spellings are unset: an EMPTY-STRING llm_name must be
+        treated the same as an absent key (SPEC-62 edge-case table)."""
+        agent = {
+            "name": "EmptyLlmName",
+            "prompts": ["system/coder.md"],
+            "tools": ["read_file"],
+            "llm_name": "",
+            "fallback_provider": "openrouter",
+        }
+        errors = ad.validate_agent_def(agent)
+        assert not any("llm_name" in e for e in errors), (
+            f"empty-string llm_name must not error — got: {errors}"
+        )
 
     def test_missing_fallback_provider(self):
         """Every agent must have a fallback_provider."""
@@ -486,3 +524,369 @@ class TestAvailableOptions:
         assert len(providers) > 0
         assert all("name" in p and "base_url" in p and "default_model" in p for p in providers)
         assert providers[0]["name"] == "openrouter"
+
+
+# ── SPEC-62 fresh-install regressions ──────────────────────────────────────
+
+_BUILTIN_SEED_SPECS = (
+    ("coder.yaml", "Coder", "system/coder.md", "coder"),
+    ("debugger.yaml", "Debugger", "system/debugger.md", "debugger"),
+    ("supervisor.yaml", "Supervisor", "system/supervisor.md", "supervisor"),
+)
+
+
+def _write_default_agents(src_dir: str, *, with_placeholder: bool = False) -> None:
+    """Write the three built-in default YAMLs into a redirected src dir.
+
+    with_placeholder=True reproduces the PRE-0.2 shipped shape (llm_name
+    naming the legacy placeholder) so the migration test starts from the
+    real historical on-disk state, not an invented one.
+    """
+    import yaml
+    for fname, name, prompt, role in _BUILTIN_SEED_SPECS:
+        agent = {
+            "name": name,
+            "emoji": "x",
+            "role": role,
+            "prompts": [prompt],
+            "tools": ["read_file"],
+            "fallback_provider": "openrouter",
+        }
+        if with_placeholder:
+            agent["llm_name"] = ad._LEGACY_PLACEHOLDER_LLM_NAME
+        with open(os.path.join(src_dir, fname), "w", encoding="utf-8") as f:
+            yaml.dump(agent, f)
+
+
+class TestSpec62FreshInstall:
+    """SPEC-62 Phase 1: built-in defs load on a fresh install and the
+    pre-0.2 placeholder llm_name is migrated in already-seeded configs.
+
+    Config resolution is isolated by the conftest autouse
+    _isolate_config_resolution fixture (HOME + XDG_CONFIG_HOME → tmp_path);
+    the agents dir itself is redirected via tmp_agents_dir/default_agents_src
+    like the suites above.
+    """
+
+    def _seed_one_provider(self, tmp_path) -> None:
+        from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
+        save_providers([
+            ProviderConfig(name="openrouter", base_url="https://openrouter.ai/api/v1",
+                           api_key="sk-test", default_model="deepseek/deepseek-v4-pro"),
+        ])
+
+    def test_fresh_install_seeds_three_valid_defs(self, tmp_agents_dir, default_agents_src):
+        """Fresh temp config, NO llm_name keys anywhere → load_agent_defs()
+        seeds the three built-ins and all three validate clean."""
+        _write_default_agents(default_agents_src)
+        defs = ad.load_agent_defs()
+        assert len(defs) == 3
+        assert {d["name"] for d in defs} == {"Coder", "Debugger", "Supervisor"}
+        for d in defs:
+            assert not d.get("llm_name"), (
+                f"{d['name']} must load with a falsy llm_name, got {d.get('llm_name')!r}"
+            )
+
+    def test_fresh_install_with_one_provider_loads_all_three(
+        self, tmp_agents_dir, default_agents_src, tmp_path
+    ):
+        """Fresh install + ONE configured card → all three built-ins load and
+        load_agent_def() returns each by display name. The seeded defaults
+        reproduce the PRE-FIX shipped shape (placeholder llm_name), which is
+        the RED case: on unmodified HEAD the placeholder is rejected the
+        moment a provider exists, every def is dropped, and these asserts
+        fail."""
+        _write_default_agents(default_agents_src, with_placeholder=True)
+        self._seed_one_provider(tmp_path)
+
+        assert ad.load_agent_def("Coder") is not None
+        assert ad.load_agent_def("Debugger") is not None
+        assert ad.load_agent_def("Supervisor") is not None
+
+    def test_fresh_install_with_zero_providers_still_loads(
+        self, tmp_agents_dir, default_agents_src
+    ):
+        """Fresh install, NO providers configured, PRE-FIX placeholder
+        defaults → the three defs still load. Green on HEAD BY CONSTRUCTION:
+        with zero cards the validator's display_names set is empty, so the
+        unknown-provider branch (the only thing that rejects the placeholder)
+        is skipped. Pinned so a no-provider install can never regress into a
+        broken boot."""
+        _write_default_agents(default_agents_src, with_placeholder=True)
+        assert ad.load_agent_def("Coder") is not None
+        assert ad.load_agent_def("Debugger") is not None
+        assert ad.load_agent_def("Supervisor") is not None
+
+    def test_validator_minimal_dict_and_unknown_provider(
+        self, tmp_path, monkeypatch
+    ):
+        """Validator contract: a minimal def without llm_name produces no
+        llm_name error; a non-empty unknown llm_name WITH one card seeded
+        still errors Unknown provider (the display_names guard makes the
+        no-card variant vacuous, so a card is seeded first)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+        minimal = {
+            "name": "Minimal",
+            "prompts": ["system/coder.md"],
+            "tools": ["read_file"],
+            "fallback_provider": "openrouter",
+        }
+        errors = ad.validate_agent_def(minimal)
+        assert not any("llm_name" in e for e in errors), (
+            f"absent llm_name must be optional — got: {errors}"
+        )
+
+        self._seed_one_provider(tmp_path)
+        unknown = dict(minimal, llm_name="not-a-provider")
+        errors = ad.validate_agent_def(unknown)
+        assert any("Unknown provider" in e for e in errors), (
+            f"non-empty unknown llm_name must still error — got: {errors}"
+        )
+
+    def test_migration_rewrites_placeholder_and_is_idempotent(
+        self, tmp_agents_dir, default_agents_src, tmp_path
+    ):
+        """End-to-end layer: pre-seed a config copy carrying the legacy
+        placeholder, run _seed_defaults(), and assert the placeholder is
+        gone, fallback_provider/name survive, the def then LOADS with one
+        card seeded, a second run is a byte-level no-op, and a customized
+        llm_name is never rewritten. (The one-line-surgical guarantee is
+        pinned separately by test_migration_is_line_surgical_and_noop_when_clean;
+        here ensure_builtin_tool legitimately extends tools in the same pass.)
+        RED on HEAD: the placeholder copy simply survives (no migration, no
+        relaxation), so the rewritten-on-disk and load asserts fail."""
+        import yaml
+
+        _write_default_agents(default_agents_src, with_placeholder=True)
+
+        # Simulate the EXISTING-INSTALL state: a user copy seeded from the
+        # old defaults, plus a customized file that must never be touched.
+        self._seed_one_provider(tmp_path)
+        ad._seed_defaults()  # first pass: copies + should migrate in one run
+
+        coder_path = os.path.join(tmp_agents_dir, "coder.yaml")
+        with open(coder_path, encoding="utf-8") as f:
+            migrated_text = f.read()
+        assert f"llm_name: {ad._LEGACY_PLACEHOLDER_LLM_NAME}" not in migrated_text
+        assert 'llm_name: ""' in migrated_text
+
+        migrated = yaml.safe_load(migrated_text)
+        assert migrated["fallback_provider"] == "openrouter"
+        assert migrated["name"] == "Coder"
+        assert ad.load_agent_def("Coder") is not None
+
+        # Byte-level idempotence: the second _seed_defaults() run must not
+        # rewrite the file at all (no new mtime/content churn).
+        before = os.stat(coder_path)
+        snapshot = migrated_text
+        ad._seed_defaults()
+        after = os.stat(coder_path)
+        with open(coder_path, encoding="utf-8") as f:
+            assert f.read() == snapshot
+        assert (before.st_mtime_ns, before.st_size) == (after.st_mtime_ns, after.st_size)
+
+        # A copy whose llm_name is any OTHER value is user customization.
+        custom_path = os.path.join(tmp_agents_dir, "debugger.yaml")
+        with open(custom_path, encoding="utf-8") as f:
+            custom_before = f.read()
+        assert f"llm_name: {ad._LEGACY_PLACEHOLDER_LLM_NAME}" not in custom_before
+
+        text = custom_before.replace(
+            'llm_name: ""', "llm_name: my-card  # user's own card"
+        )
+        with open(custom_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        ad._seed_defaults()
+        with open(custom_path, encoding="utf-8") as f:
+            custom_after = f.read()
+        assert "llm_name: my-card" in custom_after, (
+            "user-customized llm_name must NEVER be rewritten"
+        )
+        # And the validator still requires that custom card to exist.
+        custom_def = yaml.safe_load(custom_after)
+        errors = ad.validate_agent_def(custom_def)
+        assert any("Unknown provider" in e for e in errors), (
+            "customized unknown llm_name must still validate as unknown"
+        )
+
+    def test_migration_is_line_surgical_and_noop_when_clean(self, tmp_agents_dir, tmp_path):
+        """Unit layer: _migrate_legacy_placeholder_llm_name rewrites ONLY the
+        llm_name line (every other line preserved byte-for-byte), refuses a
+        longer value like ``llm_name: local-kb-v2`` (user customization), and
+        is a no-op when the exact placeholder is absent. RED-on-HEAD as an
+        AttributeError (the helper does not exist there); the NEGATIVE
+        branches inside (customize / no-op / idempotence) are trivially true
+        on HEAD because HEAD had no migration at all — pinned so the negative
+        guarantees survive the introduction of one."""
+        src_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "prompts", "default_agents", "coder.yaml",
+        )
+        with open(src_path, encoding="utf-8") as f:
+            real_yaml = f.read()
+
+        # 1) Rewrite preserves every other line byte-for-byte. Build the
+        # synthetic PRE-FIX copy by reinserting the historical llm_name line
+        # in the position it shipped in (between the role line and the
+        # fallback_provider line), so the file under test is the real
+        # pre-0.2 shape, not an invented one.
+        historical = real_yaml.replace(
+            "fallback_provider:",
+            "llm_name: %s  # placeholder; user configures their own in Settings\nfallback_provider:"
+            % ad._LEGACY_PLACEHOLDER_LLM_NAME,
+            1,
+        )
+        assert f"llm_name: {ad._LEGACY_PLACEHOLDER_LLM_NAME}" in historical, (
+            "premise: the synthetic historical copy must carry the placeholder"
+        )
+        target = os.path.join(tmp_agents_dir, "coder.yaml")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(historical)
+
+        ad._migrate_legacy_placeholder_llm_name(target)
+        with open(target, encoding="utf-8") as f:
+            migrated = f.read()
+        assert f"llm_name: {ad._LEGACY_PLACEHOLDER_LLM_NAME}" not in migrated
+        assert 'llm_name: ""' in migrated
+        old_lines = historical.splitlines()
+        new_lines = migrated.splitlines()
+        assert len(old_lines) == len(new_lines), (
+            "line-level rewrite must not add or drop lines"
+        )
+        changed = [
+            (a, b) for a, b in zip(old_lines, new_lines) if a != b
+        ]
+        assert len(changed) == 1, f"exactly one line may change, got: {changed}"
+        assert changed[0][1].strip().startswith('llm_name: ""')
+
+        # 2) Idempotent: second call changes nothing (string gate).
+        mtime_before = os.stat(target).st_mtime_ns
+        ad._migrate_legacy_placeholder_llm_name(target)
+        with open(target, encoding="utf-8") as f:
+            assert f.read() == migrated
+        assert os.stat(target).st_mtime_ns == mtime_before
+
+        # 3) A longer value sharing the prefix is user customization: NEVER
+        # rewritten.
+        customized = historical.replace(
+            f"llm_name: {ad._LEGACY_PLACEHOLDER_LLM_NAME}",
+            "llm_name: local-kb-v2  # user's own card",
+            1,
+        )
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(customized)
+        ad._migrate_legacy_placeholder_llm_name(target)
+        with open(target, encoding="utf-8") as f:
+            assert f.read() == customized
+
+        # 4) No exact placeholder (migrated already) → no-op, no rewrite.
+        mtime_before = os.stat(target).st_mtime_ns
+        ad._migrate_legacy_placeholder_llm_name(target)
+        with open(target, encoding="utf-8") as f:
+            assert f.read() == customized
+        assert os.stat(target).st_mtime_ns == mtime_before
+
+    def test_migration_matches_all_three_quoted_spellings(self, tmp_agents_dir):
+        """SPEC-62 Fix Round 1 (Debugger #6): the placeholder VALUE must match
+        across the three YAML scalar spellings — unquoted, double-quoted,
+        single-quoted — by exact equality AFTER unquoting. Near-misses sharing
+        the prefix (``local-kb-v2``) or the name (``local_kb``) are user
+        customization and stay untouched. JSON agent files are NOT a target:
+        _BUILTIN_AGENT_FILES is the three YAMLs only. RED on the pre-round
+        code, where a quoted placeholder survived the migration untouched."""
+        import yaml
+
+        template = (
+            "name: Coder\n"
+            "role: coder\n"
+            "llm_name: {value}\n"
+            "fallback_provider: openrouter\n"
+            "tools:\n  - read_file\n"
+        )
+        for spelling in (
+            ad._LEGACY_PLACEHOLDER_LLM_NAME,                     # unquoted
+            '"%s"' % ad._LEGACY_PLACEHOLDER_LLM_NAME,            # double-quoted
+            "'%s'" % ad._LEGACY_PLACEHOLDER_LLM_NAME,            # single-quoted
+        ):
+            target = os.path.join(tmp_agents_dir, "coder.yaml")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(template.format(value=spelling))
+
+            ad._migrate_legacy_placeholder_llm_name(target)
+            with open(target, encoding="utf-8") as f:
+                text = f.read()
+            assert ad._LEGACY_PLACEHOLDER_LLM_NAME not in text, (
+                f"placeholder spelling {spelling!r} survived the migration"
+            )
+            assert 'llm_name: ""' in text
+            parsed = yaml.safe_load(text)
+            assert parsed["llm_name"] == ""
+            assert parsed["name"] == "Coder"
+            assert parsed["fallback_provider"] == "openrouter"
+            assert parsed["tools"] == ["read_file"]
+
+        # Near-misses: exact-equality matching, never a substring/prefix hit.
+        for near_miss in ("local-kb-v2", "local_kb"):
+            target = os.path.join(tmp_agents_dir, "coder.yaml")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(template.format(value=near_miss))
+            ad._migrate_legacy_placeholder_llm_name(target)
+            with open(target, encoding="utf-8") as f:
+                after = f.read()
+            assert after == template.format(value=near_miss), (
+                f"near-miss {near_miss!r} must never be rewritten"
+            )
+            assert yaml.safe_load(after)["llm_name"] == near_miss
+
+    def test_shipped_defaults_load_directly(self, tmp_path, monkeypatch):
+        """The REAL shipped prompts/default_agents/*.yaml (not a fixture
+        copy) load as falsy-llm_name defs: redirects only the agents dir so
+        _get_default_agents_src() reads the repo files byte-for-byte."""
+        agents_dir = str(tmp_path / "agents")
+        monkeypatch.setattr(ad, "_get_agents_dir", lambda: agents_dir)
+        defs = ad.load_agent_defs()
+        by_name = {d["name"]: d for d in defs}
+        for _fname, name, _prompt, _role in _BUILTIN_SEED_SPECS:
+            d = by_name.get(name)
+            assert d is not None, f"shipped {name} def did not load: {by_name.keys()}"
+            assert not d.get("llm_name"), (
+                f"shipped {name} must carry a falsy llm_name, got {d.get('llm_name')!r}"
+            )
+
+    def test_no_kb_allowlist_gates_the_migration_constant(self):
+        """The whole-tree kb-string scan accepts the migration constant ONLY
+        via the SPEC-62 adjudicated allowlist: with the allowlist the scan is
+        green WITH the constant present; drop the allowlist and it FAILS
+        naming utils/agent_defs.py (proves the entry does real gating work,
+        not decoration)."""
+        import tests.test_no_kb_residuals as kb
+
+        needle = ad._LEGACY_PLACEHOLDER_LLM_NAME
+        with open(ad.__file__, encoding="utf-8") as f:
+            src = f.read()
+        assert needle in src, "premise: the constant must exist in agent_defs.py"
+
+        assert hasattr(kb, "_SPEC62_ADJUDICATED"), "adjudicated allowlist missing"
+        expected = os.path.normcase(os.path.abspath(ad.__file__))
+        assert expected in kb._SPEC62_ADJUDICATED, (
+            f"allowlist must name utils/agent_defs.py, got {list(kb._SPEC62_ADJUDICATED)}"
+        )
+        assert needle in kb._SPEC62_ADJUDICATED[expected], (
+            "allowlist must pin exactly the legacy-placeholder needle"
+        )
+
+        # With the allowlist: the real scan over the product tree is green.
+        kb.test_source_tree_free_of_kb_strings()
+
+        # Without it: the same scan fails NAMING agent_defs.py.
+        saved = dict(kb._SPEC62_ADJUDICATED)
+        try:
+            kb._SPEC62_ADJUDICATED.clear()
+            with pytest.raises(AssertionError) as excinfo:
+                kb.test_source_tree_free_of_kb_strings()
+        finally:
+            kb._SPEC62_ADJUDICATED.update(saved)
+        assert "utils" in str(excinfo.value) and "agent_defs.py" in str(excinfo.value)

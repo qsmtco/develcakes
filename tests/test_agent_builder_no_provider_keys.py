@@ -74,10 +74,43 @@ class TestValidateAgentDef:
         errors = validate_agent_def(agent_def)
         assert not any("api_key" in e.lower() and "required" in e.lower() for e in errors)
 
-    def test_missing_provider_still_errors(self):
-        agent_def = self._valid_def(provider="")
-        errors = validate_agent_def(agent_def)
-        assert any("llm_name" in e.lower() for e in errors)
+    def test_missing_provider_still_errors(self, tmp_path, monkeypatch):
+        """SPEC-62: llm_name is optional, but a NON-EMPTY unknown name still
+        errors — and that branch only fires when at least one provider card
+        is configured (utils/agent_defs.py display_names guard), so ONE card
+        is seeded first. Both falsy spellings (absent key AND llm_name: "")
+        yield no llm_name error."""
+        # Config-dir isolation (conftest autouse does the same for HOME) +
+        # one card, so `Unknown provider` is a real, non-vacuous assertion.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+        from models.providers import ProviderConfig
+        from utils.providers_store import save_providers
+        save_providers([
+            ProviderConfig(name="openrouter", base_url="https://openrouter.ai/api/v1",
+                           api_key="sk-test", default_model="deepseek/deepseek-v4-pro"),
+        ])
+
+        # Non-empty unknown llm_name → Unknown provider error.
+        agent = self._valid_def(provider="not-a-provider", llm_name="not-a-provider")
+        errors = validate_agent_def(agent)
+        assert any("Unknown provider" in e for e in errors), (
+            f"unknown non-empty llm_name must still error — got: {errors}"
+        )
+
+        # Falsy spelling 1: llm_name key ABSENT → no llm_name error.
+        absent = self._valid_def(provider="")
+        assert "llm_name" not in absent
+        errors = validate_agent_def(absent)
+        assert not any("llm_name" in e.lower() for e in errors), (
+            f"absent llm_name must be optional — got: {errors}"
+        )
+
+        # Falsy spelling 2: llm_name == "" → also no llm_name error.
+        empty = self._valid_def(provider="", llm_name="")
+        errors = validate_agent_def(empty)
+        assert not any("llm_name" in e.lower() for e in errors), (
+            f'empty-string llm_name must be optional — got: {errors}'
+        )
 
     def test_missing_name_still_errors(self):
         agent_def = self._valid_def(name="")

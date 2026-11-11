@@ -250,3 +250,100 @@ class TestLoadProvidersFromYamlPrefixKeys:
         )
         from agent.config import get_api_key
         assert get_api_key("openrouter") == "sk-chat-key"
+
+
+class TestSetAgentSettingPreservesConfig:
+    """SPEC-62 Fix Round 1 (Debugger #1): set_agent_setting on a MISSING or
+    corrupt agent.json must seed raw from the same defaults
+    _create_default_config writes, so the key write never collapses the file
+    to one key. Existing valid files keep their byte-level preserve path.
+
+    Config resolution is isolated by the conftest autouse
+    _isolate_config_resolution fixture (HOME + XDG_CONFIG_HOME → tmp_path);
+    set_agent_setting resolves the file through utils.config.get_config_dir().
+    """
+
+    @staticmethod
+    def _agent_json_path() -> str:
+        from utils.config import get_config_dir
+        return os.path.join(get_config_dir(), "agent.json")
+
+    @staticmethod
+    def _read_json(path: str) -> dict:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_missing_file_set_writes_defaults_plus_key(self):
+        """(a) Missing agent.json → set one key → the file equals the
+        shipped defaults plus that key (never {key: value} alone)."""
+        from agent.config import set_agent_setting
+
+        path = self._agent_json_path()
+        assert not os.path.exists(path)
+        set_agent_setting("default_provider", "openrouter")
+
+        raw = self._read_json(path)
+        assert raw["default_provider"] == "openrouter"
+        for key in (
+            "default_model", "max_tool_iterations", "tool_iteration_hard_cap",
+            "tool_timeout_seconds", "cost_limit", "step_limit",
+            "fallback_provider", "fallback_model", "user_id",
+            "_comment", "_security",
+        ):
+            assert key in raw, (
+                f"missing-file key write collapsed agent.json: {key!r} absent"
+            )
+        assert raw["max_tool_iterations"] == 50
+        assert raw["tool_iteration_hard_cap"] == 100
+        assert raw["tool_timeout_seconds"] == 120
+        assert raw["cost_limit"] == 5.0
+        assert raw["step_limit"] == 100
+        assert load_agent_config(path).max_tool_iterations == 50
+
+    def test_corrupt_file_set_preserves_recognizable_values(self):
+        """(b) Corrupt (non-dict / unreadable) agent.json → set one key → the
+        rewrite carries the default set plus the key; the file is not
+        collapsed to a single entry."""
+        from agent.config import set_agent_setting
+
+        path = self._agent_json_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{ this is not valid JSON")  # corrupt payload
+
+        set_agent_setting("default_provider", "openrouter")
+        raw = self._read_json(path)
+        assert raw["default_provider"] == "openrouter"
+        assert raw["cost_limit"] == 5.0
+        assert raw["max_tool_iterations"] == 50
+        assert len(raw) > 1, "corrupt-file rewrite must not be a single-key file"
+
+    def test_existing_valid_file_still_preserves_user_keys(self):
+        """Regression pin for the already-correct path: a valid agent.json
+        with user keys keeps them byte-level — only the target key changes,
+        all other keys and values untouched."""
+        from agent.config import set_agent_setting
+
+        path = self._agent_json_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        user_cfg = {
+            "default_provider": "zai",
+            "default_model": "zai/glm-5.3",
+            "cost_limit": 5.0,
+            "step_limit": 100,
+            "user_id": "alice@example.com",
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(user_cfg, f)
+        before = self._read_json(path)
+
+        set_agent_setting("default_provider", "openrouter")
+        after = self._read_json(path)
+
+        assert after["default_provider"] == "openrouter"
+        for key, value in before.items():
+            if key == "default_provider":
+                continue
+            assert after.get(key) == value, (
+                f"valid-file path must preserve {key!r}"
+            )

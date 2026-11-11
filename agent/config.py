@@ -348,6 +348,27 @@ def get_agent_setting(key: str, default: Any = None) -> Any:
         return default
 
 
+# SPEC-62 Fix Round 1 (Debugger #1): the exact dict ``_create_default_config``
+# writes into a fresh agent.json, kept as one module-level constant so
+# ``set_agent_setting`` seeds from the SAME values when the file is missing
+# or corrupt — a key write must never collapse agent.json to a single key.
+# Keep in lockstep with the ``example`` dict in _create_default_config.
+_DEFAULT_AGENT_JSON_FIELDS: dict[str, Any] = {
+    "_comment": "develcakes agent configuration. Providers are managed in providers.yaml.",
+    "_security": "chmod 600 agent.json — this file may contain API keys",
+    "default_provider": "",
+    "default_model": "",
+    "max_tool_iterations": 50,
+    "tool_iteration_hard_cap": 100,
+    "tool_timeout_seconds": 120,
+    "cost_limit": 5.0,
+    "step_limit": 100,
+    "fallback_provider": None,
+    "fallback_model": None,
+    "user_id": "",  # A-4: user identity for audit log traceability
+}
+
+
 def set_agent_setting(key: str, value: Any) -> None:
     """Write one top-level agent.json setting, preserving all other keys.
 
@@ -356,12 +377,22 @@ def set_agent_setting(key: str, value: Any) -> None:
     warning) rather than raising. Uses an atomic temp-file rename, then
     applies owner-only modes (dir 0700, file 0600) to match the rest of
     agent.json handling. OSError propagates if the write fails.
+
+    SPEC-62 Fix Round 1 (Debugger #1): when the file is missing or its
+    payload is unreadable/non-dict, ``raw`` is seeded from the SAME defaults
+    ``_create_default_config`` writes (via _DEFAULT_AGENT_JSON_FIELDS) before
+    the new key is merged in. A key write on a fresh or corrupt agent.json
+    must never collapse the file to one key — it must look like a default
+    config plus that one key, so user settings such as cost_limit survive a
+    corrupt-file incident instead of being destroyed by the rewrite.
     """
     import importlib
     utils_config = importlib.import_module("utils.config")
     config_path = os.path.join(utils_config.get_config_dir(), "agent.json")
 
-    raw: dict[str, Any] = {}
+    # Seed from the shipped defaults; a successful read below merges over it.
+    # NEVER replace: raw[key] = value must always land on a full default set.
+    raw: dict[str, Any] = dict(_DEFAULT_AGENT_JSON_FIELDS)
     if os.path.isfile(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
@@ -370,12 +401,14 @@ def set_agent_setting(key: str, value: Any) -> None:
                 raw = loaded
             else:
                 logger.warning(
-                    "agent.json root is not a mapping (%s) — rewriting with only %r",
+                    "agent.json root is not a mapping (%s) — rewriting with "
+                    "defaults + %r",
                     type(loaded).__name__, key,
                 )
         except (OSError, json.JSONDecodeError) as e:
             logger.warning(
-                "agent.json unreadable (%s) — rewriting with only %r", e, key,
+                "agent.json unreadable (%s) — rewriting with defaults + %r",
+                e, key,
             )
     raw[key] = value
 
