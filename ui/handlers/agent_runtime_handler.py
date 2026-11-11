@@ -895,10 +895,15 @@ class AgentRuntimeHandler(
         config = load_agent_config()
 
         # If the agent definition specifies a provider, use it as the default
+        # SPEC-62 fix-round 4 RULING 4: a per-agent llm_name override must
+        # survive refresh_provider_config — mark the runtime so the refresh
+        # never clobbers it with the (possibly changed) global default.
+        is_override = False
         if agent_def is not None and getattr(agent_def, 'llm_name', None):
             llm_name = agent_def.llm_name
             if llm_name in config.providers:
                 config.default_provider = llm_name
+                is_override = True
                 provider = config.providers[llm_name]
             else:
                 provider = config.providers.get(config.default_provider)
@@ -926,6 +931,11 @@ class AgentRuntimeHandler(
             on_enforcement_status=self._on_enforcement_status,
         )
         rt.set_on_provider_failover(self._on_provider_failover)
+        # RULING 4: private marker read by refresh_provider_config (absent /
+        # False for global-default runtimes — refresh then propagates the
+        # fresh global default; True here — refresh leaves default_provider
+        # alone and refreshes only the bare default_model).
+        rt._default_provider_is_override = is_override
         rt.start()
         self._runtimes[name] = rt
         logger.info("Created AgentRuntime for special agent: %s", name)

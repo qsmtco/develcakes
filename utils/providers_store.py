@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
@@ -48,13 +49,21 @@ _FILENAME = "providers.yaml"
 def _effective_caller(p: ProviderConfig) -> str:
     """The caller a card effectively presents, derived exactly like
     SettingsHandler.add_or_update's auto-detect (settings_handler.py:111):
-    an explicit caller wins; otherwise a ``<prefix>/<model>`` default_model
-    with a RECOGNIZED prefix supplies it.
+    a stored caller wins (VALIDATED — invalid or whitespace-only is treated
+    as empty, fix-round 4 RULING 1a), otherwise a ``<prefix>/<model>``
+    default_model with a RECOGNIZED prefix supplies it.
 
     SPEC-62 fix-round 2: the write choke point needs this because only
     add_or_update populates ``caller`` — direct save_providers calls, the
     agent-builder saves, and migrate_from_agent_json all produce chat cards
     with caller="", which a bare ``if p.caller`` test silently misses.
+
+    RULING 1 (fix-round 4): derivation decides WHICH caller, never WHETHER
+    the card is chat — whether-gating lives at the adoption sites via
+    _NON_CHAT_NAMES (deterministic name exclusion for the two fixed
+    non-chat cards). Residual risk: a hypothetical future non-chat card
+    with a recognized prefixed model would be misjudged as chat here —
+    accepted, post-mortem note.
 
     Uses THIS module's _VALID_CALLERS — the duplication-invariant twin of
     agent.runtime's taxonomy (TestValidCallersDuplicationInvariant) — NOT an
@@ -62,18 +71,60 @@ def _effective_caller(p: ProviderConfig) -> str:
     (:3345/:3478), so importing back would be circular, and the utils/*
     layer rule forbids it anyway.
 
-    Returns "" when nothing is derivable (caller="" + unprefixed model, or
-    an unrecognized prefix) — the silent choke-point analogue of
-    add_or_update's "Cannot auto-detect caller" ValueError.
+    Returns "" when nothing is derivable (caller absent/invalid/whitespace +
+    unprefixed model, or an unrecognized prefix) — the silent choke-point
+    analogue of add_or_update's "Cannot auto-detect caller" ValueError.
     """
-    if p.caller:
-        return p.caller
+    caller = (p.caller or "").strip()
+    if caller:
+        # RULING 1a: a stored caller counts only when it is in the taxonomy
+        # ("not-a-real-caller", "   ", None → the card has NO effective
+        # caller — it must never be adopted as the global default).
+        return caller if caller in _VALID_CALLERS else ""
     default_model = p.default_model or ""
     if "/" in default_model:
         prefix = default_model.split("/", 1)[0].strip().lower()
         if prefix in _VALID_CALLERS:
             return prefix
     return ""
+
+
+# SPEC-62 fix-round 4 RULING 1b: the two FIXED non-chat cards are excluded by
+# NAME — a DecisionModel card whose model carries a recognized prefix
+# ("openrouter/decision-x") derives a caller, so name exclusion is the
+# deterministic whether-guard for exactly these cards. The constants live in
+# agent/llm/jev_client.py and utils/improve.py (agent.config imports them
+# function-locally, so they are NOT re-exported there). providers_store cannot
+# import agent.llm.jev_client / utils.improve directly at module scope
+# (utils/* layer rule + agent-side import of this module), so mirror the same
+# function-local pattern agent.config uses — and degrade gracefully when the
+# sub-modules are absent (fresh-install probe paths).
+def _fixed_non_chat_names() -> frozenset[str]:
+    names: set[str] = set()
+    with contextlib.suppress(ImportError):
+        from agent.llm.jev_client import DECISION_MODEL_PROVIDER
+        names.add(DECISION_MODEL_PROVIDER)
+    with contextlib.suppress(ImportError):
+        from utils.improve import IMPROVE_MODEL_PROVIDER
+        names.add(IMPROVE_MODEL_PROVIDER)
+    return frozenset(names)
+
+
+_NON_CHAT_NAMES: frozenset[str] = _fixed_non_chat_names()
+
+
+def _is_chat_card(p: ProviderConfig) -> bool:
+    """The RULING 1 adoption predicate: a derivable/valid caller AND the card
+    is not one of the fixed non-chat cards (DecisionModel / ImproveModel)."""
+    return _effective_caller(p) != "" and p.name not in _NON_CHAT_NAMES
+
+
+def _bare_model(default_model: str) -> str:
+    """RULING 2: agent.json default_model is consumed only by agent/runtime's
+    f"{default_provider}/{default_model}" composition, so it must be the BARE
+    name — a stored full "openai/gpt-4o" would compose "mycard/openai/gpt-4o"
+    and brick the wire call. Unprefixed models pass through unchanged."""
+    return (default_model or "").split("/", 1)[-1]
 
 
 def get_providers_path() -> str:
@@ -311,7 +362,8 @@ def load_providers() -> list[ProviderConfig]:
 
 
 def save_providers(providers: list[ProviderConfig], *,
-                   allow_empty: bool = False) -> None:
+                   allow_empty: bool = False,
+                   prefer: str | None = None) -> None:
     """Write list[ProviderConfig] → providers.yaml. Creates parent dir.
     File is written with mode 0o600 (owner-only — contains API keys).
     Parent dir is chmod 0o700 if created. The previous file is preserved
@@ -323,6 +375,14 @@ def save_providers(providers: list[ProviderConfig], *,
     (the explicit remove-the-last-card path). A degraded load must not
     silently truncate the store; oversized intentional shrinks log a
     warning naming the .bak recovery file.
+
+    SPEC-62 fix-round 4 RULING 3: this function is the SINGLE OWNER of
+    global-default maintenance — every provider write path funnels through
+    here, so all branches live in one place (the former settings_handler
+    adoption/retarget blocks were deleted; ``add_or_update`` passes
+    ``prefer=provider.name``):
+      * ``prefer``: when the stored default is EMPTY, adopt the named card
+        if it is a chat card (RULING 1 predicate), else the first chat card.
     """
     path = get_providers_path()
     existing = _existing_card_count()
@@ -373,54 +433,92 @@ def save_providers(providers: list[ProviderConfig], *,
         except OSError:
             pass
 
-    # SPEC-62 fix-round item A: the global-default persistence lives HERE at
-    # the write choke point. settings_handler.add_or_update/remove cover only
-    # their own 2 write paths; the other 5 funnel through save_providers —
-    # test_provider's re-save (settings_handler), both agent-builder save
-    # branches, migrate_from_agent_json, and this module's brief-cited
-    # helpers. Rule (Debugger #2, Supervisor ruling): when the stored default
-    # is empty or names a card that is no longer in the just-saved list AND
-    # that list contains a CHAT card (DERIVED caller — see _effective_caller;
-    # DecisionModel/JEV cards must never become the default), adopt the FIRST chat card. A
-    # still-live default is left untouched, and a list with no chat card
-    # changes nothing (a DecisionModel-only install keeps default "" — by
-    # design, fix-round item E). Layer rule respected: agent.config getters
-    # only, never ui/*.
-    #
-    # allow_empty=True is the EXPLICIT remove-the-last-card path
-    # (SettingsHandler.remove). Skip adoption there entirely: the clearing
-    # user must not watch the just-cleared default re-adopt itself
-    # (test_settings_remove_fires_callback pins on_providers_changed firing
-    # with []), and SettingsHandler.remove's own retarget logic handles the
-    # "removed the default card" case.
+    # SPEC-62 fix-round 4 RULING 3: single-owner default maintenance. All
+    # branches live here; settings_handler's two blocks were DELETED and
+    # add_or_update now passes prefer=provider.name. Branches:
+    #   (1) allow_empty + empty list            → clear both (explicit clear)
+    #   (2) allow_empty + non-empty stale list  → retarget/clear  (fixes #6/#7)
+    #   (3) default empty OR stale              → adopt prefer-or-first chat
+    #   (4) default live                        → refresh BARE model (fixes #4)
+    # Chat-card gating: _is_chat_card (RULING 1 predicate — derived/validated
+    # caller via _effective_caller + fixed-name exclusion). Stored model is
+    # always the BARE name (RULING 2) so agent/runtime's
+    # f"{default_provider}/{default_model}" composes the full model.
+    # Layer rule respected: agent.config getters only, never ui/*.
     try:
         from agent.config import get_agent_setting, set_agent_setting
 
         current_default = get_agent_setting("default_provider", "")
         saved_names = {p.name for p in providers}
-        if allow_empty:
-            if not providers and current_default:
+        default_is_live = current_default in saved_names
+
+        if allow_empty and not providers:
+            # (1) Explicit remove-the-last-card: reset both settings.
+            if current_default:
                 set_agent_setting("default_provider", "")
                 set_agent_setting("default_model", "")
                 _logger.info(
                     "save_providers: all cards cleared — "
                     "default_provider/default_model reset"
                 )
-        elif not current_default or current_default not in saved_names:
-            # Fix-round 2: chat-card test uses the DERIVED caller, not the
-            # bare stored field — the 5 uncovered write paths produce chat
-            # cards with caller="" (only add_or_update auto-detects), which
-            # the old `if p.caller` test silently missed.
-            first_chat = next(
-                (p for p in providers if _effective_caller(p)), None
+        elif allow_empty:
+            # (2) Explicit shrink that still leaves cards (fixes #6/#7): the
+            # retarget/clear decision is the choke point's, not the caller's.
+            if current_default and not default_is_live:
+                chat_cards = [p for p in providers if _is_chat_card(p)]
+                if chat_cards:
+                    first = chat_cards[0]
+                    set_agent_setting("default_provider", first.name)
+                    set_agent_setting("default_model", _bare_model(first.default_model))
+                    _logger.info(
+                        "save_providers: default card removed via shrink — "
+                        "retargeted to %s (%s)",
+                        first.name, first.default_model,
+                    )
+                else:
+                    set_agent_setting("default_provider", "")
+                    set_agent_setting("default_model", "")
+                    _logger.info(
+                        "save_providers: default card removed via shrink — "
+                        "no chat cards left, defaults cleared"
+                    )
+        elif not current_default or not default_is_live:
+            # (3) Empty or stale default → adopt. Prefer the named card when
+            # it is a chat card (add_or_update's just-saved card), else the
+            # first chat card (any other write path).
+            prefer_card = None
+            if prefer:
+                prefer_card = next(
+                    (p for p in providers if p.name == prefer), None
+                )
+            chosen = (
+                prefer_card if prefer_card is not None and _is_chat_card(prefer_card)
+                else (chat_cards[0] if (chat_cards := [p for p in providers if _is_chat_card(p)]) else None)
             )
-            if first_chat is not None:
-                set_agent_setting("default_provider", first_chat.name)
-                set_agent_setting("default_model", first_chat.default_model)
+            if chosen is not None:
+                set_agent_setting("default_provider", chosen.name)
+                set_agent_setting("default_model", _bare_model(chosen.default_model))
                 _logger.info(
                     "save_providers: set global default provider to %s (%s)",
-                    first_chat.name, first_chat.default_model,
+                    chosen.name, chosen.default_model,
                 )
+        else:
+            # (4) Default is LIVE: refresh default_model from THE DEFAULT
+            # CARD — BARE (RULING 2) — on EVERY live path, with or without
+            # ``prefer`` (fixes #4): a re-save of the default card with an
+            # edited model (raw save, test_provider stamp, builder save)
+            # must reach agent.json without an app restart. ``prefer`` is a
+            # no-op here by design (a live default is never re-pointed).
+            default_card = next(
+                (p for p in providers if p.name == current_default), None
+            )
+            if default_card is not None and _is_chat_card(default_card):
+                set_agent_setting("default_model", _bare_model(default_card.default_model))
+                _logger.info(
+                    "save_providers: refreshed bare default_model for %s → %s",
+                    default_card.name, default_card.default_model,
+                )
+
     except Exception as e:
         # The settings persistence must never break a provider save.
         _logger.warning("save_providers: could not persist default_provider: %s", e)

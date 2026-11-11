@@ -165,16 +165,19 @@ class RuntimeProviderMixin:
                 # would never reach this runtime without an app restart. The
                 # per-provider value already rides inside cfg.providers.
                 cfg.tool_output_offload_chars = fresh.tool_output_offload_chars
-                # SPEC-62 item 6: propagate the global default so in-flight
-                # runtimes pick up a new default card without an app restart.
-                # GUARD: only overwrite with a TRUTHY fresh default. The v1
-                # audit's regression pin (tests/test_config_invalidation.py::
-                # test_per_agent_default_provider_override_survives_refresh)
-                # requires that a stale per-runtime default the fresh set can
-                # no longer resolve is left untouched by refresh — so an empty
-                # fresh.default_provider must never clobber it.
-                if fresh.default_provider:
+                # SPEC-62 item 6 + fix-round 4 RULING 4: propagate the global
+                # default to in-flight runtimes — but a per-agent llm_name
+                # OVERRIDE (rt._default_provider_is_override, set by
+                # _get_runtime) must survive: its default_provider names the
+                # agent's own card, not the global one, and a clobber (old
+                # behavior) broke #3. default_provider propagates ONLY for
+                # non-override runtimes; default_model propagates ALWAYS as
+                # the BARE name (RULING 2 — runtime composes
+                # f"{default_provider}/{default_model}").
+                if not getattr(rt, "_default_provider_is_override", False):
                     cfg.default_provider = fresh.default_provider
+                    cfg.default_model = fresh.default_model
+                else:
                     cfg.default_model = fresh.default_model
                 updated += 1
             except Exception:

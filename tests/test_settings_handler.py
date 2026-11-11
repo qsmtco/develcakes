@@ -128,17 +128,17 @@ class TestRemove:
 
 
 class TestGlobalDefaultPersistence:
-    """SPEC-62 item 4 + fix-round item B: agent.json default_provider /
-    default_model are persisted on chat-card saves, refreshed when the
-    default card's own model is edited, and retargeted/cleared on removal.
-    A card saved with allow_empty_caller=True (DecisionModel/JEV shape,
-    caller "") is NOT a chat card and must never become the default."""
+    """SPEC-62 item 4 → fix-round 4 RULING 3: agent.json default_provider /
+    default_model maintenance is owned by the save_providers choke point
+    (add_or_update passes prefer=provider.name); RULING 2: the stored model
+    is the BARE name (runtime composes f"{provider}/{bare}")."""
 
     def test_first_chat_card_save_becomes_default(self, tmp_config_dir):
         h = SettingsHandler()
         h.add_or_update(_make_provider("p1"))
         assert get_agent_setting("default_provider", "") == "p1"
-        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+        # RULING 2: bare model stored.
+        assert get_agent_setting("default_model", "") == "test-model-v1"
 
     def test_decision_model_first_does_not_become_default(self, tmp_config_dir):
         h = SettingsHandler()
@@ -164,14 +164,15 @@ class TestGlobalDefaultPersistence:
         assert get_agent_setting("default_provider", "") == "p1"
 
     def test_default_model_refreshed_when_default_card_model_edited(self, tmp_config_dir):
-        # Fix-round item B: a same-name replace of the DEFAULT card with a
-        # new default_model must refresh default_model (no stale model).
+        # Fix-round item B → RULING 3 branch (4): a same-name replace of the
+        # DEFAULT card with a new default_model must refresh default_model,
+        # BARE (RULING 2), via the choke point (add_or_update passes prefer).
         h = SettingsHandler()
         h.add_or_update(_make_provider("p1"))
-        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+        assert get_agent_setting("default_model", "") == "test-model-v1"
         h.add_or_update(_make_provider("p1", default_model="openai/new-model-v9"))
         assert get_agent_setting("default_provider", "") == "p1"  # card unchanged
-        assert get_agent_setting("default_model", "") == "openai/new-model-v9"
+        assert get_agent_setting("default_model", "") == "new-model-v9"
 
     def test_remove_default_retargets_to_first_chat_card(self, tmp_config_dir):
         h = SettingsHandler()
@@ -179,7 +180,8 @@ class TestGlobalDefaultPersistence:
         h.add_or_update(_make_provider("p2"))
         h.remove("p1")
         assert get_agent_setting("default_provider", "") == "p2"
-        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+        # RULING 2: bare model stored.
+        assert get_agent_setting("default_model", "") == "test-model-v1"
 
     def test_remove_last_card_clears_defaults(self, tmp_config_dir):
         h = SettingsHandler()
@@ -189,9 +191,10 @@ class TestGlobalDefaultPersistence:
         assert get_agent_setting("default_model", "") == ""
 
     def test_remove_default_retargets_to_callerless_prefixed_card(self, tmp_config_dir):
-        # Fix-round 3 fold-in: the retarget must see chat cards that reach
-        # disk with caller="" + a recognized model prefix (the uncovered
-        # write paths) — derivation, not the bare stored caller.
+        # Fix-round 3 fold-in → RULING 3 branch (2): the retarget is the
+        # choke point's, on derivation — chat cards that reach disk with
+        # caller="" + a recognized model prefix (the uncovered write paths)
+        # are visible to it.
         from utils.providers_store import save_providers as sp_raw
         from agent.config import get_agent_setting as gas
 
@@ -209,7 +212,8 @@ class TestGlobalDefaultPersistence:
         h.remove("p1")
         # NOT cleared: the derivable chat card was adopted as the new default.
         assert gas("default_provider", "") == "derived-card"
-        assert gas("default_model", "") == "openai/gpt-4o-mini"
+        # RULING 2: bare model stored.
+        assert gas("default_model", "") == "gpt-4o-mini"
 
 
 class TestTestProvider:

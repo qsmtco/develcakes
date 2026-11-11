@@ -547,19 +547,32 @@ class AgentBuilderWidget(Gtk.Box):
             self._fallback_providers.append(p)
 
         sl = Gtk.StringList.new(names)
+        # Capture the CURRENT fallback selection BEFORE set_model — a model
+        # swap resets the DropDown's selection to 0, so reading after the
+        # swap always yields "" and both the preserve branch and the RULING
+        # 5 rescue would be dead code (round-4 self-review fix).
+        prev = self._get_selected_fallback_provider()
         self._fallback_dropdown.set_model(sl)
         # Try to preserve the previously-selected fallback if still in the list;
         # otherwise default to "None" (which keeps the save button disabled) —
         # unless there is exactly one card, in which case the card itself is
         # pre-selected so the form is saveable without further action.
-        prev = self._get_selected_fallback_provider()
         if prev and prev in names:
             idx = names.index(prev)
             self._fallback_dropdown.set_selected(idx)
         elif len(self._providers) == 1:
             self._fallback_dropdown.set_selected(1)  # the single card itself
+        elif prev and len(self._providers) > 1:
+            # SPEC-62 fix-round 4 RULING 5: a fallback WAS selected but is no
+            # longer selectable (the primary switched onto that card, or its
+            # card was removed) — auto-select the FIRST non-primary card
+            # instead of "None", so a mid-edit primary switch never silently
+            # disables Save. prev == "" (no fallback ever chosen — create
+            # form / fresh edit form) does NOT rescue: an explicit fallback
+            # choice is still required there (existing pins).
+            self._fallback_dropdown.set_selected(1)
         else:
-            self._fallback_dropdown.set_selected(0)  # default to None
+            self._fallback_dropdown.set_selected(0)  # explicit choice required
 
     def _on_fallback_provider_changed(self, dropdown, _param) -> None:
         """When fallback provider changes, refresh save button state.

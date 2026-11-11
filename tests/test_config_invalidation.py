@@ -139,39 +139,52 @@ class TestRefreshProviderConfig:
         assert h._runtimes["Coder"]._config.default_provider == "p1"
 
     def test_stale_default_healed_and_propagated_by_refresh(self, tmp_config_dir):
-        # SPEC-62 — SUPERSEDES the v1 pin "per-agent default_provider override
-        # survives refresh". Under the Phase-2 contract the stale-default
-        # behavior changes in two stacked ways:
-        #   1. save_providers (the write choke point, fix-round item A) HEALS
-        #      agent.json when its default names a card no longer in the list
-        #      — 'gone' becomes 'p9' at save time.
-        #   2. refresh_provider_config (item 6) then PROPAGATES the fresh
-        #      global default into every cached runtime's cfg, so in-flight
-        #      runtimes pick it up on the next turn.
-        # The old expectation (cfg.default_provider == "gone", field left
-        # as-is) is exactly what the v3 spec removes; its still-valid core —
-        # refresh must not crash on an unresolvable default — is asserted
-        # alongside the healed value. The survives-untouched semantic lives
-        # on in test_empty_fresh_default_leaves_runtime_default_untouched.
+        # SPEC-62 fix-round 4, REQUIRED test #9 — REWRITTEN: the previous
+        # version asserted the BUG #3 clobber (a per-agent override runtime's
+        # default_provider replaced by the healed global) as expected
+        # behavior. Fixed semantics:
+        #   1. save_providers (choke point) HEALS agent.json: 'gone' → 'p9'.
+        #   2. refresh propagates the healed default to NON-OVERRIDE runtimes;
+        #      an override runtime (rt._default_provider_is_override, RULING 4)
+        #      keeps its own default_provider and gets only the bare
+        #      default_model refresh.
         save_providers([_make_provider("p1")])
         h = _make_handler()
-        h._runtimes["Coder"] = _stub_runtime(
+        override_rt = _stub_runtime(
             providers={"p1": _make_provider("p1")}, default_provider="gone"
         )
-        save_providers([_make_provider("p9")])  # 'gone' no longer resolvable
+        override_rt._default_provider_is_override = True  # per-agent llm_name card
+        global_rt = _stub_runtime(
+            providers={"p1": _make_provider("p1")}, default_provider="gone"
+        )
+        h._runtimes["Override"] = override_rt
+        h._runtimes["Global"] = global_rt
+
+        save_providers([_make_provider("p9")])  # 'gone' unresolvable → healed to p9
         h.refresh_provider_config()  # must not raise
 
-        cfg = h._runtimes["Coder"]._config
-        # Healed global default reached the cached runtime.
-        assert cfg.default_provider == "p9"
-        assert cfg.providers["p9"].name == "p9"
-        assert cfg.providers["p9"].base_url == "https://api.p9.example.com/v1"
+        # The override runtime survived (BUG #3 fixed).
+        assert override_rt._config.default_provider == "gone"
+        # …and still received the BARE model refresh (RULING 2/4).
+        assert override_rt._config.default_model == "p9-model-v1"
+        # The global-default runtime received the healed default; composed
+        # string equals the card's full model (REQUIRED test #2 pin).
+        assert global_rt._config.default_provider == "p9"
+        assert global_rt._config.default_model == "p9-model-v1"
+        assert (
+            f"{global_rt._config.default_provider}/{global_rt._config.default_model}"
+            == "p9/p9-model-v1"
+        )
+        assert global_rt._config.providers["p9"].name == "p9"
+        assert global_rt._config.providers["p9"].base_url == "https://api.p9.example.com/v1"
 
     def test_empty_fresh_default_leaves_runtime_default_untouched(self, tmp_config_dir):
-        # Fix-round item E, code-level: with NO chat card on disk (a
-        # DecisionModel-shaped card only, caller "") the global default stays
-        # "" and item 6's propagation must NOT clobber whatever the runtime
-        # had — the v1 "field left as-is" semantic survives in this domain.
+        # Fix-round 4 RULING 4 semantics (supersedes the round-1 truthy guard):
+        # with NO chat card on disk (a DecisionModel-shaped card only) the
+        # global default stays "". A NON-OVERRIDE runtime mirrors the fresh
+        # global default exactly — including an empty one (that IS the
+        # global default); an override runtime is the survivor case, pinned
+        # by test_stale_default_healed_and_propagated_by_refresh.
         dm_only = _make_provider(
             "DecisionModel",
             base_url="https://dm.example.com/v1",
@@ -186,7 +199,8 @@ class TestRefreshProviderConfig:
         h.refresh_provider_config()  # must not raise
 
         cfg = h._runtimes["Coder"]._config
-        assert cfg.default_provider == "gone"  # empty fresh default → untouched
+        assert cfg.default_provider == ""  # non-override mirrors the fresh global
+        assert cfg.default_model == ""
         assert cfg.providers["DecisionModel"].name == "DecisionModel"
 
     def test_refresh_pulls_newly_added_provider(self, tmp_config_dir):
@@ -471,19 +485,20 @@ class TestResolveAgentModelGlobalDefault:
 
 
 class TestRefreshProviderConfigPropagatesDefaults:
-    """SPEC-62 item 6: refresh_provider_config carries the fresh global
-    default_provider/default_model into every cached runtime's cfg, so
-    in-flight runtimes pick up a new default without an app restart. Guarded
-    propagation: an empty fresh default never clobbers the runtime's value
-    (fix-round item E boundary — DecisionModel-only install keeps whatever
-    the runtime had)."""
+    """SPEC-62 item 6 + fix-round 4 RULING 4: refresh_provider_config carries
+    the fresh global default into every cached runtime's cfg — default_provider
+    ONLY for non-override runtimes (a per-agent llm_name override survives),
+    default_model ALWAYS as the BARE name (runtime composes
+    f"{default_provider}/{default_model}")."""
 
     def test_refresh_propagates_default_provider_and_model(self, tmp_config_dir):
         from agent.config import set_agent_setting
 
         save_providers([_make_provider("p1", default_model="openai/p1-m2")])
+        # RULING 2: the choke point stores the BARE model; the test writes
+        # the setting directly, so it mirrors that contract.
         set_agent_setting("default_provider", "p1")
-        set_agent_setting("default_model", "openai/p1-m2")
+        set_agent_setting("default_model", "p1-m2")
 
         h = _make_handler()
         h._runtimes["Coder"] = _stub_runtime(
@@ -491,12 +506,39 @@ class TestRefreshProviderConfigPropagatesDefaults:
         )
         h.refresh_provider_config()
         cfg = h._runtimes["Coder"]._config
+        # Composition pin (REQUIRED #2's shape): card/bare == full model.
+        assert f"{cfg.default_provider}/{cfg.default_model}" == "p1/openai/p1-m2"
         assert cfg.default_provider == "p1"
-        assert cfg.default_model == "openai/p1-m2"
+        assert cfg.default_model == "p1-m2"
+
+    def test_override_runtime_keeps_provider_gets_bare_model_refresh(self, tmp_config_dir):
+        # REQUIRED test #3 (BUG #3): a per-agent override runtime survives
+        # refresh_provider_config — default_provider unchanged, bare
+        # default_model still refreshed.
+        from agent.config import set_agent_setting
+
+        save_providers([
+            _make_provider("p1", default_model="openai/p1-m2"),
+            _make_provider("own-card", default_model="openai/own-m1"),
+        ])
+        set_agent_setting("default_provider", "p1")
+        set_agent_setting("default_model", "p1-m2")
+
+        h = _make_handler()
+        rt = _stub_runtime(
+            providers={"p1": _make_provider("p1"), "own-card": _make_provider("own-card")},
+            default_provider="own-card",
+        )
+        rt._default_provider_is_override = True
+        h._runtimes["Coder"] = rt
+        h.refresh_provider_config()
+
+        assert rt._config.default_provider == "own-card"  # override survived
+        assert rt._config.default_model == "p1-m2"  # bare model refreshed
 
     def test_empty_fresh_default_leaves_runtime_default_untouched(self, tmp_config_dir):
-        # Fix-round item E boundary at the runtime level: no chat card on
-        # disk → the global default stays "" → refresh must not clobber.
+        # RULING 4 (non-override side): a DecisionModel-only store keeps the
+        # global default "" — a non-override runtime mirrors it exactly.
         dm_only = _make_provider(
             "DecisionModel",
             base_url="https://dm.example.com/v1",
@@ -509,7 +551,7 @@ class TestRefreshProviderConfigPropagatesDefaults:
             providers={"dm": dm_only}, default_provider="gone"
         )
         h.refresh_provider_config()
-        assert h._runtimes["Coder"]._config.default_provider == "gone"
+        assert h._runtimes["Coder"]._config.default_provider == ""
 
 
 class TestRefreshAgentRegistryLightweight:
@@ -593,9 +635,10 @@ class TestSaveProvidersChokePointPersistsDefault:
         # template is f"openai/{name}-model-v1", so a card named "p1"
         # produces "openai/p1-model-v1" — the old literal asserted the
         # GENERIC template string and never matched this instance.
+        # RULING 2: the stored setting is the BARE name.
         save_providers([_make_provider("p1", default_model="openai/first-model-v1")])
         assert get_agent_setting("default_provider", "") == "p1"
-        assert get_agent_setting("default_model", "") == "openai/first-model-v1"
+        assert get_agent_setting("default_model", "") == "first-model-v1"
 
     def test_save_with_no_chat_card_leaves_default_empty(self, tmp_config_dir):
         from agent.config import get_agent_setting
@@ -621,14 +664,15 @@ class TestSaveProvidersChokePointPersistsDefault:
 
     def test_callerless_prefixed_model_card_is_adopted(self, tmp_config_dir):
         # (a) direct save_providers path: caller="" + prefixed default_model
-        # → derivable chat card → default adopted.
+        # → derivable chat card → default adopted. Stored model is BARE
+        # (RULING 2) — runtime composes card/bare back into the full model.
         from agent.config import get_agent_setting
 
         save_providers([
             _make_provider("local-card", caller="", default_model="openai/gpt-4o-mini"),
         ])
         assert get_agent_setting("default_provider", "") == "local-card"
-        assert get_agent_setting("default_model", "") == "openai/gpt-4o-mini"
+        assert get_agent_setting("default_model", "") == "gpt-4o-mini"
 
     def test_callerless_unprefixed_model_card_not_adopted(self, tmp_config_dir):
         # (b) caller="" + unprefixed model + no other chat card → cannot
@@ -642,14 +686,84 @@ class TestSaveProvidersChokePointPersistsDefault:
         assert get_agent_setting("default_provider", "") == ""
         assert get_agent_setting("default_model", "") == ""
 
+    def test_invalid_or_whitespace_caller_card_not_adopted(self, tmp_config_dir):
+        # REQUIRED test #5 (BUG #5, RULING 1a): a stored caller outside the
+        # taxonomy — or whitespace-only — means NO effective caller; the
+        # card must never be adopted as the global default.
+        from agent.config import get_agent_setting
+
+        save_providers([
+            _make_provider("bad-caller", caller="not-a-real-caller",
+                           default_model="whatever/model"),
+        ])
+        assert get_agent_setting("default_provider", "") == ""
+
+        save_providers([
+            _make_provider("ws-caller", caller="   ",
+                           default_model="whatever/model"),
+        ])
+        assert get_agent_setting("default_provider", "") == ""
+        assert get_agent_setting("default_model", "") == ""
+
+    def test_remove_provider_helper_retargets_when_default_removed(self, tmp_config_dir):
+        # REQUIRED test #6 (BUG #6/#7, RULING 3 branch 2): remove_provider
+        # shrinking past the default card retargets to the first remaining
+        # chat card — never left dangling on the removed name.
+        from agent.config import get_agent_setting
+        from utils.providers_store import remove_provider
+
+        save_providers([_make_provider("p1"), _make_provider("p2")])
+        assert get_agent_setting("default_provider", "") == "p1"
+
+        remove_provider(load_providers(), "p1")
+
+        assert get_agent_setting("default_provider", "") == "p2"
+        assert get_agent_setting("default_model", "") == "p2-model-v1"
+
+    def test_prefer_adopts_named_card_over_first_in_list(self, tmp_config_dir):
+        # REQUIRED test #7 (RULING 3 branch 3): default empty + a chat card
+        # already on disk → add_or_update('zebra', prefer) adopts the
+        # PREFER card, not the first-in-list card.
+        from agent.config import get_agent_setting
+
+        save_providers([_make_provider("alpha")])  # on disk, no default yet
+        # Simulate the empty-default state regardless of the choke's
+        # adoption on the raw save above.
+        from agent.config import set_agent_setting
+        set_agent_setting("default_provider", "")
+        set_agent_setting("default_model", "")
+
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("zebra"))  # prefer="zebra"
+
+        assert get_agent_setting("default_provider", "") == "zebra"
+        assert get_agent_setting("default_model", "") == "test-model-v1"
+
+    def test_raw_resave_of_default_card_refreshes_bare_model(self, tmp_config_dir):
+        # REQUIRED test #4 (BUG #4, RULING 3 branch 4): a RAW save_providers
+        # re-save of the default card with a NEW model refreshes agent.json's
+        # default_model — BARE — with no prefer and no settings_handler
+        # involvement (the refresh now lives on every live write path).
+        from agent.config import get_agent_setting
+
+        save_providers([_make_provider("p1", default_model="openai/m-one")])
+        assert get_agent_setting("default_provider", "") == "p1"
+        assert get_agent_setting("default_model", "") == "m-one"
+
+        save_providers([_make_provider("p1", default_model="openai/m-two")])
+        assert get_agent_setting("default_provider", "") == "p1"
+        assert get_agent_setting("default_model", "") == "m-two"
+        # Composition (REQUIRED #2 shape): the runtime's composed id is the
+        # card's full model again.
+        assert f"p1/{get_agent_setting('default_model', '')}" == "p1/m-two"
+
     def test_decision_model_style_card_never_adopted(self, tmp_config_dir):
         # (c) DecisionModel-style card (caller="", unprefixed model) is never
-        # adopted even alongside a derivable card — the DecisionModel card is
-        # skipped, the chat card wins. (Residual, flagged not fixed: a
-        # DecisionModel card carrying a RECOGNIZED prefix such as "openai/x"
-        # is indistinguishable from a chat card under the derived-caller rule
-        # and would be adopted; the canonical DecisionModel shape is
-        # unprefixed, which is what this pin covers.)
+        # adopted even alongside a derivable card. SUPERSEDED by fix-round 4
+        # RULING 1b: DecisionModel/ImproveModel are excluded BY NAME via
+        # _NON_CHAT_NAMES, so even a RECOGNIZED prefixed model on a
+        # DecisionModel card ("openrouter/decision-x") is never adopted —
+        # the pinned residual risk from round 2 is fixed.
         from agent.config import get_agent_setting
 
         save_providers([
@@ -657,8 +771,34 @@ class TestSaveProvidersChokePointPersistsDefault:
             _make_provider("real-chat", caller="", default_model="openai/gpt-4o-mini"),
         ])
         assert get_agent_setting("default_provider", "") == "real-chat"
-        # A DecisionModel-only store stays empty (covered above); here the
-        # pin is that the FIRST derivable card skips the DecisionModel card.
+        assert get_agent_setting("default_model", "") == "gpt-4o-mini"
+
+    def test_decision_model_with_prefixed_model_never_adopted(self, tmp_config_dir):
+        # REQUIRED test #1 (BUG #1, CRITICAL): a DecisionModel card with
+        # caller="" AND a RECOGNIZED prefixed model (openrouter/decision-x)
+        # derives a caller — the round-2 predicate adopted it, and the wire
+        # call then bricked on its empty caller. RULING 1b's name exclusion
+        # fixes this; ImproveModel likewise. A later REAL chat card is
+        # adopted instead.
+        from agent.config import get_agent_setting
+
+        save_providers([
+            _make_provider("DecisionModel", caller="",
+                           default_model="openrouter/decision-x"),
+            _make_provider("ImproveModel", caller="",
+                           default_model="openrouter/improve-x"),
+        ])
+        assert get_agent_setting("default_provider", "") == ""
+        assert get_agent_setting("default_model", "") == ""
+
+        save_providers([
+            _make_provider("DecisionModel", caller="",
+                           default_model="openrouter/decision-x"),
+            _make_provider("ImproveModel", caller="",
+                           default_model="openrouter/improve-x"),
+            _make_provider("real-chat", caller="", default_model="openai/gpt-4o-mini"),
+        ])
+        assert get_agent_setting("default_provider", "") == "real-chat"
 
 
     def test_still_live_default_not_switched_on_unrelated_save(self, tmp_config_dir):
@@ -707,7 +847,8 @@ class TestSaveProvidersChokePointPersistsDefault:
         from utils.providers_store import migrate_from_agent_json
         assert migrate_from_agent_json() == 1
         assert get_agent_setting("default_provider", "") == "legacy1"
-        assert get_agent_setting("default_model", "") == "openai/legacy-model-v1"
+        # RULING 2: bare model stored (the legacy card's model is prefixed).
+        assert get_agent_setting("default_model", "") == "legacy-model-v1"
 
 
 

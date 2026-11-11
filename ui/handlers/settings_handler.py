@@ -25,7 +25,6 @@ from utils.providers_store import (
     load_providers,
     save_providers,
     has_any_verified_provider,
-    _effective_caller,
 )
 from utils.provider_test import test_connection, TestResult
 
@@ -153,40 +152,14 @@ class SettingsHandler:
         # Replace existing or append
         providers = [p for p in providers if p.name != provider.name]
         providers.append(provider)
-        save_providers(providers)
-
-        # SPEC-62 item 4: persist the global default provider/model. A card is
-        # a CHAT card when its caller is non-empty — DecisionModel/ImproveModel/
-        # JEV-style cards saved with allow_empty_caller=True carry caller == ""
-        # and must NEVER become the global default. Adopt the saved card only
-        # when the stored default is empty or names a card that no longer
-        # exists; when it still names a live card, leave it (a same-name
-        # replace must not silently re-point the default on every save).
-        try:
-            from agent.config import get_agent_setting, set_agent_setting
-
-            is_chat_card = bool(provider.caller)
-            current_default = get_agent_setting("default_provider", "")
-            default_is_live = current_default in {p.name for p in providers}
-            if is_chat_card and (not current_default or not default_is_live):
-                set_agent_setting("default_provider", provider.name)
-                set_agent_setting("default_model", provider.default_model)
-                logger.info(
-                    "Set global default provider to %s (%s)",
-                    provider.name, provider.default_model,
-                )
-            elif is_chat_card and current_default == provider.name:
-                # SPEC-62 fix-round item B: the saved card IS the default —
-                # its default_model may have been edited; refresh it so the
-                # global default never points at a stale model.
-                set_agent_setting("default_model", provider.default_model)
-                logger.info(
-                    "Refreshed default_model for default provider %s → %s",
-                    provider.name, provider.default_model,
-                )
-        except Exception as e:
-            # Config write failure must not break the provider save itself.
-            logger.warning("Could not persist default_provider setting: %s", e)
+        # SPEC-62 fix-round 4 RULING 3: save_providers is the SINGLE OWNER of
+        # global-default maintenance (adoption, stale healing, bare-model
+        # refresh). This path passes ``prefer`` so a brand-new chat card is
+        # adopted ahead of first-in-list ordering; the former item-4 /
+        # fix-round-B block here was deleted — its logic lives in the choke
+        # point now (including the fix-round-B same-card model refresh,
+        # branch 4 of the choke block).
+        save_providers(providers, prefer=provider.name)
 
         logger.info("Saved provider: %s", provider.name)
         if self._on_providers_changed:
@@ -196,7 +169,13 @@ class SettingsHandler:
 
     def remove(self, name: str) -> None:
         """Remove by name. No-op if not found. Fires on_providers_changed
-        and on_status_changed if the last verified provider was removed."""
+        and on_status_changed if the last verified provider was removed.
+
+        SPEC-62 fix-round 4 RULING 3: no default-maintenance logic here —
+        save_providers (allow_empty=True, the explicit-shrink path) retargets
+        or clears the global default itself when the removed card was the
+        default. The former item-4/fix-round-3 retarget block was deleted;
+        its logic lives in the choke point's branch (2)."""
         providers = load_providers()
         if not any(p.name == name for p in providers):
             logger.debug("Remove: provider '%s' not found", name)
@@ -205,37 +184,6 @@ class SettingsHandler:
         # Explicit user removal — clearing the last card is intentional and
         # must pass the store's empty-overwrite guard (2026-10-11 hardening).
         save_providers(providers, allow_empty=True)
-
-        # SPEC-62 item 4: if the removed card WAS the global default, retarget
-        # to the FIRST remaining chat card — never a DecisionModel/JEV-style
-        # card — or clear both settings when none remains. Re-load from disk
-        # so the list reflects what was saved. Fix-round 3: the chat-card test
-        # uses the DERIVED caller (_effective_caller), not the bare stored
-        # field — remaining comes from DISK, where caller=""+prefixed-model
-        # cards saved via the uncovered write paths are invisible to a bare
-        # `if p.caller` test.
-        try:
-            from agent.config import get_agent_setting, set_agent_setting
-
-            if name == get_agent_setting("default_provider", ""):
-                remaining = load_providers()
-                replacement = next(
-                    (p for p in remaining if _effective_caller(p)), None
-                )
-                if replacement is not None:
-                    set_agent_setting("default_provider", replacement.name)
-                    set_agent_setting("default_model", replacement.default_model)
-                    logger.info(
-                        "Default provider removed — retargeted to %s (%s)",
-                        replacement.name, replacement.default_model,
-                    )
-                else:
-                    set_agent_setting("default_provider", "")
-                    set_agent_setting("default_model", "")
-                    logger.info("Default provider removed — no chat cards left, defaults cleared")
-        except Exception as e:
-            # Config write failure must not break the provider removal itself.
-            logger.warning("Could not retarget default_provider setting: %s", e)
 
         logger.info("Removed provider: %s", name)
         if self._on_providers_changed:

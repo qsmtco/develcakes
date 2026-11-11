@@ -319,6 +319,33 @@ class TestSingleCardSaveEnabled:
         assert dlg._get_selected_fallback_provider() == ""  # still "None"
         assert dlg._save_btn.get_sensitive() is False
 
+    def test_primary_switch_rescues_fallback_and_save(self):
+        """REQUIRED test #8 (RULING 5, BUG #8): with 2 cards, switching the
+        primary onto the currently-selected fallback card must RESCUE the
+        selection — the dropdown re-populates, the previous fallback is no
+        longer selectable, and the first non-primary card is auto-selected
+        instead of "None" — so Save stays sensitive (was permanently
+        disabled)."""
+        providers = [
+            ProviderConfig("alpha", "u", "k", "openai/m-a", True),
+            ProviderConfig("beta", "u", "k", "openai/m-b", True),
+        ]
+        dlg = _make_tickable_dlg(providers)
+        dlg._name_entry.set_text("TestAgent")
+        dlg._tool_checks["read_file"].set_active(True)
+        # Create form: no fallback chosen yet → explicit choice required.
+        assert dlg._get_selected_fallback_provider() == ""
+        dlg._fallback_dropdown.set_selected(1)  # user picks "beta" (first card)
+        assert dlg._get_selected_fallback_provider() == "beta"
+        assert dlg._save_btn.get_sensitive() is True
+
+        # THE BUG: switch the primary onto "beta" — the selected fallback is
+        # now the primary and drops out of the dropdown.
+        dlg._provider_dropdown.set_selected(1)  # primary := beta
+        # RULING 5: rescued to the first NON-primary card, not "None".
+        assert dlg._get_selected_fallback_provider() == "alpha"
+        assert dlg._save_btn.get_sensitive() is True
+
 
 class TestDecisionModelExcluded:
     """SPEC-22 §2.8: the DecisionModel/JEV card never appears as an agent

@@ -69,7 +69,13 @@ class TestFreshInstallLaunchFirst:
         agent_defs._seed_defaults()
         save_providers([_chat_card("solo")])
 
-        from agent.special_agents import get_special_agents
+        # Fix-round 4 #10 (test isolation): the module-level registry is a
+        # process-wide cache; a prior test in the same session (e.g.
+        # test_mcp_integration's StringMCP rows) may have populated it
+        # against a different tmp config dir. Force the first-ever-load
+        # semantics this ordering test is about.
+        from agent.special_agents import get_special_agents, reload_registry
+        reload_registry()
         rows = get_special_agents()
         assert {r.display_name for r in rows} == _BUILTIN_NAMES
 
