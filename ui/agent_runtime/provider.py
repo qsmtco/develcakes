@@ -24,7 +24,25 @@ class RuntimeProviderMixin:
         llm_name = getattr(agent_def, "llm_name", None)
 
         if not llm_name:
-            return None
+            # SPEC-62 item 5: a def with no llm_name resolves to the GLOBAL
+            # default card (agent.json default_provider/default_model) instead
+            # of None. Returning None left conv.model empty on fresh installs
+            # where the seeded defs ship no llm_name and the wire call had no
+            # model at all. Same return shape as the llm_name branch below.
+            try:
+                from agent.config import load_agent_config
+                config = load_agent_config()
+                cfg = config.providers.get(config.default_provider)
+                if cfg and cfg.default_model:
+                    if "/" in cfg.default_model:
+                        return cfg.default_model
+                    return f"{config.default_provider}/{cfg.default_model}"
+            except Exception:
+                _mod().logger.warning(
+                    "Cannot resolve global default model for %s",
+                    getattr(agent_def, "display_name", agent_def),
+                )
+            return None  # no default card resolves — runtime uses its own default
 
         try:
             from agent.config import load_agent_config
@@ -147,6 +165,17 @@ class RuntimeProviderMixin:
                 # would never reach this runtime without an app restart. The
                 # per-provider value already rides inside cfg.providers.
                 cfg.tool_output_offload_chars = fresh.tool_output_offload_chars
+                # SPEC-62 item 6: propagate the global default so in-flight
+                # runtimes pick up a new default card without an app restart.
+                # GUARD: only overwrite with a TRUTHY fresh default. The v1
+                # audit's regression pin (tests/test_config_invalidation.py::
+                # test_per_agent_default_provider_override_survives_refresh)
+                # requires that a stale per-runtime default the fresh set can
+                # no longer resolve is left untouched by refresh — so an empty
+                # fresh.default_provider must never clobber it.
+                if fresh.default_provider:
+                    cfg.default_provider = fresh.default_provider
+                    cfg.default_model = fresh.default_model
                 updated += 1
             except Exception:
                 _mod().logger.exception(

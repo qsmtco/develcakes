@@ -6,7 +6,8 @@
 #   - Reads: <config_dir>/providers.yaml (or .json fallback)
 #   - Writes: <config_dir>/providers.yaml (atomic, chmod 0o600)
 #   - Network: none
-#   - Imports: stdlib only (yaml if available, else json); models.providers
+#   - Imports: stdlib only (yaml if available, else json); models.providers;
+#              agent.config (get/set_agent_setting, SPEC-62 global default)
 #
 # Architecture: mirrors utils/feed_store.py and utils/agent_defs.py patterns.
 # Path resolution uses utils.config.get_config_dir() — never hardcoded paths.
@@ -42,6 +43,37 @@ _VALID_CALLERS: frozenset[str] = frozenset({
 })
 
 _FILENAME = "providers.yaml"
+
+
+def _effective_caller(p: ProviderConfig) -> str:
+    """The caller a card effectively presents, derived exactly like
+    SettingsHandler.add_or_update's auto-detect (settings_handler.py:111):
+    an explicit caller wins; otherwise a ``<prefix>/<model>`` default_model
+    with a RECOGNIZED prefix supplies it.
+
+    SPEC-62 fix-round 2: the write choke point needs this because only
+    add_or_update populates ``caller`` — direct save_providers calls, the
+    agent-builder saves, and migrate_from_agent_json all produce chat cards
+    with caller="", which a bare ``if p.caller`` test silently misses.
+
+    Uses THIS module's _VALID_CALLERS — the duplication-invariant twin of
+    agent.runtime's taxonomy (TestValidCallersDuplicationInvariant) — NOT an
+    agent.runtime import: agent/runtime.py imports providers_store
+    (:3345/:3478), so importing back would be circular, and the utils/*
+    layer rule forbids it anyway.
+
+    Returns "" when nothing is derivable (caller="" + unprefixed model, or
+    an unrecognized prefix) — the silent choke-point analogue of
+    add_or_update's "Cannot auto-detect caller" ValueError.
+    """
+    if p.caller:
+        return p.caller
+    default_model = p.default_model or ""
+    if "/" in default_model:
+        prefix = default_model.split("/", 1)[0].strip().lower()
+        if prefix in _VALID_CALLERS:
+            return prefix
+    return ""
 
 
 def get_providers_path() -> str:
@@ -340,6 +372,58 @@ def save_providers(providers: list[ProviderConfig], *,
             os.chmod(parent, 0o700)
         except OSError:
             pass
+
+    # SPEC-62 fix-round item A: the global-default persistence lives HERE at
+    # the write choke point. settings_handler.add_or_update/remove cover only
+    # their own 2 write paths; the other 5 funnel through save_providers —
+    # test_provider's re-save (settings_handler), both agent-builder save
+    # branches, migrate_from_agent_json, and this module's brief-cited
+    # helpers. Rule (Debugger #2, Supervisor ruling): when the stored default
+    # is empty or names a card that is no longer in the just-saved list AND
+    # that list contains a CHAT card (DERIVED caller — see _effective_caller;
+    # DecisionModel/JEV cards must never become the default), adopt the FIRST chat card. A
+    # still-live default is left untouched, and a list with no chat card
+    # changes nothing (a DecisionModel-only install keeps default "" — by
+    # design, fix-round item E). Layer rule respected: agent.config getters
+    # only, never ui/*.
+    #
+    # allow_empty=True is the EXPLICIT remove-the-last-card path
+    # (SettingsHandler.remove). Skip adoption there entirely: the clearing
+    # user must not watch the just-cleared default re-adopt itself
+    # (test_settings_remove_fires_callback pins on_providers_changed firing
+    # with []), and SettingsHandler.remove's own retarget logic handles the
+    # "removed the default card" case.
+    try:
+        from agent.config import get_agent_setting, set_agent_setting
+
+        current_default = get_agent_setting("default_provider", "")
+        saved_names = {p.name for p in providers}
+        if allow_empty:
+            if not providers and current_default:
+                set_agent_setting("default_provider", "")
+                set_agent_setting("default_model", "")
+                _logger.info(
+                    "save_providers: all cards cleared — "
+                    "default_provider/default_model reset"
+                )
+        elif not current_default or current_default not in saved_names:
+            # Fix-round 2: chat-card test uses the DERIVED caller, not the
+            # bare stored field — the 5 uncovered write paths produce chat
+            # cards with caller="" (only add_or_update auto-detects), which
+            # the old `if p.caller` test silently missed.
+            first_chat = next(
+                (p for p in providers if _effective_caller(p)), None
+            )
+            if first_chat is not None:
+                set_agent_setting("default_provider", first_chat.name)
+                set_agent_setting("default_model", first_chat.default_model)
+                _logger.info(
+                    "save_providers: set global default provider to %s (%s)",
+                    first_chat.name, first_chat.default_model,
+                )
+    except Exception as e:
+        # The settings persistence must never break a provider save.
+        _logger.warning("save_providers: could not persist default_provider: %s", e)
 
 
 def add_provider(providers: list[ProviderConfig], p: ProviderConfig) -> None:

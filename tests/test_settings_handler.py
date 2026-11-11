@@ -127,6 +127,91 @@ class TestRemove:
         assert statuses == [False]
 
 
+class TestGlobalDefaultPersistence:
+    """SPEC-62 item 4 + fix-round item B: agent.json default_provider /
+    default_model are persisted on chat-card saves, refreshed when the
+    default card's own model is edited, and retargeted/cleared on removal.
+    A card saved with allow_empty_caller=True (DecisionModel/JEV shape,
+    caller "") is NOT a chat card and must never become the default."""
+
+    def test_first_chat_card_save_becomes_default(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        assert get_agent_setting("default_provider", "") == "p1"
+        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+
+    def test_decision_model_first_does_not_become_default(self, tmp_config_dir):
+        h = SettingsHandler()
+        dm = _make_provider(
+            "DecisionModel",
+            base_url="https://dm.example.com/v1",
+            default_model="typesafe/s1",
+        )
+        h.add_or_update(dm, allow_empty_caller=True)
+        # Non-chat card: defaults stay empty…
+        assert get_agent_setting("default_provider", "") == ""
+        assert get_agent_setting("default_model", "") == ""
+        # …until a real chat card is saved.
+        h.add_or_update(_make_provider("p1"))
+        assert get_agent_setting("default_provider", "") == "p1"
+
+    def test_still_live_default_not_switched_on_every_save(self, tmp_config_dir):
+        # "If the current default still names an existing card, LEAVE it" —
+        # a second card save must not re-point the default.
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        h.add_or_update(_make_provider("p2"))
+        assert get_agent_setting("default_provider", "") == "p1"
+
+    def test_default_model_refreshed_when_default_card_model_edited(self, tmp_config_dir):
+        # Fix-round item B: a same-name replace of the DEFAULT card with a
+        # new default_model must refresh default_model (no stale model).
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+        h.add_or_update(_make_provider("p1", default_model="openai/new-model-v9"))
+        assert get_agent_setting("default_provider", "") == "p1"  # card unchanged
+        assert get_agent_setting("default_model", "") == "openai/new-model-v9"
+
+    def test_remove_default_retargets_to_first_chat_card(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        h.add_or_update(_make_provider("p2"))
+        h.remove("p1")
+        assert get_agent_setting("default_provider", "") == "p2"
+        assert get_agent_setting("default_model", "") == "openai/test-model-v1"
+
+    def test_remove_last_card_clears_defaults(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))
+        h.remove("p1")
+        assert get_agent_setting("default_provider", "") == ""
+        assert get_agent_setting("default_model", "") == ""
+
+    def test_remove_default_retargets_to_callerless_prefixed_card(self, tmp_config_dir):
+        # Fix-round 3 fold-in: the retarget must see chat cards that reach
+        # disk with caller="" + a recognized model prefix (the uncovered
+        # write paths) — derivation, not the bare stored caller.
+        from utils.providers_store import save_providers as sp_raw
+        from agent.config import get_agent_setting as gas
+
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p1"))  # becomes the default
+        assert gas("default_provider", "") == "p1"
+
+        # Add a caller=""+prefixed card via a raw (uncovered-path-shaped)
+        # save; the live default stays p1 (still-live-default guard).
+        sp_raw([
+            _make_provider("p1"),
+            _make_provider("derived-card", caller="", default_model="openai/gpt-4o-mini"),
+        ])
+
+        h.remove("p1")
+        # NOT cleared: the derivable chat card was adopted as the new default.
+        assert gas("default_provider", "") == "derived-card"
+        assert gas("default_model", "") == "openai/gpt-4o-mini"
+
+
 class TestTestProvider:
     def test_success_stamps_last_verified_at(self, tmp_config_dir, monkeypatch):
         from ui.handlers import settings_handler as sh

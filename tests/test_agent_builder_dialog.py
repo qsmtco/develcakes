@@ -230,6 +230,95 @@ class TestSaveButtonRequiresFallback:
         assert dlg._get_selected_fallback_provider() != ""
 
 
+class TickableStubHandler(StubHandler):
+    """StubHandler with one real tool option — the base stub returns [] for
+    get_tool_options(), so no tool checkbox exists and has_tools can never be
+    satisfied. SPEC-62's Save observable needs the FULL gate: name + role +
+    tool + primary + fallback."""
+
+    def get_tool_options(self):
+        return [{"name": "read_file", "description": "Read a file from disk."}]
+
+
+def _make_tickable_dlg(providers, agent_def=None, *, is_edit=False):
+    """_make_dlg variant wired to TickableStubHandler (tool checkbox exists)."""
+    from ui.views.agent_builder import AgentBuilderWidget
+    return AgentBuilderWidget(
+        TickableStubHandler(providers), agent_def=agent_def, is_edit=is_edit,
+    )
+
+
+class TestSingleCardSaveEnabled:
+    """SPEC-62 item 8 + fix-round item D: Save must be reachable with one
+    provider card (and with a stale stored fallback), because the runtime
+    collapses a fallback == primary chain (agent/runtime.py:3247).
+
+    The OBSERVABLE is the button: widget._save_btn.get_sensitive() — the
+    dropdown contents are mechanism, asserted only as a secondary signal.
+    These tests construct real Gtk widgets: run under
+    xvfb-run -a python -m pytest tests/test_agent_builder_dialog.py -k SingleCardSaveEnabled
+    (headless, conftest skips the whole module and a skip is NOT green).
+    """
+
+    def test_single_card_save_enabled_after_form_fill(self):
+        """One card: fill name, tick a tool, primary auto-selected → Save sensitive."""
+        providers = [ProviderConfig("solo", "u", "k", "openai/gpt-4o", True)]
+        dlg = _make_tickable_dlg(providers)
+        dlg._name_entry.set_text("TestAgent")
+        dlg._tool_checks["read_file"].set_active(True)
+        # Item 8 mechanism: with exactly one card the primary itself is in the
+        # fallback list and pre-selected, so has_fallback is satisfied.
+        assert dlg._get_selected_fallback_provider() == "solo"
+        assert dlg._save_btn.get_sensitive() is True
+
+    def test_single_card_edit_stale_fallback_save_enabled(self):
+        """Edit path, one card, stored fallback names a card that no longer
+        exists → Save is NOT permanently disabled (amended brief item 8)."""
+        providers = [ProviderConfig("solo", "u", "k", "openai/gpt-4o", True)]
+        agent_def = {
+            "name": "MyAgent",
+            "role": "coder",
+            "llm_name": "solo",
+            "fallback_provider": "ghost-card",  # unconfigured
+            "tools": ["read_file"],
+            "prompts": [],
+        }
+        dlg = _make_tickable_dlg(providers, agent_def=agent_def, is_edit=True)
+        assert dlg._save_btn.get_sensitive() is True
+
+    def test_two_cards_stored_fallback_is_primary_save_enabled(self):
+        """Fix-round item D: 2 cards + stored fallback == primary (unselectable,
+        the dropdown excludes the primary) → auto-select first available card,
+        Save sensitive True."""
+        providers = [
+            ProviderConfig("solo", "u", "k", "openai/gpt-4o", True),
+            ProviderConfig("other", "u", "k", "openai/m2", True),
+        ]
+        agent_def = {
+            "name": "MyAgent",
+            "role": "coder",
+            "llm_name": "solo",
+            "fallback_provider": "solo",  # names the primary → unselectable
+            "tools": ["read_file"],
+            "prompts": [],
+        }
+        dlg = _make_tickable_dlg(providers, agent_def=agent_def, is_edit=True)
+        assert dlg._save_btn.get_sensitive() is True
+        assert dlg._get_selected_fallback_provider() == "other"
+
+    def test_multi_card_still_requires_explicit_fallback(self):
+        """Negative control (2+ cards, no stored fallback): Save must stay
+        disabled — item 8 must not over-enable the multi-card form."""
+        providers = [
+            ProviderConfig("firstprov", "u", "k", "firstprov/m1", True),
+            ProviderConfig("openai", "u", "k", "gpt-4o", True),
+        ]
+        dlg = _make_tickable_dlg(providers)
+        dlg._name_entry.set_text("TestAgent")
+        dlg._tool_checks["read_file"].set_active(True)
+        assert dlg._get_selected_fallback_provider() == ""  # still "None"
+        assert dlg._save_btn.get_sensitive() is False
+
 
 class TestDecisionModelExcluded:
     """SPEC-22 §2.8: the DecisionModel/JEV card never appears as an agent

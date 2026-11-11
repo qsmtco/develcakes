@@ -528,25 +528,36 @@ class AgentBuilderWidget(Gtk.Box):
 
         Includes a 'None' option at index 0 (invalid for save — the save button
         stays disabled until a real provider is selected). Excludes the
-        currently-selected primary provider.
+        currently-selected primary provider — EXCEPT with exactly one
+        configured card (SPEC-62 item 8): then the primary is included and
+        auto-selected (index 1), because Save requires a fallback and the
+        runtime collapses a fallback == primary chain (agent/runtime.py:3247).
+        Without this, a fresh install with one card could never save an agent.
+        The auto-select also covers the edit path where a stored
+        fallback_provider names no configured card (stale name must not leave
+        Save permanently disabled). With 2+ cards behavior is unchanged.
         """
         primary = self._get_selected_llm_name()
         names = ["None"]
         self._fallback_providers: list = []  # parallel list of ProviderConfig (index 0 = None sentinel)
         for p in self._providers:
-            if p.name == primary:
-                continue  # exclude the current primary — can't fall back to itself
+            if p.name == primary and len(self._providers) > 1:
+                continue  # multi-card: exclude the current primary — can't fall back to itself
             names.append(p.name)
             self._fallback_providers.append(p)
 
         sl = Gtk.StringList.new(names)
         self._fallback_dropdown.set_model(sl)
         # Try to preserve the previously-selected fallback if still in the list;
-        # otherwise default to "None" (which keeps the save button disabled).
+        # otherwise default to "None" (which keeps the save button disabled) —
+        # unless there is exactly one card, in which case the card itself is
+        # pre-selected so the form is saveable without further action.
         prev = self._get_selected_fallback_provider()
         if prev and prev in names:
             idx = names.index(prev)
             self._fallback_dropdown.set_selected(idx)
+        elif len(self._providers) == 1:
+            self._fallback_dropdown.set_selected(1)  # the single card itself
         else:
             self._fallback_dropdown.set_selected(0)  # default to None
 
@@ -895,14 +906,26 @@ class AgentBuilderWidget(Gtk.Box):
         for name, check in self._mcp_checks.items():
             check.set_active(name in selected_mcp)
 
-        # Restore fallback provider if present
+        # Restore fallback provider if present. SPEC-62 fix-round item D: a
+        # stored fallback_provider naming the primary — or any card that is
+        # no longer configured — is unselectable (the dropdown excludes the
+        # primary), which used to leave the selection at "None" and Save
+        # permanently disabled. When the stored name matches no dropdown row,
+        # auto-select the FIRST available (non-primary) card; with a single
+        # card, _populate_fallback_provider_dropdown has already included the
+        # primary itself (item 8) and the runtime collapses a fallback ==
+        # primary chain (agent/runtime.py:3247).
         fb_provider = agent_def.get("fallback_provider")
         if fb_provider:
             self._update_fallback_visibility()  # populates dropdown
+            matched = False
             for i, p in enumerate(getattr(self, "_fallback_providers", [])):
                 if p.name == fb_provider:
                     self._fallback_dropdown.set_selected(i + 1)  # +1 for None offset
+                    matched = True
                     break
+            if not matched and getattr(self, "_fallback_providers", None):
+                self._fallback_dropdown.set_selected(1)  # first available card
 
         # Phase C — Restore compaction strategy
         cs = agent_def.get("compaction_strategy", VALID_COMPACTION_STRATEGIES[0])

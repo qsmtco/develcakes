@@ -745,6 +745,31 @@ class AgentRuntimeHandler(
         """Return {session_key: display_name} for registered special agents."""
         return {sk: ad.display_name for sk, ad in self._agents.items()}
 
+    def refresh_agent_registry(self) -> None:
+        """Re-read the agent registry and re-register special agents, in place.
+
+        SPEC-62 item 7: called from window._on_providers_changed after a
+        provider save so the left-panel rows match the just-saved world in
+        BOTH fresh-install orderings (defs seeded before or after the first
+        provider config). LIGHTWEIGHT by contract: reload_registry() +
+        re-register from get_special_agents() only. It MUST NOT call
+        disconnect_all / connect_servers / reload_agents_and_mcp() — those
+        tear down MCP subprocesses on the GTK thread while tool loops are
+        live (v2 audit BUG #4). Agent defs carry no provider keys (Phase B),
+        so a provider save cannot invalidate anything the MCP connections
+        depend on; only the registry contents can change here.
+        """
+        from agent.special_agents import reload_registry, get_special_agents
+
+        reload_registry()
+        self._agents.clear()
+        for agent_def in get_special_agents():
+            self._agents[agent_def.conv_id_prefix] = agent_def
+        logger.info(
+            "refresh_agent_registry: re-registered %d special agent(s)",
+            len(self._agents),
+        )
+
 
 
     def get_special_agent_def(self, session_key: str) -> Any | None:

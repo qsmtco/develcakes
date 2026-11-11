@@ -2286,6 +2286,16 @@ class MainWindow(Gtk.ApplicationWindow):
         arh = getattr(self, "_agent_runtime_handler", None)
         if arh is not None:
             arh.refresh_provider_config()
+            # SPEC-62 item 7: a provider save can change which agent defs are
+            # valid (fresh-install seeding order) and must re-render the
+            # rows. Lightweight registry refresh — no MCP teardown (see
+            # AgentRuntimeHandler.refresh_agent_registry).
+            refresh_registry = getattr(arh, "refresh_agent_registry", None)
+            if callable(refresh_registry):
+                refresh_registry()
+            set_special_agents = getattr(self._left_panel, "set_special_agents", None)
+            if callable(set_special_agents):
+                set_special_agents(arh)
 
     # ── Auto-Accept warning dialog (Phase 5) ───────────────────────────────
 
@@ -2464,6 +2474,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if name:
             agent_def = self._agent_builder_handler.load_for_edit(name)
             if agent_def is None:
+                # SPEC-62 item 9 → fix-round item C (ruling R1): the toast
+                # channel is dead app-wide — render_sync ALWAYS returns None
+                # (chat_render_handler.py:841-842), so _on_command_text's
+                # append branch never fires. A _on_command_text call here was
+                # REVERTED; the loud-failure AC is amended to "no regression;
+                # channel documented as pre-broken" (post-mortem §8). Only the
+                # log line remains.
                 logger.warning("Agent not found for editing: %s", name)
                 return None
             is_edit = True
