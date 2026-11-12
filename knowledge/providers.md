@@ -2,6 +2,17 @@
 
 Auxilium and the other built-in agents (Coder, Debugger) need an LLM provider to function. This guide walks you through configuring one of the six supported providers — including the built-in local KB provider that needs no API key at all.
 
+**One-click presets (Settings → Providers → `+ Add Provider`)** — Base URL, caller, and a default model are pre-filled; you paste only the key:
+
+| Preset | Base URL | Get a key |
+|---|---|---|
+| **OpenAI** | `https://api.openai.com/v1` | https://platform.openai.com/api-keys |
+| **Anthropic** | `https://api.anthropic.com` | https://console.anthropic.com/settings/keys |
+| **OpenRouter** | `https://openrouter.ai/api/v1` | https://openrouter.ai/keys |
+| **Google Gemini** | `https://generativelanguage.googleapis.com/v1beta/openai` | https://aistudio.google.com |
+
+MiniMax and Z.ai presets are deferred until their endpoints/model IDs can be live-verified (the repo currently mixes `api.minimax.chat` and `api.minimax.io` across docs and tests — flagged, not silently rewritten; see `knowledge/configuration.md:505` vs the runtime tests).
+
 **Quick decision guide:**
 
 | Provider | Best for | Cost | Setup time |

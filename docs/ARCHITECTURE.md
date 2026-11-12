@@ -779,7 +779,7 @@ toggle_favorite(filepath) -> bool   # True if now favorited
 
 ### 3.11a `utils/provider_test.py` — LLM Provider Connectivity Probe + Context Window Discovery
 
-**Responsibility:** Test that an LLM provider is reachable and authenticated; optionally discover the model's context window. Used by Settings dialog "Test Connection" button and the auxilium wizard.
+**Responsibility:** Test that an LLM provider is reachable and authenticated; optionally discover the model's context window. Used by Settings dialog "Test Connection" button and the auxilium wizard. Error strings it produces are now consumed by `utils/provider_errors.explain_test_error` (§3.11e) for human display — `test_connection` itself is unchanged.
 
 **Owns:** `_OPENAI_COMPATIBLE` set (`{"openai", "openrouter", "zai", "minimax"}`), `_NoAuthRedirectHandler` (strips `Authorization` header on cross-host redirect — prevents leaking keys to a different origin), `_CALLER_DEFAULT_MAX_TOKENS` static lookup table (per-caller fallback context window when probe fails), and the HTTP request lifecycle.
 
@@ -899,6 +899,47 @@ def migrate_from_agent_json(agent_json_path: str) -> int  # legacy migration; re
 `_PARSE_CACHE` keyed by `(path, text)` — a same-text reload skips the YAML
 re-parse, and callers always receive `dataclasses.replace` copies so a
 mutated card never leaks into the cache.
+
+### 3.11e `utils/provider_presets.py` + SPEC-63 setup helpers (2026-11)
+
+**Responsibility:** One-click provider setup. A **static, offline-first catalog**
+(no network, no `agent/*`/`gi` imports at module scope — enforced by
+`tests/test_provider_presets.py::TestUtilsModuleImportHygiene`) of 4 vendor
+presets (openai, anthropic, openrouter, google — MiniMax/Z.ai deferred pending
+live-key verification), plus the helpers around it:
+
+- `utils/provider_presets.py` — `PRESETS` tuple of frozen `ProviderPreset`
+  dataclasses; `get_preset(key)`, `preset_for(p)` (base_url join — survives
+  card renames), `preset_vendor_present(providers, preset)` (THE single
+  vendor-presence predicate used by `create_from_env`, `startup_warnings`,
+  and the view's env chips), `presets_from_env(env)`. The caller taxonomy is
+  deliberately NOT copied here; enforcement is test-side
+  (`TestPresetCallerInvariant` asserts every `preset.caller` against
+  `agent.runtime.get_valid_callers()`).
+- `utils/provider_errors.py` — `explain_test_error(error, *, preset=None)` +
+  `error_class(error)` sharing ONE classification implementation, so message
+  and class can never disagree. MODEL row evaluates BEFORE the 404 row (an
+  OpenAI-compatible 404 with a model body is a model problem, not a URL
+  problem). No URL is ever embedded in a message (the view's
+  `Gtk.LinkButton` renders `preset.api_key_url`); unknown errors pass
+  through unchanged.
+- `utils/model_catalog.py` — `fetch_model_ids(base_url, api_key, caller)` →
+  `ModelListResult` (total function, never raises). LOCAL opener built per
+  call — **never `install_opener`** (process-global; audit BUG #1) — with
+  its own `_NoAuthRedirectHandler` stripping `Authorization` on cross-host
+  redirects, and a local key-redacting `_safe_error`. Caps at 500 IDs.
+- `utils/env_provider_keys.py` — `detect_env_keys(env)` reading
+  industry-standard names (`OPENAI_API_KEY` etc.; blank treated as absent).
+  The key VALUE never surfaces in any string this module returns.
+
+**Handler-owned persistence (SPEC-63 §2.4):** Test Connection's result
+stamping lives in `SettingsHandler._persist_test_result` — an UNSAVED card
+writes NOTHING on all three exit paths (no `save_providers` call, byte-
+identical `providers.yaml`); a saved card's green test stamps
+`last_verified_at`, and failed tests persist the EXPLAINED string via
+`explain_test_error`. `save_providers()` remains the single owner of
+global-default maintenance (cross-ref SPEC-62 fix-round 4 RULING 3) — no
+new call sites were introduced.
 
 ### 3.12 `ui/handlers/agent_list_handler.py` — Agent List Handler (Agent Cards)
 

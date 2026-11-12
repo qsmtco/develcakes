@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-04
 **Author:** Supervisor (PM-directed, from discussion of "make setup easier out of the box")
-**Status:** Draft v3 — for implementation (fix-rounds 1+2 applied 2026-11-11; delta adjudication in §9.2)
+**Status:** COMPLETE — Waves A–D shipped 2026-11-11/12 (pre-req 068b2f0c, Wave A d5a33ce9, Wave B 5ae8b208, Wave C d1ff4522, Wave D docs this commit). Full-suite gate: 16 failures, all proven pre-existing on clean HEAD 5ae8b208. Deferred out of v1: MiniMax + Z.ai presets (unverifiable endpoints/IDs), Gemini `/models` on the `/v1beta/openai` path (live-check pending; fallback `supports_models_list=False`).
 **Implements:** ideas 1, 2, 3, 5 from the 2026-11-04 setup discussion
 **Explicitly OUT of scope:** idea 4 (first-run wizard), idea 6 (Ollama/local preset), "download a starter model" UX, `${VAR}` indirection in stored keys, **MiniMax + Z.ai presets (deferred pending live-key verification — see §2.1)**
 **Depends on:** SPEC-62 fix-round 4 (`bd472833`, pushed — `save_providers` single-owner default maintenance, bare stored models, `_is_chat_card` gating)

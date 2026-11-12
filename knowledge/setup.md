@@ -17,16 +17,17 @@ pip install -e .
 
 See **[Configuration Guide](configuration.md)** and **[Providers Guide](providers.md)**.
 
-Providers are configured in `~/.config/crabcakes/providers.yaml`. On first launch, the `local-kb` provider is auto-seeded — Auxilium can answer install and config questions immediately without any external API key.
+**The easy way (no YAML):** open **Settings → Providers → `+ Add Provider`**, pick a vendor preset (OpenAI, Anthropic, OpenRouter, Google Gemini), paste your API key, click **Test Connection**, then **Save**. That's the whole setup — Base URL, caller, and default model are pre-filled by the preset, and the preset's model dropdown can load real model IDs from your account. If `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` is set in your environment, a one-click chip on the Providers page creates the card for you. A **Custom…** entry covers any OpenAI-compatible endpoint presets don't know.
 
-To use Coder, Debugger, or other agents that need a real LLM, add a provider:
+**The advanced way:** edit `~/.config/crabcakes/providers.yaml` directly (the preset UI writes the same file):
 
 ```bash
-# Edit providers.yaml
 nano ~/.config/crabcakes/providers.yaml
 ```
 
 Add your API key and set the caller field (e.g. `openai`, `openrouter`, `minimax`).
+
+On first launch, the `local-kb` provider is auto-seeded — Auxilium can answer install and config questions immediately without any external API key.
 
 ## How do I start CrabCakes?
 
