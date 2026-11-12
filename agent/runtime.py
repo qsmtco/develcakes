@@ -3091,17 +3091,17 @@ class AgentRuntime:
     def _failover_limits(self) -> tuple[float, float]:
         """Return (budget seconds, per-attempt socket timeout)."""
         try:
-            budget = float(getattr(self._config, "provider_failover_budget_s", 30.0) or 30.0)
+            budget = float(getattr(self._config, "provider_failover_budget_s", 400.0) or 400.0)
         except (TypeError, ValueError):
-            budget = 30.0
+            budget = 400.0
         try:
-            cap = float(getattr(self._config, "provider_failover_attempt_timeout_s", 8.0) or 8.0)
+            cap = float(getattr(self._config, "provider_failover_attempt_timeout_s", 120.0) or 120.0)
         except (TypeError, ValueError):
-            cap = 8.0
+            cap = 120.0
         if budget != budget or budget <= 0:  # NaN or non-positive
-            budget = 30.0
+            budget = 400.0
         if cap != cap or cap <= 0:
-            cap = 8.0
+            cap = 120.0
         return budget, cap
 
     def _chain_socket_timeout(

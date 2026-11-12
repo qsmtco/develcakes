@@ -129,8 +129,10 @@ The `agent.json` file serves two purposes:
     "default_model": "openai/gpt-4o",
     "max_tool_iterations": 50,
     "tool_timeout_seconds": 120,
-    "cost_limit": 5.0,
+    "cost_limit": null,
     "step_limit": 100,
+    "provider_failover_attempt_timeout_s": 120.0,
+    "provider_failover_budget_s": 400.0,
     "enforcement": {
         "enabled": true,
         "syntax_check": true,
@@ -530,7 +532,7 @@ Here's a complete setup with two providers, three agents, and enforcement:
     "default_model": "openai/gpt-4o",
     "max_tool_iterations": 50,
     "tool_timeout_seconds": 120,
-    "cost_limit": 5.0,
+    "cost_limit": null,
     "step_limit": 100,
     "enforcement": {
         "enabled": true,

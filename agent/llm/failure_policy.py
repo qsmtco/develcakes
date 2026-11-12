@@ -17,7 +17,7 @@ from agent.llm.failure_classifier import FailureClass, ProviderFailure
 class RetryConfig:
     provider_retries: int = 2
     backoff_base_s: float = 1.0
-    provider_failover_budget_s: float = 30.0
+    provider_failover_budget_s: float = 400.0
 
 
 @dataclass
