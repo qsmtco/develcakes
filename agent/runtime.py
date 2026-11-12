@@ -1266,7 +1266,15 @@ class AgentRuntime:
         from models.conversation import Conversation
 
         if model is None:
-            model = self._config.default_model
+            # SPEC-63: the stored providers.yaml card default_model may carry a
+            # provider prefix (OpenRouter picks like 'openrouter/qwen/qwen3-max',
+            # the google preset 'openai/gemini-2.0-flash'). Read the FULL card
+            # value so _match_provider_cfg_by_model resolves the card — the bare
+            # agent.json default_model loses the prefix. Same pattern as the
+            # force_llm_compact resolver below.
+            card = self._config.providers.get(self._config.default_provider)
+            dm = getattr(card, "default_model", "") if card is not None else ""
+            model = dm or self._config.default_model
 
         # SPEC-38: construct the conversation first, then resolve the budget
         # window FROM IT via the shared resolver — the conversation's provider

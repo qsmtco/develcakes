@@ -225,6 +225,170 @@ class TestLifecycle:
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  SPEC-63 §2.7 — create_conversation(model=None) default-model resolution
+#
+#  THE BUG: create_conversation read the BARE agent.json default_model, so
+#  any provider card whose stored providers.yaml default_model carries a
+#  prefix (OpenRouter picks like 'openrouter/qwen/qwen3-max', the google
+#  preset 'openai/gemini-2.0-flash') produced a conv.model that
+#  _match_provider_cfg_by_model could NOT resolve → "Provider X is not
+#  configured" at call time. THE FIX: read the card's FULL default_model
+#  (same pattern as the force_llm_compact resolver in agent/runtime.py).
+#
+#  Each parametrized case below is one measured shape from the SPEC-63
+#  matrix, given as the (default_provider, card default_model, agent.json
+#  default_model) triple actually written by the settings/preset flows.
+#  Cards go through the REAL store (utils.providers_store → providers.yaml
+#  → agent.config.load_agent_config), not a hand-built AgentConfig, so the
+#  test covers exactly what production reads. Each case asserts:
+#    1. conv.model == the card's FULL stored default_model (not the bare
+#       agent.json value), and
+#    2. rt._match_provider_cfg_by_model(conv.model) resolves to the RIGHT
+#       card — the user-visible failure the bug caused.
+# ═══════════════════════════════════════════════════════════════════
+
+def _spec63_card(provider_name: str, default_model: str):
+    """One provider card. The card's display name IS the provider name —
+    the settings/preset flows set agent.json default_provider to the card
+    display name, so the bare-model shapes ('gpt-4o', 'claude-3-5-sonnet')
+    resolve via the default_provider branch of _match_provider_cfg_by_model."""
+    from models.providers import ProviderConfig
+    return ProviderConfig(
+        name=provider_name,
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        default_model=default_model,
+    )
+
+
+_SPEC63_SHAPES = [
+    # (default_provider, card default_model, agent.json default_model)
+    pytest.param("openrouter", "openrouter/qwen/qwen3-max",
+                 "openrouter/qwen/qwen3-max", id="openrouter-qwen3-max"),
+    # 3-segment OpenRouter vendor pick
+    pytest.param("openrouter", "openrouter/anthropic/claude-x",
+                 "openrouter/anthropic/claude-x", id="openrouter-claude-x"),
+    pytest.param("openrouter", "openrouter/auto",
+                 "openrouter/auto", id="openrouter-auto"),
+    # Bare model, no prefix on the card
+    pytest.param("openai", "gpt-4o",
+                 "openai/gpt-4o", id="openai-gpt-4o"),
+    # Preset serves via an openai-compatible endpoint; card value carries a
+    # FOREIGN prefix ('openai/...') while default_provider is 'google'
+    pytest.param("google", "openai/gemini-2.0-flash",
+                 "google/gemini-2.0-flash", id="google-gemini-flash"),
+    pytest.param("anthropic", "claude-3-5-sonnet-20241022",
+                 "anthropic/claude-3-5-sonnet-20241022", id="anthropic-sonnet"),
+]
+
+@pytest.mark.parametrize(
+    "default_provider,card_default_model,agent_json_default_model",
+    _SPEC63_SHAPES,
+)
+def test_spec63_default_model_resolves_card(
+    tmp_config_dir, default_provider, card_default_model, agent_json_default_model,
+):
+    from agent.config import load_agent_config, set_agent_setting
+    from utils.providers_store import save_providers
+
+    save_providers([_spec63_card(default_provider, card_default_model)])
+    set_agent_setting("default_provider", default_provider)
+    set_agent_setting("default_model", agent_json_default_model)
+
+    cfg = load_agent_config()
+    assert cfg.default_provider == default_provider
+    assert cfg.default_model == agent_json_default_model
+    assert cfg.providers[default_provider].default_model == card_default_model
+
+    rt = AgentRuntime(cfg)
+    rt.start()
+    try:
+        sk = rt.create_conversation("Coder", _uniq(), str(tmp_config_dir))
+        conv = rt.get_conversation(sk)
+        assert conv is not None
+
+        # 1. The FULL stored card value lands on the conversation.
+        assert conv.model == card_default_model
+
+        # 2. It resolves to the RIGHT card (the bug returned None here).
+        matched = rt._match_provider_cfg_by_model(conv.model)
+        assert matched is not None
+        assert matched.name == default_provider
+        assert matched.default_model == card_default_model
+    finally:
+        rt.stop()
+
+
+def test_spec63_empty_card_model_falls_back_to_agent_json(tmp_config_dir):
+    """Card with no default_model: the agent.json bare value still applies."""
+    from agent.config import load_agent_config, set_agent_setting
+    from utils.providers_store import save_providers
+
+    save_providers([_spec63_card("solo", "")])
+    set_agent_setting("default_provider", "solo")
+    set_agent_setting("default_model", "solo/gpt-4o")
+
+    cfg = load_agent_config()
+    rt = AgentRuntime(cfg)
+    rt.start()
+    try:
+        sk = rt.create_conversation("Coder", _uniq(), str(tmp_config_dir))
+        conv = rt.get_conversation(sk)
+        assert conv is not None
+        assert conv.model == "solo/gpt-4o"
+        matched = rt._match_provider_cfg_by_model(conv.model)
+        assert matched is not None
+        assert matched.name == "solo"
+    finally:
+        rt.stop()
+
+
+def test_spec63_no_cards_falls_back_to_agent_json(tmp_config_dir):
+    """No providers.yaml cards: bare agent.json default_model — the
+    pre-SPEC-63 behavior for setups that never saved a provider card."""
+    from agent.config import load_agent_config, set_agent_setting
+
+    set_agent_setting("default_provider", "")
+    set_agent_setting("default_model", "solo/gpt-4o")
+
+    cfg = load_agent_config()
+    assert cfg.providers == {}
+
+    rt = AgentRuntime(cfg)
+    rt.start()
+    try:
+        sk = rt.create_conversation("Coder", _uniq(), str(tmp_config_dir))
+        conv = rt.get_conversation(sk)
+        assert conv is not None
+        assert conv.model == "solo/gpt-4o"
+    finally:
+        rt.stop()
+
+
+def test_spec63_explicit_model_argument_wins(tmp_config_dir):
+    """model=<str> never touches the default-model resolution path."""
+    from agent.config import load_agent_config, set_agent_setting
+    from utils.providers_store import save_providers
+
+    save_providers([_spec63_card("openrouter", "openrouter/qwen/qwen3-max")])
+    set_agent_setting("default_provider", "openrouter")
+    set_agent_setting("default_model", "openrouter/qwen/qwen3-max")
+
+    cfg = load_agent_config()
+    rt = AgentRuntime(cfg)
+    rt.start()
+    try:
+        sk = rt.create_conversation(
+            "Coder", _uniq(), str(tmp_config_dir), model="solo/other-model"
+        )
+        conv = rt.get_conversation(sk)
+        assert conv is not None
+        assert conv.model == "solo/other-model"
+    finally:
+        rt.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Tool loop — test by calling _run_loop directly (synchronous)
 #
 #  IMPORTANT: When patching rt._call_llm, the mock is an unbound function.
