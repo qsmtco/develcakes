@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Mapping
 
 _logger = logging.getLogger(__name__)
 
 
-def startup_warnings() -> list[str]:
-    """Configuration faults that used to stay silent until a call failed."""
+def startup_warnings(env: Mapping[str, str] | None = None) -> list[str]:
+    """Configuration faults that used to stay silent until a call failed.
+
+    SPEC-63 §2.5 (fix-round 2, delta #8): ``env`` defaults to ``os.environ``
+    AT CALL TIME, making the env-key-warning tests hermetic — they pass a
+    dict instead of monkeypatching process state. Still a pure function:
+    no I/O beyond the passed-in mapping.
+    """
+    if env is None:
+        env = os.environ
     warnings: list[str] = []
     try:
         from utils.providers_store import load_providers
@@ -20,6 +29,38 @@ def startup_warnings() -> list[str]:
     enabled = [p for p in providers if getattr(p, "enabled", True)]
     if not enabled:
         warnings.append("no enabled provider card")
+
+    # SPEC-63 §2.5 (v3): the env line is ADDED alongside the generic line
+    # above — the two conditions are independent (zero-enabled vs
+    # missing-vendor), so neither may replace the other. Fires only when a
+    # mapped env var is set AND no stored card serves that preset's vendor.
+    try:
+        from utils.env_provider_keys import detect_env_keys
+        from utils.provider_presets import get_preset, preset_vendor_present
+        detected = [
+            (env_name, preset_key)
+            for env_name, preset_key, _value in detect_env_keys(env)
+            if not preset_vendor_present(providers, get_preset(preset_key))
+        ]
+    except ImportError:
+        detected = []
+    if detected:
+        first_env_name = detected[0][0]
+        line = (
+            f"Found {len(detected)} provider key(s) in your environment "
+            f"(e.g. {first_env_name})"
+        )
+        # v3: when the store is empty the env line itself carries BOTH facts
+        # (keys found + nothing configured); when any card exists, drop the
+        # second clause so the disabled-card story stays on the generic line.
+        if not providers:
+            line += (
+                " — but no provider card is configured yet; open Settings "
+                "→ Providers to add one in a click."
+            )
+        else:
+            line += " — open Settings → Providers to add one in a click."
+        warnings.append(line)
 
     names = {getattr(p, "name", "") for p in providers}
     try:
