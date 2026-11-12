@@ -510,8 +510,11 @@ class TestMaxTokensSpinButton:
         assert card._provider.last_error is None
 
     def test_on_test_result_failure_stamps_error(self, tmp_config_dir):
-        """A failed test should stamp the error on _provider.last_error so
-        refresh_providers() doesn't revert to 'Untested'."""
+        """A failed test surfaces the error on the status label.
+        SPEC-63 delta #11/#12: the VIEW no longer writes _provider.last_error
+        — the handler (_persist_test_result) is the SINGLE writer and
+        persists the EXPLAINED string (pinned in tests/test_settings_handler.py).
+        """
         h = SettingsHandler()
         h.add_or_update(_make_provider("p1"))
         d = SettingsDialog(parent=None, handler=h)
@@ -520,7 +523,10 @@ class TestMaxTokensSpinButton:
                             error="HTTP 401: bad key",
                             model_used="p1/model-v1")
         card._on_test_result(result)
-        assert card._provider.last_error == "HTTP 401: bad key"
+        # Raw string never lands on the in-memory card; the label shows the
+        # explained message (§2.6c), the persisted string is the handler's.
+        assert card._provider.last_error is None
+        assert "bad key" not in card._status_label.get_text()
 
     def test_on_test_result_does_not_change_max_tokens_when_not_sentinel(self, tmp_config_dir):
         """If user has customized max_tokens, the spin value must NOT change
@@ -824,3 +830,412 @@ class TestAgentsRoomFallback:
         # Unrelated keys survive the write.
         assert raw["default_model"] == "openai/gpt-4o"
         assert raw["user_id"] == "u-7"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-63 §2.6 — preset menu, preset card, unsaved survival, model
+#  read path, error display, env chips. Requires a display (xvfb-run -a)
+#  — same GTK guard as the rest of this file.
+# ═══════════════════════════════════════════════════════════════════
+
+from utils.model_catalog import ModelListResult  # noqa: E402
+from utils.provider_presets import PRESETS  # noqa: E402
+
+_ENV_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
+
+
+class TestSpec63PresetMenu:
+    """§2.6(a): 4 presets + Custom…, activated through the RESOLUTION path
+    (v3 delta #9/#10 — lookup_action bypasses GTK name resolution and cannot
+    catch the dead-menu bug this criterion exists for)."""
+
+    def test_menu_model_has_four_presets_plus_custom(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        model = d._add_btn.get_popover().get_menu_model()
+        assert model.get_n_items() == len(PRESETS) + 1
+        actions = [
+            model.get_item_attribute_value(i, "action").get_string()
+            for i in range(model.get_n_items())
+        ]
+        assert actions[: len(PRESETS)] == [
+            f"settings.add-preset.{p.key}" for p in PRESETS
+        ]
+        assert actions[-1] == "settings.add-custom"
+
+    def test_resolution_path_activation_creates_preset_card(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert d._add_btn.activate_action("settings.add-preset.openai", None) is True
+        assert len(d._cards) == 1
+        card = d._cards[0]
+        assert card._name_entry.get_text() == "openai"
+        assert card._base_url_entry.get_text() == "https://api.openai.com/v1"
+        assert card._model_entry.get_text() == "gpt-4o"
+
+    def test_every_preset_menu_item_resolves(self, tmp_config_dir):
+        h = SettingsHandler()
+        for preset in PRESETS:
+            d = SettingsDialog(parent=None, handler=h)
+            assert d._add_btn.activate_action(
+                f"settings.add-preset.{preset.key}", None) is True
+            card = d._cards[-1]
+            assert card._name_entry.get_text() == preset.name
+            assert card._provider.base_url == preset.base_url
+
+    def test_custom_reproduces_old_blank_card(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_custom_clicked()
+        assert len(d._cards) == 1
+        card = d._cards[0]
+        # Old blank-card behavior, byte-for-byte: all fields empty, unsaved,
+        # not dirty (nothing typed), Remove just removes the card.
+        assert card._provider.name == ""
+        assert card._model_entry.get_text() == ""
+        assert card._is_new is True
+        assert card._saved is False
+        assert card._is_dirty() is False
+        # The old entry point still exists (spec: preserve it).
+        assert callable(d._on_add_provider_clicked)
+
+
+class TestSpec63PresetCard:
+    """§2.6(b): the executed-trace contract — fresh preset card is NOT dirty;
+    caller lands in _provider; key is placeholder-only."""
+
+    def test_fresh_preset_card_is_not_dirty(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        assert card._is_dirty() is False, (
+            "preset card dirty before the user typed anything (executed-trace regression)"
+        )
+
+    def test_key_typing_makes_card_dirty(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._api_key_entry.set_text("sk-test")
+        assert card._is_dirty() is True
+
+    def test_preset_key_is_placeholder_only(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        assert card._api_key_entry.get_text() == ""  # never a VALUE
+        assert card._api_key_entry.get_placeholder_text() == "sk-…"
+
+    def test_collected_caller_comes_from_preset(self, tmp_config_dir):
+        """Without caller in _provider, an unprefixed model ('gpt-4o') raises
+        'Cannot auto-detect caller' at Save (settings_handler :113-121)."""
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("google")
+        card = d._cards[-1]
+        card._api_key_entry.set_text("AIzaTest")
+        collected = card._collect_from_form()
+        assert collected.caller == "openai"
+        assert collected.default_model == "openai/gemini-2.0-flash"
+
+    def test_anthropic_card_has_no_load_models_button(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("anthropic")
+        assert d._cards[-1]._load_models_btn is None
+        assert d._cards[-1]._key_link is not None
+
+    def test_get_a_key_link_carries_catalog_uri(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        link = d._cards[-1]._key_link
+        assert link.get_uri() == "https://platform.openai.com/api-keys"
+
+    def test_save_preset_card_round_trips_catalog_fields(self, tmp_config_dir):
+        """Save on a fresh preset card persists catalog values + typed key."""
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._api_key_entry.set_text("sk-saved")
+        card._on_save_clicked(None)
+        stored = h.list_providers()
+        assert len(stored) == 1
+        assert stored[0].name == "openai"
+        assert stored[0].default_model == "gpt-4o"
+        assert stored[0].caller == "openai"
+        assert stored[0].api_key == "sk-saved"
+        assert stored[0].max_tokens == 128_000
+        assert card._saved is True
+
+
+class TestSpec63UnsavedSurvival:
+    """§2.6(b2) Debugger #2 (CRITICAL): saving provider B must not delete
+    unsaved preset card A — along with the API key the user just typed."""
+
+    def test_saving_b_keeps_unsaved_preset_card_a(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("beta"))
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card_a = d._cards[-1]
+        card_a._api_key_entry.set_text("sk-typed-key")
+
+        d._cards[0]._on_save_clicked(None)      # save B
+        d.refresh_providers(h.list_providers())  # wiring's refresh
+
+        assert card_a in d._cards, "unsaved preset card A was reconciled away"
+        assert card_a._api_key_entry.get_text() == "sk-typed-key"
+        assert len(d._cards) == 2
+
+    def test_saved_flag_set_before_add_or_update(self, tmp_config_dir, monkeypatch):
+        """delta #4/#5: _saved flips BEFORE add_or_update — the handler fires
+        on_providers_changed SYNCHRONOUSLY inside the call."""
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._api_key_entry.set_text("sk-x")
+
+        seen = {}
+
+        real_add = h.add_or_update
+
+        def spy_add(provider, **kw):
+            seen["saved_during_call"] = card._saved
+            return real_add(provider, **kw)
+
+        monkeypatch.setattr(h, "add_or_update", spy_add)
+        card._on_save_clicked(None)
+        assert seen["saved_during_call"] is True
+        assert card._saved is True
+
+    def test_failed_save_resets_saved_flag(self, tmp_config_dir):
+        """delta #4: ValueError from add_or_update must reset _saved False —
+        the card stays unsaved and reconcilable-away."""
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_custom_clicked()
+        card = d._cards[-1]
+        card._saved = True   # simulate the flag having been set optimistically
+        card._on_save_clicked(None)  # empty fields → ValueError inside
+        assert card._saved is False
+
+
+class TestSpec63ModelReadPath:
+    """§2.6(d): _current_model_text is the ONLY model read path; the
+    re-prefix rule anchors at READ time, gated on base_url (delta #7)."""
+
+    def test_openrouter_raw_id_gets_prefixed_at_read(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openrouter")
+        card = d._cards[-1]
+        card._model_entry.set_text("qwen/qwen3-max")
+        assert card._current_model_text() == "openrouter/qwen/qwen3-max"
+        collected = card._collect_from_form()
+        assert collected.default_model == "openrouter/qwen/qwen3-max"
+
+    def test_already_anchored_value_not_double_prefixed(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openrouter")
+        card = d._cards[-1]
+        # populate wrote the stored 'openrouter/auto'
+        assert card._current_model_text() == "openrouter/auto"
+
+    def test_non_openrouter_base_url_never_prefixed(self, tmp_config_dir):
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("x", base_url="https://api.example.com/v1"))
+        d = SettingsDialog(parent=None, handler=h)
+        card = d._cards[0]
+        card._model_entry.set_text("myorg/model")
+        assert card._current_model_text() == "myorg/model"
+
+    def test_loaded_models_dropdown_writes_raw_id_to_entry(self, tmp_config_dir, monkeypatch):
+        """delta #8: the dropdown is display-only; the ENTRY is the authority.
+        Picking a RAW vendor id stores the raw id; the prefix appears only at
+        read time."""
+        from ui.handlers import settings_handler as sh
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openrouter")
+        card = d._cards[-1]
+        # Type a value that matches a RAW /models id so the preselection
+        # branch fires ('auto' from the catalog default matches nothing).
+        card._model_entry.set_text("qwen/qwen3-max")
+
+        ids = ("qwen/qwen3-max", "anthropic/claude-x", "openai/gpt-4o")
+        monkeypatch.setattr(
+            sh.SettingsHandler, "list_models",
+            lambda self_, base_url, api_key, caller, on_result: on_result(
+                ModelListResult(ok=True, model_ids=tuple(ids), error=None)),
+        )
+        card._on_load_models_clicked()
+        # The dropdown took over display; the entry holds the picked RAW id.
+        assert card._model_entry.get_text() == "qwen/qwen3-max"
+        assert card._model_dropdown.get_visible() is True
+        # Read time applies the anchor.
+        assert card._current_model_text() == "openrouter/qwen/qwen3-max"
+        # The user changed the model away from the stored catalog default —
+        # the card IS dirty (delta #8's non-dirty claim is about the refresh
+        # path, not about a real user edit).
+        assert card._is_dirty() is True
+
+    def test_edit_manually_restores_entry_never_blanks(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openrouter")
+        card = d._cards[-1]
+        card._model_entry.set_text("qwen/qwen3-max")
+        ids = ("qwen/qwen3-max",)
+        monkeypatch.setattr(
+            sh.SettingsHandler, "list_models",
+            lambda self_, base_url, api_key, caller, on_result: on_result(
+                ModelListResult(ok=True, model_ids=tuple(ids), error=None)),
+        )
+        card._on_load_models_clicked()
+        assert card._model_dropdown.get_visible() is True
+        card._on_edit_manually_clicked()
+        assert card._model_entry.get_visible() is True
+        # "Current value" restored = the RAW selected id (delta #8: the
+        # prefix exists only at read time, so the entry holds raw), and the
+        # value is never blanked.
+        assert card._model_entry.get_text() == "qwen/qwen3-max"
+        assert card._current_model_text() == "openrouter/qwen/qwen3-max"
+
+    def test_loaded_models_with_no_match_defers_to_entry(self, tmp_config_dir, monkeypatch):
+        """Catalog default 'auto' matches no raw id → dropdown stays hidden,
+        the user's entry value is kept (never blanked)."""
+        from ui.handlers import settings_handler as sh
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openrouter")
+        card = d._cards[-1]  # entry holds 'openrouter/auto' from the preset
+        monkeypatch.setattr(
+            sh.SettingsHandler, "list_models",
+            lambda self_, base_url, api_key, caller, on_result: on_result(
+                ModelListResult(ok=True, model_ids=("qwen/qwen3-max",), error=None)),
+        )
+        card._on_load_models_clicked()
+        assert card._model_dropdown.get_visible() is False
+        assert card._model_entry.get_visible() is True
+        assert card._current_model_text() == "openrouter/auto"
+        assert card._is_dirty() is False
+
+
+class TestSpec63ErrorDisplay:
+    """§2.6(c): the view translates ONLY the immediate label; the persisted
+    string is the handler's explained stamp (Wave B)."""
+
+    def test_401_label_explained_and_link_visible(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._on_test_result(TestResult(
+            ok=False, latency_ms=5, error='HTTP 401: {"error":"bad key"}',
+            model_used="gpt-4o"))
+        assert card._status_label.get_text() == (
+            "❌ Key rejected — check or regenerate it."
+        )
+        assert card._key_link.get_visible() is True
+        assert card._provider.last_error is None  # view never writes it
+
+    def test_non_auth_failure_hides_get_a_key_link(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._on_test_result(TestResult(
+            ok=False, latency_ms=5, error="HTTP 404: Not Found",
+            model_used="gpt-4o"))
+        assert card._key_link.get_visible() is False
+        assert "Base URL looks wrong" in card._status_label.get_text()
+
+    def test_success_hides_get_a_key_link(self, tmp_config_dir):
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._on_test_result(TestResult(
+            ok=True, latency_ms=5, error=None, model_used="gpt-4o"))
+        assert card._key_link.get_visible() is False
+
+    def test_model_class_404_shows_model_message(self, tmp_config_dir):
+        """Debugger #17: an OpenAI-compatible 404 whose body names the model
+        is a MODEL error, not a wrong-Base-URL error."""
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        d._on_add_preset_clicked("openai")
+        card = d._cards[-1]
+        card._on_test_result(TestResult(
+            ok=False, latency_ms=5,
+            error="HTTP 404: The model 'qwen/qwen3-max' does not exist",
+            model_used="qwen/qwen3-max"))
+        assert "Model ID not accepted" in card._status_label.get_text()
+
+
+class TestSpec63EnvChips:
+    """§2.6(e): chips only for vendor-missing env keys; the VALUE never
+    surfaces; click creates the card via create_from_env."""
+
+    def _clear_env(self, monkeypatch):
+        for name in _ENV_NAMES:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_no_env_keys_no_chips(self, tmp_config_dir, monkeypatch):
+        self._clear_env(monkeypatch)
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert d._env_chips == []
+        assert d._env_chip_box.get_visible() is False
+
+    def test_chip_appears_for_vendor_missing_key(self, tmp_config_dir, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-SUPER-SECRET-123")
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        assert len(d._env_chips) == 1
+        label = d._env_chips[0][1].get_label()
+        # VAR NAME + preset label — never the VALUE (security invariant).
+        assert "OPENAI_API_KEY" in label
+        assert "OpenAI" in label
+        assert "sk-SUPER-SECRET-123" not in label
+        for widget in (d._env_chip_box,):
+            assert "sk-SUPER-SECRET-123" not in str(widget)
+
+    def test_chip_suppressed_when_vendor_card_exists(self, tmp_config_dir, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+        h = SettingsHandler()
+        # Debugger #18: a RENAMED card still suppresses (base_url half of the
+        # SINGLE preset_vendor_present helper).
+        h.add_or_update(_make_provider(
+            "my-openai",
+            base_url="https://api.openai.com/v1",
+            default_model="gpt-4o", caller="openai",
+        ))
+        d = SettingsDialog(parent=None, handler=h)
+        assert d._env_chips == []
+
+    def test_chip_click_creates_card_then_disappears(self, tmp_config_dir, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-click-key")
+        h = SettingsHandler()
+        d = SettingsDialog(parent=None, handler=h)
+        chip = d._env_chips[0][1]
+        chip.emit("clicked")
+        stored = h.list_providers()
+        assert len(stored) == 1
+        assert stored[0].name == "openai"
+        assert stored[0].api_key == "sk-click-key"  # delivered via the closure
+        assert get_agent_setting("default_provider") == "openai"
+        # wiring fires refresh_providers after a provider change → chip hides.
+        d.refresh_providers(h.list_providers())
+        assert chip.get_visible() is False

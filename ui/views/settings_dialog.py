@@ -12,14 +12,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import gi
 
 gi.require_version('Gtk', '4.0')
 
-from gi.repository import Gtk
+from gi.repository import Gio, Gtk
 
 from agent.config import ROOM_FALLBACK_VALUES as _ROOM_FALLBACK_VALUES
 from agent.llm.jev_client import DECISION_MODEL_PROVIDER as _DECISION_MODEL_PROVIDER
@@ -29,7 +31,17 @@ from models.providers import (
     validate_provider_reasoning_effort,
 )
 from utils import stt_config as _stt_config
+from utils.env_provider_keys import detect_env_keys
 from utils.improve import IMPROVE_MODEL_PROVIDER as _IMPROVE_MODEL_PROVIDER
+from utils.model_catalog import ModelListResult
+from utils.provider_errors import error_class, explain_test_error
+from utils.provider_presets import (
+    PRESETS,
+    ProviderPreset,
+    get_preset,
+    preset_for,
+    preset_vendor_present,
+)
 
 # SPEC-22 §2.8: the structural handle the code looks the JEV card up by. The
 # Settings page pre-names its card with this; the general Providers list and
@@ -70,7 +82,7 @@ class _ProviderCard:
 
     def __init__(self, dialog: SettingsDialog, provider: ProviderConfig | None, *,
                  fixed_name: bool = False, allow_empty_caller: bool = False,
-                 test_runner=None):
+                 test_runner=None, preset: ProviderPreset | None = None):
         """If provider is None, this is a new (unsaved) card with empty fields.
 
         ``fixed_name`` locks the Name entry (used for the DecisionModel card,
@@ -78,18 +90,39 @@ class _ProviderCard:
         ``allow_empty_caller`` lets a card save with caller="" (the JEV adapter
         sets its own; we do not invent caller detection — fix-round JOB 2).
         ``test_runner`` overrides Test Connection (the DecisionModel probe).
+        ``preset`` (SPEC-63 §2.6b) pre-fills the card from a vendor catalog
+        entry: catalog values land in ``_provider`` via ONE dataclasses.replace
+        (executed-trace design) and are pushed to the widgets by the existing
+        populate path, so the fresh card is NOT dirty before the user types.
         """
         self._dialog = dialog
         self._is_new = provider is None
         self._fixed_name = fixed_name
         self._allow_empty_caller = allow_empty_caller
         self._test_runner = test_runner
+        # SPEC-63 §2.6(b2) — explicit saved-flag. Do NOT overload _is_new:
+        # its one read (_on_remove_clicked) must keep its current meaning.
+        self._saved = provider is not None
+        self._preset = preset
+        # §2.6(c): preset cards get a "Get a key" LinkButton in
+        # _build_widgets; Custom cards keep it None (no preset, no link).
+        self._key_link = None
+        # §2.6(b) dropdown state — the ENTRY stays the stored-value authority;
+        # the dropdown is display-only while a loaded list is showing.
+        self._model_dropdown = None
+        self._model_string_list = None
+        self._model_row_box = None
+        self._load_models_btn = None
+        self._models_request_token = 0
+        self._models_ids: list[str] = []  # python mirror of the StringList
         self._provider = provider or ProviderConfig(
             name="", base_url="", api_key="", default_model="", caller="",
         )
         self._build_widgets()
         if provider is not None:
             self._populate_from_provider()
+        elif self._is_new and self._preset is not None:
+            self._apply_preset()
 
     def _build_widgets(self) -> None:
         self._frame = Gtk.Frame()
@@ -126,7 +159,12 @@ class _ProviderCard:
         self._model_entry = Gtk.Entry()
         self._model_entry.set_placeholder_text("model-id")
         self._model_entry.set_hexpand(True)
-        model_row = self._labeled("Default Model", self._model_entry)
+        # §2.6(d): the model row is a box so a loaded /models list can swap
+        # the free-text entry for a display-only dropdown (the entry stays
+        # the stored-value authority).
+        self._model_row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._model_row_box.append(self._model_entry)
+        model_row = self._labeled("Default Model", self._model_row_box)
         vbox.append(model_row)
 
         # API key (password + reveal toggle)
@@ -235,6 +273,28 @@ class _ProviderCard:
         vbox.append(btn_row)
         self._frame.set_child(vbox)
 
+        # SPEC-63 §2.6(b) — preset-conditioned widgets. Built HERE (vbox is a
+        # local of _build_widgets; _apply_preset only sets VALUES).
+        if self._preset is not None:
+            # "Get a key" row — Gtk.LinkButton MANDATED (Debugger #21: the
+            # UriLauncher alternative is async, has no assertable get_uri(),
+            # and fails silently without a browser handler). The URL itself is
+            # never embedded in any persisted string (delta #12).
+            netloc = urlparse(self._preset.api_key_url).netloc
+            self._key_link = Gtk.LinkButton.new_with_label(
+                self._preset.api_key_url, f"Get a key at {netloc}"
+            )
+            self._key_link.add_css_class("settings-preset-link")
+            self._key_link.set_halign(Gtk.Align.START)
+            vbox.append(self._key_link)
+
+            if self._preset.supports_models_list:
+                self._load_models_btn = Gtk.Button(label="Load models")
+                self._load_models_btn.add_css_class("settings-model-row")
+                self._load_models_btn.set_halign(Gtk.Align.START)
+                self._load_models_btn.connect("clicked", self._on_load_models_clicked)
+                vbox.append(self._load_models_btn)
+
     @staticmethod
     def _effective_context_window(p: ProviderConfig | None) -> int:
         """The window the resolver actually uses: context_window-first.
@@ -269,6 +329,164 @@ class _ProviderCard:
         stored = (self._provider.default_model or "").strip()
         if current != stored:
             self._supports_reasoning_check.set_active(False)
+
+    # ── SPEC-63 §2.6(b)/(d) — preset apply + model dropdown ────────────
+
+    def _apply_preset(self) -> None:
+        """Seed a fresh preset card. ALL preset fields land in ``_provider``
+        via ONE dataclasses.replace, then the standard populate path pushes
+        them into the widgets — the executed-trace design that keeps the
+        fresh card NOT dirty (per-widget set_text made _is_dirty() True
+        before the user typed anything). The key is deliberately NOT set —
+        it is the user's one required input; its hint goes on the
+        PLACEHOLDER only. ``_populate_from_provider`` also renders the caller
+        label from p.caller — no separate set_text (dropped per §2.6b)."""
+        preset = self._preset
+        if preset is None:
+            return
+        self._provider = replace(
+            self._provider,
+            name=preset.name,
+            base_url=preset.base_url,
+            default_model=preset.default_model,
+            caller=preset.caller,
+            max_tokens=preset.context_window,
+            context_window=preset.context_window,
+        )
+        self._populate_from_provider()
+        # Placeholder ONLY, set AFTER populate (it writes entry TEXT; the
+        # placeholder does not affect _is_dirty(), which compares text only).
+        self._api_key_entry.set_placeholder_text(preset.key_prefix_hint or "API key")
+
+    def _current_model_text(self) -> str:
+        """The ONLY read path for the card's model id (feeds BOTH
+        _collect_from_form and _is_dirty). Applies the re-prefix rule AT
+        READ TIME — never at write time (v1's write-time rule was destroyed
+        by set_active(); Debugger #5). v3: ALWAYS anchor to the card's
+        caller unless already anchored, gated on the card's BASE_URL (not
+        on _preset) — a Custom card pointed at OpenRouter and a RENAMED
+        preset card get the same treatment (delta #7)."""
+        raw = ""
+        if (self._model_dropdown is not None
+                and self._model_dropdown.get_visible()):
+            sel = self._model_dropdown.get_selected_item()
+            raw = (sel.get_string() if sel is not None else "")
+        else:
+            raw = self._model_entry.get_text()
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        if (self._provider.base_url.rstrip("/").endswith("openrouter.ai/api/v1")
+                and raw.split("/", 1)[0] != "openrouter"):
+            return f"openrouter/{raw}"
+        return raw
+
+    def _on_load_models_clicked(self, *_args) -> None:
+        """Fetch /models off-thread via handler.list_models. Button state
+        machine (Debugger #12): disabled from click until the callback
+        fires, re-enabled in BOTH ok and error paths; a monotonic per-card
+        request token discards stale results (a late return from a
+        superseded click must not overwrite a newer list)."""
+        token = self._models_request_token + 1
+        self._models_request_token = token
+        self._load_models_btn.set_sensitive(False)
+        self._dialog._handler.list_models(
+            self._base_url_entry.get_text().strip(),  # the FORM's URL (Test uses it too)
+            self._api_key_entry.get_text(),
+            self._provider.caller,
+            lambda result, t=token: self._on_models_arrived(result, t),
+        )
+
+    def _on_models_arrived(self, result: ModelListResult, token: int) -> None:
+        """Main-thread callback. The DROPDOWN is display-only (delta #8): the
+        picked RAW id is written into the entry — the entry is the single
+        stored-value authority; the vendor prefix exists only at read time."""
+        if token != self._models_request_token:
+            return  # stale — a newer click superseded this list
+        self._load_models_btn.set_sensitive(True)  # re-enable in BOTH paths
+        if not result.ok:
+            self._set_status(
+                f"⚠ {result.error or 'could not load models'}", fail=True)
+            return
+        ids = list(result.model_ids)
+        if not ids:
+            self._set_status("⚠ No models returned", fail=True)
+            return
+        if self._model_dropdown is None:
+            self._model_string_list = Gtk.StringList.new([])
+            self._model_dropdown = Gtk.DropDown.new(self._model_string_list)
+            self._model_dropdown.set_hexpand(True)
+            self._model_dropdown.connect(
+                "notify::selected", self._on_model_selected_reset_reasoning)
+            edit_btn = Gtk.Button(label="edit manually")
+            edit_btn.add_css_class("flat")
+            edit_btn.connect("clicked", self._on_edit_manually_clicked)
+            self._model_row_box.append(self._model_dropdown)
+            self._model_row_box.append(edit_btn)
+        else:
+            # A second (or later) load REPLACES the list — never appends to
+            # the previous StringList (duplicate ids / stale tail).
+            while self._model_string_list.get_n_items():
+                self._model_string_list.remove(0)
+        for model_id in ids:
+            self._model_string_list.append(model_id)
+        self._models_ids = ids
+        # GTK4 widgets are born visible: a freshly appended dropdown would
+        # enter the read path (item 0 auto-selected) BEFORE the match
+        # decision below, silently rewriting the card's model. Park the row
+        # on the ENTRY first — the entry is the stored-value authority —
+        # then swap only when the current value actually matches a raw id.
+        self._model_dropdown.set_visible(False)
+        self._model_entry.set_visible(True)
+        # Preselect the current value when it matches a RAW id (after
+        # stripping this card's own re-prefix); otherwise select nothing and
+        # defer to the entry (dropdown stays hidden → reads stay on the
+        # entry — the user's value is never blanked).
+        current = self._current_model_text()
+        if self._provider.base_url.rstrip("/").endswith("openrouter.ai/api/v1"):
+            bare = current.split("/", 1)[1] if "/" in current else current
+        else:
+            bare = current
+        match_idx = ids.index(bare) if bare in ids else -1
+        if match_idx >= 0:
+            self._populating = True
+            try:
+                self._model_entry.set_text(bare)
+                self._model_dropdown.set_selected(match_idx)
+                self._model_dropdown.set_visible(True)
+                self._model_entry.set_visible(False)
+            finally:
+                self._populating = False
+        else:
+            self._model_dropdown.set_visible(False)
+            self._model_entry.set_visible(True)
+        self._set_status(f"Loaded {len(ids)} models", ok=True)
+
+    def _on_model_selected_reset_reasoning(self, *_args) -> None:
+        """§2.6(d): the reasoning-reset wiring extends to the dropdown, same
+        _populating guard that suppresses programmatic changes."""
+        if self._populating:
+            return
+        if (self._model_dropdown is not None
+                and self._model_dropdown.get_visible()):
+            current = self._current_model_text().strip()
+            stored = (self._provider.default_model or "").strip()
+            if current != stored:
+                self._supports_reasoning_check.set_active(False)
+
+    def _on_edit_manually_clicked(self, *_args) -> None:
+        """Restore the free-text entry with the current value (never blanked).
+        delta #8: the entry is the stored-value authority and holds the RAW
+        id while the dropdown displays — so the raw id is what gets restored;
+        the vendor prefix exists only at read time."""
+        if self._model_dropdown is None:
+            return
+        sel = self._model_dropdown.get_selected_item()
+        raw = (sel.get_string() if sel is not None else "") \
+            or self._model_entry.get_text()
+        self._model_entry.set_text(raw or "")
+        self._model_dropdown.set_visible(False)
+        self._model_entry.set_visible(True)
 
     def _labeled(self, text: str, widget: Gtk.Widget) -> Gtk.Box:
         """Label above the control so the row fits the settings sidebar."""
@@ -306,6 +524,25 @@ class _ProviderCard:
             self._reasoning_dropdown.set_sensitive(bool(p.supports_reasoning))
         finally:
             self._populating = False
+        # §2.6(d) delta #8 — keep a VISIBLE dropdown consistent with the
+        # (prefixed) stored model: select the matching RAW id if present,
+        # else defer to the entry. Either way the card stays non-dirty: the
+        # read path re-prefixes, matching what populate wrote into the entry.
+        if (self._model_dropdown is not None
+                and self._model_dropdown.get_visible()):
+            bare = (p.default_model or "").strip()
+            if self._provider.base_url.rstrip("/").endswith("openrouter.ai/api/v1"):
+                bare = bare.split("/", 1)[1] if "/" in bare else bare
+            if bare in self._models_ids:
+                idx = self._models_ids.index(bare)
+                self._populating = True
+                try:
+                    self._model_dropdown.set_selected(idx)
+                finally:
+                    self._populating = False
+            else:
+                self._model_dropdown.set_visible(False)
+                self._model_entry.set_visible(True)
 
     def _is_dirty(self) -> bool:
         """True if any entry field differs from the stored provider values.
@@ -315,7 +552,10 @@ class _ProviderCard:
         return (
             self._name_entry.get_text().strip() != (p.name or "")
             or self._base_url_entry.get_text().strip() != (p.base_url or "")
-            or self._model_entry.get_text().strip() != (p.default_model or "")
+            # §2.6(d): the model comparison goes through the SINGLE read path
+            # (_current_model_text), so a display-only dropdown never makes a
+            # card read dirty.
+            or self._current_model_text() != (p.default_model or "")
             or self._api_key_entry.get_text().strip() != (p.api_key or "")
             # Compare against the EFFECTIVE window: the spin displays
             # context_window-or-max_tokens, so an untouched asymmetric card
@@ -347,7 +587,10 @@ class _ProviderCard:
             name=self._name_entry.get_text().strip(),
             base_url=self._base_url_entry.get_text().strip(),
             api_key=self._api_key_entry.get_text().strip(),
-            default_model=self._model_entry.get_text().strip(),
+            # §2.6(d): the SINGLE model read path — applies the read-time
+            # re-prefix rule (vendor-qualified OpenRouter ids stay qualified;
+            # raw /models ids get the caller anchor).
+            default_model=self._current_model_text(),
             caller=existing.caller if existing else "",
             enabled=existing.enabled if existing else True,
             supports_tools=existing.supports_tools if existing else True,
@@ -382,11 +625,18 @@ class _ProviderCard:
     def _on_save_clicked(self, *args) -> None:
         """Save the card's current form values via handler."""
         provider = self._collect_from_form()
+        # §2.6(b2) — set BEFORE add_or_update: the handler fires
+        # on_providers_changed → refresh_providers SYNCHRONOUSLY inside the
+        # call; a flag set after the call leaves the just-saved card invisible
+        # to the reconciliation loop, which then appends a DUPLICATE card and
+        # orphans the original (delta #4/#5 — both auditors executed the bug).
+        self._saved = True
         try:
             self._dialog._handler.add_or_update(
                 provider, allow_empty_caller=self._allow_empty_caller,
             )
         except ValueError as e:
+            self._saved = False  # reset on failure — card stays unsaved
             self._set_status(str(e), fail=True)
 
     def _on_test_clicked(self, *args) -> None:
@@ -419,6 +669,7 @@ class _ProviderCard:
         """Remove this provider. Shows confirmation first."""
         if self._is_new:
             # Unsaved card — just remove from the dialog
+            self._saved = False
             self._dialog._remove_card(self)
             return
 
@@ -447,6 +698,8 @@ class _ProviderCard:
         """Called on the GTK main thread with the test result."""
         if result.ok:
             self._set_status(f"✅ {result.latency_ms}ms", ok=True)
+            if self._key_link is not None:
+                self._key_link.set_visible(False)
             # Pre-fill context window if discovered and user hasn't customized.
             # Sentinel matches settings_handler: max_tokens == 128_000 AND
             # default_max_tokens == 0 (no wizard stamp). If the wizard
@@ -491,14 +744,20 @@ class _ProviderCard:
                 last_error=None,
             )
         else:
-            error_msg = result.error or "unknown error"
-            self._set_status(f"❌ {error_msg}", fail=True)
-            # Stamp the error on the in-memory provider too so refresh doesn't
-            # revert to "Untested".
-            self._provider = replace(
-                self._provider,
-                last_error=error_msg,
+            # §2.6(c) (delta #11/#12): the view does NOT write last_error —
+            # the handler (`_persist_test_result`) is the SINGLE writer. The
+            # view translates ONLY for the immediate status label; the raw
+            # error is never embedded in the in-memory card either.
+            explained = explain_test_error(
+                result.error, preset=preset_for(self._provider)
             )
+            self._set_status(f"❌ {explained}", fail=True)
+            # "Get a key" shows for auth-class failures (preset cards only —
+            # the link exists only when a preset set it).
+            if self._key_link is not None:
+                self._key_link.set_visible(
+                    error_class(result.error) == "auth"
+                )
 
     def _set_status(self, text: str, *, ok: bool = False, fail: bool = False) -> None:
         self._status_label.set_text(text)
@@ -581,18 +840,62 @@ class SettingsDialog:
         self._list_box.append(self._empty_state)
 
         self._scrolled.set_child(self._list_box)
+
+        # SPEC-63 §2.6(e) — env chip row ABOVE the card list (spec-literal
+        # placement). A chip appears only when an industry-standard env var
+        # is set AND no stored card serves that vendor
+        # (preset_vendor_present). The key VALUE lives only as the click
+        # closure's argument — never in any label/log/string.
+        self._env_chip_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._env_chip_box.set_margin_start(16)
+        self._env_chip_box.set_margin_end(16)
+        self._env_chip_box.set_margin_top(8)
+        self._env_chip_box.set_margin_bottom(0)
+        self._env_chips: list[tuple[str, Gtk.Button]] = []
+        providers_page.append(self._env_chip_box)
+
         providers_page.append(self._scrolled)
 
-        # + Add Provider button (bottom)
+        # + Add Provider button (bottom) — SPEC-63 §2.6(a): a MenuButton with
+        # a Gio.Menu popover (4 vendor presets + Custom…). MUST be Gio.Menu
+        # (GTK 4.14 GTK-CRITICAL trap with widget children in PopoverMenu,
+        # chat_input_toolbar.py:306-315).
         add_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         add_btn_box.set_margin_start(16)
         add_btn_box.set_margin_end(16)
         add_btn_box.set_margin_top(4)
         add_btn_box.set_margin_bottom(8)
-        self._add_btn = Gtk.Button(label="+ Add Provider")
+
+        # Action naming (fix-round 1 — Debugger #4): group action names carry
+        # NO prefix; the prefix lives in insert_action_group(name, …) and in
+        # the menu strings. Flagger #17: the group goes on a REAL widget (the
+        # stack), not on the dialog (SettingsDialog is not a Gtk.Widget).
+        group = Gio.SimpleActionGroup()
+        for preset in PRESETS:
+            action = Gio.SimpleAction.new(f"add-preset.{preset.key}", None)
+            action.connect(
+                "activate",
+                lambda _a, _p, k=preset.key: self._on_add_preset_clicked(k),
+            )
+            group.add_action(action)
+        custom = Gio.SimpleAction.new("add-custom", None)
+        custom.connect("activate", lambda _a, _p: self._on_add_custom_clicked())
+        group.add_action(custom)
+        self._stack.insert_action_group("settings", group)
+
+        menu = Gio.Menu()
+        for preset in PRESETS:
+            menu.append(preset.label, f"settings.add-preset.{preset.key}")
+        menu.append("Custom…", "settings.add-custom")
+        popover = Gtk.PopoverMenu.new_from_model(menu)
+        popover.set_autohide(True)
+
+        # Attribute name _add_btn kept (spec: keep for safety even though no
+        # test references it) — but it is now a Gtk.MenuButton.
+        self._add_btn = Gtk.MenuButton(label="+ Add Provider")
         self._add_btn.add_css_class("suggested-action")
         self._add_btn.set_hexpand(True)
-        self._add_btn.connect("clicked", self._on_add_provider_clicked)
+        self._add_btn.set_popover(popover)
         add_btn_box.append(self._add_btn)
         providers_page.append(add_btn_box)
 
@@ -649,6 +952,10 @@ class SettingsDialog:
 
         self._root.append(self._group_box)
         self._root.append(page_scroll)
+
+        # SPEC-63 §2.6(e): detect env keys BEFORE the initial refresh —
+        # refresh_providers ends in _sync_env_chips, which reads _env_chips.
+        self._build_env_chips(handler.list_providers())
 
         # Populate from current handler state
         self.refresh_providers(handler.list_providers())
@@ -718,11 +1025,14 @@ class SettingsDialog:
             )
         ]
 
-        # Build lookup of current cards by provider name
+        # Build lookup of current cards by provider name. §2.6(b2): UNSAVED
+        # cards are NEVER reconciled away — a preset card carrying a typed
+        # API key would otherwise be destroyed (with the key) the moment any
+        # other provider is saved and the refresh fires (Debugger #2).
         current_by_name: dict[str, _ProviderCard] = {}
         for card in self._cards:
             name = card._provider.name
-            if name:
+            if name and card._saved:
                 current_by_name[name] = card
 
         new_names = {p.name for p in providers}
@@ -755,6 +1065,56 @@ class SettingsDialog:
         # Toggle empty state
         self._empty_state.set_visible(len(self._cards) == 0)
 
+        # §2.6(e): chips whose vendor card now exists disappear.
+        self._sync_env_chips(providers)
+
+    # ── SPEC-63 §2.6(e) — env chips ────────────────────────────────────
+
+    def _build_env_chips(self, providers: list[ProviderConfig]) -> None:
+        """Detect industry-standard provider env keys and render one chip per
+        vendor-missing hit. Called once from __init__ (after the Providers
+        page exists, before the initial refresh)."""
+        self._env_detected = detect_env_keys(dict(os.environ))
+        # §2.6(e): chip per vendor-MISSING hit — the build-time filter uses
+        # the same SINGLE predicate as _sync_env_chips (a vendor card that
+        # exists at open time must not produce a chip at all).
+        self._env_detected = [
+            (env_name, preset_key, key_value)
+            for env_name, preset_key, key_value in self._env_detected
+            if (preset := get_preset(preset_key)) is not None
+            and not preset_vendor_present(providers, preset)
+        ]
+        self._env_chip_box.set_visible(bool(self._env_detected))
+        for env_name, preset_key, key_value in self._env_detected:
+            preset = get_preset(preset_key)
+            if preset is None:
+                continue
+            chip = Gtk.Button(
+                label=f"Add {preset.label} from {env_name} (found in environment)"
+            )
+            chip.add_css_class("settings-env-chip")
+            chip.connect(
+                "clicked",
+                lambda _b, k=preset_key, v=key_value: self._on_env_chip_clicked(k, v),
+            )
+            self._env_chip_box.append(chip)
+            self._env_chips.append((preset_key, chip))
+
+    def _sync_env_chips(self, providers: list[ProviderConfig]) -> None:
+        """Hide chips whose vendor is now served by a stored card. ONE
+        predicate (preset_vendor_present, §2.4a) — no local re-implementation
+        (Debugger #18: a renamed card must still suppress the chip)."""
+        for preset_key, chip in self._env_chips:
+            preset = get_preset(preset_key)
+            if preset is not None and preset_vendor_present(providers, preset):
+                chip.set_visible(False)
+
+    def _on_env_chip_clicked(self, preset_key: str, key_value: str) -> None:
+        """One click: create_from_env (handler-owned vendor guard +
+        add_or_update prefer path). The value travels as this closure's
+        argument only — never in widget text, labels, or logs."""
+        self._handler.create_from_env(preset_key, key_value)
+
     # ── Internal ──────────────────────────────────────────────────────
 
     def _on_add_provider_clicked(self, *args) -> None:
@@ -764,6 +1124,21 @@ class SettingsDialog:
         self._list_box.append(card.get_widget())
         # Hide empty state
         self._empty_state.set_visible(False)
+
+    def _on_add_preset_clicked(self, key: str) -> None:
+        """§2.6(a): append a fresh card pre-filled from the vendor catalog."""
+        preset = get_preset(key)
+        if preset is None:
+            return
+        card = _ProviderCard(self, None, preset=preset)
+        self._cards.append(card)
+        self._list_box.append(card.get_widget())
+        self._empty_state.set_visible(False)
+
+    def _on_add_custom_clicked(self, *args) -> None:
+        """§2.6(a): Custom… reproduces the old blank-card behavior byte-for-
+        byte in behavior — it IS the old handler."""
+        self._on_add_provider_clicked()
 
     def _remove_card(self, card: _ProviderCard) -> None:
         """Remove a card from the list (for unsaved new cards)."""

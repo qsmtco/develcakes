@@ -1207,6 +1207,31 @@ button.settings-remove-btn:hover {
     color: #6b6b7a;
 }
 
+/* SPEC-63 §2.6(f) — preset card "Get a key" link (dim, small) */
+.settings-preset-link {
+    color: #9ca3af;
+    font-size: 12px;
+}
+.settings-preset-link:hover {
+    color: #c7d2fe;
+}
+
+/* SPEC-63 §2.6(f) — env-var one-click chip (suggested-action variant) */
+.settings-env-chip {
+    background: rgba(99, 102, 241, 0.25);
+    color: #c7d2fe;
+    border-radius: 6px;
+    padding: 4px 10px;
+}
+.settings-env-chip:hover {
+    background: rgba(99, 102, 241, 0.45);
+}
+
+/* SPEC-63 §2.6(f) — model row (Load models button + dropdown swap row) */
+.settings-model-row {
+    spacing: 4px;
+}
+
 /* Transient Improve status line (SPEC-55 §3d) — small, error-tinted,
    sits above the input box; hidden by default. */
 .improve-status {
