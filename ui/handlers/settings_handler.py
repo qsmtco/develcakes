@@ -6,8 +6,10 @@
 # Manifest:
 #   - Reads: <config_dir>/providers.yaml
 #   - Writes: <config_dir>/providers.yaml (via utils.providers_store)
-#   - Network: yes (Test Connection, via utils.provider_test in a daemon thread)
+#   - Network: yes (Test Connection, via utils.provider_test in a daemon thread;
+#     Load Models, via utils.model_catalog.fetch_model_ids in a daemon thread)
 #   - Imports: stdlib threading/datetime, utils.providers_store, utils.provider_test,
+#              utils.provider_presets, utils.provider_errors, utils.model_catalog,
 #              models.providers
 #   - Does NOT import gi.repository.Gtk — only optionally uses GLib for idle_add
 
@@ -27,6 +29,9 @@ from utils.providers_store import (
     has_any_verified_provider,
 )
 from utils.provider_test import test_connection, TestResult
+from utils.provider_errors import explain_test_error
+from utils.provider_presets import get_preset, preset_for, preset_vendor_present
+from utils.model_catalog import ModelListResult, fetch_model_ids
 
 logger = logging.getLogger(__name__)
 
@@ -293,53 +298,12 @@ class SettingsHandler:
                     model_used=provider.default_model,
                 )
 
-            # Stamp the result on the provider
-            providers = load_providers()
-            for i, p in enumerate(providers):
-                if p.name == provider.name:
-                    if result.ok:
-                        # Pre-fill max_tokens from /v1/models probe ONLY if
-                        # user hasn't customized. Sentinel conditions:
-                        #   (a) max_tokens == 128_000 (dataclass default) AND
-                        #       default_max_tokens == 0 (no wizard stamp).
-                        # The wizard stamps default_max_tokens with the
-                        # caller-specific value to mark "this is intentional",
-                        # so we treat (default_max_tokens > 0) as a deliberate
-                        # wizard-set choice that must not be overwritten even
-                        # when max_tokens happens to equal 128K — audit BUG #7.
-                        user_has_customized = (
-                            p.max_tokens != 128_000
-                            or (p.default_max_tokens or 0) > 0
-                        )
-                        new_max_tokens = (
-                            result.context_window
-                            if (result.context_window and not user_has_customized)
-                            else p.max_tokens
-                        )
-                        # SPEC-38: dual write — a discovered window lands in
-                        # BOTH max_tokens and context_window so the resolver's
-                        # context_window-first order sees the same number the
-                        # user sees. BUG #7 sentinel is honored above: when the
-                        # user has customized, neither field changes.
-                        new_context_window = (
-                            result.context_window
-                            if (result.context_window and not user_has_customized)
-                            else p.context_window
-                        )
-                        providers[i] = replace(
-                            p,
-                            max_tokens=new_max_tokens,
-                            context_window=new_context_window,
-                            last_verified_at=datetime.now(timezone.utc).isoformat(),
-                            last_error=None,
-                        )
-                    else:
-                        providers[i] = replace(
-                            p,
-                            last_error=result.error or "unknown",
-                        )
-                    break
-            save_providers(providers)
+            # SPEC-63 §2.4a (fix-round 1 — Debugger #1/#3): ALL THREE exit
+            # paths persist through the ONE handler-owned helper. The helper
+            # is a no-op when no STORED card matches by name (unsaved card) —
+            # it must never create or rewrite providers.yaml for a card the
+            # user has not saved yet.
+            self._persist_test_result(provider, result)
 
             # Dispatch result back to the main thread
             def _dispatch():
@@ -358,34 +322,94 @@ class SettingsHandler:
         t = threading.Thread(target=_worker, daemon=True, name=f"test-{provider.name}")
         t.start()
 
+    def _persist_test_result(self, provider: ProviderConfig, result: TestResult) -> None:
+        """Stamp the result on the STORED card and save. No-op when no stored
+        card matches by name (unsaved card) — never creates an empty
+        providers.yaml. Single owner of test-result persistence.
+
+        SPEC-63 §2.4a (fix-round 1 — Debugger #1/#3/#7): the worker's THREE
+        exit paths (valid-caller probe, empty-caller early return, invalid-
+        caller early return) all route here. When the card IS stored, the
+        stamping body is the verbatim move of the former :296-341 block —
+        context-window pre-fill, the BUG #7 user_has_customized sentinel, the
+        SPEC-38 dual write, last_verified_at/last_error stamping. ONE
+        intentional change: a failed test stamps the EXPLAINED error
+        (explain_test_error, §2.6c) — the persisted last_error must be the
+        human string, never the raw probe output (Debugger #7, D#11).
+        """
+        providers = load_providers()
+        for i, p in enumerate(providers):
+            if p.name != provider.name:
+                continue
+            if result.ok:
+                # Pre-fill max_tokens from /v1/models probe ONLY if
+                # user hasn't customized. Sentinel conditions:
+                #   (a) max_tokens == 128_000 (dataclass default) AND
+                #       default_max_tokens == 0 (no wizard stamp).
+                # The wizard stamps default_max_tokens with the
+                # caller-specific value to mark "this is intentional",
+                # so we treat (default_max_tokens > 0) as a deliberate
+                # wizard-set choice that must not be overwritten even
+                # when max_tokens happens to equal 128K — audit BUG #7.
+                user_has_customized = (
+                    p.max_tokens != 128_000
+                    or (p.default_max_tokens or 0) > 0
+                )
+                new_max_tokens = (
+                    result.context_window
+                    if (result.context_window and not user_has_customized)
+                    else p.max_tokens
+                )
+                # SPEC-38: dual write — a discovered window lands in
+                # BOTH max_tokens and context_window so the resolver's
+                # context_window-first order sees the same number the
+                # user sees. BUG #7 sentinel is honored above: when the
+                # user has customized, neither field changes.
+                new_context_window = (
+                    result.context_window
+                    if (result.context_window and not user_has_customized)
+                    else p.context_window
+                )
+                providers[i] = replace(
+                    p,
+                    max_tokens=new_max_tokens,
+                    context_window=new_context_window,
+                    last_verified_at=datetime.now(timezone.utc).isoformat(),
+                    last_error=None,
+                )
+            else:
+                providers[i] = replace(
+                    p,
+                    # Debugger #7: persist the EXPLAINED string, resolved
+                    # against the STORED card (base_url → preset join).
+                    last_error=explain_test_error(
+                        result.error, preset=preset_for(p)
+                    ) or "unknown",
+                )
+            break
+        else:
+            return  # not stored: nothing to stamp, nothing to save
+        save_providers(providers)
+
     def _dispatch_test_result(
         self,
         provider: ProviderConfig,
         result: TestResult,
         on_result: Callable[[TestResult], None],
     ) -> None:
-        """Stamp the result on the provider, save, and dispatch the callback.
+        """Dispatch a failed result (short-circuit paths: invalid caller,
+        empty caller gap) through the shared persistence helper, then fire
+        on_result and on_status_changed via the main thread.
 
-        Used by test_provider._worker for failure paths (invalid caller, empty
-        caller gap, etc.) where we need to short-circuit BEFORE test_connection
-        runs. Shared between branches to keep the dispatch logic in one place.
-
-        Stamps `last_error` on the persisted provider (so the red-dot indicator
-        reflects the bad state), saves, then dispatches on_result and
-        on_status_changed via the main thread.
+        SPEC-63 §2.4a: the stamping + save now lives in the ONE helper
+        (`_persist_test_result`) shared by all three worker exit paths;
+        this wrapper keeps only the dispatch half.
 
         Preserves `caller=p.caller` per the Bug #2/#3 fix — caller must
-        round-trip through save unchanged.
+        round-trip through save unchanged (the helper replaces onto the
+        STORED card, so untouched fields round-trip).
         """
-        providers = load_providers()
-        for i, p in enumerate(providers):
-            if p.name == provider.name:
-                providers[i] = replace(
-                    p,
-                    last_error=result.error or "unknown",
-                )
-                break
-        save_providers(providers)
+        self._persist_test_result(provider, result)
 
         def _dispatch():
             try:
@@ -399,6 +423,73 @@ class SettingsHandler:
             self._GLib.idle_add(_dispatch)
         else:
             _dispatch()
+
+    # ── SPEC-63 §2.4b — Load Models ─────────────────────────────────────
+
+    def list_models(
+        self,
+        base_url: str,
+        api_key: str,
+        caller: str,
+        on_result: Callable[[ModelListResult], None],
+    ) -> None:
+        """Fetch /models off the GTK main thread; dispatch via GLib.idle_add.
+        Mirrors test_provider's thread + dispatch pattern. Never persists.
+
+        The worker is defensive: fetch_model_ids is a total function, but a
+        daemon thread must not swallow an unexpected exception silently.
+        """
+        def _worker():
+            try:
+                result = fetch_model_ids(base_url, api_key, caller)
+            except Exception as e:  # noqa: BLE001 — a thread must not swallow
+                result = ModelListResult(ok=False, model_ids=(),
+                                         error=f"{type(e).__name__}: {e}")
+
+            def _dispatch(result=result):  # fix-round 1 (Debugger #12): bind explicitly — never rely on late closure capture
+                try:
+                    on_result(result)
+                except Exception:
+                    logger.exception("list_models on_result callback raised")
+
+            if self._GLib is not None and hasattr(self._GLib, "idle_add"):
+                self._GLib.idle_add(_dispatch)
+            else:
+                _dispatch()  # test path: synchronous
+
+        threading.Thread(target=_worker, daemon=True, name="list-models").start()
+
+    # ── SPEC-63 §2.4c — env-var one-click card ─────────────────────────
+
+    def create_from_env(self, preset_key: str, api_key: str) -> ProviderConfig | None:
+        """Build + save a card from an environment-supplied key. Returns the
+        saved ProviderConfig, or None if the preset is unknown / the vendor
+        already has a card. All default maintenance stays in save_providers
+        (prefer=...) via add_or_update — no new save_providers call site."""
+        preset = get_preset(preset_key)
+        if preset is None:
+            return None
+        providers = load_providers()
+        # v2 (fix-round 1 — Debugger #18): guard on the VENDOR, not the name.
+        # A renamed card ("my-openai") freed the name "openai" and a name-only
+        # guard would let a second same-vendor card silently appear AND adopt
+        # the global default. ONE helper (§2.4a): preset_vendor_present.
+        if preset_vendor_present(providers, preset):
+            return None  # never clobber an existing vendor card
+        card = ProviderConfig(
+            name=preset.name, base_url=preset.base_url, api_key=api_key.strip(),
+            default_model=preset.default_model, caller=preset.caller,
+            max_tokens=preset.context_window, context_window=preset.context_window,
+        )
+        try:
+            self.add_or_update(card)  # validation + prefer=card.name + callbacks
+        except ValueError:
+            # fix-round 1 (Flagger #6): add_or_update's ValueError must not
+            # escape into a GTK callback (chip click). Log and report failure
+            # via None.
+            logger.warning("create_from_env: add_or_update rejected preset %r", preset.key)
+            return None
+        return card
 
     def status_has_verified(self) -> bool:
         """Return True if any provider is verified (drives the red dot)."""

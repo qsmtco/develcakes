@@ -258,7 +258,9 @@ class TestTestProvider:
 
         assert captured[0].ok is False
         providers = h.list_providers()
-        assert providers[0].last_error == "401 unauthorized"
+        # SPEC-63 Debugger #7: the PERSISTED last_error is the EXPLAINED
+        # string (the raw "401 unauthorized" stays on the TestResult).
+        assert providers[0].last_error == "Key rejected — check or regenerate it."
         assert providers[0].last_verified_at is None  # unchanged
 
     def test_test_connection_raises_wrapped_as_failure(self, tmp_config_dir, monkeypatch):
@@ -347,7 +349,8 @@ class TestTestProvider:
         assert providers[0].caller == "minimax", (
             f"test_provider stripped caller on failure; got {providers[0].caller!r}"
         )
-        assert providers[0].last_error == "401 unauthorized"
+        # SPEC-63 Debugger #7: persisted last_error is the EXPLAINED string.
+        assert providers[0].last_error == "Key rejected — check or regenerate it."
 
     def test_auto_detects_caller_from_model_prefix(self, tmp_config_dir, monkeypatch):
         """Self-heal: when caller is empty and default_model has a slash,
@@ -932,3 +935,290 @@ class TestRoomFallbackSetting:
         # Unrelated keys survive the write.
         assert raw["default_model"] == "openai/gpt-4o"
         assert raw["user_id"] == "u-7"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SPEC-63 §2.4 — handler-owned persistence (a), list_models (b),
+#  create_from_env (c). Headless: pure handler logic, GLib_module=None.
+# ═══════════════════════════════════════════════════════════════════
+
+def _providers_yaml_bytes(tmp_config_dir):
+    """Raw providers.yaml content, or b'' when absent. Delta #8: assert on
+    CONTENT identity, not existence — SettingsHandler.__init__ creates the
+    file via ensure_providers_yaml_exists, so existence is always True here.
+    """
+    path = tmp_config_dir / "providers.yaml"
+    return path.read_bytes() if path.is_file() else b""
+
+
+def _install_save_spy(monkeypatch):
+    """Wrap settings_handler.save_providers, counting every call. Delegates
+    to the real function so a (failing) write stays store-consistent."""
+    from ui.handlers import settings_handler as sh
+    calls = []
+    real_save = sh.save_providers
+
+    def spy(providers, **kw):
+        calls.append(kw)
+        return real_save(providers, **kw)
+
+    monkeypatch.setattr(sh, "save_providers", spy)
+    return calls
+
+
+def test_legacy_401_probe_raw_body_classification():
+    """Wave B integration seam: the EXACT error string provider_test produces
+    on a 401 (f"HTTP {code}: {body}") must persist as the EXPLAINED message
+    through explain_test_error — the Debugger #7 boundary. classify_failure
+    (SPEC-02) reads the raw string; the CARD stores the explained one."""
+    from utils.provider_errors import explain_test_error, error_class
+    raw = "HTTP 401: {\"error\": {\"message\": \"Incorrect API key provided\"}}"
+    assert error_class(raw) == "auth"
+    assert explain_test_error(raw) == "Key rejected — check or regenerate it."
+
+
+class TestSpec63NoWriteOnUnsavedCard:
+    """§2.4a invariant (a) on ALL THREE worker exit paths: a Test on an
+    UNSAVED card writes NOTHING — save_providers is never called and
+    providers.yaml content is byte-identical before/after (delta #8)."""
+
+    def _run_unsaved(self, tmp_config_dir, monkeypatch, provider):
+        h = SettingsHandler()
+        # Snapshot AFTER handler construction: __init__ may create the empty
+        # providers.yaml once (ensure_providers_yaml_exists). Delta #8 pins
+        # the TEST's effect, not the constructor's.
+        before = _providers_yaml_bytes(tmp_config_dir)
+        save_calls = _install_save_spy(monkeypatch)
+
+        callback = threading.Event()
+        h.test_provider(provider, lambda r: callback.set())
+        assert callback.wait(timeout=2.0), "test_provider callback never fired"
+
+        return save_calls, before, _providers_yaml_bytes(tmp_config_dir)
+
+    def test_unsaved_valid_caller_test_writes_nothing(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+        monkeypatch.setattr(sh, "test_connection", lambda **kw:
+            TestResult(ok=True, latency_ms=5, error=None, model_used=kw["model"]))
+
+        save_calls, before, after = self._run_unsaved(
+            tmp_config_dir, monkeypatch, _make_provider("burner"),
+        )
+        assert save_calls == [], (
+            f"unsaved-card green Test called save_providers: {save_calls}"
+        )
+        assert after == before, "providers.yaml content changed on an unsaved-card Test"
+        assert load_providers() == []
+
+    def test_unsaved_empty_caller_gap_writes_nothing(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+        tc_called = []
+
+        def fake_tc(**kw):
+            tc_called.append(kw)
+            return TestResult(ok=True, latency_ms=0, error=None, model_used=kw["model"])
+
+        monkeypatch.setattr(sh, "test_connection", fake_tc)
+
+        save_calls, before, after = self._run_unsaved(
+            tmp_config_dir, monkeypatch,
+            _make_provider("bad", default_model="gpt-4o", caller=""),
+        )
+        assert save_calls == [], (
+            f"unsaved-card empty-caller Test called save_providers: {save_calls}"
+        )
+        assert after == before
+        assert tc_called == []  # early return BEFORE the probe
+
+    def test_unsaved_invalid_caller_writes_nothing(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+        tc_called = []
+
+        def fake_tc(**kw):
+            tc_called.append(kw)
+            return TestResult(ok=True, latency_ms=0, error=None, model_used=kw["model"])
+
+        monkeypatch.setattr(sh, "test_connection", fake_tc)
+
+        save_calls, before, after = self._run_unsaved(
+            tmp_config_dir, monkeypatch,
+            _make_provider("bad", default_model="poolside/free", caller=""),
+        )
+        assert save_calls == [], (
+            f"unsaved-card invalid-caller Test called save_providers: {save_calls}"
+        )
+        assert after == before
+        assert tc_called == []
+
+
+class TestSpec63SavedCardStamping:
+    """§2.4a invariant (b): a SAVED card's green Test stamps last_verified_at
+    on the STORED card — via exactly one save through the shared helper."""
+
+    def test_saved_card_green_test_stamps_and_saves_once(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+        monkeypatch.setattr(sh, "test_connection", lambda **kw:
+            TestResult(ok=True, latency_ms=7, error=None,
+                       model_used=kw["model"], context_window=500_000))
+
+        h = SettingsHandler()
+        h.add_or_update(_make_provider("p"))
+        save_calls = _install_save_spy(monkeypatch)  # AFTER add_or_update
+
+        callback = threading.Event()
+        h.test_provider(_make_provider("p"), lambda r: callback.set())
+        assert callback.wait(timeout=2.0), "test_provider callback never fired"
+
+        providers = h.list_providers()
+        assert providers[0].last_verified_at is not None
+        assert providers[0].last_error is None
+        # The moved stamping body still pre-fills the discovered window
+        # (max_tokens == 128_000 default, no wizard stamp → adopt).
+        assert providers[0].max_tokens == 500_000
+        # Exactly ONE write on the Test path. It is the helper's plain
+        # positional save — the VERBATIM move of the former worker save (the
+        # prefer path belongs to add_or_update, i.e. create_from_env, not to
+        # result stamping).
+        assert len(save_calls) == 1, f"expected one save, got {save_calls!r}"
+
+    def test_saved_card_401_persists_explained_last_error(self, tmp_config_dir, monkeypatch):
+        """§2.4a invariant (c) / Debugger #7: the persisted last_error is the
+        EXPLAINED string, never the raw probe output."""
+        from ui.handlers import settings_handler as sh
+        monkeypatch.setattr(sh, "test_connection", lambda **kw:
+            TestResult(ok=False, latency_ms=3,
+                       error="HTTP 401: Unauthorized", model_used=kw["model"]))
+
+        h = SettingsHandler()
+        # Preset-shaped stored card so preset_for() joins on base_url and the
+        # explained message is the catalog auth row.
+        h.add_or_update(_make_provider(
+            "openai",
+            base_url="https://api.openai.com/v1",
+            default_model="gpt-4o",
+            caller="openai",
+        ))
+
+        callback = threading.Event()
+        h.test_provider(
+            _make_provider("openai",
+                           base_url="https://api.openai.com/v1",
+                           default_model="gpt-4o", caller="openai"),
+            lambda r: callback.set(),
+        )
+        assert callback.wait(timeout=2.0), "test_provider callback never fired"
+
+        last_error = h.list_providers()[0].last_error
+        assert last_error == "Key rejected — check or regenerate it."
+        assert "HTTP 401" not in last_error  # raw string never persisted
+
+
+class TestSpec63ListModels:
+    """§2.4b: off-thread fetch_model_ids, dispatched back on the handler's
+    dispatch path; never persists."""
+
+    def test_list_models_dispatches_result(self, tmp_config_dir, monkeypatch):
+        from utils.model_catalog import ModelListResult
+        from ui.handlers import settings_handler as sh
+
+        seen = {}
+
+        def fake_fetch(base_url, api_key, caller):
+            seen["args"] = (base_url, api_key, caller)
+            return ModelListResult(ok=True, model_ids=("m-1", "m-2"), error=None)
+
+        monkeypatch.setattr(sh, "fetch_model_ids", fake_fetch)
+
+        got, evt = [], threading.Event()
+        h = SettingsHandler()
+        h.list_models("https://x/v1", "sk-k", "openai",
+                      lambda r: (got.append(r), evt.set()))
+        assert evt.wait(timeout=2.0), "list_models callback never fired"
+        assert seen["args"] == ("https://x/v1", "sk-k", "openai")
+        assert got[0].ok is True
+        assert got[0].model_ids == ("m-1", "m-2")
+        assert load_providers() == []  # never persists
+
+    def test_list_models_wraps_worker_exception(self, tmp_config_dir, monkeypatch):
+        from ui.handlers import settings_handler as sh
+
+        def boom(*_a):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(sh, "fetch_model_ids", boom)
+
+        got, evt = [], threading.Event()
+        h = SettingsHandler()
+        h.list_models("https://x/v1", "sk-k", "openai",
+                      lambda r: (got.append(r), evt.set()))
+        assert evt.wait(timeout=2.0), "list_models callback never fired"
+        assert got[0].ok is False
+        assert got[0].error == "RuntimeError: network down"
+
+
+class TestSpec63CreateFromEnv:
+    """§2.4c: env one-click card — vendor guard via the SINGLE
+    preset_vendor_present helper, saved through add_or_update (prefer path),
+    so agent.json default maintenance stays in save_providers."""
+
+    def test_creates_and_saves_openai_card(self, tmp_config_dir):
+        h = SettingsHandler()
+        card = h.create_from_env("openai", "  sk-env-key  ")
+        assert card is not None
+        assert card.name == "openai"
+        assert card.api_key == "sk-env-key"  # stripped
+        assert card.default_model == "gpt-4o"
+        assert card.caller == "openai"
+        assert card.max_tokens == 128_000
+        assert card.context_window == 128_000
+        # RULING 3 adoption via add_or_update's prefer path (no handler-side
+        # default maintenance).
+        assert get_agent_setting("default_provider") == "openai"
+        stored = load_providers()
+        assert len(stored) == 1 and stored[0].name == "openai"
+
+    def test_openrouter_prefix_stays_on_card_bare_in_agent_json(self, tmp_config_dir):
+        """Debugger #23: the openrouter preset's prefixed default_model keeps
+        the FULL value on the card; agent.json gets the BARE model."""
+        h = SettingsHandler()
+        card = h.create_from_env("openrouter", "sk-or")
+        assert card is not None
+        assert card.default_model == "openrouter/auto"
+        assert card.caller == "openrouter"
+        assert get_agent_setting("default_provider") == "openrouter"
+        assert get_agent_setting("default_model") == "auto"
+        assert load_providers()[0].default_model == "openrouter/auto"
+
+    def test_vendor_guard_blocks_same_name_twice(self, tmp_config_dir):
+        h = SettingsHandler()
+        assert h.create_from_env("openai", "sk-1") is not None
+        assert h.create_from_env("openai", "sk-2") is None
+        assert len(load_providers()) == 1
+        assert load_providers()[0].api_key == "sk-1"  # never clobbered
+
+    def test_vendor_guard_blocks_renamed_card_same_vendor(self, tmp_config_dir):
+        """Debugger #18: a renamed card must NOT free the vendor — the guard
+        is preset_vendor_present (base_url OR name), not a name check. The
+        stored card's NAME differs from preset.name; the base_url matches."""
+        h = SettingsHandler()
+        # Simulates the user renaming the card in the UI (stored entry now
+        # "my-openai" with the OpenAI preset base_url) — no "openai"-named
+        # card exists, so a name-only guard would let the chip through.
+        h.add_or_update(_make_provider(
+            "my-openai",
+            base_url="https://api.openai.com/v1",
+            default_model="gpt-4o",
+            caller="openai",
+        ))
+        assert h.create_from_env("openai", "sk-2") is None
+        names = [p.name for p in load_providers()]
+        assert names == ["my-openai"], (
+            f"vendor guard leaked a second same-vendor card: {names}"
+        )
+        assert load_providers()[0].api_key == "sk-my-openai-key"  # untouched
+
+    def test_unknown_preset_returns_none(self, tmp_config_dir):
+        h = SettingsHandler()
+        # MiniMax was deferred out of the v1 catalog (§2.1 ruling) — unknown.
+        assert h.create_from_env("minimax", "sk-x") is None
+        assert load_providers() == []
