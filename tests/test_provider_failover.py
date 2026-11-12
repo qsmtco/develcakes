@@ -83,7 +83,7 @@ class TestFailoverFlagOff:
 def test_default_failover_is_on():
     cfg = AgentConfig()
     assert cfg.provider_failover_enabled is True
-    assert cfg.provider_failover_attempt_timeout_s == 8.0
+    assert cfg.provider_failover_attempt_timeout_s == 120.0
 
 
 class TestFailoverChain:
@@ -101,7 +101,7 @@ class TestFailoverChain:
         result = rt._call_llm("s1", sent, [])
         assert result["choices"][0]["message"]["content"] == "from fallback"
         assert [call["model"] for call in provider.calls] == ["openrouter/demo", "zai/glm"]
-        assert [call["timeout"] for call in provider.calls] == [8.0, 8.0]
+        assert [call["timeout"] for call in provider.calls] == [120.0, 120.0]
         assert sent == [{"role": "user", "content": "hi"}]
         assert rt._conversations["s1"].model == "zai/glm"
         assert notices and "M3" in notices[0][1]
@@ -221,7 +221,7 @@ class TestFailoverChain:
         result = rt._call_llm("s1", [{"role": "user", "content": "hi"}], [])
         assert result["choices"][0]["message"]["content"] == "from fallback"
         assert [call["model"] for call in provider.calls] == ["openrouter/demo", "zai/glm"]
-        assert provider.calls[1]["timeout"] == 8.0
+        assert provider.calls[1]["timeout"] == 120.0
 
     def test_backoff_sleep_leaves_a_second_for_the_next_attempt(self, monkeypatch):
         cfg = _cfg()

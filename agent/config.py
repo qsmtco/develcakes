@@ -97,11 +97,11 @@ class AgentConfig:
     provider_failover_enabled: bool = True
     provider_retries: int = 2
     provider_retry_backoff_s: float = 1.0
-    provider_failover_budget_s: float = 30.0
+    provider_failover_budget_s: float = 400.0
     # Socket idle timeout for one chain attempt. A dead provider fails here
     # instead of sitting on tool_timeout_seconds. A live stream may run longer
     # than this as long as bytes keep arriving.
-    provider_failover_attempt_timeout_s: float = 8.0
+    provider_failover_attempt_timeout_s: float = 120.0
     # SPEC-48: size threshold (chars) above which a tool result is offloaded
     # to <project>/.crabcakes/tool-outputs/ instead of being lossily stubbed.
     # 0 disables offloading (the pre-SPEC-48 lossy behavior).
@@ -309,9 +309,9 @@ def load_agent_config(config_path: str | None = None) -> AgentConfig:
         provider_failover_enabled=bool(raw.get("provider_failover_enabled", True)),
         provider_retries=int(raw.get("provider_retries", 2) or 2),
         provider_retry_backoff_s=float(raw.get("provider_retry_backoff_s", 1.0) or 0.0),
-        provider_failover_budget_s=float(raw.get("provider_failover_budget_s", 30.0) or 30.0),
+        provider_failover_budget_s=float(raw.get("provider_failover_budget_s", 400.0) or 400.0),
         provider_failover_attempt_timeout_s=float(
-            raw.get("provider_failover_attempt_timeout_s", 8.0) or 8.0
+            raw.get("provider_failover_attempt_timeout_s", 120.0) or 120.0
         ),
         tool_output_offload_chars=int(raw.get("tool_output_offload_chars", 8192) or 0),
     )
@@ -361,11 +361,13 @@ _DEFAULT_AGENT_JSON_FIELDS: dict[str, Any] = {
     "max_tool_iterations": 50,
     "tool_iteration_hard_cap": 100,
     "tool_timeout_seconds": 120,
-    "cost_limit": 5.0,
+    "cost_limit": None,
     "step_limit": 100,
     "fallback_provider": None,
     "fallback_model": None,
     "user_id": "",  # A-4: user identity for audit log traceability
+    "provider_failover_attempt_timeout_s": 120.0,
+    "provider_failover_budget_s": 400.0,
 }
 
 
@@ -455,11 +457,13 @@ def _create_default_config(path: str) -> None:
         "max_tool_iterations": 50,
         "tool_iteration_hard_cap": 100,
         "tool_timeout_seconds": 120,
-        "cost_limit": 5.0,
+        "cost_limit": None,
         "step_limit": 100,
         "fallback_provider": None,
         "fallback_model": None,
         "user_id": "",  # A-4: user identity for audit log traceability
+        "provider_failover_attempt_timeout_s": 120.0,
+        "provider_failover_budget_s": 400.0,
     }
 
     try:

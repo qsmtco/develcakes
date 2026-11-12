@@ -296,8 +296,10 @@ class TestSetAgentSettingPreservesConfig:
         assert raw["max_tool_iterations"] == 50
         assert raw["tool_iteration_hard_cap"] == 100
         assert raw["tool_timeout_seconds"] == 120
-        assert raw["cost_limit"] == 5.0
+        assert raw["cost_limit"] is None
         assert raw["step_limit"] == 100
+        assert raw["provider_failover_attempt_timeout_s"] == 120.0
+        assert raw["provider_failover_budget_s"] == 400.0
         assert load_agent_config(path).max_tool_iterations == 50
 
     def test_corrupt_file_set_preserves_recognizable_values(self):
@@ -314,7 +316,7 @@ class TestSetAgentSettingPreservesConfig:
         set_agent_setting("default_provider", "openrouter")
         raw = self._read_json(path)
         assert raw["default_provider"] == "openrouter"
-        assert raw["cost_limit"] == 5.0
+        assert raw["cost_limit"] is None
         assert raw["max_tool_iterations"] == 50
         assert len(raw) > 1, "corrupt-file rewrite must not be a single-key file"
 
