@@ -27,7 +27,6 @@ from collections import namedtuple
 from typing import Any
 
 from utils.audit_parser import extract_audit_reports
-from utils.quoting import _parse_quoted_payload
 
 logger = logging.getLogger(__name__)
 
@@ -49,127 +48,240 @@ _QUOTED_PAYLOAD_MAX = 4096
 # Fields: command, agent, payload, raw_start, raw_end
 ParsedCommand = namedtuple('ParsedCommand', ['command', 'agent', 'payload', 'raw_start', 'raw_end'])
 
+# Commands the agent scanner recognizes before the registry filter.
+_SCAN_COMMANDS = frozenset({"ask", "tell", "delegate", "stop", "compact", "clear"})
+
+# Opening quote characters accepted on the agent path (ASCII, curly, single).
+_QUOTE_OPEN = frozenset({'"', "\u201c", "\u201d", "'"})
+
+# Prefix before `/`: start, whitespace, or a line-leading list/quote marker,
+# then optional inline Markdown wrappers (backtick, bold, paren, bracket).
+_CMD_PREFIX_RE = re.compile(
+    r"(?:^|\s|(?:(?<=^)|(?<=\n))[ \t]*[-+>][ \t]*)[`*_(\[]*/",
+)
+
+# `@Agent` plus optional trailing `[:,;]` and an em-dash / en-dash / hyphen
+# separator. `$` is accepted so payload-free `/stop @Agent` at end of string
+# still matches (the spec's `\s+` would drop it).
+_AGENT_TOKEN_RE = re.compile(
+    r"(@[^\s\"`\u201c\u201d'*_)\]:;,—–]+)"
+    r"[:;,]*"
+    r"(?:[ \t]+(?:[—–-]+[ \t]+)?|(?=\s|$))"
+)
+
+_CLOSING_FOLLOWERS = frozenset("`*_).,:;!?]")
+_NEXT_CMD_RE = re.compile(
+    r"\s+[`*_(\[]*/(?:ask|a|tell|delegate|stop|compact|clear|@[^\s\"`]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _scan_agent_quoted_payload(
+    text: str, open_pos: int, *, wrapped_backtick: bool = False
+) -> tuple[str | None, int, bool]:
+    """Scan a quoted A2A payload starting at ``open_pos``.
+
+    Supports ASCII ``"..."``, typographic ``“...”``, single ``'...'``,
+    ``\\"`` and ``\\\\`` escapes, ``\\\\\\n`` continuations, single-line
+    unescaped inner quotes (e.g. ``"check "foo" in bar.py"``), and agent
+    end-of-string auto-close.
+    Returns ``(payload_or_none, end_pos, was_closed)``.
+    """
+    n = len(text)
+    if open_pos >= n:
+        return None, open_pos, False
+    open_ch = text[open_pos]
+    close_map = {'"': '"', "\u201c": "\u201d", "\u201d": "\u201d", "'": "'"}
+    if open_ch not in close_map:
+        return None, open_pos, False
+    close_ch = close_map[open_ch]
+    close_set = {close_ch, '"'} if open_ch in ("\u201c", "\u201d") else {close_ch}
+
+    nl_pos = text.find("\n", open_pos + 1)
+    line_limit = nl_pos if nl_pos != -1 else n
+    next_cmd = _NEXT_CMD_RE.search(text, open_pos + 1, line_limit)
+    seg_limit = next_cmd.start() if next_cmd else line_limit
+
+    def _remaining_unescaped_closes(from_idx: int, limit_idx: int) -> int:
+        cnt = 0
+        k = from_idx
+        while k < limit_idx:
+            if text[k] == "\\" and k + 1 < limit_idx:
+                k += 2
+                continue
+            if text[k] in close_set:
+                cnt += 1
+            k += 1
+        return cnt
+
+    parts: list[str] = []
+    i = open_pos + 1
+    inner_depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in close_set or nxt == '"':
+                parts.append(nxt)
+                i += 2
+                continue
+            if nxt == "\\":
+                parts.append("\\")
+                i += 2
+                continue
+            parts.append("\\")
+            i += 1
+            continue
+        if ch in close_set:
+            if inner_depth > 0:
+                inner_depth -= 1
+                parts.append(ch)
+                i += 1
+                continue
+            if (
+                i < seg_limit
+                and i + 1 < seg_limit
+                and not text[i + 1].isspace()
+                and text[i + 1] not in _CLOSING_FOLLOWERS
+                and _remaining_unescaped_closes(i + 1, seg_limit) >= 2
+            ):
+                inner_depth += 1
+                parts.append(ch)
+                i += 1
+                continue
+            payload = "".join(parts)
+            if not payload:
+                return None, open_pos, True
+            return payload, i + 1, True
+        parts.append(ch)
+        i += 1
+
+    payload = "".join(parts)
+    if wrapped_backtick and payload.endswith("`"):
+        payload = payload[:-1]
+    if not payload:
+        return None, open_pos, False
+    return payload, n, False
+
 
 def _extract_quoted_commands(text: str, command_names: set[str] | None = None) -> list[ParsedCommand]:
-    """Extract A2A commands in quoted-payload format: `cmd @Agent "payload"`
-    
-    Per A2A_QUOTED_PAYLOAD_SPEC §3:
-    - `ask`, `tell`, `delegate` require quoted payloads ("payload")
-    - `stop` is payload-free (no quotes needed)
-    - Unquoted payloads for cmd requiring quotes are silently skipped (§4.3)
-    - Bare `@Agent` at command position → implicit `ask` (§3.1)
-    - Inner quotes in payload are parsed until closing " (§3.2)
-    
-    Returns list of ParsedCommand namedtuples.
+    """Extract A2A commands in quoted-payload format.
+
+    Sanitizes ``<think>`` blocks and code fences first, accepts Markdown and
+    list prefixes, curly/single quotes, the ``/a`` alias, and em-dash
+    separators, then returns matches in source order.
     """
-    results = []
-    seen_spans: set[tuple[int, int]] = set()  # avoid double-matching
+    if not isinstance(text, str) or not text:
+        return []
+    clean = AgentCommandHandler._sanitize_for_command_scan(text)
+    if not isinstance(clean, str) or not clean:
+        return []
 
-    def _emit(cmd: str, agent: str, payload: str, span: tuple[int, int]):
-        if span in seen_spans:
-            return
-        seen_spans.add(span)
-        if command_names and cmd not in command_names:
-            return
-        results.append(ParsedCommand(
-            command=cmd,
-            agent=agent,
-            payload=payload,
-            raw_start=span[0],
-            raw_end=span[1],
-        ))
+    results: list[ParsedCommand] = []
+    occupied: list[tuple[int, int]] = []
 
-    # ── Pass 1: explicit commands with closing quote ────────────────────────
-    # Pattern: /cmd @Agent "payload" where payload may contain / (file paths)
-    # and escaped quotes (\" \\). The closing " must be unescaped.
-    # Inner payload: (non-quote/non-backslash) | (backslash + any char)
-    for m in re.finditer(
-        r'(?:^|\s)/([a-zA-Z]+)\s+(@[^\s"]+)\s+"((?:[^"\\]|\\.)*)"',
-        text,
-    ):
-        cmd = m.group(1).lower()
-        agent = m.group(2)
-        raw_payload = m.group(3)
-        if cmd not in ('ask', 'tell', 'delegate', 'stop', 'compact', 'clear'):
-            continue
-        if cmd == 'stop':
-            _emit(cmd, agent, '', m.span())
-            continue
-        # Unescape \" and \\ in payload
-        try:
-            payload, _ = _parse_quoted_payload('"' + raw_payload + '"', 0)
-        except Exception:
-            payload = None
-        if payload is None:
-            continue
-        if len(payload) > _QUOTED_PAYLOAD_MAX:
-            payload = payload[:_QUOTED_PAYLOAD_MAX] + '…'
-        _emit(cmd, agent, payload, m.span())
+    def _overlaps(start: int, end: int) -> bool:
+        return any(not (end <= s0 or start >= e0) for s0, e0 in occupied)
 
-    # ── Pass 2: explicit commands with auto-close (unclosed trailing quote) ──
-    # Only matches when no closing " exists before end-of-string. Avoids
-    # duplicating matches already found in Pass 1.
-    for m in re.finditer(
-        r'(?:^|\s)/([a-zA-Z]+)\s+(@[^\s"]+)\s+"([^"]*)$',
-        text,
-    ):
-        if m.span() in seen_spans:
-            continue
-        cmd = m.group(1).lower()
-        agent = m.group(2)
-        if cmd not in ('ask', 'tell', 'delegate', 'compact', 'clear'):
-            continue
-        raw_payload = m.group(3)
-        if not raw_payload:
-            continue  # bare " → silently drop per spec §4.5
-        if len(raw_payload) > _QUOTED_PAYLOAD_MAX:
-            raw_payload = raw_payload[:_QUOTED_PAYLOAD_MAX] + '…'
-        _emit(cmd, agent, raw_payload, m.span())
+    def _allowed(cmd: str) -> bool:
+        if cmd not in _SCAN_COMMANDS:
+            return False
+        return command_names is None or cmd in command_names
 
-    # ── Pass 3: implicit ask /@Agent "payload" (with closing quote) ─────────
-    for m in re.finditer(
-        r'(?:^|\s)/(@[^\s"]+)\s+"((?:[^"\\]|\\.)*)"',
-        text,
-    ):
-        agent = m.group(1)
-        raw_payload = m.group(2)
-        try:
-            payload, _ = _parse_quoted_payload('"' + raw_payload + '"', 0)
-        except Exception:
-            payload = None
-        if payload is None:
+    pos = 0
+    n = len(clean)
+    while pos < n:
+        match = _CMD_PREFIX_RE.search(clean, pos)
+        if match is None:
+            break
+        cursor = match.end()
+        if cursor <= pos:
+            pos += 1
             continue
-        if len(payload) > _QUOTED_PAYLOAD_MAX:
-            payload = payload[:_QUOTED_PAYLOAD_MAX] + '…'
-        _emit('ask', agent, payload, m.span())
 
-    # ── Pass 4: implicit ask /@Agent "payload" (auto-close) ─────────────────
-    for m in re.finditer(
-        r'(?:^|\s)/(@[^\s"]+)\s+"([^"]*)$',
-        text,
-    ):
-        if m.span() in seen_spans:
-            continue
-        agent = m.group(1)
-        raw_payload = m.group(2)
-        if not raw_payload:
-            continue
-        if len(raw_payload) > _QUOTED_PAYLOAD_MAX:
-            raw_payload = raw_payload[:_QUOTED_PAYLOAD_MAX] + '…'
-        _emit('ask', agent, raw_payload, m.span())
+        cmd = ""
+        agent = ""
+        agent_end = cursor
+        if cursor < n and clean[cursor] == "@":
+            cmd = "ask"
+            agent_match = _AGENT_TOKEN_RE.match(clean, cursor)
+            if agent_match is None:
+                pos = cursor
+                continue
+            agent = agent_match.group(1)
+            agent_end = agent_match.end()
+        else:
+            cmd_match = re.match(r"[A-Za-z]+", clean[cursor:])
+            if cmd_match is None:
+                pos = cursor
+                continue
+            cmd = cmd_match.group(0).lower()
+            probe = cursor + cmd_match.end()
+            while probe < n and clean[probe].isspace():
+                probe += 1
+            agent_match = _AGENT_TOKEN_RE.match(clean, probe)
+            if agent_match is None:
+                pos = probe if probe > pos else cursor
+                continue
+            agent = agent_match.group(1)
+            agent_end = agent_match.end()
 
-    # ── Pass 5: payload-free /stop @Agent (no quotes at all) ────────────────
-    for m in re.finditer(r'(?:^|\s)/stop\s+(@[^\s"]+?)(?=\s|$)(?!\s*")', text):
-        if m.span() in seen_spans:
+        if cmd == "a" and (
+            command_names is None or "a" in command_names or "ask" in command_names
+        ):
+            cmd = "ask"
+        if not _allowed(cmd):
+            pos = agent_end if agent_end > pos else cursor
             continue
-        _emit('stop', m.group(1), '', m.span())
 
-    # ── Pass 6: payload-free /compact and /clear (no quotes at all) ────────
-    for m in re.finditer(r'(?:^|\s)/(compact|clear)\s+(@[^\s"]+?)(?=\s|$)(?!\s*")', text):
-        if m.span() in seen_spans:
+        quote_at = agent_end
+        has_quote = quote_at < n and clean[quote_at] in _QUOTE_OPEN
+        wrapped = "`" in clean[match.start():match.end()]
+
+        if cmd == "stop":
+            end = agent_end
+            if has_quote:
+                _payload, end_pos, _closed = _scan_agent_quoted_payload(
+                    clean, quote_at, wrapped_backtick=wrapped,
+                )
+                if end_pos > quote_at:
+                    end = end_pos
+            span = (match.start(), end)
+            if not _overlaps(span[0], span[1]):
+                occupied.append(span)
+                results.append(ParsedCommand("stop", agent, "", span[0], span[1]))
+            pos = max(end, pos + 1)
             continue
-        _emit(m.group(1), m.group(2), '', m.span())
 
+        if has_quote:
+            payload, end_pos, _closed = _scan_agent_quoted_payload(
+                clean, quote_at, wrapped_backtick=wrapped,
+            )
+            if payload is None:
+                pos = max(quote_at + 1, pos + 1)
+                continue
+            if len(payload) > _QUOTED_PAYLOAD_MAX:
+                payload = payload[:_QUOTED_PAYLOAD_MAX] + "…"
+            span = (match.start(), end_pos)
+            if _overlaps(span[0], span[1]):
+                pos = max(end_pos, pos + 1)
+                continue
+            occupied.append(span)
+            results.append(ParsedCommand(cmd, agent, payload, span[0], span[1]))
+            pos = max(end_pos, pos + 1)
+            continue
+
+        if cmd in ("compact", "clear"):
+            span = (match.start(), agent_end)
+            if not _overlaps(span[0], span[1]):
+                occupied.append(span)
+                results.append(ParsedCommand(cmd, agent, "", span[0], span[1]))
+            pos = max(agent_end, pos + 1)
+            continue
+
+        pos = max(agent_end, pos + 1)
+
+    results.sort(key=lambda pc: pc.raw_start)
     return results
 
 
@@ -198,6 +310,9 @@ class AgentCommandHandler:
         # Only set for response-expecting commands (ask, delegate). `tell` is
         # one-way and does NOT create a pending ask.
         self._pending_asks: dict[str, str] = {}
+        # Extra concurrent askers for the same target. The head stays in
+        # _pending_asks so the dict shape remains {target_sk: source_sk}.
+        self._pending_ask_waiters: dict[str, list[str]] = {}
 
         # For audit report processing — see _process_audit_reports()
         self._project_path_provider: Any = None   # Callable[] → str | None
@@ -245,7 +360,7 @@ class AgentCommandHandler:
     # ── Core entry point ──────────────────────────────────────────────────────
 
     def on_agent_response(self, session_key: str, text: str,
-                          project_name: str | None) -> None:
+                          project_name: str | None) -> set[str]:
         """Called after an agent's final response is rendered.
 
         Three responsibilities:
@@ -253,24 +368,29 @@ class AgentCommandHandler:
         2. RELAY: If this agent has a pending ask, relay response to asker.
         3. COMMAND: Scan for slash A2A commands.
 
+        Returns the set of target session keys routed by commands in this
+        response. Empty when nothing was forwarded.
+
         Args:
             session_key: The responding agent's session key
                          (e.g. "agent:coder" or "agent:qaster:...")
             text: The agent's full response text
             project_name: Active project name, or None
         """
-        if not text:
-            return
+        routed_targets: set[str] = set()
+        if not isinstance(text, str) or not text:
+            return routed_targets
 
         # ── Step 0: Process structured audit reports (SPEC-3) ───────────────
         self._process_audit_reports(session_key, text)
 
         # ── Step 1: Relay answer back to asking agent ────────────────────────
-
-
-        source_sk = self._pending_asks.pop(session_key, None)
-        if source_sk is not None:
-            self._relay_response(source_sk, session_key, text, project_name)
+        # A stranded "[... asks]: " inbound is about to start as the next
+        # turn. Leave the pending ask in place for that turn.
+        if not self._has_unstarted_ask_for(session_key):
+            source_sk = self._pop_next_asker(session_key)
+            if source_sk is not None:
+                self._relay_response(source_sk, session_key, text, project_name)
 
         # ── Step 2: Scan for new commands ─────────────────────────────────────
 
@@ -278,7 +398,7 @@ class AgentCommandHandler:
         if not self._command_handler:
             # No command handler — clear depth and return (relay already done above)
             self._chain_depth.pop(session_key, None)
-            return
+            return routed_targets
 
         # Chain depth guard — prevent runaway command chains.
         # Must check BEFORE any command processing to respect the limit.
@@ -289,14 +409,12 @@ class AgentCommandHandler:
                 _MAX_CHAIN_DEPTH, session_key
             )
             self._chain_depth.pop(session_key, None)
-            return
+            return routed_targets
 
-        # Strip fenced code blocks to avoid false positives
-        clean_text = self._strip_fenced_blocks(text)
-
-        # Extract A2A commands in quoted-payload format (A2A_QUOTED_PAYLOAD_SPEC §5.2)
+        # Extract A2A commands. Sanitizing (<think>, html/live fences, code
+        # fences) happens inside _extract_quoted_commands.
         command_names = self._command_handler.get_command_names() if self._command_handler else None
-        parsed_commands = _extract_quoted_commands(clean_text, command_names)
+        parsed_commands = _extract_quoted_commands(text, command_names)
 
         # Process commands if any are found
         if parsed_commands:
@@ -324,21 +442,105 @@ class AgentCommandHandler:
                                                              skip_dispatch=True)
 
                 if result.handled and result.forward_to and result.forward_text:
-                    self._route_command(result, project_name, depth, source_sk=session_key,
-                                        command_name=pc.command)
+                    route_key = self._route_command(
+                        result, project_name, depth, source_sk=session_key,
+                        command_name=pc.command,
+                    )
+                    if route_key:
+                        routed_targets.add(route_key)
                     command_count += 1
                 elif result.handled and result.broadcast_targets and result.forward_text:
                     for target in result.broadcast_targets:
                         self._route_to_target(
                             target, result.forward_text, project_name
                         )
+                        if isinstance(target, str) and target:
+                            routed_targets.add(target)
                     command_count += 1
                 elif result.handled and result.response_text:
                     # Action result (e.g. /compact, /clear) — no forward target.
                     # Inject the result into the issuing agent's own conversation
                     # so the supervisor sees the outcome on its next turn.
+                    logger.warning(
+                        "[agent-cmd] Command %r from %s returned non-forward message: %s",
+                        candidate, session_key, result.response_text,
+                    )
                     self._record_action_result(session_key, result.response_text)
                     command_count += 1
+
+        # A self-ask keeps this session in routed_targets so its depth stays
+        # incremented. Every other completion clears the chain counter.
+        if session_key not in routed_targets:
+            self._chain_depth.pop(session_key, None)
+        return routed_targets
+
+    def _has_unstarted_ask_for(self, session_key: str) -> bool:
+        """True when a stranded ``[... asks]: `` message is still queued."""
+        if not isinstance(session_key, str) or not session_key:
+            return False
+        arh = self._agent_runtime_handler
+        checker = getattr(arh, "has_pending_ask_inbound", None)
+        if callable(checker):
+            try:
+                return bool(checker(session_key))
+            except Exception:
+                logger.debug(
+                    "has_pending_ask_inbound check failed for %s",
+                    session_key, exc_info=True,
+                )
+        return False
+
+    def _push_pending_ask(self, target_sk: str, source_sk: str) -> None:
+        """Record an asker. The first asker is the head; later ones wait."""
+        if not isinstance(target_sk, str) or not target_sk:
+            return
+        if not isinstance(source_sk, str) or not source_sk:
+            return
+        head = self._pending_asks.get(target_sk)
+        if head is None:
+            self._pending_asks[target_sk] = source_sk
+            return
+        if source_sk == head:
+            return
+        waiters = self._pending_ask_waiters.setdefault(target_sk, [])
+        if source_sk not in waiters:
+            waiters.append(source_sk)
+
+    def _pop_next_asker(self, session_key: str) -> str | None:
+        """Pop the head asker and promote the next waiter, if any."""
+        if not isinstance(session_key, str) or not session_key:
+            return None
+        head = self._pending_asks.pop(session_key, None)
+        waiters = self._pending_ask_waiters.get(session_key)
+        if waiters:
+            nxt = waiters.pop(0)
+            if waiters:
+                self._pending_ask_waiters[session_key] = waiters
+            else:
+                self._pending_ask_waiters.pop(session_key, None)
+            if isinstance(nxt, str) and nxt:
+                self._pending_asks[session_key] = nxt
+        return head
+
+    def on_agent_error(self, session_key: str, error_text: str) -> None:
+        """Clear zombie pending-ask / chain-depth state when a target turn fails."""
+        if not isinstance(session_key, str) or not session_key:
+            return
+        if self._has_unstarted_ask_for(session_key):
+            return
+        self._chain_depth.pop(session_key, None)
+        source_sk = self._pop_next_asker(session_key)
+        if source_sk is not None:
+            display_name = self._resolve_display_name(session_key)
+            shown = error_text if isinstance(error_text, str) else str(error_text)
+            logger.warning(
+                "[agent-cmd] Clearing pending ask %s -> %s after target turn error: %s",
+                source_sk, session_key, shown,
+            )
+            self._record_action_result(
+                source_sk,
+                f"{display_name} encountered an error before answering: {shown}",
+            )
 
     def _record_action_result(self, source_sk: str, text: str) -> None:
         """Inject an action result into the issuing agent's own conversation.
@@ -430,7 +632,7 @@ class AgentCommandHandler:
 
     def _route_command(self, result, project_name: str | None,
                        current_depth: int, source_sk: str,
-                       command_name: str = "") -> None:
+                       command_name: str = "") -> str:
         """Route a single CommandResult to the target agent and record pending ask.
 
         Only records a pending ask for response-expecting commands (ask, delegate).
@@ -449,7 +651,7 @@ class AgentCommandHandler:
 
         # Record pending ask ONLY for response-expecting commands
         if command_name != "tell":
-            self._pending_asks[record_key] = source_sk
+            self._push_pending_ask(record_key, source_sk)
 
         # Increment chain depth for the target
         self._chain_depth[depth_key] = current_depth + 1
@@ -460,6 +662,7 @@ class AgentCommandHandler:
         sender_name = self._resolve_display_name(source_sk)
         forward_text = f"[{sender_name} asks]: {result.forward_text}"
         self._route_to_target(route_key, forward_text, project_name)
+        return route_key if isinstance(route_key, str) else ""
 
     def _send_with_guard(self, target_sk: str, text: str) -> None:
         """SPEC-58 r4 chunk 2: a guarded send_to_special_agent call.
@@ -529,7 +732,7 @@ class AgentCommandHandler:
 
         # Strip fenced blocks BEFORE extraction (prevent false positives from
         # audit report examples inside ```...``` code blocks)
-        clean_text = self._strip_fenced_blocks(text)
+        clean_text = self._strip_fenced_blocks(self._strip_thinking_blocks(text))
         reports = extract_audit_reports(clean_text)
         if not reports:
             return
@@ -610,6 +813,40 @@ class AgentCommandHandler:
         return session_key.split("/")[-1]
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _strip_thinking_blocks(text: str) -> str:
+        """Remove <think>...</think> reasoning blocks (and unclosed trailing <think>)."""
+        if not isinstance(text, str) or not text:
+            return "" if not isinstance(text, str) else text
+        text = re.sub(r"<think\b[^>]*>.*?</think>", "\n", text, flags=re.DOTALL | re.IGNORECASE)
+        return re.sub(r"<think\b[^>]*>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+
+    @classmethod
+    def _sanitize_for_command_scan(cls, text: str) -> str:
+        """Strip <think> blocks, unwrap WebKit html/live fences, then strip code fences."""
+        if not isinstance(text, str):
+            return ""
+        text = cls._strip_thinking_blocks(text)
+
+        def _unwrap_html_fence(m: re.Match) -> str:
+            body = m.group(1)
+            body = re.sub(
+                r"<(script|style|pre|code)\b[^>]*>.*?</\1>",
+                " ",
+                body,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            body = re.sub(r"<[^>]+>", "\n", body)
+            return "\n" + body.replace("&quot;", '"').replace("&#34;", '"') + "\n"
+
+        text = re.sub(
+            r"```(?:html|live)[ \t]*\r?\n(.*?)```",
+            _unwrap_html_fence,
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        return cls._strip_fenced_blocks(text)
 
     @staticmethod
     def _strip_fenced_blocks(text: str) -> str:

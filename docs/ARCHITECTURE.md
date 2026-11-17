@@ -1431,7 +1431,7 @@ show_project_menu(parent, project_name, member_names, current_solo, on_select)
 
 **Responsibility:** Parse slash-prefixed commands, resolve `@mentions`, dispatch to command handlers.
 
-**Quoted payloads:** A2A commands use quoted payloads per `A2A_QUOTED_PAYLOAD_SPEC` — the payload is wrapped in double quotes (`"payload"`). The parser (`_parse_quoted_payload()` in `utils/quoting.py`) handles `\"` and `\\` escapes. The canonical format is `/cmd @Agent "payload"`.
+**Quoted payloads:** A2A commands use quoted payloads per `A2A_QUOTED_PAYLOAD_SPEC` — the payload is wrapped in double quotes (`"payload"`). The parser (`_parse_quoted_payload()` in `utils/quoting.py`) handles `\"` and `\\` escapes. The canonical format is `/cmd @Agent "payload"`. SPEC-65 reads that payload from the unsplit raw string, so newlines and indentation inside the quotes are kept. `get_command_names()` includes aliases (`/a` for `/ask`). `_resolve_mention` strips a trailing `:`, `,`, or `;` from `@name`. `Window._sync_special_agent_consumers()` refreshes both the left panel and `CommandHandler._special_agents` when providers or agents are saved.
 
 **Owns:** CommandRegistry, command prefix, `@mention` resolution.
 
@@ -1511,10 +1511,13 @@ class AgentCommandHandler:
     def set_awareness_sent(awareness_set)       # Shared set[str] from ChatHandler — deduplicate awareness
 
     # Entry point (wired into both response pipelines)
-    def on_agent_response(session_key, text, project_name) -> None
+    def on_agent_response(session_key, text, project_name) -> set[str]
         # Step 1: RELAY — if agent has pending ask, deliver response to asking agent
         # Step 2: SCAN — parse slash commands, route through CommandHandler.process_input()
+        # Returns the session keys routed by this response
 ```
+
+**SPEC-65 scan and relay:** `_sanitize_for_command_scan()` strips `<think>` blocks, unwraps WebKit `html` / `live` fences (after dropping `script` / `style` / `pre` / `code`), then strips other code fences. `_scan_agent_quoted_payload()` accepts ASCII, curly, and single quotes, escaped quotes, and a single-line inner quote. Results are sorted by `raw_start`, so `/clear` before `/ask` runs in source order. `_has_unstarted_ask_for` leaves `_pending_asks` in place when a stranded `[... asks]: ` message is still queued. Extra concurrent askers wait in `_pending_ask_waiters` (a FIFO); `_pending_asks` stays `{target_sk: source_sk}`. `on_agent_error` drops a zombie pending ask when the target turn fails. `[room]` witness lines skip targets already in the returned `routed_targets` set.
 
 **Constants:**
 - `_MAX_CHAIN_DEPTH = 3` — max nested command hops before cutoff
@@ -1694,7 +1697,7 @@ Guidance preambles on injected blocks (SPEC-31):
 
 **Turn state machine (SPEC-RUNTIME-TERMINAL-PATH-CONSOLIDATION):** All terminal transitions in `_run_loop` funnel through a single `_terminate_turn(result: TurnResult)` method. The state machine tracks per-turn status: `RUNNING → STREAMING → {COMPLETED | FAILED | CANCELLED}`. State is keyed by `(session_key, turn_token)` tuple (not session_key alone) so cancellation races don't clobber a new turn's state. CANCELLED's only `metadata.reason` is `"user"` (SPEC-61 A1 — the shared-flag `"shutdown"` reason is gone). A dedicated `_state_lock` (separate from `self._lock`) protects the compound read-decide-write operation — the GIL does NOT make this atomic. When a turn registers, the session's older `_turn_state`/`_turn_results` entries are dropped under `_state_lock` (SPEC-61 A3 — each dict holds at most one entry per session; the records of superseded turns are never read). `_terminate_turn` deduplicates terminal transitions (at most one accepted terminal per turn) and rejects stale-token results (a result whose turn_token doesn't match the session's active token). `_check_and_stop_on_limit` is now a pure predicate returning `tuple[str, str] | None` (was: side-effecting with an undefined `turn_token` NameError). Public accessors `get_turn_state(sk)` and `get_last_turn_result(sk)` provide observability.
 
-**Tool-loop ceiling (SPEC-60).** `max_tool_iterations` (default 50) is the soft line; `tool_iteration_hard_cap` (default 100) is the non-negotiable ceiling. `hard_cap <= max_tool_iterations` disarms the judge — exact legacy path: FAILED, `reason="max_iterations"`, judge never consulted. When armed (`judge_armed` evaluated once per turn), a free nudge lands at soft−5 via `_pending_stuck_messages`, and at the soft line `_iteration_judge` makes one `post_decision` call — `continue` requires `confidence >= 0.6` and each grant is +25 iterations (max 2 grants, clamped by hard cap); anything else stops. Stop closes the turn through `_graceful_iteration_close`: COMPLETED with a synthetic `[tool loop closed — …]` summary, `metadata.reason` is `iteration_judge` or `hard_cap`. Judge failure (no card, error, malformed answer) fails safe to stop; `post_decision`'s own contract is never-raise. Because the default config arms the judge, an environment with no DecisionModel card also stops at the soft line COMPLETED rather than FAILED (PM ruling 2026-11-02, option i); the legacy FAILED expectation survives only on the disarmed path (`tests/test_iteration_judge.py` case 1).
+**Tool-loop ceiling (SPEC-60) & turn-text continuity (SPEC-64).** `max_tool_iterations` (default 50) is the soft line; `tool_iteration_hard_cap` (default 100) is the non-negotiable ceiling. `hard_cap <= max_tool_iterations` disarms the judge — exact legacy path: FAILED, `reason="max_iterations"`, judge never consulted. When armed (`judge_armed` evaluated once per turn), a free nudge lands at soft−5 via `_pending_stuck_messages`, and at the soft line `_iteration_judge` makes one `post_decision` call — `continue` requires `confidence >= 0.6` and each grant is +25 iterations (max 2 grants, clamped by hard cap); anything else stops. Stop closes the turn through `_graceful_iteration_close`: COMPLETED with a synthetic `[tool loop closed — …]` summary, `metadata.reason` is `iteration_judge` or `hard_cap`, and `TurnResult.text` carries `f"{prior_text}\n\n{close_note}"` (or `close_note` when no prose preceded the close) so `_do_response_complete` always renders the close note and fires `_on_agent_response` (SPEC-64 Finding 1A). Judge failure (no card, error, malformed answer) fails safe to stop; `post_decision`'s own contract is never-raise. Because the default config arms the judge, an environment with no DecisionModel card also stops at the soft line COMPLETED rather than FAILED (PM ruling 2026-11-02, option i); the legacy FAILED expectation survives only on the disarmed path (`tests/test_iteration_judge.py` case 1). Across all iterations of `_run_loop`, `turn_text_segments` collects non-empty `text_content` emitted alongside tool calls (and across mid-turn `_drain_inbox` continuations) so normal completion joins `[*turn_text_segments, text_content]` into `TurnResult.text` without duplicating messages in `conv.messages` (Finding 1C); if a post-tool follow-up returns empty `content` with no `tool_calls`, no `_stream_error`, and no `[calling tools]` stub after non-empty `turn_text_segments`, `_run_loop` appends `"[completed after tool execution]"` (preserving strict `user`/`assistant` alternation for Anthropic) and completes `TurnStatus.COMPLETED` with `"\n\n".join(turn_text_segments)` (Finding 1B). `peek_pending_inbound(session_key) -> list[str]` returns a non-destructive copy of `_inbox` + `_stranded` under `_lock`. Output token ceiling hits (`finish_reason == "length"` / `stop_reason == "max_tokens"`) stamp `TurnResult.metadata["output_truncated"] = True` without modifying `TurnResult.text` (Finding 4A).
 
 **Public API:**
 ```python
@@ -1782,11 +1785,11 @@ LLMResponse — normalized response dataclass
 **Sub-modules:**
 - `protocol.py` — LLMProvider Protocol (@runtime_checkable) + LLMResponse dataclass
 - `registry.py` — provider registry (5 entries: openai, minimax, anthropic, openrouter, zai)
-- `openai_provider.py` — OpenAIProvider (handles openai, openrouter, zai; call + stream)
-- `minimax_provider.py` — MiniMaxProvider (ChatCompletion v2; call + stream)
-- `anthropic_provider.py` — AnthropicProvider (Messages API; call + stream)
-- `streaming.py` — SSE helpers (sse_lines, parse_sse_line, parse_sse_delta) + SSL retry infrastructure
-- `extractors.py` — response extractors (tool_calls, text_content, usage); takes `response_format: str` parameter
+- `openai_provider.py` — OpenAIProvider (handles openai, openrouter, zai; call + stream, including `finish_reason=="length"` `truncated` metadata and 2 MiB-bounded non-SSE HTTP 200 JSON fallback `_events_from_non_sse_json`)
+- `minimax_provider.py` — MiniMaxProvider (ChatCompletion v2; call + stream, including `finish_reason=="length"` `truncated` metadata)
+- `anthropic_provider.py` — AnthropicProvider (Messages API; call + stream, model-tiered `_anthropic_max_output_tokens` 4096/8192/16384 and `stop_reason=="max_tokens"` `truncated` metadata)
+- `streaming.py` — SSE helpers (`sse_lines`, `parse_sse_line`, `parse_sse_delta`, `coerce_content_text`) + SSL retry infrastructure
+- `extractors.py` — response extractors (`tool_calls`, `text_content` with `list[dict]` block support, `usage`); takes `response_format: str` parameter
 - `convert.py` — Anthropic message/tool format converters
 - `cost.py` — cost tables + model_id + cost_for_model
 

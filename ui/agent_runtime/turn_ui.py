@@ -528,9 +528,12 @@ class RuntimeTurnUiMixin:
                         chat_box.append(bubble)
 
             # Agent command parsing hook (Phase 6.2) — fire after bubble render, before lifecycle
+            routed_targets: set[str] = set()
             if self._on_agent_response is not None and text:
                 project_name = self._active_project[0] if self._active_project else None
-                self._on_agent_response(session_key, text, project_name)
+                hook_res = self._on_agent_response(session_key, text, project_name)
+                if isinstance(hook_res, (set, frozenset)):
+                    routed_targets = set(hook_res)
 
             # Fire lifecycle: agent finished → ActivityHandler progress bar
             if self._on_agent_end_cb:
@@ -582,7 +585,7 @@ class RuntimeTurnUiMixin:
                                 )
 
                         for member in members:
-                            if member == session_key:
+                            if member == session_key or member in routed_targets:
                                 continue
                             if self._GLib is not None:
                                 threading.Thread(
@@ -768,6 +771,13 @@ class RuntimeTurnUiMixin:
                         "turn-error feed card emission failed for %s (non-fatal)",
                         session_key,
                     )
+
+            err_cb = getattr(self, "_on_agent_error_cb", None)
+            if callable(err_cb):
+                try:
+                    err_cb(session_key, display_msg)
+                except Exception:
+                    _mod().logger.exception("on_agent_error callback failed for %s", session_key)
 
             # Fire lifecycle: agent finished (error) → ActivityHandler returns to idle
             if self._on_agent_end_cb:

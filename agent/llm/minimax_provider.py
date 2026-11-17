@@ -63,7 +63,8 @@ def _handle_finish_frame(d: dict) -> Iterator[SSEEvent]:
             usage = d.get("usage")
             if usage:
                 yield SSEEvent(type="usage", data={"usage": usage})
-            yield SSEEvent(type="done", data={})
+            done_data = {"truncated": True} if finish_reason == "length" else {}
+            yield SSEEvent(type="done", data=done_data)
         else:
             # BUG #4: still yield usage when finish_reason is not in the
             # recognized set (or None), so usage frames are not dropped.
@@ -130,6 +131,8 @@ class MiniMaxProvider:
                     raise RuntimeError(
                         f"MiniMax API error (status_code={status_code}): {status_msg}"
                     )
+                if isinstance(result, dict) and first_choice(result).get("finish_reason") == "length":
+                    result["_output_truncated"] = True
                 return result
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")

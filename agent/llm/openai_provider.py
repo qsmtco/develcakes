@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 
 from agent.llm.cost import model_id
+from agent.llm.extractors import extract_text_content
 from agent.llm.streaming import (
     SSEEvent,
     sse_lines,
@@ -32,6 +33,70 @@ def _apply_reasoning(payload: dict, caller: str, level: str) -> None:
         payload["reasoning_effort"] = level
     elif caller == "openrouter":
         payload["reasoning"] = {"effort": level}
+
+
+_MAX_NON_SSE_FALLBACK_BYTES = 2 * 1024 * 1024  # 2 MiB safety bound
+
+
+def _events_from_non_sse_json(raw_bytes: bytes) -> list[SSEEvent] | None:
+    """Parse a non-SSE HTTP 200 JSON ChatCompletion body into SSEEvents."""
+    if not raw_bytes or len(raw_bytes) > _MAX_NON_SSE_FALLBACK_BYTES:
+        return None
+    try:
+        d = json.loads(raw_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    events: list[SSEEvent] = []
+    top_error = d.get("error")
+    if top_error and isinstance(top_error, dict):
+        events.append(SSEEvent(type="error", data={"error": top_error}))
+        events.append(SSEEvent(type="done", data={}))
+        return events
+    choice = first_choice(d)
+    finish_reason = None
+    if choice:
+        finish_reason = choice.get("finish_reason")
+        msg = choice.get("message")
+        if isinstance(msg, dict):
+            text = extract_text_content(d, response_format="openai")
+            if text:
+                events.append(SSEEvent(type="text_delta", data={"content": text}))
+            tcs = msg.get("tool_calls") or []
+            if isinstance(tcs, list):
+                for idx, tc in enumerate(tcs):
+                    if isinstance(tc, dict) and isinstance(tc.get("function"), dict):
+                        fn = tc["function"]
+                        raw_args = fn.get("arguments")
+                        if isinstance(raw_args, dict):
+                            fargs = json.dumps(raw_args)
+                        elif isinstance(raw_args, str):
+                            fargs = raw_args
+                        else:
+                            fargs = ""
+                        events.append(SSEEvent(type="tool_call_delta", data={
+                            "index": tc.get("index", idx),
+                            "name": fn.get("name") or "",
+                            "arguments": fargs,
+                            "id": tc.get("id") or "",
+                        }))
+        else:
+            events.extend(parse_sse_delta(d))
+        if finish_reason == "content_filter":
+            events.append(SSEEvent(type="error", data={"error": {
+                "code": 400,
+                "reason": "content_filter",
+                "message": "Content was filtered by the provider (finish_reason=content_filter).",
+            }}))
+    usage = d.get("usage")
+    if isinstance(usage, dict) and usage:
+        events.append(SSEEvent(type="usage", data={"usage": usage}))
+    if choice or usage is not None:
+        done_data = {"truncated": True} if finish_reason == "length" else {}
+        events.append(SSEEvent(type="done", data=done_data))
+        return events
+    return None
 
 
 class OpenAIProvider:
@@ -91,7 +156,10 @@ class OpenAIProvider:
         )
         try:
             with urlopen_with_ssl_retry(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+                parsed = json.loads(resp.read())
+                if isinstance(parsed, dict) and first_choice(parsed).get("finish_reason") == "length":
+                    parsed["_output_truncated"] = True
+                return parsed
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(
@@ -148,10 +216,22 @@ class OpenAIProvider:
             )
             raise
         with resp as resp:
+            saw_sse_event = False
+            non_sse_chunks: list[bytes] = []
+            non_sse_bytes = 0
             for line in sse_lines(resp):
                 ev = parse_sse_line(line)
                 if ev is None:
+                    if (
+                        line
+                        and not line.startswith(b":")
+                        and not saw_sse_event
+                        and non_sse_bytes <= _MAX_NON_SSE_FALLBACK_BYTES
+                    ):
+                        non_sse_chunks.append(line)
+                        non_sse_bytes += len(line)
                     continue
+                saw_sse_event = True
                 if ev.type == "done":
                     yield SSEEvent(type="done", data={})
                     return
@@ -198,8 +278,13 @@ class OpenAIProvider:
                         usage = d.get("usage")
                         if usage:
                             yield SSEEvent(type="usage", data={"usage": usage})
-                        yield SSEEvent(type="done", data={})
+                        done_data = {"truncated": True} if finish_reason == "length" else {}
+                        yield SSEEvent(type="done", data=done_data)
                         return
                 usage = d.get("usage")
                 if usage:
                     yield SSEEvent(type="usage", data={"usage": usage})
+            if not saw_sse_event and non_sse_chunks:
+                fallback_events = _events_from_non_sse_json(b"\n".join(non_sse_chunks))
+                if fallback_events is not None:
+                    yield from fallback_events

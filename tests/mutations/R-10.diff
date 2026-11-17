@@ -1,0 +1,18 @@
+--- a/ui/handlers/agent_command_handler.py	2026-11-15 20:44:21.278416426 -0800
++++ b/ui/handlers/agent_command_handler.py	2026-11-15 20:45:18.406917603 -0800
+@@ -281,7 +281,6 @@
+ 
+         pos = max(agent_end, pos + 1)
+ 
+-    results.sort(key=lambda pc: pc.raw_start)
+     return results
+ 
+ 
+@@ -827,7 +826,6 @@
+         """Strip <think> blocks, unwrap WebKit html/live fences, then strip code fences."""
+         if not isinstance(text, str):
+             return ""
+-        text = cls._strip_thinking_blocks(text)
+ 
+         def _unwrap_html_fence(m: re.Match) -> str:
+             body = m.group(1)

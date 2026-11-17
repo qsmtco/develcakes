@@ -110,18 +110,36 @@ def extract_tool_calls(
 
 def extract_text_content(response: dict, response_format: str = "openai") -> str:
     """Extract text content from an API response."""
+    if not isinstance(response, dict):
+        return ""
     if response_format == "openai":
-        choices = response.get("choices", [])
-        if not choices:
+        choices = response.get("choices") or []
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             return ""
         msg = choices[0].get("message", {})
-        return msg.get("content", "") or ""
+        if not isinstance(msg, dict):
+            return ""
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    btype = block.get("type")
+                    btext = block.get("text")
+                    if btype in ("text", "output_text", None) and isinstance(btext, str):
+                        parts.append(btext)
+            return "".join(parts)
+        return ""
 
     elif response_format == "anthropic":
         content = response.get("content", [])
         if not isinstance(content, list):
             return ""
-        parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
         return "".join(parts)
 
     return ""

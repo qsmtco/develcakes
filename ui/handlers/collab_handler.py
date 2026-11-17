@@ -35,11 +35,11 @@ class CollabHandler:
     # ── Collaboration commands ──────────────────────────────────────────────────
 
     def cmd_ask(self, cmd: Command) -> CommandResult:
-        """/ask @agent — question → forward question to agent (or all if `@`)"""
+        """/ask @agent "question" → forward question to agent (or all if `@`)"""
         if cmd.is_broadcast:
             return CommandResult(handled=True, broadcast_targets=cmd.broadcast_targets, forward_text=cmd.body)
         if not cmd.target_session_key:
-            return CommandResult(handled=True, response_text="No target agent. Usage: /ask @agent — question")
+            return CommandResult(handled=True, response_text='No target agent. Usage: /ask @agent "question"')
         return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text=cmd.body)
 
     def cmd_stop(self, cmd: Command) -> CommandResult:

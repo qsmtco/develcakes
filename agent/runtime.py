@@ -312,6 +312,7 @@ def _parallel_runs(tool_calls_raw, is_truncated) -> dict[int, int]:
 # ── SSE streaming helpers (extracted to agent/llm/streaming.py, Phase B5) ──
 from agent.llm.streaming import (
     SSEEvent,
+    coerce_content_text,
     ssl_retry_budget,
     stream_with_ssl_retry,
 )
@@ -1522,6 +1523,13 @@ class AgentRuntime:
         with self._lock:
             return self._stranded.pop(session_key, [])
 
+    def peek_pending_inbound(self, session_key: str) -> list[str]:
+        """Return a copy of queued (_inbox) and stranded (_stranded) texts without mutating state."""
+        if not isinstance(session_key, str) or not session_key:
+            return []
+        with self._lock:
+            return list(self._inbox.get(session_key, ())) + list(self._stranded.get(session_key, ()))
+
     def start_claimed_loop(
         self,
         session_key: str,
@@ -2100,6 +2108,8 @@ class AgentRuntime:
 
                 # Step 2: loop until no tool calls or limit hit
                 iteration = 0
+                turn_text_segments: list[str] = []
+                turn_output_truncated = False
                 max_iter = self._config.max_tool_iterations
                 # SPEC-60: iteration judge. tool_iteration_hard_cap is the
                 # non-negotiable ceiling; <= soft (or non-int/bool) disables
@@ -2273,6 +2283,13 @@ class AgentRuntime:
                         )
                         return
 
+                    if isinstance(response, dict) and response.get("_output_truncated"):
+                        turn_output_truncated = True
+                        logger.warning(
+                            "[tool-loop] sk=%s LLM response hit max output token limit at iteration=%d",
+                            session_key, iteration,
+                        )
+
                     # Extract content and tool calls
                     # Determine provider from conversation model
                     model = conv.model or self._config.default_model
@@ -2360,6 +2377,47 @@ class AgentRuntime:
                         # nothing (e.g. " \n\u200b"). Same predicate used at the
                         # tool-call path below for consistency.
                         if _is_empty_content(text_content):
+                            stream_err = response.get("_stream_error")
+                            is_calling_tools_stub = (
+                                isinstance(text_content, str) and text_content.strip() == "[calling tools]"
+                            )
+                            if turn_text_segments and not stream_err and not is_calling_tools_stub:
+                                combined_text = "\n\n".join(turn_text_segments)
+                                logger.info(
+                                    "[tool-loop] sk=%s empty post-tool follow-up after %d prose segment(s); "
+                                    "completing turn with accumulated text (len=%d)",
+                                    session_key, len(turn_text_segments), len(combined_text),
+                                )
+                                conv.add_assistant_message("[completed after tool execution]", [])
+                                limit_result = self._check_and_stop_on_limit(session_key, conv)
+                                if limit_result is not None:
+                                    stopped_reason, reason_msg = limit_result
+                                    conv.add_assistant_message(f"[stopped: {reason_msg}]", [])
+                                    self._terminate_turn(TurnResult(
+                                        status=TurnStatus.FAILED,
+                                        session_key=session_key,
+                                        turn_token=turn_token,
+                                        error=reason_msg,
+                                        metadata={"reason": stopped_reason, "iteration": iteration},
+                                    ))
+                                    return
+                                if self._drain_inbox(session_key, conv):
+                                    continue
+                                empty_followup_meta: dict = {
+                                    "stream_error": None,
+                                    "completed_from_prior_iteration_text": True,
+                                }
+                                if turn_output_truncated:
+                                    empty_followup_meta["output_truncated"] = True
+                                self._terminate_turn(TurnResult(
+                                    status=TurnStatus.COMPLETED,
+                                    session_key=session_key,
+                                    turn_token=turn_token,
+                                    text=combined_text,
+                                    metadata=empty_followup_meta,
+                                ))
+                                return
+
                             logger.warning("[tool-loop] sk=%s LLM returned no content (with tool_calls=%d, choices=%d) — treating as error",
                                            session_key, len(tool_calls_raw), len(response.get("choices") or []))
 
@@ -2369,7 +2427,6 @@ class AgentRuntime:
                             # the generic "no content" placeholder. This happens when
                             # the provider hits rate limits, content filters,
                             # or other mid-stream errors.
-                            stream_err = response.get("_stream_error")
                             if stream_err:
                                 err_code = stream_err.get("code", 0)
                                 err_msg = stream_err.get("message", "Unknown provider error")
@@ -2501,17 +2558,30 @@ class AgentRuntime:
                         # COMPLETED for the same (session_key, turn_token) would be
                         # rejected (SPEC-WIRE-CONTEXT-PRESSURE §2.1).
                         if self._drain_inbox(session_key, conv):
+                            if not _is_empty_content(text_content):
+                                turn_text_segments.append(text_content)
                             continue
+                        final_turn_text = (
+                            "\n\n".join([*turn_text_segments, text_content])
+                            if turn_text_segments
+                            else text_content
+                        )
+                        completed_meta: dict = {
+                            "stream_error": response.get("_stream_error"),
+                        }
+                        if turn_output_truncated:
+                            completed_meta["output_truncated"] = True
                         self._terminate_turn(TurnResult(
                             status=TurnStatus.COMPLETED,
                             session_key=session_key,
                             turn_token=turn_token,
-                            text=text_content,
-                            metadata={
-                                "stream_error": response.get("_stream_error"),
-                            },
+                            text=final_turn_text,
+                            metadata=completed_meta,
                         ))
                         return
+
+                    if not _is_empty_content(text_content):
+                        turn_text_segments.append(text_content)
 
                     if self._execute_tool_batch(
                         session_key,
@@ -2573,6 +2643,8 @@ class AgentRuntime:
                             session_key, conv, turn_token, iteration,
                             self._iteration_tool_errors.get(session_key, 0),
                             grants_used, hit_hard_cap=(max_iter >= hard_cap),
+                            prior_text="\n\n".join(turn_text_segments),
+                            output_truncated=turn_output_truncated,
                         )
                         return
 
@@ -3755,6 +3827,7 @@ class AgentRuntime:
         captured_usage: dict = {}
         # OpenRouter mid-stream error details (finish_reason="error").
         captured_error: dict = {}
+        output_truncated = False
 
         _stream = stream_with_ssl_retry(
             streamer,
@@ -3779,7 +3852,8 @@ class AgentRuntime:
                     self._last_stream_text.pop(session_key, None)
                     raise TurnInactive(inactive)
                 if ev.type == "text_delta":
-                    text = ev.data.get("content") or ""
+                    raw_text = ev.data.get("content") if isinstance(ev.data, dict) else ""
+                    text = raw_text if isinstance(raw_text, str) else (coerce_content_text(raw_text) or "")
                     parts.append(text)
                     if self._on_text_delta:
                         self._dispatch(self._on_text_delta, session_key, text, _turn_token=turn_token)
@@ -3824,6 +3898,8 @@ class AgentRuntime:
                         )
 
                 elif ev.type == "done":
+                    if isinstance(ev.data, dict) and ev.data.get("truncated"):
+                        output_truncated = True
                     # STREAM-ID-PRES: the helper keeps the provider id captured
                     # during SSE assembly and falls back to a synthetic id.
                     # SPEC-61 B7: join once at the end of the reply.
@@ -3851,12 +3927,17 @@ class AgentRuntime:
                             usage_data = ev.data.get("usage", {})
                             if isinstance(usage_data, dict) and usage_data:
                                 captured_usage = usage_data
+                        elif ev.type == "done":
+                            if isinstance(ev.data, dict) and ev.data.get("truncated"):
+                                output_truncated = True
                     # Write back late-captured values — the drain updates local
                     # variables only; the `result` dict was built before the drain.
                     if captured_error and "_stream_error" not in result:
                         result["_stream_error"] = captured_error
                     if captured_usage and not result.get("usage"):
                         result["usage"] = captured_usage
+                    if output_truncated:
+                        result["_output_truncated"] = True
                     return result
 
             # Fallback — stream ended without explicit done event (e.g. provider doesn't send [DONE])
@@ -3869,6 +3950,8 @@ class AgentRuntime:
             result = {"choices": [{"message": {"content": full_content, "tool_calls": tool_calls}}], "usage": captured_usage}
             if captured_error:
                 result["_stream_error"] = captured_error
+            if output_truncated:
+                result["_output_truncated"] = True
             return result
         finally:
             # SPEC-61 B7: one write instead of one per chunk. An empty parts
@@ -3970,21 +4053,28 @@ class AgentRuntime:
 
     def _graceful_iteration_close(self, session_key: str, conv, turn_token,
                                   iteration: int, tool_errors: int,
-                                  grants_used: int, hit_hard_cap: bool) -> None:
+                                  grants_used: int, hit_hard_cap: bool,
+                                  prior_text: str = "",
+                                  output_truncated: bool = False) -> None:
         """Close the turn COMPLETED with a synthetic summary instead of FAILED."""
         reason = "hard_cap" if hit_hard_cap else "iteration_judge"
-        conv.add_assistant_message(
+        close_note = (
             f"[tool loop closed — {reason} at {iteration} iterations, "
             f"{grants_used} extension(s) granted, {tool_errors} tool error(s). "
-            f"Partial work above stands; resume with a follow-up message.]",
-            [],
+            f"Partial work above stands; resume with a follow-up message.]"
         )
+        conv.add_assistant_message(close_note, [])
+        final_text = f"{prior_text}\n\n{close_note}" if prior_text else close_note
+        meta: dict = {"reason": reason, "iterations": iteration, "grants": grants_used}
+        if output_truncated:
+            meta["output_truncated"] = True
         self._terminate_turn(TurnResult(
             status=TurnStatus.COMPLETED,
             session_key=session_key,
             turn_token=turn_token,
+            text=final_text,
             error=None,
-            metadata={"reason": reason, "iterations": iteration, "grants": grants_used},
+            metadata=meta,
         ))
 
     def drop_compile(self, session_key: str) -> None:

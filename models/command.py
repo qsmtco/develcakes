@@ -55,7 +55,7 @@ class Command:
     args: list[str] = field(default_factory=list)
     flags: dict[str, str] = field(default_factory=dict)
     raw_text: str = ""
-    body: str = ""          # text after the em-dash separator, e.g. "what is the status?" in `ask @Debugger — what is the status?`
+    body: str = ""          # quoted payload, e.g. "what is the status?" in `/ask @Debugger "what is the status?"`
     source_session_key: str = ""
     target_session_key: str | None = None   # single target
     is_broadcast: bool = False              # True when @ mentions all project members
@@ -145,6 +145,17 @@ class CommandRegistry:
             return self._commands[name_lower]
         if name_lower in self._aliases:
             return self._commands[self._aliases[name_lower]]
+        return None
+
+    def resolve_name(self, name: str) -> str | None:
+        """Return canonical command name for a registered command or alias, or None."""
+        if not isinstance(name, str) or not name:
+            return None
+        name_lower = name.lower()
+        if name_lower in self._commands:
+            return name_lower
+        if name_lower in self._aliases:
+            return self._aliases[name_lower]
         return None
 
     def list_commands(self) -> list[str]:

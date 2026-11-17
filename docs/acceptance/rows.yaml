@@ -65,3 +65,35 @@
   mutation: tests/mutations/R-7.diff
   runner: plain
   added: 2026-10-09
+
+- id: R-8
+  claim: "Multi-iteration prose accumulated before tool calls and before _graceful_iteration_close is delivered in TurnResult.text to _on_response_complete."
+  source: docs/specs/SPEC-64-TURN-TEXT-AND-STREAMING-HARDENING.md §7 (Findings 1A, 1C)
+  node: tests/test_spec64_turn_text_streaming.py::TestTurnTextContinuity
+  mutation: tests/mutations/R-8.diff
+  runner: plain
+  added: 2026-11-15
+
+- id: R-9
+  claim: "Post-tool empty follow-up after non-empty tool-iteration prose completes TurnStatus.COMPLETED with accumulated text and Anthropic-valid role alternation instead of FAILED (empty_content)."
+  source: docs/specs/SPEC-64-TURN-TEXT-AND-STREAMING-HARDENING.md §7 (Finding 1B)
+  node: tests/test_spec64_turn_text_streaming.py::TestPostToolEmptyFollowup
+  mutation: tests/mutations/R-9.diff
+  runner: plain
+  added: 2026-11-15
+
+- id: R-10
+  claim: "_extract_quoted_commands and CommandHandler.process_input strip <think> blocks, accept prompt-style formatting, aliases, and inner quotes, preserve multiline indentation, and sort /clear before /ask."
+  source: docs/specs/SPEC-65-ASK-PARSER-REGISTRY-AND-RELAY-HARDENING.md §7 (Findings 2A, 2B, 2C, 3D)
+  node: tests/test_spec65_ask_command_hardening.py::TestParserAndOrdering
+  mutation: tests/mutations/R-10.diff
+  runner: xvfb
+  added: 2026-11-15
+
+- id: R-11
+  claim: "_pending_asks survives a prior turn's completion when a stranded ask is pending, _chain_depth resets when CommandHandler is wired, and _sync_special_agent_consumers updates CommandHandler._special_agents."
+  source: docs/specs/SPEC-65-ASK-PARSER-REGISTRY-AND-RELAY-HARDENING.md §7 (Findings 3A, 3B, 3C)
+  node: tests/test_spec65_ask_command_hardening.py::TestRelayAndRegistrySync
+  mutation: tests/mutations/R-11.diff
+  runner: xvfb
+  added: 2026-11-15

@@ -892,6 +892,14 @@ class ProjectHandler:
                     handled=True,
                     response_text=f"Compact failed for {agent_name}: {exc}",
                 )
+            if isinstance(result, dict) and result.get("error"):
+                return CommandResult(
+                    handled=True,
+                    response_text=(
+                        f"Could not compact {agent_name}: a tool loop is currently running. "
+                        f"Wait for it to finish, then run /compact again."
+                    ),
+                )
             removed = int(result.get("messages_removed", 0))
             freed = int(result.get("tokens_freed", 0))
             msg = (

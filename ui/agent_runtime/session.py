@@ -47,10 +47,6 @@ class RuntimeSessionMixin:
             )
             return False
 
-        # SPEC-10 SP2b: the /clear teardown drops any stale attribution
-        # snapshot — a cleared session must not checkpoint a pre-clear turn.
-        self._turn_attr.pop(session_key, None)
-
         # Resolve the runtime that owns this session. Display name is the
         # key in self._runtimes; _get_runtime will lazily create one if
         # the agent has never been used yet (clear-before-first-use is a
@@ -78,6 +74,12 @@ class RuntimeSessionMixin:
                 session_key,
             )
             return False
+
+        # SPEC-10 SP2b: drop attribution only after the active-loop refusal.
+        # A refused /clear must keep the in-flight turn's attribution.
+        turn_attr = getattr(self, "_turn_attr", None)
+        if isinstance(turn_attr, dict):
+            turn_attr.pop(session_key, None)
 
         conv = rt.get_conversation(session_key)
         if conv is not None:
@@ -174,6 +176,19 @@ class RuntimeSessionMixin:
                 session_key, exc,
             )
             return {"messages_removed": 0, "tokens_freed": 0, "summary_chars": 0, "layer": 0}
+
+        if not protect_open_turn and rt.is_loop_active(session_key):
+            _mod().logger.warning(
+                "compact_conversation: refusing compact for %s — tool loop is active; retry after it completes",
+                session_key,
+            )
+            return {
+                "messages_removed": 0,
+                "tokens_freed": 0,
+                "summary_chars": 0,
+                "layer": 0,
+                "error": "tool loop is active",
+            }
 
         conv = rt.get_conversation(session_key)
         if conv is None:
@@ -300,6 +315,41 @@ class RuntimeSessionMixin:
         if plan_err is not None:
             return {"ok": False, "error": plan_err}
         return {"ok": True, "remove": sorted(remove)}
+
+    def has_pending_ask_inbound(self, session_key: str) -> bool:
+        """True if an unstarted '[... asks]: ' message is queued in _inbox or _stranded."""
+        if not isinstance(session_key, str) or not session_key:
+            return False
+        agents = getattr(self, "_agents", None) or {}
+        runtimes = getattr(self, "_runtimes", None) or {}
+        if not isinstance(agents, dict) or not isinstance(runtimes, dict):
+            return False
+        agent_def = agents.get(session_key)
+        if agent_def is None:
+            return False
+        rt = runtimes.get(getattr(agent_def, "display_name", None))
+        if rt is None:
+            return False
+        peek = getattr(rt, "peek_pending_inbound", None)
+        if callable(peek):
+            try:
+                pending = peek(session_key)
+            except Exception:
+                _mod().logger.debug(
+                    "has_pending_ask_inbound: peek failed for %s", session_key, exc_info=True,
+                )
+                return False
+        elif hasattr(rt, "_lock"):
+            with rt._lock:
+                pending = (
+                    list(getattr(rt, "_inbox", {}).get(session_key, ()))
+                    + list(getattr(rt, "_stranded", {}).get(session_key, ()))
+                )
+        else:
+            pending = []
+        if not isinstance(pending, (list, tuple)):
+            return False
+        return any(isinstance(m, str) and " asks]: " in m for m in pending)
 
     def edit_conversation(
         self,

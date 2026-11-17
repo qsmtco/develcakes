@@ -81,7 +81,7 @@ class CommandHandler:
         # Collaboration — requires CollabHandler
         if collab_handler is not None:
             self.register_command("ask", collab_handler.cmd_ask, aliases=["a"],
-                help_text="Ask an agent a question: /ask @agent — question")
+                help_text='Ask an agent a question: /ask @agent "question"')
             self.register_command("stop", collab_handler.cmd_stop,
                 help_text="PM stops the current collaboration: /stop @agent",
                 payload_free=True)
@@ -180,7 +180,7 @@ class CommandHandler:
         is a known command (vs. arbitrary quoted text that looks like a command).
         Spec §4.4: returns set[str] for O(1) membership checks.
         """
-        return set(self._registry.list_commands())
+        return set(self._registry.list_commands()) | set(self._registry.list_aliases().keys())
 
     def resolve_inline_mention(self, text: str, session_key: str = "") -> "MentionResolution":
         """Resolve @mentions from plain text (no slash prefix required).
@@ -274,6 +274,7 @@ class CommandHandler:
         tokens = raw.split()
         if not tokens:
             return CommandResult(handled=False)
+        started_with_at = tokens[0].startswith("@")
         cmd_name = tokens[0].lower()
         rest_tokens = tokens[1:]
 
@@ -325,10 +326,18 @@ class CommandHandler:
         error_msg = None
 
         if after_ws and after_ws[0] == '"':
-            payload, q_pos = _parse_quoted_payload(after_ws, 0)
+            # Read the payload from the unsplit raw string so newlines and
+            # indentation inside the quotes survive token splitting.
+            raw_spans = list(re.finditer(r"\S+", raw))
+            quote_tok_idx = (0 if started_with_at else 1) + len(mentions_from_rest)
+            if quote_tok_idx < len(raw_spans) and raw[raw_spans[quote_tok_idx].start()] == '"':
+                raw_after_ws = raw[raw_spans[quote_tok_idx].start():]
+            else:
+                raw_after_ws = after_ws
+            payload, q_pos = _parse_quoted_payload(raw_after_ws, 0)
             if payload is None:
                 # "" → empty payload error; missing closing " → unclosed quote error
-                if len(after_ws) >= 2 and after_ws[1] == '"':
+                if len(raw_after_ws) >= 2 and raw_after_ws[1] == '"':
                     error_msg = 'Empty payload — provide a message: /' + cmd_name + ' @Agent "your message"'
                 else:
                     error_msg = 'Unclosed quote — missing closing ": /' + cmd_name + ' @Agent "your message"'
@@ -466,7 +475,10 @@ class CommandHandler:
             session_key:  Source session key for project context resolution.
                           Used to determine which project @ broadcast targets.
         """
-        name = mention[1:]  # strip leading @
+        raw_name = mention[1:] if isinstance(mention, str) else ""
+        name = raw_name.rstrip(":,;") if raw_name else ""
+        if raw_name and not name:
+            return CommandResult(handled=True, response_text=f"Unknown agent: {mention}")
 
         if not name:
             # Empty @ → project broadcast

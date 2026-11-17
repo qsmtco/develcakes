@@ -1,0 +1,11 @@
+--- a/agent/runtime.py
++++ b/agent/runtime.py
+@@ -2381,7 +2381,7 @@
+                             is_calling_tools_stub = (
+                                 isinstance(text_content, str) and text_content.strip() == "[calling tools]"
+                             )
+-                            if turn_text_segments and not stream_err and not is_calling_tools_stub:
++                            if False and turn_text_segments and not stream_err and not is_calling_tools_stub:
+                                 combined_text = "\n\n".join(turn_text_segments)
+                                 logger.info(
+                                     "[tool-loop] sk=%s empty post-tool follow-up after %d prose segment(s); "

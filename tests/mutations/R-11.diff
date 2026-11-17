@@ -1,0 +1,20 @@
+--- a/ui/handlers/agent_command_handler.py	2026-11-15 20:44:21.278416426 -0800
++++ b/ui/handlers/agent_command_handler.py	2026-11-15 20:45:18.412541182 -0800
+@@ -387,7 +387,7 @@
+         # ── Step 1: Relay answer back to asking agent ────────────────────────
+         # A stranded "[... asks]: " inbound is about to start as the next
+         # turn. Leave the pending ask in place for that turn.
+-        if not self._has_unstarted_ask_for(session_key):
++        if True:
+             source_sk = self._pop_next_asker(session_key)
+             if source_sk is not None:
+                 self._relay_response(source_sk, session_key, text, project_name)
+@@ -470,8 +470,6 @@
+ 
+         # A self-ask keeps this session in routed_targets so its depth stays
+         # incremented. Every other completion clears the chain counter.
+-        if session_key not in routed_targets:
+-            self._chain_depth.pop(session_key, None)
+         return routed_targets
+ 
+     def _has_unstarted_ask_for(self, session_key: str) -> bool:

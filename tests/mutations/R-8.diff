@@ -1,0 +1,10 @@
+--- a/agent/runtime.py
++++ b/agent/runtime.py
+@@ -4072,7 +4072,6 @@
+             status=TurnStatus.COMPLETED,
+             session_key=session_key,
+             turn_token=turn_token,
+-            text=final_text,
+             error=None,
+             metadata=meta,
+         ))

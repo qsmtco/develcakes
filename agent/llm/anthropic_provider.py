@@ -35,6 +35,29 @@ def _merge_usage(acc: dict, raw: dict) -> bool:
     return changed
 
 
+def _anthropic_max_output_tokens(model: str) -> int:
+    """Return a safe max_tokens ceiling for the target Anthropic model."""
+    raw = model if isinstance(model, str) else ""
+    bare = model_id(raw).strip().lower()
+    if bare.startswith((
+        "claude-3-opus",
+        "claude-3-sonnet",
+        "claude-3-haiku",
+        "claude-2",
+        "claude-instant",
+    )) or bare == "claude-3-5-sonnet-20240620":
+        return 4096
+    if bare.startswith((
+        "claude-3-7",
+        "claude-sonnet-4",
+        "claude-opus-4",
+        "claude-haiku-4",
+        "claude-4",
+    )):
+        return 16384
+    return 8192
+
+
 class AnthropicProvider:
     """Anthropic Messages API.
 
@@ -77,7 +100,7 @@ class AnthropicProvider:
         payload: dict[str, Any] = {
             "model": model_id(model),
             "messages": api_messages,
-            "max_tokens": 4096,
+            "max_tokens": _anthropic_max_output_tokens(model),
         }
         if system_msg:
             payload["system"] = system_msg
@@ -97,7 +120,10 @@ class AnthropicProvider:
         )
         try:
             with urlopen_with_ssl_retry(req, timeout=timeout) as resp:
-                return json.loads(resp.read())
+                parsed = json.loads(resp.read())
+                if isinstance(parsed, dict) and parsed.get("stop_reason") == "max_tokens":
+                    parsed["_output_truncated"] = True
+                return parsed
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(
@@ -131,7 +157,7 @@ class AnthropicProvider:
         payload: dict[str, Any] = {
             "model": model_id(model),
             "messages": api_messages,
-            "max_tokens": 4096,
+            "max_tokens": _anthropic_max_output_tokens(model),
             "stream": True,
         }
         if system_msg:
@@ -151,13 +177,15 @@ class AnthropicProvider:
             method="POST",
         )
         usage: dict = {}
+        stop_reason: str = ""
         with urlopen_with_ssl_retry(req, timeout=timeout) as resp:
             for line in sse_lines(resp):
                 ev = parse_sse_line(line)
                 if ev is None:
                     continue
                 if ev.type == "done":
-                    yield SSEEvent(type="done", data={})
+                    done_data = {"truncated": True} if stop_reason == "max_tokens" else {}
+                    yield SSEEvent(type="done", data=done_data)
                     return
                 if ev.type != "raw":
                     continue
@@ -190,9 +218,13 @@ class AnthropicProvider:
                             "id": "",
                         })
                 elif etype == "message_delta":
+                    delta_meta = d.get("delta")
+                    if isinstance(delta_meta, dict) and isinstance(delta_meta.get("stop_reason"), str):
+                        stop_reason = delta_meta["stop_reason"]
                     usage_raw = d.get("usage")
                     if _merge_usage(usage, usage_raw if isinstance(usage_raw, dict) else {}):
                         yield SSEEvent(type="usage", data={"usage": dict(usage)})
                 elif etype == "message_stop":
-                    yield SSEEvent(type="done", data={})
+                    done_data = {"truncated": True} if stop_reason == "max_tokens" else {}
+                    yield SSEEvent(type="done", data=done_data)
                     return

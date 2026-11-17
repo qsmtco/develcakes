@@ -257,10 +257,10 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib_module=GLib,
             parent_window=self,
             on_agent_saved=lambda name: self._agent_runtime_handler.reload_agents_and_mcp(
-                on_complete=lambda: self._left_panel.set_special_agents(self._agent_runtime_handler)
+                on_complete=self._sync_special_agent_consumers
             ),
             on_agent_deleted=lambda name: self._agent_runtime_handler.reload_agents_and_mcp(
-                on_complete=lambda: self._left_panel.set_special_agents(self._agent_runtime_handler)
+                on_complete=self._sync_special_agent_consumers
             ),
         )
 
@@ -811,6 +811,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # agent-command parsing AND mirror Supervisor replies to the phone.
         # (The slot is not stolen; _on_agent_response calls both.)
         self._agent_runtime_handler.set_on_agent_response(self._on_agent_response)
+        self._agent_runtime_handler.set_on_agent_error(self._agent_command_handler.on_agent_error)
 
         # SPEC-AGENT-DASHBOARD: construct the AgentDashboard in the same early
         # slot the event drawer used to occupy. The dashboard widget is a
@@ -1639,13 +1640,16 @@ class MainWindow(Gtk.ApplicationWindow):
         (it is built after the ARH); a bridge fault must NEVER break the
         response pipeline.
         """
-        self._agent_command_handler.on_agent_response(session_key, text, project_name)
+        routed = self._agent_command_handler.on_agent_response(session_key, text, project_name)
         bridge = getattr(self, "_bridge_handler", None)
         if bridge is not None:
             try:
                 bridge.on_supervisor_reply(session_key, text)
             except Exception:
                 logger.exception("Telegram bridge reply mirror failed (ignored)")
+        if isinstance(routed, (set, frozenset)):
+            return set(routed)
+        return set()
 
     def _remote_stop_all(self) -> None:
         """SPEC-15 SP4: the phone-confirmed stop-all action.
@@ -2293,9 +2297,23 @@ class MainWindow(Gtk.ApplicationWindow):
             refresh_registry = getattr(arh, "refresh_agent_registry", None)
             if callable(refresh_registry):
                 refresh_registry()
-            set_special_agents = getattr(self._left_panel, "set_special_agents", None)
-            if callable(set_special_agents):
-                set_special_agents(arh)
+            self._sync_special_agent_consumers()
+
+    def _sync_special_agent_consumers(self) -> None:
+        """Keep LeftPanel and CommandHandler special-agent maps synchronized with ARH."""
+        arh = getattr(self, "_agent_runtime_handler", None)
+        if arh is None:
+            return
+        left_panel = getattr(self, "_left_panel", None)
+        set_lp = getattr(left_panel, "set_special_agents", None)
+        if callable(set_lp):
+            set_lp(arh)
+        cmd_handler = getattr(self, "_command_handler", None)
+        set_ch = getattr(cmd_handler, "set_special_agents", None)
+        if callable(set_ch):
+            agents = arh.get_special_agents() if hasattr(arh, "get_special_agents") else None
+            if isinstance(agents, dict):
+                set_ch(agents)
 
     # ── Auto-Accept warning dialog (Phase 5) ───────────────────────────────
 

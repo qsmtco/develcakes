@@ -8,6 +8,7 @@ Public API:
     sse_lines — chunked SSE line reader
     parse_sse_line — SSE line → SSEEvent
     parse_sse_delta — delta dict → SSEEvent list
+    coerce_content_text — normalize str / content-block list to str
     first_choice — defensive choices[0] accessor
     urlopen_with_ssl_retry — urllib.urlopen with SSL/DNS retry
     stream_with_ssl_retry — SSE stream retry wrapper
@@ -81,6 +82,35 @@ def parse_sse_line(line: bytes) -> SSEEvent | None:
         return None
 
 
+def coerce_content_text(content: object) -> str | None:
+    """Normalize an OpenAI-compatible delta/message content value to ``str``.
+
+    Returns:
+      - ``None`` when ``content is None`` or contains no text blocks (so
+        ``delta: {}`` and reasoning-only block frames emit no ``text_delta``).
+      - ``content`` unchanged when ``isinstance(content, str)`` (preserving
+        explicit ``""`` empty deltas).
+      - Joined text from ``str`` items and ``{"type": "text"|"output_text",
+        "text": str}`` dicts when ``isinstance(content, list)``.
+    """
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                btext = block.get("text")
+                if btype in ("text", "output_text", None) and isinstance(btext, str):
+                    parts.append(btext)
+        return "".join(parts) if parts else None
+    return None
+
+
 def parse_sse_delta(d: dict) -> list[SSEEvent]:
     """Extract text_delta and tool_call_delta events from an SSE delta dict.
 
@@ -97,7 +127,7 @@ def parse_sse_delta(d: dict) -> list[SSEEvent]:
     choice = first_choice(d)
     raw_delta = choice.get("delta")
     delta = raw_delta if isinstance(raw_delta, dict) else {}
-    content = delta.get("content")
+    content = coerce_content_text(delta.get("content"))
     if content is not None:
         events.append(SSEEvent(type="text_delta", data={"content": content}))
     tc_delta = delta.get("tool_calls", [])

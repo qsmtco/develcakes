@@ -143,6 +143,8 @@ class AgentRuntimeHandler(
         # SPEC-16 SP2: pill. Fired from _do_tool_call_start after the ended-session guard.
         self._on_tool_start_cb: Callable[[str, str], None] | None = None
         self._on_agent_response: Callable[[str, str, str | None], None] | None = None  # Phase 6.2
+        # SPEC-65: fired from _do_error after the display message is built.
+        self._on_agent_error_cb: Callable[[str, str], None] | None = None
         # SPEC-activity-drawer Phase 1: command_output callback.
         # cb(session_key, command, output, exit_code, duration_ms) — drawer uses
         # command for the row label, output for click-to-expand revealer, and
@@ -276,6 +278,15 @@ class AgentRuntimeHandler(
         session key, full response text, and active project name.
         """
         self._on_agent_response = cb
+
+    def set_on_agent_error(self, cb: Callable[[str, str], None] | None) -> None:
+        """Store the turn-failure callback.
+
+        Trigger: RuntimeTurnUiMixin._do_error, after display_msg is built and
+        before the activity-drawer end callback. The callback receives
+        (session_key, display_msg). A raising callback is logged there.
+        """
+        self._on_agent_error_cb = cb
 
     def set_on_command_output(self, cb: Callable[[str, str, str, int, int], None]) -> None:
         """Set callback for command_output drawer events (SPEC-activity-drawer §2.5).

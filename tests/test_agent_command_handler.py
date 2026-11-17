@@ -397,6 +397,7 @@ class TestMultiHop:
         """After on_agent_response completes (no new commands), chain depth is cleared."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
+        handler.set_command_handler(FakeCommandHandler(commands={"ask"}))
         handler.set_agent_runtime_handler(fake_rt)
 
         # Pre-set chain depth for the source agent
@@ -410,6 +411,7 @@ class TestMultiHop:
         """When no pending ask exists, chain depth still cleared on response."""
         handler = AgentCommandHandler()
         fake_rt = FakeAgentRuntimeHandler(special_agents={"agent:debugger": "Debugger"})
+        handler.set_command_handler(FakeCommandHandler(commands={"ask"}))
         handler.set_agent_runtime_handler(fake_rt)
 
         # Pre-set chain depth for the responding agent
