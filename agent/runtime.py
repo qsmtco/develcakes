@@ -457,6 +457,27 @@ _CODER_SHELL_REFUSAL = (
 )
 
 
+def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
+    """Project-relative form of a tool call's path, or None.
+
+    SPEC-66 §2.1/§12.1: the runtime-level approval gate used the RAW
+    model string (``./.crabcakes/x``, ``foo/../.crabcakes/x``), which does
+    not start with the ``.crabcakes/`` prefix ``is_sensitive_path``
+    matches — the exact input the gate exists to defeat. This resolves the
+    path against the project and returns its project-relative form, the
+    same normalization ``agent/tools.py`` applies. None when the path does
+    not resolve inside the project (nothing to gate — the tool refuses it).
+    """
+    if not isinstance(path_arg, str) or not path_arg.strip():
+        return None
+    from agent.tools import _resolve_project_path, _project_relpath
+
+    resolved = _resolve_project_path(path_arg, project_path)
+    if resolved is None:
+        return None
+    return _project_relpath(resolved, project_path)
+
+
 def _coder_shell_allowed(command: str, project_path: str) -> str | None:
     """None when a Coder shell command is on the allowlist. Else a refusal.
 
@@ -2866,9 +2887,15 @@ class AgentRuntime:
 
                 # HIGH-1: Sensitive-path write/edit also requires PM approval.
                 # Fires before tool_call_start so the PM sees the card.
+                # SPEC-66 §2.1/§12.1: gate on the RESOLVED path's
+                # project-relative form. The raw model string
+                # ("./.crabcakes/x", "foo/../.crabcakes/x") does not start
+                # with ".crabcakes/", so gating on it skipped approval.
+                rel_path: str | None = None
                 if tool_name in ("write_file", "edit_file"):
                     path_arg = args.get("path", "")
-                    if agent_tools_module.is_sensitive_path(path_arg):
+                    rel_path = _sensitive_relpath(path_arg, conv.project_path or "")
+                    if rel_path is not None and agent_tools_module.is_sensitive_path(rel_path):
                         approved = self._dispatch_approval(session_key, tool_name, args)
                         logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
                                      session_key, tool_name, approved)
@@ -2899,9 +2926,15 @@ class AgentRuntime:
                 # HIGH-1: write_file/edit_file with sensitive paths — runtime already
                 # dispatched to PM above, so bypass the tool's internal check.
                 # MED-1: Use per-call approval_callback (bypass = lambda True, normal = None).
+                # SPEC-66 §12.1: the sensitive-path test here must use the SAME
+                # resolved relative path as the gate above. The raw model string
+                # never matched the sensitive prefixes, so the bypass was NOT
+                # taken for a path the gate had just approved — the tool then
+                # asked for approval a second time.
                 bypass_approval = (tool_name == "exec_command" or
                                    (tool_name in ("write_file", "edit_file") and
-                                    agent_tools_module.is_sensitive_path(args.get("path", ""))))
+                                    rel_path is not None and
+                                    agent_tools_module.is_sensitive_path(rel_path)))
                 per_call_cb = (lambda *a: True) if bypass_approval else None
                 # LOW-2: validate the session workspace. The return value
                 # is unread (dead binding removed) — the required side

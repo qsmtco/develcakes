@@ -29,6 +29,7 @@ from typing import Any, Callable
 import httpx
 
 from utils.config import get_env  # SPEC-11 SP2: renamed env family (D2)
+from utils.env_security import get_scrubbed_env  # SPEC-66 §2.1: scrubbed subprocess env
 
 # ── Dataclasses ────────────────────────────────────────────────────────────────
 
@@ -625,20 +626,44 @@ def _is_context_md(path: str, project_path: str) -> bool:
     return resolved == expected
 
 
+def _project_relpath(resolved: str, project_path: str) -> str:
+    """Project-relative form of an already-resolved absolute path.
+
+    SPEC-66 §2.1: the approval decision must see the RESOLVED path's
+    project-relative form, not the model's raw string. `./.crabcakes/x`
+    and `foo/../.crabcakes/x` both resolve to `<project>/.crabcakes/x`,
+    whose relative form starts with `.crabcakes/` — the sensitive
+    prefix `is_sensitive_path` matches. Forward slashes are forced so the
+    prefix/glob rules see one separator style on every platform.
+    """
+    try:
+        rel = os.path.relpath(resolved, os.path.realpath(project_path))
+    except ValueError:
+        # Different drives on Windows — relpath raises. Fall back to the
+        # resolved path itself (is_sensitive_path still refuses it when the
+        # basename is a leading-dot file).
+        rel = resolved
+    return rel.replace("\\", "/")
+
+
 def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
     """Write content to a file relative to project_path."""
     resolved = _resolve_project_path(path, project_path)
     if resolved is None:
         return ToolResult(success=False, error=f"Path escapes project sandbox: {path}")
 
-    # HIGH-1: Sensitive-path guard — require PM approval before writing
-    if is_sensitive_path(path):
-        approved = _get_approval(session_key, "write_file", {"path": path}, approval_callback=approval_callback)
+    # HIGH-1: Sensitive-path guard — require PM approval before writing.
+    # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
+    # The raw model string (`./.crabcakes/x`, `foo/../.crabcakes/x`) does
+    # not start with `.crabcakes/`, so gating on it skipped approval.
+    rel = _project_relpath(resolved, project_path)
+    if is_sensitive_path(rel):
+        approved = _get_approval(session_key, "write_file", {"path": rel}, approval_callback=approval_callback)
         if not approved:
             return ToolResult(
                 success=False,
                 error=(
-                    f"write_file blocked: {path} is a sensitive path\n"
+                    f"write_file blocked: {rel} is a sensitive path\n"
                     f"(credential, secret, SSH key, or cloud config file).\n"
                     f"PM approval is required before writing to this file."
                 ),
@@ -833,14 +858,16 @@ def _edit_file(
             error="context.md is append-only. write_file a single ## entry. The file was not changed.",
         )
 
-    # HIGH-1: Sensitive-path guard — require PM approval before editing
-    if is_sensitive_path(path):
-        approved = _get_approval(session_key, "edit_file", {"path": path}, approval_callback=approval_callback)
+    # HIGH-1: Sensitive-path guard — require PM approval before editing.
+    # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
+    rel = _project_relpath(resolved, project_path)
+    if is_sensitive_path(rel):
+        approved = _get_approval(session_key, "edit_file", {"path": rel}, approval_callback=approval_callback)
         if not approved:
             return ToolResult(
                 success=False,
                 error=(
-                    f"edit_file blocked: {path} is a sensitive path\n"
+                    f"edit_file blocked: {rel} is a sensitive path\n"
                     f"(credential, secret, SSH key, or cloud config file).\n"
                     f"PM approval is required before editing this file."
                 ),
@@ -1194,6 +1221,7 @@ def _run_grep(
             timeout=timeout,
             cwd=search_root,
             text=True,
+            env=get_scrubbed_env(),
         )
     except FileNotFoundError:
         if not rg:
@@ -1208,6 +1236,7 @@ def _run_grep(
             timeout=timeout,
             cwd=search_root,
             text=True,
+            env=get_scrubbed_env(),
         )
     return result.returncode, result.stdout, result.stderr
 
@@ -1757,10 +1786,14 @@ def _web_search(query: str, count: int = 5) -> ToolResult:
 
 
 def _is_web_fetch_restricted() -> bool:
-    """MED-3 opt-in check: returns True when WEB_FETCH_RESTRICT=1
-    (DEVELCAKES_WEB_FETCH_RESTRICT; the old CRABCAKES_ name rides the
-    one-release fallback — utils.config.get_env). Default off per Q3."""
-    return get_env("WEB_FETCH_RESTRICT") == "1"
+    """True unless DEVELCAKES_WEB_FETCH_RESTRICT is the string "0".
+
+    SPEC-66 §2.1: fetch is restricted BY DEFAULT. Absence is restricted.
+    An empty string is present (utils.config.get_env) and is not "0", so
+    it is restricted. CRABCAKES_WEB_FETCH_RESTRICT is the one-release
+    fallback inside get_env.
+    """
+    return get_env("WEB_FETCH_RESTRICT") != "0"
 
 
 def _reject_restricted_url(url: str) -> ToolResult | None:
@@ -1807,6 +1840,12 @@ def _reject_restricted_url(url: str) -> ToolResult | None:
                 return ToolResult(success=False, error=f"MED-3: Refusing loopback request: {url} → {ip}")
             if ip.is_link_local:
                 return ToolResult(success=False, error=f"MED-3: Refusing link-local request: {url} → {ip}")
+            # SPEC-66 §11.5: defense-in-depth ONLY. 0.0.0.0 and :: are
+            # ALREADY is_private=True (measured), so the check above
+            # refuses them; this branch documents the intent explicitly
+            # and survives a future change to the private-range rules.
+            if ip.is_unspecified:
+                return ToolResult(success=False, error=f"MED-3: Refusing unspecified address: {url} → {ip}")
     except socket.gaierror:
         # Hostname doesn't resolve — refuse (could be SSRF attempt)
         return ToolResult(success=False, error=f"MED-3: Hostname does not resolve: {hostname}")

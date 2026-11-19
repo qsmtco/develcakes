@@ -97,3 +97,27 @@
   mutation: tests/mutations/R-11.diff
   runner: xvfb
   added: 2026-11-15
+
+- id: R-12
+  claim: "A path that resolves to a sensitive location asks for approval at BOTH the tool gate and the runtime gate, in every spelling ('./.crabcakes/x', 'foo/../.crabcakes/x', absolute-in-project); `python3 -c` is not a valid test command."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.1 + §12.1 + §11.1/§11.2
+  node: tests/test_spec66_approval_and_eval.py::test_resolved_sensitive_path_and_python_c
+  mutation: tests/mutations/R-12.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-13
+  claim: "A closing tag inside fenced project content cannot close the fence: the angle brackets are stripped (inert for the HTML reader AND for a model scanning for the terminator), case-insensitively and whitespace-tolerantly."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.3 + §11.4
+  node: tests/test_spec66_fence.py::test_fence_body_cannot_close_the_fence
+  mutation: tests/mutations/R-13.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-14
+  claim: "Both grep subprocesses receive the scrubbed env, and the fetch restriction is default-ON with DEVELCAKES_WEB_FETCH_RESTRICT=0 as the off-switch."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.1 + §12.2
+  node: tests/test_spec66_approval_and_eval.py::test_scrubbed_grep_and_default_fetch
+  mutation: tests/mutations/R-14.diff
+  runner: plain
+  added: 2026-11-18

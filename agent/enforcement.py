@@ -57,8 +57,15 @@ SYNTAX_CHECKERS: dict[str, str] = {
 # CRIT-1/CRIT-2: Binary allowlist for project-supplied test/lint commands.
 # Enforces that .crabcakes/enforcement.json `full_suite_command` first token
 # is one of these. See docs/SPEC-SECURITY-REMEDIATION.md §2.1.
+#
+# SPEC-66 §11.2: `npx` is REMOVED from this allowlist. `npx -c '<cmd>'`
+# is `npm exec -c` — a full shell escape from a project-supplied config
+# file, and an enforcement test command has no legitimate npx use. Do not
+# re-add it. (`npm` must stay out for the same reason.) The agent's own
+# shell allowlist (_coder_shell_allowed) is a DIFFERENT list and is
+# unchanged.
 _ALLOWED_BINARIES: frozenset[str] = frozenset({
-    "python3", "pytest", "ruff", "mypy", "eslint", "npx", "node", "go",
+    "python3", "pytest", "ruff", "mypy", "eslint", "node", "go",
 })
 
 # CRIT-2: Scrubbed environment for all enforcement subprocesses.
@@ -173,18 +180,63 @@ def _is_safe_filename(file_path: str) -> bool:
     return not any(c in _SHELL_METACHARS for c in basename)
 
 
+def _is_eval_flag(tok: str, prefixes: tuple[str, ...]) -> bool:
+    """True when `tok` is an interpreter eval flag, in any attached spelling.
+
+    SPEC-66 §11.1: exact membership (`"-c" in flags`) was DEAD — `shlex.split`
+    makes `python3 -c"import os"` into ONE token (`-cimport os`), so every
+    attached spelling passed the old check. Matching is by PREFIX on the
+    `=`-stripped token: `-c`, `-cCODE`, `-c=CODE` all match `-c`; `--config`
+    does not (it starts with `--`, not `-c`).
+
+    The `=` split comes first so `--eval=x` reduces to `--eval`.
+    """
+    tok = tok.split("=", 1)[0]
+    return tok in prefixes or any(tok.startswith(p) for p in prefixes)
+
+
 def _validate_test_command(command: str | None) -> bool:
     """Return True if `command`'s first token is in _ALLOWED_BINARIES.
 
     Strips leading whitespace, splits on whitespace, lowercases the first token,
     strips path components. Used to gate project-supplied .crabcakes/enforcement.json
     commands. (Phase 0 / CRIT-2)
+
+    SPEC-66 §2.2 + §11.1: after the first-token allowlist passes, the command is
+    split with `shlex` and interpreter eval flags are refused:
+
+      * python/python3 → any token starting with `-c` (NOT `--config`).
+      * node → any token starting with `-e` or `--eval`.
+
+    ACCEPTED FALSE POSITIVE (SPEC-66 §11.1): `python3 -m pytest -c setup.cfg`
+    is REFUSED — pytest's own config flag collides with python's `-c`. Projects
+    must pass pytest config via environment variables or file arguments.
+
+    `shlex.ValueError` (unbalanced quotes) returns False — an unparseable
+    command is not trusted.
     """
     if not command or not command.strip():
         return False
     first_token = command.strip().split(maxsplit=1)[0].lower()
     first_token = os.path.basename(first_token)
-    return first_token in _ALLOWED_BINARIES
+    if first_token not in _ALLOWED_BINARIES:
+        return False
+
+    import shlex
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+
+    base = os.path.basename(argv[0]).lower()
+    flags = argv[1:]
+    if base in ("python", "python3") and any(_is_eval_flag(tok, ("-c",)) for tok in flags):
+        return False
+    if base == "node" and any(_is_eval_flag(tok, ("-e", "--eval")) for tok in flags):
+        return False
+    return True
 
 # ── Data models ────────────────────────────────────────────────────────────────
 

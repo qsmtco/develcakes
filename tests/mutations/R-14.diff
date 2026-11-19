@@ -1,0 +1,18 @@
+--- a/agent/tools.py
++++ b/agent/tools.py
+@@ -1215,13 +1215,12 @@
+             cmd += ["--include=*." + file_type.lstrip(".")]
+     cmd += ["--", pattern, target]
+     try:
+         result = subprocess.run(
+             cmd,
+             capture_output=True,
+             timeout=timeout,
+             cwd=search_root,
+             text=True,
+-            env=get_scrubbed_env(),
+         )
+     except FileNotFoundError:
+         if not rg:
+             raise
+         cmd = ["grep", "-n", "-H", "--directories=skip", "-r", "--exclude-dir=.git"]

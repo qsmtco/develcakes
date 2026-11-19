@@ -1672,12 +1672,23 @@ class TestWebSearch:
 
 
 class TestWebFetch:
-    def test_web_fetch_success(self):
+    # SPEC-66 §12.3: web_fetch is RESTRICTED BY DEFAULT now. Every test
+    # below states its env explicitly — both names are cleared and the
+    # NEW name (DEVELCAKES_WEB_FETCH_RESTRICT) is set, so an ambient
+    # CRABCAKES_/DEVELCAKES_ value in the developer's shell cannot
+    # decide the outcome. "0" = unrestricted (the intent of these tests),
+    # "1" = restricted (the MED-3 tests).
+
+    def test_web_fetch_success(self, monkeypatch):
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "0")
         r = execute_tool("web_fetch", {"url": "https://example.com"}, "/tmp")
         assert r.success is True
         assert len(r.output) > 0
 
-    def test_web_fetch_truncates(self):
+    def test_web_fetch_truncates(self, monkeypatch):
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "0")
         # The response is small so truncation won't trigger in practice,
         # but verify the parameter is accepted
         r = execute_tool("web_fetch", {"url": "https://example.com", "max_chars": 50}, "/tmp")
@@ -1687,7 +1698,8 @@ class TestWebFetch:
     # ── MED-3: re-check-after-redirect ──────────────────────────────
     def test_web_fetch_rejects_loopback_initial(self, monkeypatch):
         """MED-3: loopback URL is rejected when restriction is enabled."""
-        monkeypatch.setenv("CRABCAKES_WEB_FETCH_RESTRICT", "1")
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "1")
         r = execute_tool("web_fetch", {"url": "http://127.0.0.1/"}, "/tmp")
         assert r.success is False
         assert "MED-3" in r.error
@@ -1701,7 +1713,8 @@ class TestWebFetch:
         """
         from agent import tools as tools_mod
 
-        monkeypatch.setenv("CRABCAKES_WEB_FETCH_RESTRICT", "1")
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "1")
 
         class FakeRedirectResponse:
             """Simulates a 302 redirect response."""
@@ -1740,7 +1753,8 @@ class TestWebFetch:
         """MED-3 (Phase 6.1): redirect to RFC1918 private IP is rejected before connecting."""
         from agent import tools as tools_mod
 
-        monkeypatch.setenv("CRABCAKES_WEB_FETCH_RESTRICT", "1")
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "1")
 
         class FakeRedirectResponse:
             status_code = 302
@@ -1782,6 +1796,7 @@ class TestWebFetch:
         from agent import tools as tools_mod
 
         monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "0")
 
         class FakeOkResponse:
             status_code = 200
@@ -1810,7 +1825,8 @@ class TestWebFetch:
         """
         from agent import tools as tools_mod
 
-        monkeypatch.setenv("CRABCAKES_WEB_FETCH_RESTRICT", "1")
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "1")
 
         class FakeRedirectResponse:
             status_code = 302
@@ -1863,7 +1879,8 @@ class TestWebFetch:
         """
         from agent import tools as tools_mod
 
-        monkeypatch.setenv("CRABCAKES_WEB_FETCH_RESTRICT", "1")
+        monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "1")
 
         locations = [
             "https://public{}.example.com/h{}",
@@ -1945,6 +1962,7 @@ class TestWebFetch:
                 )
 
         monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "0")
         monkeypatch.setattr(tools_mod.httpx, "get", lambda *a, **kw: FakeErrorResponse())
         r = execute_tool("web_fetch", {"url": "https://example.com/notfound"}, "/tmp")
         assert r.success is False
@@ -1962,6 +1980,7 @@ class TestWebFetch:
         from agent import tools as tools_mod
 
         monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+        monkeypatch.setenv("DEVELCAKES_WEB_FETCH_RESTRICT", "0")
 
         class FakeAlwaysRedirect:
             status_code = 302
