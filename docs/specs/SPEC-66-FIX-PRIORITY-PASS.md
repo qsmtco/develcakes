@@ -743,3 +743,105 @@ The three embedded product decisions are explicitly blessed:
 - `web_fetch` restricted by default; `DEVELCAKES_WEB_FETCH_RESTRICT=0` is the documented escape.
 - Coder-role tool batches run tests again (`test_run` stays at config default); only `lint_check` is forced off.
 - `python3 -c` / `node -e` / `--eval` test commands are refused; projects using them must move to a real test invocation.
+
+---
+
+## 11. v3 amendments — pre-flight audit incorporation (2026-11-18)
+
+Incorporates Debugger's pre-flight (docs/audits/2026-11-18-SPEC-66-PREFLIGHT-ADVERSARIAL-AUDIT.md; 7 findings, all independently re-verified by Supervisor). Where this section conflicts with earlier sections, this section wins.
+
+### 11.1 §2.2 REPLACEMENT — prefix-based eval-flag matching (BUG #1, CRITICAL)
+
+The §2.2 exact-membership check (`"-c" in flags`) is DEAD: `shlex.split` makes `python3 -c"import os"` into one token `['-cimport os']`, and every attached spelling passes (verified). Replace with shape matching:
+
+```python
+def _is_eval_flag(tok: str, prefixes: tuple[str, ...]) -> bool:
+    tok = tok.split("=", 1)[0]          # --eval=x -> --eval
+    return tok in prefixes or any(
+        tok.startswith(p) for p in prefixes if p not in ("--",)
+    )
+```
+
+Rules: python/python3 → refuse any token starting `-c` (catches `-c`, `-cCODE`, `-c=CODE`; does NOT catch `--config`); node → refuse any token starting `-e` or `--eval`. Explicitly document the accepted false positive: `python3 -m pytest -c setup.cfg` is refused (pytest's config flag) — projects must pass config via env or file args. `python` (bare) cannot reach the check (not in `_ALLOWED_BINARIES`); remove it from the base set in the spec's code block.
+
+### 11.2 §2.2 ADDITION — npx removal (BUG #2, CRITICAL)
+
+`npx -c '<cmd>'` is `npm exec -c` — a full shell escape, and `npx` is in `_ALLOWED_BINARIES` (enforcement.py:60-63; verified executable, marker created). FIX: **remove `npx` from `_ALLOWED_BINARIES`** entirely. An enforcement test command has no legitimate npx use. Also refuse `npm` if ever added later. Note: `_coder_shell_allowed` (the agent's own shell tool allowlist) is a DIFFERENT list and stays unchanged.
+
+### 11.3 §2.9 ADDITION — normalize before index comparison (BUG #3, HIGH)
+
+`repo.index.diff("HEAD")` yields repo-relative paths; `card.file_path` may be `./x`, absolute, or `sub/../x` — none match, refusing legitimate accepts. Compare against the repo-relative form derived from the resolved path `stage_paths` already computes: `rel = os.path.relpath(staged_abs, project_real).replace("\\", "/")`.
+
+### 11.4 §2.3 CLARIFICATION — fence consumer, and strip not escape (BUG #4, HIGH)
+
+`_break_fence_tags` escapes `<` (HTML-safe) but the fence body is ALSO read by the model (Markdown-aware). State the target consumer explicitly: BOTH. Fix: replace the literal closing tag `</untrusted-project-data>` (case-insensitive, whitespace-tolerant) with a stripped inert marker — e.g. remove the `<`/`>` angle brackets entirely (`/untrusted-project-data/` text form) — inert for HTML AND for a model scanning for the fence terminator.
+
+### 11.5 §2.3 CORRECTION — is_unspecified rationale (BUG #5, MEDIUM)
+
+The claim "0.0.0.0/:: are not is_private" is FALSE (measured: both `is_private=True`); the existing check already refuses them, and §1 Problem item 3 is already false on 0df09338. Keep the `is_unspecified` check as defense-in-depth ONLY, with a corrected comment; fix the §1 problem statement.
+
+### 11.6 §2.11 SCOPE ADDITION — feed surface (BUG #6, MEDIUM)
+
+`ui/views/feed_surface.py:281-288` is a SECOND JS-enabled WebView with no LiveGuard (verified; not exploitable today only because `_esc` escapes all card fields — an accidental guarantee). Add feed_surface.py to §2.11's scope: LiveGuard must attach there too (the feed needs JS — FEED_SCRIPT drives scroll/click), and add it to `tests/test_html_guard_sites.py`'s catalog.
+
+### 11.7 §2.5/§2.6 ADDITIONS — required parameter + multi-project note (BUG #7, LOW)
+
+- `AgentRuntime.load_conversation(session_key, project_path)` — `project_path` has NO default (a silent empty conversation on omission is the failure mode).
+- Document the multi-project legacy case in §8: a session key used in two projects gets its transcript only in the project matching the legacy file's stored path; the other starts empty (by design, scoped identity).
+- Legacy files are not deleted after adoption; note the 2.2 MiB duplication as accepted hygiene debt.
+
+### 11.8 Wave plan (replaces the §5 order for delegation)
+
+- **Wave 1 (security)**: §2.1 approval fix, §2.2 (as amended 11.1+11.2), §2.3 (as amended 11.4+11.5) — enforcement.py, tools.py, prompt_loader.py.
+- **Wave 2 (persistence/accept/stop)**: §2.5/§2.6 (as amended 10.3+11.7), §2.7 stage_paths + 11.3, §2.9/§2.10 cancel semantics.
+- **Wave 3 (surface/packaging/transport)**: §2.11 (as amended 11.6), §2.12 packaging, §2.13 re-anchored parser items, Telegram worker.
+
+---
+
+## 12. v4 amendments — Flagger pre-flight incorporation (2026-11-18)
+
+Incorporates Flagger's test-quality pre-flight (14 findings; load-bearing claims independently verified by Supervisor). Where this section conflicts with earlier sections, this section wins.
+
+### 12.1 §2.1 ADDITION — the runtime-level gate is in scope (Flagger BUG #1, CRITICAL)
+
+`agent/runtime.py:2867-2875` gates write/edit on `is_sensitive_path(args.get("path"))` — the RAW model string — the exact input §2.1 exists to defeat, and `:2902-2904` computes `bypass_approval` from the same raw string. §2.1 MUST change both runtime sites to use the resolved relpath (same normalization as tools.py). R-12's mutation must delete the rel checks at BOTH `agent/tools.py:635`/`:837` AND the runtime gate; the node asserts approval requested for all three fixtures (`./.crabcakes/`, `foo/../.crabcakes/`, absolute).
+
+### 12.2 §2.3/§7 — R-14 re-scoped; the 0.0.0.0 claim corrected (Flagger BUG #2, CRITICAL; supersedes §11.5 detail)
+
+`is_unspecified` is redundant (0.0.0.0/:: are already `is_private=True` — verified twice). R-14's node drops all `0.0.0.0` assertions; it pins (a) scrubbed-grep env kwarg — `mock.call_args.kwargs["env"] == get_scrubbed_env()` on BOTH subprocess.run sites (tools.py:1191, :1205) — and (b) the `DEVELCAKES_WEB_FETCH_RESTRICT=0` off-switch (the NEW env name). The `is_unspecified` branch may ship as commented defense-in-depth or be dropped; either way no row depends on it.
+
+### 12.3 §5 NEW STEP — existing fetch tests must be updated (Flagger BUG #3, CRITICAL)
+
+Six `tests/test_tools.py` tests assume the old unrestricted default (three `delenv CRABCAKES_WEB_FETCH_RESTRICT` at :1784/:1947/:1964). Every unrestricted-mode test must clear BOTH env names and set `DEVELCAKES_WEB_FETCH_RESTRICT=0` where unrestricted is intended. All `_reject_restricted_url` tests with hostname fixtures MUST mock `socket.getaddrinfo` (the :1833-1839 pattern). §1 Problem item 3 corrected: 0.0.0.0/:: were already refused; the finding is default-off, not a bypass.
+
+### 12.4 §2.6 ADDITION — the 18 unpackers (Flagger BUG #4, CRITICAL)
+
+`load_conversation_from_disk` arity change breaks 18 sites (verified by grep): tests/test_agent_runtime ×6 (:3092,:3133,:3688,:3750,:3792,:3831), test_spec48_phase3_digest ×6, test_spec23_context_working_set ×3, test_agent_persistence ×2, agent/runtime.py:5229. §5 gains an explicit migration step + acceptance grep: `conv, _ = load_conversation_from_disk` → zero matches after.
+
+### 12.5 §2.5 ADDITION — four legacy-filename readers (Flagger BUG #5, HIGH; R-1 vacuity)
+
+Scoped filenames break four readers (verified): project_handler.py:740 (`_read_agent_usage` → silent (0,0) metrics), session.py:119 (`clear_conversation` deletes a nonexistent path → scoped file SURVIVES /clear → R-1 becomes vacuous), runtime.py:5336 (`list_conversations` yields `sk__slug` keys), status_report.py (slug-prefixed session keys resolve to no agent). All four MUST migrate: glob `<session_key>__*.json`, split on `__`, strip slug. R-1's node/mutation re-verified after.
+
+### 12.6 §7 — transcript coverage restructured (Flagger BUG #6, HIGH)
+
+R-16's node becomes a class with four methods (R-8/R-9/R-10 pattern): `test_other_project_is_not_loaded`, `test_legacy_file_is_rejected_on_realpath_mismatch`, `test_legacy_hit_writes_scoped_file_with_project_slug` (asserts the file NAME on disk — `<sk>__<sha16>.json` exists, `__none.json` does not — pinning §10.3's ordering), `test_scoped_file_wins_over_legacy_with_different_content`.
+
+### 12.7 §7 — runner corrections + the plain-row contract (Flagger BUG #7/#8, HIGH)
+
+R-19 → `runner: plain` (closure is GTK-free). R-18 splits: the ChatHandler/CollabHandler half is plain, the `cancel_agent` half stays xvfb. RULE for every new plain row: (a) no import of ui.window/ui.views.*/agent_runtime_handler/feed_handler; (b) `GTK_HEADLESS_SAFE = True` where the closure pulls a GTK module without constructing widgets; (c) never `skip_ok: true` — a skipped node is a row failure (acceptance.py:253-259).
+
+### 12.8 §7 — R-22 split (Flagger BUG #9, HIGH)
+
+R-22 covers packaging discovery ONLY (declared via `setuptools.packages.find` include + package-data; no pip-install-in-pytest). New R-23: stale strings — left_panel placeholder no longer says "Connect", knowledge/setup.md has no `local-kb`/`CrabCakes`.
+
+### 12.9 §2.3/§8 — fetch edge rows (Flagger BUG #10/#11, MEDIUM)
+
+Add: `http://[::]/` (refused via is_private — test it), `http://[::ffff:127.0.0.1]/` (verified is_private=True → refused; ADJUDICATED against Flagger's static claim — Debugger's executed probe + my interpreter run both confirm refused; a pin test still lands), mixed-address DNS (any-private-refuses). Mock getaddrinfo everywhere.
+
+### 12.10 §2.4 — no lazy import (Flagger BUG #14, LOW)
+
+No cycle exists (prompt_loader already lazy-imports project_awareness). Keep the module-scope import at project_awareness.py:38; fix the rationale text.
+
+### 12.11 Test isolation contract (Flagger BUG #12, MEDIUM)
+
+Transcript tests use the autouse isolation fixture (no get_config_dir monkeypatch) and assert the scoped file's absolute path is under tmp_path.
