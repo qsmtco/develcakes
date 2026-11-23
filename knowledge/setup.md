@@ -1,12 +1,12 @@
 # Quick Start Guide
 
-## How do I install CrabCakes?
+## How do I install Develcakes?
 
-See the detailed guide: **[Installing CrabCakes](install.md)**
+See the detailed guide: **[Installing Develcakes](install.md)**
 
 ```bash
-git clone https://github.com/qsmtco/crabcakes.git
-cd crabcakes
+git clone https://github.com/qsmtco/develcakes.git
+cd develcakes
 sudo apt install python3-gi python3-gi-cairo libgtk-4-dev libadwaita-1-dev
 pip install -e .
 ```
@@ -19,44 +19,40 @@ See **[Configuration Guide](configuration.md)** and **[Providers Guide](provider
 
 **The easy way (no YAML):** open **Settings → Providers → `+ Add Provider`**, pick a vendor preset (OpenAI, Anthropic, OpenRouter, Google Gemini), paste your API key, click **Test Connection**, then **Save**. That's the whole setup — Base URL, caller, and default model are pre-filled by the preset, and the preset's model dropdown can load real model IDs from your account. If `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` is set in your environment, a one-click chip on the Providers page creates the card for you. A **Custom…** entry covers any OpenAI-compatible endpoint presets don't know.
 
-**The advanced way:** edit `~/.config/crabcakes/providers.yaml` directly (the preset UI writes the same file):
+**The advanced way:** edit `~/.config/develcakes/providers.yaml` directly (the preset UI writes the same file):
 
 ```bash
-nano ~/.config/crabcakes/providers.yaml
+nano ~/.config/develcakes/providers.yaml
 ```
 
 Add your API key and set the caller field (e.g. `openai`, `openrouter`, `minimax`).
 
-On first launch, the `local-kb` provider is auto-seeded — Auxilium can answer install and config questions immediately without any external API key.
-
-## How do I start CrabCakes?
+## How do I start Develcakes?
 
 ```bash
-cd ~/projects/crabcakes
+cd ~/projects/develcakes
 python3 main.py
 ```
 
 Or with debug logging:
 
 ```bash
-CRABCAKES_DEBUG=1 python3 main.py
+DEVELCAKES_DEBUG=1 python3 main.py
 ```
 
 ## What happens on first launch?
 
-1. `~/.config/crabcakes/` is created with default config
-2. `ensure_kb_provider()` seeds the `local-kb` provider into `providers.yaml`
-3. Auxilium's `llm_name` is set to `local-kb` (if empty)
-4. KB HTTP server starts on `localhost:18790` (if KB index is available)
-5. Auxilium auto-opens — you can immediately ask install/config questions
+1. `~/.config/develcakes/` is created with default config
+2. Add a provider (see above) — every agent, including Auxilium, answers
+   through the provider you configure
+3. The project/agent panel opens empty until you create a project
 
 ## How do I connect to the OpenClaw gateway?
 
 See **[Gateway Guide](gateway.md)**.
 
 1. Start the gateway: `openclaw gateway start`
-2. Click **Connect** in CrabCakes toolbar
-3. Gateway agents appear in the left panel
+2. Gateway agents appear in the left panel once the gateway is reachable
 
 ## How do I create a project?
 
@@ -72,4 +68,4 @@ See **[Projects Guide](projects.md)** for details.
 
 - Ask **Auxilium** (🦀) — click its tab and type your question
 - See **[Troubleshooting](troubleshooting.md)** for common errors
-- Check logs at `~/.config/crabcakes/logs/`
+- Check logs at `~/.config/develcakes/logs/`

@@ -8,11 +8,15 @@
 # pipeline it means the escape-first emitter, the fail-closed sanitizer
 # allowlist, and the JS-off webview settings are pinned in source.
 #
-# CATALOG (5 entries — each verified against source before pinning):
-#   1. ui/views/chat_surface.py            — JS off (behavior pin lives in
-#                                            tests/test_chat_surface.py:149,
+# CATALOG (6 entries — each verified against source before pinning):
+#   1. ui/views/chat_surface.py            — JS gated on the LiveGuard attach
+#                                            (behavior pin lives in
+#                                            tests/test_chat_surface.py:109,
 #                                            test_javascript_disabled; here we
-#                                            pin the SETTING in source).
+#                                            pin the GATING in source).
+#   1b. ui/views/feed_surface.py           — the second JS surface, same rule
+#                                            (SPEC-66 §11.6; pre-fix it had a
+#                                            bare JS-enable and no guard).
 #   2. render/sanitize.py                  — fail-closed allowlist posture.
 #   3. render/html.py                      — escape-first emission.
 #   4. ui/handlers/chat_render_handler.py  — every surface append is
@@ -34,46 +38,126 @@ import re
 
 from render.html import markdown_to_html, render_document
 
-# ── Catalog entry 1: chat_surface.py — JavaScript OFF at the webview ──────
+# ── Catalog entry 1: chat_surface.py — JavaScript gated on the guard ─────
 
 
 class TestChatSurfaceJavaScriptOff:
     """WebKit settings: JS posture is a SECURITY decision, not a preference.
 
-    Pre-SP2 the posture was unconditionally OFF. SPEC-19 SP2 flips the default
-    ON for live sections, with the kill-switch (`DEVELCAKES_LIVE_JS=0`)
-    restoring the JS-off degrade. The runtime behavior is pinned by
-    tests/test_chat_surface.py::test_javascript_disabled (kill-switch OFF →
-    JS off) and tests/test_live_guard.py (ON → JS on + guard). This catalog
-    entry pins that the setting RIDES _ensure_webview (the only webview
-    factory) and is driven by the resolved live flag — never a stray constant.
+    SPEC-66 §2.11 tightened this from "JS follows the live flag" to "JS is
+    enabled ONLY by the LiveGuard attaching". Pre-fix, `_ensure_webview` did
+    `set_enable_javascript(live)`, so a live-flagged surface ran script from
+    the moment the view existed — before the filter compiled, and forever if
+    it never did. Now the view is created JS-off and `_on_live_guard_compiled`
+    is the ONLY place JS is turned on, after `attach` returns True.
+
+    Behavior pins live in tests/test_chat_surface.py::test_javascript_disabled
+    (kill-switch OFF → JS off) and tests/test_live_guard.py (ON → JS on +
+    filter attached).
     """
 
-    def test_set_enable_javascript_driven_by_live_flag(self):
-        from ui.views import chat_surface
-        src = inspect.getsource(chat_surface)
-        assert "set_enable_javascript(live)" in src, (
-            "JS setting is no longer driven by the live flag in chat_surface.py"
-        )
+    PATH = "ui/views/chat_surface.py"
 
-    def test_no_unconditional_js_enable(self):
-        """A bare `set_enable_javascript(True)` (winning over the kill-switch)
-        would make `DEVELCAKES_LIVE_JS=0` unable to disable JS — policy leak."""
+    @staticmethod
+    def _src():
         from ui.views import chat_surface
-        src = inspect.getsource(chat_surface)
-        assert "set_enable_javascript(True)" not in src, (
-            "an unconditional JS-enable call can defeat the kill-switch"
-        )
+        return inspect.getsource(chat_surface)
 
-    def test_setting_applied_at_webview_creation(self):
-        """The setting must ride _ensure_webview (the only webview factory),
-        not some dead corner of the file."""
-        from ui.views import chat_surface
-        src = inspect.getsource(chat_surface)
+    def test_webview_is_created_with_js_off(self):
+        """The view must never be BORN scriptable: a compile failure then
+        degrades to static instead of running unbounded."""
+        src = self._src()
         ensure = src[src.index("def _ensure_webview"):]
         ensure_body = ensure[: ensure.index("return self._webview")]
-        assert "set_enable_javascript(live)" in ensure_body, (
-            "JS setting is not applied inside _ensure_webview"
+        assert "set_enable_javascript(False)" in ensure_body, (
+            "chat_surface: _ensure_webview no longer disables JS at creation — "
+            "a filter that never compiles would leave script running"
+        )
+        assert "set_enable_javascript(live)" not in ensure_body, (
+            "chat_surface: JS is again driven by the live FLAG at creation "
+            "instead of by the guard attaching (SPEC-66 §2.11)"
+        )
+
+    def test_js_enable_only_after_a_successful_attach(self):
+        """The single `set_enable_javascript(True)` must be in the attach
+        callback AND guarded by a checked `attach(...)` return."""
+        src = self._src()
+        assert src.count("set_enable_javascript(True)") == 1, (
+            "chat_surface: expected exactly one JS-enable site (the attach "
+            "callback); a second one is an unguarded path to script"
+        )
+        callback = src[src.index("def _on_live_guard_compiled"):]
+        callback = callback[: callback.index("\n    def ", 1)] if "\n    def " in callback[1:] else callback
+        assert "set_enable_javascript(True)" in callback, (
+            "chat_surface: JS is no longer enabled from _on_live_guard_compiled"
+        )
+        assert "if not self._live_guard.attach(self._webview)" in callback, (
+            "chat_surface: attach's return value is not checked — a failed "
+            "attach would still reach the JS-enable line"
+        )
+
+
+# ── Catalog entry 1b: feed_surface.py — the second JS surface ────────────
+
+
+class TestFeedSurfaceJavaScriptGated:
+    """SPEC-66 §11.6: `ui/views/feed_surface.py` was a SECOND JS-enabled
+    WebView with NO LiveGuard (pre-fix `:288` did a bare
+    `set_enable_javascript(True)` in `__init__`). The feed genuinely needs JS
+    (FEED_SCRIPT drives incremental patching and scroll restore), so it is
+    not a JS-off surface — it is a guard-gated one, under the same rule as
+    the chat surface. `_esc` escaping every card field lives in
+    render/feed_html.py (catalog entry 3) and is defense in depth, not the
+    boundary; this entry pins the boundary itself.
+    """
+
+    PATH = "ui/views/feed_surface.py"
+
+    @staticmethod
+    def _src():
+        from ui.views import feed_surface
+        return inspect.getsource(feed_surface)
+
+    def test_feed_webview_is_created_with_js_off(self):
+        src = self._src()
+        assert "set_enable_javascript(False)" in src, (
+            "feed_surface: the webview is no longer created JS-off"
+        )
+
+    def test_feed_has_exactly_one_guarded_js_enable(self):
+        src = self._src()
+        assert src.count("set_enable_javascript(True)") == 1, (
+            "feed_surface: expected exactly one JS-enable site (the guard "
+            "callback); more means an unguarded path to script"
+        )
+        callback = src[src.index("def _on_live_guard_compiled"):]
+        assert "set_enable_javascript(True)" in callback, (
+            "feed_surface: JS is not enabled from the guard callback"
+        )
+
+    def test_feed_compiles_and_attaches_the_guard(self):
+        """A guard that is constructed but never compiled/attached is
+        decoration — the feed would stay static forever and the JS-enable
+        line would be dead code that can never fire."""
+        src = self._src()
+        assert "LiveGuard()" in src, "feed_surface: no LiveGuard constructed"
+        assert ".compile(self._on_live_guard_compiled)" in src, (
+            "feed_surface: the guard is never compiled, so the callback (and "
+            "therefore JS) can never activate"
+        )
+        callback = src[src.index("def _on_live_guard_compiled"):]
+        assert "if not self._live_guard.attach(self._webview)" in callback, (
+            "feed_surface: attach's return value is not checked — fail-closed "
+            "is broken"
+        )
+
+    def test_no_bare_js_enable_outside_the_callback(self):
+        src = self._src()
+        init = src[src.index("def __init__"):]
+        init_body = init[: init.index("def _on_live_guard_compiled")]
+        assert "set_enable_javascript(True)" not in init_body, (
+            "feed_surface: JS is enabled during construction, before the "
+            "filter exists (the original §11.6 bug)"
         )
 
 

@@ -1,0 +1,52 @@
+--- a/ui/views/chat_surface.py
++++ b/ui/views/chat_surface.py
+@@ -1085,22 +1085,14 @@ class ChatSurface(Gtk.Box):
+                     self._webview.get_settings().set_enable_javascript(False)
+                 except Exception:
+                     logger.debug("live_guard: could not disable JS", exc_info=True)
+-            # SPEC-66 W3-audit HIGH #2: JS is OFF, so render-path selection
+-            # must agree. `_live_js` drives the incremental `_inject_new_rows`
+-            # path; leaving it True would eval into a JS-off view and render
+-            # NOTHING. Fall back to the full-document load_html path — the
+-            # same static degrade the feed surface documents.
+-            self._live_js = False
+-            self._live_guard = None
+-            return
++            self._live_guard = None  # MUTANT (R-15): _live_js stays True
+         if not self._live_guard.attach(self._webview):
+             logger.error("live_guard: attach returned False — disabling live JS")
+             try:
+                 self._webview.get_settings().set_enable_javascript(False)
+             except Exception:
+                 logger.debug("live_guard: could not disable JS", exc_info=True)
+-            self._live_js = False  # SPEC-66 W3-audit HIGH #2 (static fallback)
+-            self._live_guard = None
++            self._live_guard = None  # MUTANT (R-15): _live_js stays True
+             return
+         # Filter + nav lock are in place: ONLY now may script run.
+         try:
+@@ -1109,8 +1101,7 @@ class ChatSurface(Gtk.Box):
+             logger.error(
+                 "live_guard: could not enable JS after attach — surface stays "
+                 "static", exc_info=True)
+-            self._live_js = False  # SPEC-66 W3-audit HIGH #2 (static fallback)
+-            self._live_guard = None
++            self._live_guard = None  # MUTANT (R-15): _live_js stays True
+ 
+     def _on_chat_script_message(self, manager, value) -> None:
+         """SPEC-56 §3c: page-initiated copy bridge. Runs on the GTK main
+--- a/ui/views/feed_surface.py
++++ b/ui/views/feed_surface.py
+@@ -326,11 +326,7 @@ class FeedSurface:
+             )
+             self._live_guard = None
+             return
+-        if not self._live_guard.attach(self._webview):
+-            logger.error(
+-                "feed_surface: live_guard attach returned False — feed JS stays OFF")
+-            self._live_guard = None
+-            return
++        self._live_guard.attach(self._webview)  # MUTANT (R-15): failure ignored
+         try:
+             self._webview.get_settings().set_enable_javascript(True)
+         except Exception:  # noqa: BLE001

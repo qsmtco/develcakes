@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
@@ -209,6 +210,12 @@ class TelegramBridgeHandler:
         # Two-step confirmation: True after a bare /stop until the exact word
         # arrives or any other reply aborts. Cleared on disconnect hygiene.
         self._pending_stop: bool = False
+        # SPEC-66 §2.10: outbound sends leave the GTK thread. `_send_thread`
+        # is the last worker started (flush_outbound joins it); `_send_lock`
+        # serializes deliveries so chunk order inside one call is preserved
+        # and two overlapping sends cannot interleave.
+        self._send_thread: threading.Thread | None = None
+        self._send_lock = threading.Lock()
 
     def set_feed_handler(self, feed_handler: Any) -> None:
         """Late-bind the FeedHandler (SP3a — card re-read after approve).
@@ -723,20 +730,52 @@ class TelegramBridgeHandler:
         _logger.info("foreign chat %s refused (redacted; not paired)", chat_id)
         if self._transport is None or chat_id is None:
             return
-        try:
-            self._transport.send_message(
-                "This bot is paired to another chat. Sorry.", chat_id=chat_id)
-        except Exception as e:  # noqa: BLE001
-            _logger.warning(
-                "foreign refusal send failed: %s", redact_log_preview(str(e)))
+        # SPEC-66 §2.10: off the GTK thread, like every other outbound send.
+        self._deliver(["This bot is paired to another chat. Sorry."], chat_id)
+
+    def _deliver(self, chunks: list[str], chat_id: int | None) -> None:
+        """SPEC-66 §2.10: send `chunks` on a daemon worker, off the GTK thread.
+
+        A blocking socket on the main thread froze the UI (and the bridge's own
+        reply handling) for the length of every Telegram round-trip. Order
+        inside one call is preserved by sending the list in order on ONE
+        thread; `_send_lock` keeps two overlapping deliveries from
+        interleaving their chunks. `send_message` exceptions are logged with
+        redact_log_preview and never propagate — a dead phone must not break a
+        local turn. `flush_outbound` joins the last worker (tests and shutdown
+        use it; the 5s timeout means a hung socket cannot hang the join).
+        """
+        def _work() -> None:
+            with self._send_lock:
+                transport = self._transport
+                if transport is None:
+                    return
+                for chunk in chunks:
+                    try:
+                        if chat_id is None:
+                            transport.send_message(chunk)
+                        else:
+                            transport.send_message(chunk, chat_id=chat_id)
+                    except Exception as e:  # noqa: BLE001
+                        _logger.warning(
+                            "bridge send failed: %s", redact_log_preview(str(e)))
+
+        thread = threading.Thread(target=_work, name="telegram-send", daemon=True)
+        self._send_thread = thread
+        thread.start()
+
+    def flush_outbound(self) -> None:
+        """Block until the last started delivery finishes (tests/shutdown).
+
+        The bridge's contract is still fire-and-forget; this is the seam that
+        lets a caller (or a test) order a send before observing the transport.
+        """
+        thread = self._send_thread
+        if thread is not None:
+            thread.join(timeout=5)
 
     def _send(self, text: str) -> None:
-        if self._transport is None:
-            return
-        try:
-            self._transport.send_message(text)
-        except Exception as e:  # noqa: BLE001
-            _logger.warning("bridge send failed: %s", redact_log_preview(str(e)))
+        self._deliver([text], None)
 
     # ── app → phone (SP3b) ───────────────────────────────────────────────
 
@@ -807,13 +846,12 @@ class TelegramBridgeHandler:
             remaining = remaining[split_at:].lstrip("\n")
         if remaining:
             chunks.append(remaining)
-        for chunk in chunks:
-            if not chunk.strip():
-                continue  # F6 (audit): never send an empty/whitespace chunk
-            try:
-                self._transport.send_message(chunk)
-            except Exception as e:  # noqa: BLE001 — keep mirroring later chunks
-                _logger.warning("forward chunk failed: %s", redact_log_preview(str(e)))
+        chunks = [c for c in chunks if c.strip()]  # F6 (audit): never send an
+        # empty/whitespace chunk — filtered BEFORE the worker so the delivered
+        # list is exactly what the transport sees. One _deliver call keeps the
+        # chunks in order on one worker thread (SPEC-66 §2.10).
+        if chunks:
+            self._deliver(chunks, None)
 
     # ── defaults ─────────────────────────────────────────────────────────
 

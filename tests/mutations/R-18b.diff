@@ -1,6 +1,6 @@
 --- a/agent/runtime.py
 +++ b/agent/runtime.py
-@@ -1703,7 +1703,4 @@
+@@ -1703,10 +1703,7 @@ class AgentRuntime:
              self._on_error, session_key, CANCEL_MESSAGE,
              _turn_token=active_tk,
          )
@@ -9,11 +9,12 @@
 -        from agent.tools import cancel_all_processes
 -        return cancel_all_processes(session_key)
 +        return 0, 0
+ 
+     def cancel_peer(self, session_key: str) -> None:
+         """Ask one other session's loop to stop. Marks only a live loop.
 --- a/ui/handlers/agent_runtime_handler.py
 +++ b/ui/handlers/agent_runtime_handler.py
-@@ -472,11 +472,6 @@
-         try:
-             killed, unkillable = runtime.cancel(session_key)
+@@ -474,12 +474,7 @@ class AgentRuntimeHandler(
          except Exception:
              logger.exception("cancel_agent: runtime cancel raised for %r", session_key)
              return "cancelled"
@@ -24,3 +25,6 @@
 -            outcome += f"+{unkillable}-unkillable"
 -        return outcome
 +        return "cancelled"
+ 
+     def _get_runtime_for_session(self, session_key: str, agent_def) -> object | None:
+         """Return the runtime already holding this session, or None.

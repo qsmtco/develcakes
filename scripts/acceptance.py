@@ -264,13 +264,61 @@ def check_row(row: dict, diffs_dir=_DEFAULT_MUTATIONS, root=None) -> dict:
     return out
 
 
-def extract_fail_set(proc) -> list[str]:
-    """Collect FAILED node ids from a pytest -q run."""
+def _proc_output_text(proc) -> str:
+    """stdout + stderr of a finished subprocess, decoded leniently."""
     text = ""
     if proc.stdout:
         text += proc.stdout.decode(errors="replace")
     if proc.stderr:
         text += proc.stderr.decode(errors="replace")
+    return text
+
+
+# SPEC-66 W3-audit HIGH #3: markers a CRASHED pytest leaves in its output.
+# A run that dies here never emits a FAILED line for the tests it did not
+# reach, so an empty fail-set must never be read as "everything fixed".
+_CRASH_MARKERS = (
+    "Fatal Python error",
+    "Segmentation fault",
+    "core dumped",
+)
+
+
+def suite_crash_marker(proc) -> str | None:
+    """The crash marker present in the run's output, or None if it is clean."""
+    text = _proc_output_text(proc)
+    for marker in _CRASH_MARKERS:
+        if marker in text:
+            return marker
+    return None
+
+
+def suite_refusal(proc) -> str | None:
+    """SPEC-66 W3-audit HIGH #3: why this pytest run cannot be gated, or None.
+
+    The suite gate is shrink-only, so it must NEVER be evaluated against a run
+    that did not actually complete: a SIGSEGV / collection error yields an
+    empty fail-set and every baseline entry would be reported "shrunk (fixed)"
+    for tests that never ran. Exit codes: 0=all pass, 1=tests failed,
+    2=interrupted, 3=INTERNAL_ERROR/crash, 4=usage error, 5=no tests.
+    """
+    marker = suite_crash_marker(proc)
+    if proc.returncode not in (0, 1):
+        detail = f"; output contains {marker!r}" if marker else ""
+        return (f"pytest exited {proc.returncode} "
+                f"(crash / collection error / no tests){detail}")
+    if marker is not None:
+        # Exit 0/1 with a crash marker in the log: the run died mid-suite
+        # (e.g. a crashed xdist worker or a segfault after the summary), so
+        # its fail-set is not a complete picture of the tree.
+        return (f"pytest exited {proc.returncode} but its output contains "
+                f"{marker!r} — the run crashed mid-suite")
+    return None
+
+
+def extract_fail_set(proc) -> list[str]:
+    """Collect FAILED node ids from a pytest -q run."""
+    text = _proc_output_text(proc)
     fails = set()
     for line in text.splitlines():
         line = line.strip()
@@ -345,6 +393,21 @@ def cmd_rows(args) -> int:
 
 def cmd_suite(args) -> int:
     proc, _fails = run_suite()
+    refusal = suite_refusal(proc)
+    if refusal is not None:
+        # SPEC-66 W3-audit HIGH #3: never diff a run that did not complete.
+        # A crashed run yields an empty fail-set, which the shrink-only diff
+        # would report as "N shrunk (fixed)" for tests that never ran.
+        if args.json:
+            print(json.dumps({
+                "returncode": proc.returncode,
+                "crashed": suite_crash_marker(proc) is not None,
+                "refused": refusal,
+            }, indent=2))
+            return 1
+        print(f"pytest exit={proc.returncode}; failures=<unknown — run did not complete>")
+        print(f"gate: REFUSED — {refusal}")
+        return 1
     fail_set = extract_fail_set(proc)
     diff = diff_fail_set(fail_set)
     if args.json:
@@ -375,19 +438,29 @@ def cmd_smokes(args) -> int:
 def cmd_all(args) -> int:
     rows = collect_rows()
     suite_proc, _fails = run_suite()
-    suite_diff = diff_fail_set(extract_fail_set(suite_proc))
+    # SPEC-66 W3-audit HIGH #3: the summed gate must refuse a crashed suite
+    # too — `extract_fail_set` on a SIGSEGV'd run is empty, and the
+    # shrink-only diff would call every baseline entry "fixed".
+    suite_refused = suite_refusal(suite_proc)
+    suite_diff = diff_fail_set(
+        [] if suite_refused is not None else extract_fail_set(suite_proc)
+    )
     smoke_rows = [r for r in load_rows()
                   if row_node_id(r) and not _is_pytest_node(row_node_id(r))]
     smoke_results = [check_row(r) for r in smoke_rows]
     ok = (
         all(r["ok"] for r in rows)
+        and suite_refused is None
         and suite_diff["allowed"]
         and all(r["ok"] for r in smoke_results)
     )
     payload = {
         "timestamp": datetime.now(UTC).isoformat(),
         "rows": rows,
-        "suite": {"returncode": suite_proc.returncode, **suite_diff},
+        "suite": {"returncode": suite_proc.returncode,
+                  "refused": suite_refused,
+                  "crashed": suite_crash_marker(suite_proc) is not None,
+                  **suite_diff},
         "smokes": smoke_results,
         "ok": ok,
     }
@@ -398,9 +471,13 @@ def cmd_all(args) -> int:
         return 0 if ok else 1
     print("=== acceptance gate: ALL ===")
     _print_rows(rows)
-    print(f"suite: exit={suite_proc.returncode} "
-          f"failures={len(suite_diff['current'])} "
-          f"new={len(suite_diff['new_failures'])}")
+    if suite_refused is not None:
+        print(f"suite: exit={suite_proc.returncode} (run did not complete)")
+        print(f"suite gate: REFUSED — {suite_refused}")
+    else:
+        print(f"suite: exit={suite_proc.returncode} "
+              f"failures={len(suite_diff['current'])} "
+              f"new={len(suite_diff['new_failures'])}")
     _print_rows(smoke_results)
     print(f"overall: {'PASS' if ok else 'FAIL'} → .acceptance/last-run.json written")
     return 0 if ok else 1

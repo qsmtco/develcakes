@@ -91,12 +91,14 @@ class LeftPanel(Gtk.Box):
         )
 
         # Tab 2: Agents — placeholder until set_agents() is called
+        # SPEC-66 §2.12: no "Connect" — the toolbar action no longer exists,
+        # so the old copy pointed at a control the user cannot find.
         agents_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         agents_container.set_vexpand(True)
         self._agents_placeholder = Gtk.Label()
         self._agents_placeholder.set_markup(
             '<span foreground="#6b6b7a" font_desc="Sans 11">'
-            'Click Connect to discover agents</span>')
+            'No agents yet</span>')
         self._agents_placeholder.set_halign(Gtk.Align.CENTER)
         self._agents_placeholder.set_valign(Gtk.Align.CENTER)
         agents_container.append(self._agents_placeholder)

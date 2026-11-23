@@ -67,4 +67,15 @@ py-modules = ["main"]
 # Patterns are PACKAGE names, not filesystem paths. "ui/*" matched nothing
 # (0 packages discovered); "ui*" matches the ui package and its subpackages
 # (ui.handlers, ui.views, agent.llm, ...).
-include = ["ui*", "agent*", "utils*", "models*", "prompts*", "transport*"]
+# SPEC-66 §2.12: "render*" was missing — a non-editable install dropped the
+# whole render package (every surface's sanitizer + emitter), so an installed
+# app raised ImportError on first paint.
+include = ["ui*", "agent*", "utils*", "models*", "prompts*", "transport*", "render*"]
+
+[tool.setuptools.package-data]
+# SPEC-66 §2.12: the system prompts are DATA (no __init__.py in the tree they
+# live in), so packages.find cannot ship them — without this mapping an
+# installed wheel starts with no agent prompts at all. SYSTEM_DIR resolves
+# dirname(dirname(prompt_loader.__file__))/prompts/system, which is exactly
+# site-packages/prompts/system once `prompts` is an installed package.
+prompts = ["system/*.md"]

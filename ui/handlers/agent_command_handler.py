@@ -843,11 +843,26 @@ class AgentCommandHandler:
 
     @staticmethod
     def _strip_thinking_blocks(text: str) -> str:
-        """Remove <think>...</think> reasoning blocks (and unclosed trailing <think>)."""
+        """Remove think slabs before command scanning.
+
+        Balanced pairs are stripped anywhere. An UNCLOSED opener strips the
+        rest of the message only when it is the first non-whitespace thing in
+        it (a truncated reasoning-first message); otherwise the payload is
+        kept, so a later opener never eats a following command.
+        """
         if not isinstance(text, str) or not text:
             return "" if not isinstance(text, str) else text
         text = re.sub(r"<think\b[^>]*>.*?</think>", "\n", text, flags=re.DOTALL | re.IGNORECASE)
-        return re.sub(r"<think\b[^>]*>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # SPEC-66 §2.8: an unclosed block swallows the rest of the message ONLY
+        # when the message STARTS with it — the model opened with reasoning and
+        # the payload was truncated, so nothing after it is trustworthy. That is
+        # the SPEC-65 pinned case. When other text came FIRST, a later unclosed
+        # opener must NOT eat a real command (the SPEC-65-audit CRITICAL:
+        # truncation silently dropped a following /ask). Balanced pairs above
+        # are still removed everywhere.
+        if text.lstrip().lower().startswith("<think"):
+            return re.sub(r"<think\b[^>]*>.*$", "", text, flags=re.DOTALL | re.IGNORECASE)
+        return text
 
     @classmethod
     def _sanitize_for_command_scan(cls, text: str) -> str:

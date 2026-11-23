@@ -740,10 +740,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # SPEC-66 §2.8: /stop wiring. Both the chat input and the agent-response
         # command loop reach the runtime through these seams (handlers never
         # import each other). Idle /stop is a no-op message in cancel_agent.
+        # NOTE: _agent_command_handler does not exist yet here — it is built
+        # later in _build (Phase 6.2 block). Its /stop seam is wired there,
+        # right after construction.
         self._chat_handler.set_on_cancel_session(
-            self._agent_runtime_handler.cancel_agent
-        )
-        self._agent_command_handler.set_on_cancel_session(
             self._agent_runtime_handler.cancel_agent
         )
         # Wire AgentRoutingTable into AgentRuntimeHandler (solo DM response routing)
@@ -814,6 +814,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self._agent_command_handler = AgentCommandHandler(GLib_module=GLib)
         self._agent_command_handler.set_command_handler(self._command_handler)
         self._agent_command_handler.set_agent_runtime_handler(self._agent_runtime_handler)
+        # SPEC-66 §2.8: the agent-response command loop's /stop seam — wired
+        # here (right after construction), NOT in _wire_feed where the handler
+        # does not exist yet (that ordering was a launch crash).
+        self._agent_command_handler.set_on_cancel_session(
+            self._agent_runtime_handler.cancel_agent
+        )
         # Wire callbacks into both agent response pipelines
         self._chat_handler.set_on_agent_response(self._agent_command_handler.on_agent_response)
         # SPEC-15 SP3b: COMPOSE the ARH's single response slot — keep the

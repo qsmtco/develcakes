@@ -1,0 +1,11 @@
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -70,7 +70,7 @@ py-modules = ["main"]
+ # SPEC-66 §2.12: "render*" was missing — a non-editable install dropped the
+ # whole render package (every surface's sanitizer + emitter), so an installed
+ # app raised ImportError on first paint.
+-include = ["ui*", "agent*", "utils*", "models*", "prompts*", "transport*", "render*"]
++include = ["ui*", "agent*", "utils*", "models*", "prompts*", "transport*"]
+ 
+ [tool.setuptools.package-data]
+ # SPEC-66 §2.12: the system prompts are DATA (no __init__.py in the tree they

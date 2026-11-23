@@ -153,3 +153,43 @@
   mutation: tests/mutations/R-18b.diff
   runner: xvfb
   added: 2026-11-18
+
+- id: R-15
+  claim: "JS is enabled on the chat and feed WebViews only after LiveGuard compiles AND attaches; a failed attach or compile leaves JS off (fail-closed)."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.11 + audit BUG #6
+  node: tests/test_spec66_live_js.py::TestFeedSurfaceFailClosed::test_attach_false_leaves_js_off
+  mutation: tests/mutations/R-15.diff
+  runner: xvfb
+  added: 2026-11-18
+
+- id: R-19
+  claim: "An unclosed <think> opener swallows to end-of-message only when it leads the message; a later unclosed opener never eats a following command."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.8 + audit truncation finding
+  node: tests/test_spec66_think.py::test_prose_think_keeps_later_ask
+  mutation: tests/mutations/R-19.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-20
+  claim: "The coder role no longer forces test_run=False; coders re-run the suite after their own writes. lint_check stays forced off for coders."
+  source: "docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2 (finding 9: coder test_run force)"
+  node: tests/test_spec66_coder_tests.py::test_coder_does_not_disable_test_run
+  mutation: tests/mutations/R-20.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-21
+  claim: "Telegram sends run on the worker thread, not the GTK main thread: _send enqueues to a single worker; flush_outbound joins it before returning."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.10 (Telegram main-thread sends)
+  node: tests/test_spec66_telegram.py::test_send_leaves_the_caller_thread
+  mutation: tests/mutations/R-21.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-22
+  claim: "A non-editable install ships all seven code packages: render* (and prompts*) are in the setuptools include list, and prompts/__init__.py exists so packages.find discovers it."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.12
+  node: tests/test_spec66_package.py::test_render_and_prompts_are_packages
+  mutation: tests/mutations/R-22.diff
+  runner: plain
+  added: 2026-11-18

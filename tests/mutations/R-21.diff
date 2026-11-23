@@ -1,0 +1,14 @@
+--- a/ui/handlers/telegram_bridge_handler.py
++++ b/ui/handlers/telegram_bridge_handler.py
+@@ -760,9 +760,8 @@ class TelegramBridgeHandler:
+                         _logger.warning(
+                             "bridge send failed: %s", redact_log_preview(str(e)))
+ 
+-        thread = threading.Thread(target=_work, name="telegram-send", daemon=True)
+-        self._send_thread = thread
+-        thread.start()
++        # MUTANT (R-21): inline send — blocks the caller, _send_thread stays None.
++        _work()
+ 
+     def flush_outbound(self) -> None:
+         """Block until the last started delivery finishes (tests/shutdown).

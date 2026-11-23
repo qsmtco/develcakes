@@ -2971,7 +2971,13 @@ class AgentRuntime:
                 # above (before on_tool_call_start) per spec §A.2.4.
                 enf = self._config.enforcement
                 if getattr(conv, "agent_role", "") == "coder":
-                    enf = dataclasses.replace(enf, lint_check=False, test_run=False)
+                    # SPEC-66 §2 (finding 9): the coder path forced
+                    # `test_run=False` too, so a coder never re-ran the suite
+                    # after its own writes — the verification tier the role
+                    # exists for was silently off. `test_run` now stays at the
+                    # config default (True unless the project turns it off);
+                    # only `lint_check` is still forced off for coders.
+                    enf = dataclasses.replace(enf, lint_check=False)
                 ctx = ToolContext(
                     session_key=session_key,
                     project_path=conv.project_path,

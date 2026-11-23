@@ -203,6 +203,7 @@ def test_transport_disconnect_clears_approval_map():
         "id": "cbq-old2", "data": "deny:old",
         "message": {"chat": {"id": 42}},
     }})
+    h.flush_outbound()  # SPEC-66 §2.10: the refusal/edit rides a worker thread
     assert t["t"].edited == [], t["t"].edited
 
 
@@ -228,6 +229,7 @@ def test_foreign_chat_text_refused_never_routed():
     t["t"].kw["on_update"](update)
     assert arh.calls == []  # never processed
     # Exactly one polite refusal, and it never contains the user's text.
+    h.flush_outbound()  # SPEC-66 §2.10: the refusal rides a worker thread
     assert len(t["t"].sent) == 1, t["t"].sent
     assert "paired" in t["t"].sent[0]["text"].lower()
     assert "hack" not in t["t"].sent[0]["text"]
@@ -239,6 +241,7 @@ def test_routing_when_arh_missing_refuses():
     t["t"].kw["on_connect"]()
     update = {"update_id": 3, "message": {"chat": {"id": 42}, "text": "hi"}}
     t["t"].kw["on_update"](update)
+    h.flush_outbound()  # SPEC-66 §2.10: sends are threaded
     assert any("unavailable" in s["text"].lower() or "refus" in s["text"].lower()
                for s in t["t"].sent), t["t"].sent
 
@@ -273,6 +276,7 @@ def test_callback_query_approve_resolves_and_edits():
     }}
     t["t"].kw["on_update"](update)
     assert a.approve_calls == [("1", True)], "approve_exec not called"
+    h.flush_outbound()  # SPEC-66 §2.10: the ack/edit ride a worker thread
     assert len(t["t"].answered) == 1
     assert t["t"].answered[0]["id"] == "cbq-1"
     assert any(e["id"] == 77 and "Approved" in e["text"]
@@ -295,6 +299,7 @@ def test_callback_query_unknown_state_says_already_resolved():
         "message": {"chat": {"id": 42}},
     }}
     t["t"].kw["on_update"](update)
+    h.flush_outbound()  # SPEC-66 §2.10: the edit rides a worker thread
     assert any("Already resolved" in e["text"]
                for e in t["t"].edited), t["t"].edited
 
@@ -307,6 +312,7 @@ def test_foreign_chat_callback_refused():
         "id": "cbq-2", "data": "x", "message": {"chat": {"id": 999}},
     }}
     t["t"].kw["on_update"](update)
+    h.flush_outbound()  # SPEC-66 §2.10: the ack would ride a worker thread
     assert t["t"].answered == []  # foreign → never answered
 
 
@@ -334,6 +340,7 @@ def test_feed_card_is_not_sent_to_phone():
     h.on_feed_card_added(card)
     h.on_feed_card_added("card-1")  # add_card passes the id string
     h.on_feed_card_added(None)
+    h.flush_outbound()  # SPEC-66 §2.10: a card prompt rides a worker thread
     assert t["t"].sent == []
     assert h._approval_msgs == {}
 
@@ -341,12 +348,14 @@ def test_feed_card_is_not_sent_to_phone():
 def test_supervisor_reply_forwards_to_phone():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:supervisor", "done — 3 files changed")
+    h.flush_outbound()  # SPEC-66 §2.10: the forward rides a worker thread
     assert [s["text"] for s in t["t"].sent] == ["done — 3 files changed"]
 
 
 def test_non_supervisor_reply_is_not_forwarded():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:coder", "coding…")
+    h.flush_outbound()  # SPEC-66 §2.10
     assert t["t"].sent == []  # thin client: only the Supervisor mirrors
 
 
@@ -358,6 +367,7 @@ def test_supervisor_reply_when_disconnected_noop():
 def test_reply_over_4096_hard_split():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:supervisor", "x" * 9000)
+    h.flush_outbound()  # SPEC-66 §2.10: all chunks ride one worker
     chunks = [s["text"] for s in t["t"].sent]
     assert len(chunks) >= 3
     assert all(len(c) <= 4096 for c in chunks)
@@ -369,6 +379,7 @@ def test_reply_splits_on_paragraph_boundary():
     para_a = "a" * 2000
     para_b = "b" * 3000
     h.on_supervisor_reply("agent:supervisor", f"{para_a}\n\n{para_b}")
+    h.flush_outbound()  # SPEC-66 §2.10
     chunks = [s["text"] for s in t["t"].sent]
     assert len(chunks) == 2
     assert chunks[0] == para_a
@@ -379,6 +390,7 @@ def test_reply_empty_and_nonstr_no_send():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:supervisor", "")
     h.on_supervisor_reply("agent:supervisor", None)
+    h.flush_outbound()  # SPEC-66 §2.10
     assert t["t"].sent == []
 
 
@@ -388,6 +400,7 @@ def test_html_card_reply_flattened_to_text():
     h, t, _a = _connected()
     card = '```html\n<div><b>Build OK</b><br>line two</div>\n```'
     h.on_supervisor_reply("agent:supervisor", card)
+    h.flush_outbound()  # SPEC-66 §2.10: the flattened send rides a worker
     sent = t["t"].sent[-1]["text"]
     assert "Build OK" in sent
     assert "line two" in sent
@@ -397,6 +410,7 @@ def test_html_card_reply_flattened_to_text():
 def test_plain_text_reply_passes_through_unchanged():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:supervisor", "just **markdown**, no fence")
+    h.flush_outbound()  # SPEC-66 §2.10
     assert t["t"].sent[-1]["text"] == "just **markdown**, no fence"
 
 
@@ -405,6 +419,7 @@ def test_mixed_html_reply_flattens_fence_keeps_prose():
     h, t, _a = _connected()
     reply = "  Here:\n```html\n<div><b>Build OK</b></div>\n```\nDone."
     h.on_supervisor_reply("agent:supervisor", reply)
+    h.flush_outbound()  # SPEC-66 §2.10
     sent = t["t"].sent[-1]["text"]
     assert sent.startswith("  Here:")
     assert "Build OK" in sent
@@ -416,6 +431,7 @@ def test_mixed_html_reply_crlf_and_angle_prose():
     h, t, _a = _connected()
     reply = "5 < 6\r\n```html\r\n<div>ok</div>\r\n```\r\n"
     h.on_supervisor_reply("agent:supervisor", reply)
+    h.flush_outbound()  # SPEC-66 §2.10
     sent = t["t"].sent[-1]["text"]
     assert "5 < 6" in sent
     assert "ok" in sent
@@ -439,6 +455,7 @@ def test_plain_text_still_forwards():
 def test_unknown_slash_command_refused_not_forwarded():
     h, t, arh = _connected()
     _send_text(h, t, "/deploy")
+    h.flush_outbound()  # SPEC-66 §2.10: the refusal rides a worker thread
     assert arh.calls == []
     assert any("unknown" in s["text"].lower() for s in t["t"].sent)
 
@@ -447,6 +464,7 @@ def test_status_command_handled_not_forwarded():
     h, t, arh = _connected()
     h.set_status_provider(lambda: "Project: demo\nWork units: 1 pending")
     _send_text(h, t, "/status")
+    h.flush_outbound()  # SPEC-66 §2.10: the status reply rides a worker
     assert arh.calls == []
     assert any("Project: demo" in s["text"] for s in t["t"].sent)
 
@@ -454,12 +472,14 @@ def test_status_command_handled_not_forwarded():
 def test_status_without_provider_is_honest():
     h, t, _a = _connected()
     _send_text(h, t, "/status")
+    h.flush_outbound()  # SPEC-66 §2.10
     assert any("unavailable" in s["text"].lower() for s in t["t"].sent)
 
 
 def test_help_lists_allowlist():
     h, t, _a = _connected()
     _send_text(h, t, "/help")
+    h.flush_outbound()  # SPEC-66 §2.10
     blob = " ".join(s["text"] for s in t["t"].sent)
     assert "/status" in blob and "/stop" in blob
 
@@ -472,6 +492,7 @@ def test_stop_prompts_and_does_not_fire_on_first_command():
     fired = []
     h.set_stop_all_handler(lambda: fired.append(True))
     _send_text(h, t, "/stop")
+    h.flush_outbound()  # SPEC-66 §2.10: the confirm prompt rides a worker
     assert fired == []  # armed, NOT run
     assert h._pending_stop is True
     assert any("confirm" in s["text"].lower() for s in t["t"].sent)
@@ -502,6 +523,7 @@ def test_stop_wrong_word_aborts():
     h.set_stop_all_handler(lambda: fired.append(True))
     _send_text(h, t, "/stop")
     _send_text(h, t, "nope")
+    h.flush_outbound()  # SPEC-66 §2.10
     assert fired == []
     assert h._pending_stop is False
     assert any("cancel" in s["text"].lower() for s in t["t"].sent)
@@ -520,6 +542,7 @@ def test_stop_unwired_is_honest_no_crash():
     h, t, _a = _connected()
     _send_text(h, t, "/stop")
     _send_text(h, t, "/stop STOP")  # no handler wired → honest, no raise
+    h.flush_outbound()  # SPEC-66 §2.10
     assert any("unavailable" in s["text"].lower() for s in t["t"].sent)
 
 
@@ -648,6 +671,7 @@ def test_foreign_refusal_targets_foreign_chat_not_paired():
     _h, t, _a = _connected()
     t["t"].kw["on_update"]({"update_id": 9, "message": {
         "chat": {"id": 999}, "text": "hack"}})
+    _h.flush_outbound()  # SPEC-66 §2.10: the refusal rides a worker thread
     assert len(t["t"].sent) == 1
     assert t["t"].sent[0]["chat_id"] == 999, (
         "refusal must go to the FOREIGN chat, not the paired chat (42)"
@@ -709,6 +733,7 @@ def test_forward_whitespace_only_sends_nothing():
     h, t, _a = _connected()
     h.on_supervisor_reply("agent:supervisor", " " * 5000)
     h.on_supervisor_reply("agent:supervisor", "\n" * 5000)
+    h.flush_outbound()  # SPEC-66 §2.10
     assert t["t"].sent == []
 
 

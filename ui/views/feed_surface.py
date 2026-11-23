@@ -27,6 +27,7 @@ from gi.repository import Gdk, GLib
 
 from render.feed_html import render_feed_card, render_feed_document
 from utils.config import get_env
+from utils.live_guard import LiveGuard
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,12 @@ class FeedSurface:
         self._queued_reload = False
         self._last_ops: list | None = None
         self._patch_count = 0
+        # SPEC-66 §11.6: this is the SECOND JS-enabled WebView in the app and
+        # it had no enforcement boundary at all. `_esc` escaping every card
+        # field was the only thing keeping it honest — an accident, not a
+        # control. It now follows the chat surface's rule: JS is enabled ONLY
+        # by the LiveGuard attaching (see `_on_live_guard_compiled`).
+        self._live_guard = None
         self._webview = WebKit.WebView()
         _apply_canvas_color(self._webview)
         # The document scrolls ITSELF: the host ScrolledWindow runs with
@@ -285,7 +292,7 @@ class FeedSurface:
         # webview fills the viewport, so its own scrollbars move the page.
         self._webview.set_vexpand(True)
         self._webview.set_hexpand(True)
-        self._webview.get_settings().set_enable_javascript(True)
+        self._webview.get_settings().set_enable_javascript(False)
         manager = self._webview.get_user_content_manager()
         # Signature recorded from the probe above. A False return means the
         # name was refused — raise so create_feed_surface keeps the GTK list.
@@ -295,6 +302,42 @@ class FeedSurface:
         self._webview.connect("load-changed", self._on_load_changed)
         self._webview.connect("load-failed", self._on_load_failed)
         self._webview.connect("web-process-terminated", self._on_web_process_terminated)
+        # Same guard instance pattern as the chat surface: compile, then let
+        # the compiled filter (or its absence) decide whether JS may run.
+        # `_flush` is safe either way — with JS off the document still renders,
+        # it just loses FEED_SCRIPT's incremental patch/scroll behaviour and
+        # falls back to full reloads.
+        self._live_guard = LiveGuard()
+        self._live_guard.compile(self._on_live_guard_compiled)
+
+    def _on_live_guard_compiled(self, content_filter) -> None:
+        """SPEC-66 §11.6: enable feed JS only once the filter is attached.
+
+        FAIL-CLOSED, identical to the chat surface: no filter, a failed
+        attach, or a raising `set_enable_javascript` all leave JS OFF. A
+        static feed (no patch, no auto-scroll) is the correct degrade — it is
+        still readable, and it never runs a script without the boundary.
+        """
+        if (content_filter is None or self._live_guard is None
+                or self._webview is None):
+            logger.error(
+                "feed_surface: content-filter compile FAILED — feed JS stays "
+                "OFF (never run the document without the enforcement boundary)"
+            )
+            self._live_guard = None
+            return
+        if not self._live_guard.attach(self._webview):
+            logger.error(
+                "feed_surface: live_guard attach returned False — feed JS stays OFF")
+            self._live_guard = None
+            return
+        try:
+            self._webview.get_settings().set_enable_javascript(True)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "feed_surface: could not enable JS after attach — document "
+                "stays static")
+            self._live_guard = None
 
     @property
     def webview(self):

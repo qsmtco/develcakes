@@ -1,0 +1,11 @@
+--- a/agent/runtime.py
++++ b/agent/runtime.py
+@@ -2977,7 +2977,7 @@ class AgentRuntime:
+                     # exists for was silently off. `test_run` now stays at the
+                     # config default (True unless the project turns it off);
+                     # only `lint_check` is still forced off for coders.
+-                    enf = dataclasses.replace(enf, lint_check=False)
++                    enf = dataclasses.replace(enf, lint_check=False, test_run=False)  # MUTANT (R-20)
+                 ctx = ToolContext(
+                     session_key=session_key,
+                     project_path=conv.project_path,

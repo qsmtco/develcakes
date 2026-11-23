@@ -1003,8 +1003,14 @@ class ChatSurface(Gtk.Box):
             # SPEC-19 SP1 (F1): with the live-JS flag ON the transcript runs
             # with JS enabled + the enforcement boundary attached; OFF keeps
             # the SPEC-06 ruling (JS off) byte-for-byte.
+            #
+            # SPEC-66 §2.11: ONE state — JS is enabled only BY the guard
+            # attaching (in `_on_live_guard_compiled`), never here. Passing
+            # `live` straight to `set_enable_javascript` could enable JS on a
+            # view whose filter never compiles; the flag only says the user
+            # WANTS live. So we disable now and let the attach flip it on.
             live = self._live_js
-            settings.set_enable_javascript(live)
+            settings.set_enable_javascript(False)
             if live:
                 self._live_guard = LiveGuard()
                 self._live_guard.compile(self._on_live_guard_compiled)
@@ -1061,9 +1067,15 @@ class ChatSurface(Gtk.Box):
     def _on_live_guard_compiled(self, content_filter) -> None:
         """SPEC-19 SP1: attach the enforcement boundary once the compiled
         filter is ready. FAIL-CLOSED: no filter → the guard refuses to attach;
-        we log and leave the surface with JS on but NO boundary — so we must
-        disable JS instead (never run live without the boundary)."""
-        if content_filter is None:
+        we log and leave the surface with JS OFF (never run live without the
+        boundary).
+
+        SPEC-66 §2.11: this callback is the ONLY place JS is turned on. The
+        view is created with JS disabled (`_ensure_webview`), so a compile or
+        attach failure simply leaves it off — there is no window in which the
+        transcript runs script without a filter."""
+        if (content_filter is None or self._live_guard is None
+                or self._webview is None):
             logger.error(
                 "live_guard: content-filter compile FAILED — disabling live JS "
                 "(never run the transcript without the enforcement boundary)"
@@ -1073,10 +1085,32 @@ class ChatSurface(Gtk.Box):
                     self._webview.get_settings().set_enable_javascript(False)
                 except Exception:
                     logger.debug("live_guard: could not disable JS", exc_info=True)
+            # SPEC-66 W3-audit HIGH #2: JS is OFF, so render-path selection
+            # must agree. `_live_js` drives the incremental `_inject_new_rows`
+            # path; leaving it True would eval into a JS-off view and render
+            # NOTHING. Fall back to the full-document load_html path — the
+            # same static degrade the feed surface documents.
+            self._live_js = False
             self._live_guard = None
             return
-        if self._live_guard is not None and self._webview is not None:
-            self._live_guard.attach(self._webview)
+        if not self._live_guard.attach(self._webview):
+            logger.error("live_guard: attach returned False — disabling live JS")
+            try:
+                self._webview.get_settings().set_enable_javascript(False)
+            except Exception:
+                logger.debug("live_guard: could not disable JS", exc_info=True)
+            self._live_js = False  # SPEC-66 W3-audit HIGH #2 (static fallback)
+            self._live_guard = None
+            return
+        # Filter + nav lock are in place: ONLY now may script run.
+        try:
+            self._webview.get_settings().set_enable_javascript(True)
+        except Exception:
+            logger.error(
+                "live_guard: could not enable JS after attach — surface stays "
+                "static", exc_info=True)
+            self._live_js = False  # SPEC-66 W3-audit HIGH #2 (static fallback)
+            self._live_guard = None
 
     def _on_chat_script_message(self, manager, value) -> None:
         """SPEC-56 §3c: page-initiated copy bridge. Runs on the GTK main
@@ -1656,7 +1690,11 @@ class ChatSurface(Gtk.Box):
 
         The render handler branches on this to choose between the live append
         (T3) and the T2-static degrade (sanitize_agent_html) for a ```live
-        fence. The flag is resolved once at construction.
+        fence. The flag is resolved at construction and is cleared to False by
+        every `_on_live_guard_compiled` failure branch (SPEC-66 W3-audit HIGH
+        #2) — after a guard failure this reports the EFFECTIVE state, so the
+        surface degrades to the full-document path instead of injecting into a
+        JS-off view.
         """
         return bool(self._live_js)
 
