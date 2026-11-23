@@ -83,9 +83,11 @@ class FeedReviewMixin:
                 # file path) and may not match the real diff.
                 #
                 # Only catch ImportError (gitpython not installed). Other
-                # exceptions are logged as warnings — the user clicked Accept
-                # on a card and the card remains visible, so we don't need
-                # to surface a chat message.
+                # exceptions here mean we cannot see the index at all, so the
+                # accept cannot proceed — and an accept that did not happen
+                # MUST tell the person on the card (SPEC-66 BUG #5: every
+                # failed accept surfaces, the same contract as the stage,
+                # foreign-path and commit exits below). Logged AND failed.
                 try:
                     import git as gitpython
                 except ImportError:
@@ -99,18 +101,20 @@ class FeedReviewMixin:
                             "handle_accept: failed to read diff for %s: %s: %s",
                             project_path, type(e).__name__, e,
                         )
+                        _fail(f"diff read failed: {type(e).__name__}")
                         return
 
                 if not staged:
-                    # Working tree is clean — nothing to commit. Silent no-op:
-                    # the user clicked Accept on a card but the underlying
-                    # changes have already been accepted (or never existed).
-                    # Log a warning for observability, but don't create an
-                    # empty commit and don't mark the card as accepted.
+                    # Working tree is clean — nothing to commit, so there is
+                    # nothing to accept: the changes were already accepted (or
+                    # never existed). Still NOT an empty commit and NOT
+                    # card.accepted = True — but the person clicked Accept and
+                    # gets no commit, so the card records why (SPEC-66 BUG #5).
                     _mod()._logger.info(
                         "handle_accept: nothing to commit for card %s (working tree clean)",
                         card_id,
                     )
+                    _fail("nothing to commit — this file already matches HEAD")
                     return
 
                 # Refuse when anything OTHER than this card's file is staged:

@@ -437,12 +437,12 @@ class TestHandleAccept:
 
     @patch("ui.handlers.feed_handler.git_ops")
     @patch("ui.handlers.feed_handler.feed_store")
-    def test_handle_accept_empty_tree_silently_noops(
+    def test_handle_accept_empty_tree_fails_the_card(
         self, mock_feed_store, mock_git_ops, feed_handler
     ):
         """When the working tree is clean (no staged files), handle_accept
-        should be a silent no-op. The card is not marked accepted and no
-        empty commit is created.
+        commits nothing and does not accept — and the card records why
+        nothing committed (SPEC-66 BUG #5: every failed accept surfaces).
         """
         ts = datetime.now(timezone.utc)
         card = FeedCardData(
@@ -472,6 +472,9 @@ class TestHandleAccept:
         mock_git_ops.commit.assert_not_called()
         # The card should NOT be marked accepted
         assert card.accepted is not True
+        # ...but the failed accept is recorded on the card, not swallowed.
+        assert "nothing to commit" in card.metadata["accept_error"]
+        assert card.metadata["status"] == "error"
 
     @patch("ui.handlers.feed_handler.git_ops")
     @patch("ui.handlers.feed_handler.feed_store")

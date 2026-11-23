@@ -14,9 +14,13 @@ tmp_path; no GTK, no ui.window.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 import pytest
 
+from models.feed_card import FeedCardData
+from ui.feed.review import FeedReviewMixin
+from utils import git_ops
 from utils.git_ops import stage_paths
 
 
@@ -136,3 +140,116 @@ class TestNormalizedIndexComparison:
         # "never stage_all".
         assert ".stage_all(" not in handle_accept, "handle_accept must not call stage_all"
         assert ".stage_paths(" in handle_accept
+
+
+# ── SPEC-66 BUG #5: every failed accept tells the person on the card ─────────
+#
+# Two exits in `_git_accept` used to leave the card untouched: a clean tree
+# (nothing to commit) and a diff read that raised. Both now record
+# `metadata["accept_error"]` (+ `status = "error"`) through `_fail`, which is
+# what the feed document renders. These tests drive the REAL `handle_accept`
+# against a REAL repo — the two cases the external report reproduced.
+
+class _InlineGLib:
+    """idle_add runs the callback inline (no main loop in a test)."""
+
+    def idle_add(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        return 0
+
+
+class _SyncThreading:
+    """threading shim: Thread.start() runs the target on the calling thread.
+
+    Same idiom as tests/test_feed_handler.py — the accept path hands
+    `_git_accept` to a daemon thread, so without this the assertions would
+    race the worker.
+    """
+
+    class Thread:
+        def __init__(self, target=None, daemon=None, args=(), kwargs=None):
+            self._target = target
+            self._args = args or ()
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            if self._target is not None:
+                self._target(*self._args, **self._kwargs)
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            return None
+
+
+class _AcceptHost(FeedReviewMixin):
+    """Minimal mixin host: the card map, the project map, and update_card.
+
+    `update_card` is the (main-thread) surface the feed re-renders from, so
+    recording its calls is how the tests observe the surfaced failure.
+    """
+
+    def __init__(self, repo, project_name="proj"):
+        self._cards = {}
+        self._project_paths = {project_name: str(repo)}
+        self._recent_git_paths = {}
+        self.updates = []
+
+    def update_card(self, card_id, card_data):
+        self.updates.append((card_id, card_data))
+
+
+def _accept_in(monkeypatch, repo, file_path):
+    """Run one real-repo accept; return (host, card, commit_calls)."""
+    import ui.handlers.feed_handler as fh
+
+    commits = []
+    monkeypatch.setattr(git_ops, "commit", lambda *a, **k: commits.append(a))
+    monkeypatch.setattr(fh, "threading", _SyncThreading)
+    monkeypatch.setattr(fh, "_GLib", _InlineGLib(), raising=False)
+
+    host = _AcceptHost(repo)
+    card = FeedCardData(
+        card_type="file_modified", source="agent", title="change",
+        body="+x", author="agent", timestamp=datetime.now(timezone.utc),
+        project_name="proj", file_path=file_path, metadata={},
+    )
+    card_id = "c1"
+    host._cards[card_id] = card
+    host.handle_accept(card_id)
+    return host, card, commits
+
+
+class TestHandleAcceptFailureSurfacing:
+    """BUG #5: a failed accept is recorded on the card, never a dead silence."""
+
+    def test_clean_tree_accept_records_accept_error(self, monkeypatch, repo):
+        """The card's file already matches HEAD: no commit, no accept, but
+        the card records why nothing committed."""
+        # a.txt is committed and unmodified — the index diff is empty.
+        host, card, commits = _accept_in(monkeypatch, repo, "a.txt")
+
+        assert commits == [], "a clean tree must not produce a commit"
+        assert card.accepted is not True
+        assert card.accepted is None  # still pending: the failure never decides
+        assert "nothing to commit" in card.metadata["accept_error"]
+        assert card.metadata["status"] == "error"
+        # ...and the surface was redrawn with that failure.
+        assert host.updates and host.updates[-1][1] is card
+
+    def test_diff_read_failure_records_accept_error(self, monkeypatch, repo):
+        """Staging succeeds but the diff read raises (HEAD points at a
+        nonexistent ref → BadName): the card records the failure."""
+        (repo / "a.txt").write_text("a2\n", encoding="utf-8")
+        # After the initial commit and a real working-tree change, so staging
+        # succeeds and only `index.diff("HEAD")` blows up.
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/nonexistent\n", encoding="utf-8")
+
+        host, card, commits = _accept_in(monkeypatch, repo, "a.txt")
+
+        assert commits == []
+        assert card.accepted is not True
+        assert "diff read failed" in card.metadata["accept_error"]
+        assert card.metadata["status"] == "error"
+        assert host.updates and host.updates[-1][1] is card
