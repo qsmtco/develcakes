@@ -1,10 +1,10 @@
-# Installing CrabCakes
+# Installing DevelCakes
 
-This guide walks you through installing CrabCakes on Linux, verifying all dependencies, and fixing common install errors.
+This guide walks you through installing DevelCakes on Linux, verifying all dependencies, and fixing common install errors.
 
 **Audience:** First-time users on a fresh system.
 
-**Platform support:** CrabCakes is a **Linux-only** application. The GTK4 toolchain and OpenClaw gateway client target Linux. macOS and Windows are not supported. If you need to run on those platforms, use a Linux VM or WSL2.
+**Platform support:** DevelCakes is a **Linux-only** application. The GTK4 toolchain and OpenClaw gateway client target Linux. macOS and Windows are not supported. If you need to run on those platforms, use a Linux VM or WSL2.
 
 ---
 
@@ -13,13 +13,13 @@ This guide walks you through installing CrabCakes on Linux, verifying all depend
 If you have a modern Linux system with Python 3.11+ and GTK4 already installed:
 
 ```bash
-git clone https://github.com/qsmtco/crabcakes.git
-cd crabcakes
+git clone https://github.com/qsmtco/develcakes.git
+cd develcakes
 pip install -e .
-crabcakes
+develcakes
 ```
 
-That's it. The first launch creates `~/.config/crabcakes/` with default configs, seeds the three built-in agents (Coder, Debugger, Auxilium), and starts the KB provider auto-setup.
+That's it. The first launch creates `~/.config/develcakes/` with default configs and seeds the three built-in agents (Coder, Debugger, Auxilium).
 
 ---
 
@@ -27,7 +27,7 @@ That's it. The first launch creates `~/.config/crabcakes/` with default configs,
 
 ### Required system packages
 
-CrabCakes depends on GTK4 and GObject introspection. These are **system packages** — they cannot be installed via pip alone. You must install them with your distribution's package manager before running `pip install`.
+DevelCakes depends on GTK4 and GObject introspection. These are **system packages** — they cannot be installed via pip alone. You must install them with your distribution's package manager before running `pip install`.
 
 #### Debian / Ubuntu (12 Bookworm, 22.04+)
 
@@ -61,7 +61,7 @@ sudo pacman -S --needed \
 
 ### Python version
 
-CrabCakes requires **Python 3.11 or later**. This is enforced in `pyproject.toml`:
+DevelCakes requires **Python 3.11 or later**. This is enforced in `pyproject.toml`:
 
 ```toml
 requires-python = ">=3.11"
@@ -88,11 +88,10 @@ These are listed in `pyproject.toml` and installed when you run `pip install -e 
 
 | Tool | Install command | Why |
 |------|----------------|-----|
-| **xvfb** | `sudo apt install xvfb` | Run CrabCakes in headless environments (CI, Docker, servers) |
+| **xvfb** | `sudo apt install xvfb` | Run DevelCakes in headless environments (CI, Docker, servers) |
 | **Ollama** | See [ollama.com](https://ollama.com) | Local LLM runtime — lets you run agents without a paid API key |
 | **ripgrep** | `sudo apt install ripgrep` | Faster `search_files` tool for the Coder/Debugger agents |
 | **PyYAML** | `pip install pyyaml` | Pretty-formatting of `providers.yaml` (falls back to JSON without it) |
-| **sentence-transformers + numpy** | `pip install sentence-transformers numpy` | Required for the KB embedding index (~700MB, includes PyTorch). Needed if you're rebuilding the Auxilium knowledge base. |
 | **faster-whisper** | `pip install faster-whisper` | Push-to-talk speech-to-text (voice input) |
 | **pyenchant** | `pip install pyenchant` | Spell check in the chat input |
 | **Pygments** | `pip install pygments` | Syntax highlighting in code blocks |
@@ -104,8 +103,8 @@ These are listed in `pyproject.toml` and installed when you run `pip install -e 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/qsmtco/crabcakes.git
-cd crabcakes
+git clone https://github.com/qsmtco/develcakes.git
+cd develcakes
 ```
 
 ### 2. (Recommended) Create a virtual environment
@@ -117,18 +116,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Install CrabCakes
+### 3. Install DevelCakes
 
 ```bash
 pip install -e .
 ```
 
-This installs the `crabcakes` entry-point script and all Python dependencies.
+This installs the `develcakes` entry-point script and all Python dependencies.
 
-### 4. Run CrabCakes
+### 4. Run DevelCakes
 
 ```bash
-crabcakes
+develcakes
 ```
 
 Or, to run directly from source without installing the entry point:
@@ -141,15 +140,15 @@ python3 main.py
 
 ## First-Launch Experience
 
-When you run `crabcakes` for the first time, several things happen automatically:
+When you run `develcakes` for the first time, several things happen automatically:
 
 ### 1. Config directory creation
 
-CrabCakes creates `~/.config/crabcakes/` with permissions `0o700` (owner-only). This follows the same security model as `~/.ssh/` — the directory contains API keys and should not be readable by other users.
+DevelCakes creates `~/.config/develcakes/` with permissions `0o700` (owner-only). This follows the same security model as `~/.ssh/` — the directory contains API keys and should not be readable by other users.
 
 ### 2. Default agent seeding
 
-CrabCakes copies built-in agent definitions from `prompts/default_agents/` into `~/.config/crabcakes/agents/`:
+DevelCakes copies built-in agent definitions from `prompts/default_agents/` into `~/.config/develcakes/agents/`:
 
 - `coder.yaml` — The 🛠️ Coder agent
 - `debugger.yaml` — The 🐛 Debugger agent
@@ -161,39 +160,7 @@ CrabCakes copies built-in agent definitions from `prompts/default_agents/` into 
 
 An `agent.json` file is created with example provider configurations (OpenAI, MiniMax). This file gets `chmod 0o600` permissions.
 
-### 4. KB provider auto-setup
-
-This is the key step that makes Auxilium work out of the box. On startup, CrabCakes calls `ensure_kb_provider()` from `utils/providers_store.py`, which does two things:
-
-**a) Seeds the `local-kb` provider into `providers.yaml`:**
-
-If no `local-kb` provider exists yet, one is created:
-
-```yaml
-- name: local-kb
-  base_url: http://localhost:18790/v1
-  api_key: "***"
-  default_model: local-kb
-  caller: openai
-  enabled: true
-  supports_tools: false
-  supports_streaming: false
-  max_tokens: 4096
-```
-
-This is an OpenAI-compatible endpoint running on localhost.
-
-**b) Patches the Auxilium agent to use `local-kb`:**
-
-If the Auxilium agent's `llm_name` is empty, it gets set to `local-kb`. This ensures the help agent can answer questions from the local knowledge base immediately.
-
-If Auxilium already has a provider configured (e.g., you set it to OpenRouter), this step is skipped — your configuration is respected.
-
-### 5. KB server startup
-
-If the KB embedding index exists at `knowledge/.index/`, the KB HTTP server starts on `localhost:18790`. If the index doesn't exist yet, the server skips startup (and Auxilium will need an external LLM provider until the index is built).
-
-### 6. Auxilium tab opens
+### 4. Auxilium tab opens
 
 The Auxilium 🦀 tab opens automatically (`auto_open: true`). If no verified provider is configured, a first-run wizard may appear.
 
@@ -213,7 +180,7 @@ python3 -c "import gi; gi.require_version('Gtk', '4.0'); from gi.repository impo
 # Expected: GTK OK 4 <minor> (e.g., GTK OK 4 12)
 ```
 
-### Step 2: Check CrabCakes imports
+### Step 2: Check DevelCakes imports
 
 ```bash
 python3 -c "from ui.window import MainWindow; print('Import OK')"
@@ -223,29 +190,20 @@ python3 -c "from ui.window import MainWindow; print('Import OK')"
 ### Step 3: Launch the app
 
 ```bash
-crabcakes
+develcakes
 ```
 
 **Expected behavior:**
-- The CrabCakes window opens
+- The DevelCakes window opens
 - The Auxilium 🦀 tab is visible
 - The left panel shows Prompts, Agents, and Projects tabs
 - No error messages in the terminal
 
-### Step 4: Test the KB server
-
-If the KB index is built, verify the local server responds:
-
-```bash
-curl http://localhost:18790/health
-# Expected: {"status": "ok"}
-```
-
-### Step 5: Ask Auxilium a question
+### Step 4: Ask Auxilium a question
 
 In the Auxilium 🦀 tab, type: "How do I configure a provider?"
 
-If the KB server is running, Auxilium should respond with content from this knowledge base — no external API call needed.
+Auxilium answers through whichever provider you configured in the first-run wizard (Settings → Providers).
 
 ### Headless verification (no display)
 
@@ -282,8 +240,8 @@ sudo dnf install python3-gobject gobject-introspection-devel
 ```bash
 python3 -m venv ~/.crabcakes-venv
 source ~/.crabcakes-venv/bin/activate
-pip install -e /path/to/crabcakes
-crabcakes
+pip install -e /path/to/develcakes
+develcakes
 ```
 
 **Fix (quick, not recommended):**
@@ -297,12 +255,12 @@ pip install --user --break-system-packages -e .
 
 **Fix:** Run with Xvfb:
 ```bash
-xvfb-run -a crabcakes
+xvfb-run -a develcakes
 ```
 
 **Fix (Wayland issues):** Force X11 backend:
 ```bash
-GDK_BACKEND=x11 crabcakes
+GDK_BACKEND=x11 develcakes
 ```
 
 ### `ImportError: libgtk-4.so.1: cannot open shared object file`
@@ -320,7 +278,7 @@ sudo ldconfig
 sudo dnf install gtk4
 ```
 
-### `crabcakes: command not found`
+### `develcakes: command not found`
 
 **Cause:** The entry-point script is in `~/.local/bin` (or your venv `bin/`) but that directory is not on `$PATH`.
 
@@ -349,31 +307,31 @@ sudo ldconfig
 
 ## Running in a Virtual Environment (Recommended)
 
-A venv isolates CrabCakes and its dependencies from your system Python.
+A venv isolates DevelCakes and its dependencies from your system Python.
 
 ```bash
 # Create (one-time)
-python3 -m venv ~/crabcakes-venv
+python3 -m venv ~/develcakes-venv
 
 # Activate (every session)
-source ~/crabcakes-venv/bin/activate
+source ~/develcakes-venv/bin/activate
 
 # Install
-pip install -e /path/to/crabcakes
+pip install -e /path/to/develcakes
 
 # Run
-crabcakes
+develcakes
 ```
 
 **Auto-activation alias** (add to `~/.bashrc`):
 ```bash
-alias crabcakes='~/crabcakes-venv/bin/crabcakes'
+alias develcakes='~/develcakes-venv/bin/develcakes'
 ```
 
 **Cleanup:**
 ```bash
-rm -rf ~/crabcakes-venv           # remove the venv
-rm -rf ~/.config/crabcakes        # reset config (optional)
+rm -rf ~/develcakes-venv           # remove the venv
+rm -rf ~/.config/develcakes        # reset config (optional)
 ```
 
 ---
@@ -381,8 +339,8 @@ rm -rf ~/.config/crabcakes        # reset config (optional)
 ## Installing for Development
 
 ```bash
-git clone https://github.com/qsmtco/crabcakes.git
-cd crabcakes
+git clone https://github.com/qsmtco/develcakes.git
+cd develcakes
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -401,12 +359,6 @@ Dev dependencies (`[dev]` extra):
 - `pytest>=8.0` — test runner
 - `ruff>=0.4` — linter
 
-For KB index rebuilding (if you're editing `knowledge/` files):
-```bash
-pip install sentence-transformers numpy
-```
-
-This adds ~700MB (mostly PyTorch). Only needed when modifying KB content.
 
 ---
 
@@ -416,9 +368,9 @@ This adds ~700MB (mostly PyTorch). Only needed when modifying KB content.
 |----------|---------|---------|
 | `CRABCAKES_PROJECTS_DIR` | `~/projects` | Root directory for the Projects file tree |
 | `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
-| `CRABCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging |
+| `DEVELCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging (legacy `CRABCAKES_DEBUG` still honored) |
 | `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size for voice input |
-| `XDG_CONFIG_HOME` | `~/.config` | Base config directory (CrabCakes uses `$XDG_CONFIG_HOME/crabcakes/`) |
+| `XDG_CONFIG_HOME` | `~/.config` | Base config directory (DevelCakes uses `$XDG_CONFIG_HOME/develcakes/`) |
 
 ---
 
@@ -426,7 +378,7 @@ This adds ~700MB (mostly PyTorch). Only needed when modifying KB content.
 
 If the install doesn't work after trying the fixes above:
 
-1. Set `CRABCAKES_DEBUG=1` for verbose logs: `CRABCAKES_DEBUG=1 crabcakes`
+1. Set `DEVELCAKES_DEBUG=1` for verbose logs: `DEVELCAKES_DEBUG=1 develcakes`
 2. Check `knowledge/troubleshooting.md` for known issues
-3. Search existing issues: https://github.com/qsmtco/crabcakes/issues
+3. Search existing issues: https://github.com/qsmtco/develcakes/issues
 4. File a new issue with: OS + version, Python version, GTK version, full error output

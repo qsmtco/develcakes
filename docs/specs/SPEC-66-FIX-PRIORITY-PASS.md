@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-18
 **Author:** Spec draft from the 18 Nov 2026 fixes list
-**Status:** Draft — for implementation
+**Status:** Complete — Waves 1-3 shipped (26cb03da, 55e5dce0, f812cd7e); the §12.8 stale-strings row was renumbered R-66S (SPEC-67 keeps R-23) and the §12.9 fetch-edge rows landed with it in the remainder commit.
 **Implements:** The ordered fixes in the 18 Nov 2026 review. Features from that review (remember the room, ask-on-unsure, source view, turn snapshot, vision, a person-owned terminal, dream proposals, branch and push) are not this spec.
 **Depends on:** SPEC-47 (acceptance rows). SPEC-64 row R-9 and SPEC-65 row R-10 are repaired here; their behavior is not redesigned except for the `<think>` rule in §2.8.
 **Target branch:** main

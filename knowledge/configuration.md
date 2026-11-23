@@ -1,12 +1,12 @@
-# Configuring CrabCakes
+# Configuring DevelCakes
 
-CrabCakes stores all configuration under `~/.config/crabcakes/`. This guide covers every configuration file, the provider system, agent definitions, and how to set things up via the UI or by hand.
+DevelCakes stores all configuration under `~/.config/develcakes/`. This guide covers every configuration file, the provider system, agent definitions, and how to set things up via the UI or by hand.
 
 ---
 
-## Where is CrabCakes configuration stored?
+## Where is DevelCakes configuration stored?
 
-All config lives under `~/.config/crabcakes/` (respecting `$XDG_CONFIG_HOME` if set). The directory is created on first launch with permissions `0o700` (owner-only), matching the `~/.ssh/` security model.
+All config lives under `~/.config/develcakes/` (respecting `$XDG_CONFIG_HOME` if set). The directory is created on first launch with permissions `0o700` (owner-only), matching the `~/.ssh/` security model.
 
 | File | Purpose | Permissions |
 |------|---------|-------------|
@@ -30,12 +30,12 @@ The `providers.yaml` file is the **canonical** source for LLM provider configura
 - **YAML is human-friendly** — easier to read and edit than nested JSON
 - **Atomic writes** — `save_providers()` writes to a `.tmp` file then renames, preventing corruption
 - **Managed by the UI** — the Settings → Providers dialog reads and writes this file directly
-- **Backward compatible** — if `providers.yaml` is empty or missing, CrabCakes falls back to `agent.json`'s `providers` section (with a deprecation warning)
+- **Backward compatible** — if `providers.yaml` is empty or missing, DevelCakes falls back to `agent.json`'s `providers` section (with a deprecation warning)
 
 ### File location
 
 ```
-~/.config/crabcakes/providers.yaml
+~/.config/develcakes/providers.yaml
 ```
 
 ### Format
@@ -55,20 +55,9 @@ The file contains a YAML list of provider dictionaries:
   last_verified_at: "2026-06-14T23:26:46Z"
   last_error: null
 
-- name: local-kb
-  base_url: http://localhost:18790/v1
-  api_key: "***"
-  default_model: local-kb
-  caller: openai
-  enabled: true
-  supports_tools: false
-  supports_streaming: false
-  max_tokens: 4096
-  last_verified_at: null
-  last_error: null
 ```
 
-If PyYAML is not installed, CrabCakes falls back to JSON format automatically.
+If PyYAML is not installed, DevelCakes falls back to JSON format automatically.
 
 ### ProviderConfig fields
 
@@ -90,17 +79,17 @@ Each provider entry maps to a `ProviderConfig` dataclass (defined in `models/pro
 
 ### The `caller` field
 
-The `caller` field tells CrabCakes which API format to use when making requests. This is essential because not all providers use the same request/response format:
+The `caller` field tells DevelCakes which API format to use when making requests. This is essential because not all providers use the same request/response format:
 
 | Caller | API format | Used by |
 |--------|-----------|---------|
-| `openai` | OpenAI Chat Completions | OpenAI, local-kb, any OpenAI-compatible endpoint |
+| `openai` | OpenAI Chat Completions | OpenAI and any OpenAI-compatible endpoint |
 | `minimax` | MiniMax API | MiniMax |
 | `anthropic` | Anthropic Messages API | Anthropic (Claude) |
 | `openrouter` | OpenRouter (OpenAI-compatible) | OpenRouter |
 | `zai` | ZAI API | ZAI models |
 
-If `caller` is empty, CrabCakes defaults to OpenAI format.
+If `caller` is empty, DevelCakes defaults to OpenAI format.
 
 ---
 
@@ -193,7 +182,7 @@ Default skip patterns (enforcement doesn't run on these):
 
 ## How providers.yaml and agent.json interact
 
-CrabCakes uses a **fallback chain** for provider configuration:
+DevelCakes uses a **fallback chain** for provider configuration:
 
 1. **Try `providers.yaml` first** — `_load_providers_from_yaml_or_fallback()` calls `utils.providers_store.load_providers()` to read the YAML file.
 2. **If non-empty** — Each `ProviderConfig` from YAML is converted to an `LLMProviderConfig` via `_to_llm_provider()` and added to the providers dict. The runtime uses these.
@@ -231,49 +220,9 @@ Providers are keyed two ways in the runtime dict:
 
 ---
 
-## The local-kb Provider
-
-The `local-kb` provider is special — it wraps CrabCakes' built-in KB HTTP server, which presents an OpenAI-compatible API on `localhost:18790`.
-
-### What it does
-
-When the agent runtime sends a chat completion request to `local-kb`:
-
-1. The KB server (`agent/kb_server.py`) receives the request
-2. It extracts the last user message from the `messages` array
-3. It embeds the question using the `BAAI/bge-small-en-v1.5` model
-4. It computes cosine similarity against all indexed KB chunks
-5. Top-5 chunks above score 0.35 are returned, formatted as a response
-6. If the top chunk's score is below 0.55 (confidence threshold), returns `[KB_OUT_OF_SCOPE]`
-7. The response is formatted as a standard OpenAI chat completion
-
-### Configuration
-
-```yaml
-- name: local-kb
-  base_url: http://localhost:18790/v1
-  api_key: "***"           # placeholder — KB server doesn't check auth
-  default_model: local-kb
-  caller: openai            # OpenAI-compatible API format
-  supports_tools: false     # KB server never calls tools
-  supports_streaming: false # blocking only, no streaming
-  max_tokens: 4096
-```
-
-### Auto-setup via ensure_kb_provider()
-
-On every startup, `ensure_kb_provider()` in `utils/providers_store.py` runs. It is idempotent:
-
-1. **Seeds the provider** — If no `local-kb` entry exists in `providers.yaml`, one is created
-2. **Patches the Auxilium agent** — If Auxilium's `llm_name` is empty, sets it to `local-kb`
-
-If you manually configure Auxilium with a different provider (e.g., OpenRouter), step 2 is skipped.
-
----
-
 ## agents/ Directory — Agent Definitions
 
-Agent definitions live in `~/.config/crabcakes/agents/` as YAML files.
+Agent definitions live in `~/.config/develcakes/agents/` as YAML files.
 
 ### Agent YAML schema
 
@@ -324,7 +273,7 @@ self_improvement:
 
 Each agent can override the global provider:
 
-- `llm_name` — Use a specific provider from `providers.yaml` (e.g., `"minimax"`, `"openai"`, `"local-kb"`)
+- `llm_name` — Use a specific provider from `providers.yaml` (e.g., `"minimax"`, `"openai"`)
 - `model` — Use a specific model (e.g., `"MiniMax-M2.7"`, `"gpt-4o"`)
 - If both are unset, the global `default_provider` and `default_model` from `agent.json` are used
 
@@ -348,7 +297,7 @@ Three default agents are seeded from `prompts/default_agents/` on first launch:
 
 | Agent | File | Role | Key traits |
 |-------|------|------|------------|
-| 🦀 Auxilium | `auxilium.yaml` | `helper` | `auto_open: true`, `auto_add_to_projects: true`, uses `local-kb` |
+| 🦀 Auxilium | `auxilium.yaml` | `helper` | `auto_open: true`, `auto_add_to_projects: true` |
 | 🛠️ Coder | `coder.yaml` | `coder` | Has write tools, enforcement enabled, full self-improvement |
 | 🐛 Debugger | `debugger.yaml` | `debugger` | Read-only (no write tools), enforcement disabled |
 
@@ -356,7 +305,7 @@ Three default agents are seeded from `prompts/default_agents/` on first launch:
 
 **Via the UI:** Use the Agent Builder dialog (pencil icon in the Agents tab).
 
-**Via YAML:** Create a new `.yaml` file in `~/.config/crabcakes/agents/`:
+**Via YAML:** Create a new `.yaml` file in `~/.config/develcakes/agents/`:
 
 ```yaml
 name: Reviewer
@@ -380,7 +329,7 @@ self_improvement:
 
 ### Legacy migration
 
-If you have an old `crabcakes.yaml` agent file (from before the Auxilium rename), it's automatically migrated to `auxilium.yaml` on next launch. The `name`, `role`, and prompt references are updated in-place.
+If you have an old `develcakes.yaml` agent file (from before the Auxilium rename), it's automatically migrated to `auxilium.yaml` on next launch. The `name`, `role`, and prompt references are updated in-place.
 
 ---
 
@@ -418,12 +367,12 @@ The Settings dialog can verify a provider by making a test API call. On success,
 
 ## File Permissions
 
-CrabCakes takes API key security seriously:
+DevelCakes takes API key security seriously:
 
 ### Config directory
 
 ```bash
-~/.config/crabcakes/    # chmod 0o700 (owner-only, like ~/.ssh/)
+~/.config/develcakes/    # chmod 0o700 (owner-only, like ~/.ssh/)
 ```
 
 Created by `_create_default_config()` and enforced by `_fix_config_dir_permissions()` on every startup. If the directory has broader permissions, they're tightened automatically.
@@ -431,8 +380,8 @@ Created by `_create_default_config()` and enforced by `_fix_config_dir_permissio
 ### Config files
 
 ```bash
-~/.config/crabcakes/agent.json       # chmod 0o600
-~/.config/crabcakes/providers.yaml   # chmod 0o600
+~/.config/develcakes/agent.json       # chmod 0o600
+~/.config/develcakes/providers.yaml   # chmod 0o600
 ```
 
 Both are written with `0o600` permissions. The `save_providers()` function in `utils/providers_store.py` uses atomic writes (`.tmp` → rename) and then `os.chmod(path, 0o600)`.
@@ -443,10 +392,10 @@ On startup, `_check_permissions()` in `agent/config.py` checks if `agent.json` i
 
 ```
 WARNING: agent.json is readable by other users (mode=0644).
-Run: chmod 600 /home/user/.config/crabcakes/agent.json
+Run: chmod 600 /home/user/.config/develcakes/agent.json
 ```
 
-This is a warning only — CrabCakes does not refuse to start.
+This is a warning only — DevelCakes does not refuse to start.
 
 ---
 
@@ -457,7 +406,7 @@ This is a warning only — CrabCakes does not refuse to start.
 | `XDG_CONFIG_HOME` | `~/.config` | Base config directory |
 | `CRABCAKES_PROJECTS_DIR` | `~/projects` | Root directory for the Projects file tree |
 | `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
-| `CRABCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging |
+| `DEVELCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging (legacy `CRABCAKES_DEBUG` still honored) |
 | `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size for voice input |
 
 These are resolved centrally in `utils/config.py`. All path lookups go through `get_config_dir()`, `get_projects_dir()`, `get_gateway_url()`, or `get_identity_dir()` — never hardcoded paths.
@@ -466,7 +415,7 @@ These are resolved centrally in `utils/config.py`. All path lookups go through `
 
 ## Configuring the OpenClaw Gateway Connection
 
-CrabCakes connects to an OpenClaw gateway via WebSocket for remote agent access.
+DevelCakes connects to an OpenClaw gateway via WebSocket for remote agent access.
 
 ### Default connection
 
@@ -482,7 +431,7 @@ CrabCakes connects to an OpenClaw gateway via WebSocket for remote agent access.
 
 ### Without a gateway
 
-You do NOT need a gateway connection to use CrabCakes. The three special agents (Coder, Debugger, Auxilium) run locally with direct API calls. The gateway is only needed for remote OpenClaw agents.
+You do NOT need a gateway connection to use DevelCakes. The three special agents (Coder, Debugger, Auxilium) run locally with direct API calls. The gateway is only needed for remote OpenClaw agents.
 
 ---
 
@@ -513,15 +462,6 @@ Here's a complete setup with two providers, three agents, and enforcement:
   supports_streaming: true
   max_tokens: 1048576
 
-- name: local-kb
-  base_url: http://localhost:18790/v1
-  api_key: "***"
-  default_model: local-kb
-  caller: openai
-  enabled: true
-  supports_tools: false
-  supports_streaming: false
-  max_tokens: 4096
 ```
 
 ### agent.json (runtime settings only — providers moved to YAML)

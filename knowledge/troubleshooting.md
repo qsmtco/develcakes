@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide covers common issues in CrabCakes and how to resolve them. Each issue includes the actual error message you will see, the root cause, and step-by-step fixes.
+This guide covers common issues in DevelCakes and how to resolve them. Each issue includes the actual error message you will see, the root cause, and step-by-step fixes.
 
 ---
 
@@ -15,7 +15,7 @@ This guide covers common issues in CrabCakes and how to resolve them. Each issue
 **Fix:**
 
 1. Run the first-run wizard (Settings → Run Setup Wizard)
-2. Or manually edit `~/.config/crabcakes/providers.yaml` to add a provider:
+2. Or manually edit `~/.config/develcakes/providers.yaml` to add a provider:
 
 ```yaml
 - name: openrouter
@@ -30,7 +30,7 @@ This guide covers common issues in CrabCakes and how to resolve them. Each issue
 ```
 
 3. Ensure the agent's `llm_name` in `agents/*.yaml` matches a configured provider name
-4. Restart CrabCakes
+4. Restart DevelCakes
 
 ### "Provider 'X' is not configured"
 
@@ -54,7 +54,7 @@ This guide covers common issues in CrabCakes and how to resolve them. Each issue
 
 1. Open Settings → click the ⚙ button in the toolbar
 2. Find the provider and add your API key
-3. Or edit `~/.config/crabcakes/providers.yaml` directly and add the `api_key` field
+3. Or edit `~/.config/develcakes/providers.yaml` directly and add the `api_key` field
 4. For per-agent keys, use the Agent Builder to set an API key specific to one agent
 
 The `providers.yaml` fallback scan: if neither the conversation nor the provider config has an API key, the runtime scans `providers.yaml` for a matching provider name with a non-empty key.
@@ -90,65 +90,6 @@ The `providers.yaml` fallback scan: if neither the conversation nor the provider
 
 ---
 
-## KB Server Issues
-
-### KB Server Not Starting
-
-**Symptom:** The Auxilium agent cannot answer questions, or the local-kb provider returns errors.
-
-**Diagnosis:**
-
-The KB server (`agent/kb_server.py`) only starts if the KB index is available. Check:
-
-```bash
-ls -la /path/to/projects/crabcakes/knowledge/.index/
-# Should show: chunks.json  embeddings.npy
-```
-
-If these files don't exist, the index needs to be built:
-
-```bash
-cd /path/to/projects/crabcakes
-python3 scripts/rebuild_kb_index.py
-```
-
-**Requirements for KB index:**
-- `sentence-transformers` Python package
-- `numpy` Python package
-- ~130MB model download on first run (BAAI/bge-small-en-v1.5)
-
-**Server won't bind to port 18790:**
-
-If another process is using port 18790, the KB server logs:
-```
-kb_server: failed to bind 127.0.0.1:18790: [Errno 98] Address already in use
-```
-
-Fix: kill the process using the port, or restart CrabCakes.
-
-### KB Server Returns [KB_OUT_OF_SCOPE] for Everything
-
-**Symptom:** Auxilium always falls back to the external provider, even for questions about CrabCakes.
-
-**Root cause:** The KB index may be stale or the confidence threshold (0.55) is too high for your content.
-
-**Fix:**
-
-1. Rebuild the index: `python3 scripts/rebuild_kb_index.py`
-2. Check that your knowledge `.md` files have proper `##` headings (chunks are split by level-2 headings)
-3. Verify the index loaded correctly by running with `CRABCAKES_DEBUG=1` and checking for `kb_lookup` log lines
-
-### sentence-transformers Not Installed
-
-**Symptom:** KB lookup silently returns empty results. Log shows: `sentence-transformers not available; kb_lookup returning []`
-
-**Fix:**
-```bash
-pip install sentence-transformers
-```
-
----
-
 ## Gateway Connection Issues
 
 ### Toolbar Shows "Offline" or "Connecting..." Indefinitely
@@ -172,9 +113,9 @@ pip install sentence-transformers
    openclaw device list
    ```
 
-5. **Check logs:** Run with `CRABCAKES_DEBUG=1` to see WebSocket connection details:
+5. **Check logs:** Run with `DEVELCAKES_DEBUG=1` to see WebSocket connection details:
    ```bash
-   CRABCAKES_DEBUG=1 crabcakes
+   DEVELCAKES_DEBUG=1 develcakes
    ```
 
 ### Gateway Disconnects Randomly
@@ -200,7 +141,7 @@ pip install sentence-transformers
 1. Verify the agent has an active session (check if the agent appears in the Agents tab)
 2. Check gateway status — is the agent process running?
 3. Look for error messages in the chat tab or activity drawer
-4. Run with `CRABCAKES_DEBUG=1` to see event routing
+4. Run with `DEVELCAKES_DEBUG=1` to see event routing
 
 ### Special Agents (Coder, Debugger, custom)
 
@@ -211,7 +152,7 @@ pip install sentence-transformers
 1. **Provider configured:** Ensure the agent's LLM provider is set up with a valid API key
 2. **API key valid:** Test with a simple message — if you get a 401 error, the key is invalid
 3. **Check error messages:** Special agent errors appear in the chat as red error bubbles
-4. **Review logs:** `CRABCAKES_DEBUG=1` shows the full API request/response cycle
+4. **Review logs:** `DEVELCAKES_DEBUG=1` shows the full API request/response cycle
 
 **Common errors:**
 - `"Agent returned no content"` — The LLM provider returned an empty response. Check provider status and model name.
@@ -224,7 +165,7 @@ pip install sentence-transformers
 
 ### Python Version
 
-CrabCakes requires Python 3.12+. Check:
+DevelCakes requires Python 3.12+. Check:
 
 ```bash
 python3 --version
@@ -232,7 +173,7 @@ python3 --version
 
 ### GTK4 Installation
 
-CrabCakes requires GTK4 and PyGObject. Verify:
+DevelCakes requires GTK4 and PyGObject. Verify:
 
 ```bash
 python3 -c "import gi; gi.require_version('Gtk', '4.0'); from gi.repository import Gtk; print('GTK4 OK')"
@@ -257,19 +198,19 @@ sudo pacman -S python-gobject gtk4
 
 ### Dependencies
 
-Install CrabCakes dependencies:
+Install DevelCakes dependencies:
 
 ```bash
-cd /path/to/projects/crabcakes
+cd /path/to/projects/develcakes
 pip install -e .
 ```
 
 ### Import Errors
 
-If you see `ModuleNotFoundError` for CrabCakes modules, ensure you are running from the project root:
+If you see `ModuleNotFoundError` for DevelCakes modules, ensure you are running from the project root:
 
 ```bash
-cd /path/to/projects/crabcakes
+cd /path/to/projects/develcakes
 python3 main.py
 ```
 
@@ -279,20 +220,19 @@ python3 main.py
 
 ### Log Location
 
-CrabCakes logs to stderr (terminal output). There is no log file by default — logs appear in the terminal where CrabCakes was launched.
+DevelCakes logs to stderr (terminal output). There is no log file by default — logs appear in the terminal where DevelCakes was launched.
 
 ### Debug Mode
 
-Enable verbose logging with the `CRABCAKES_DEBUG` environment variable:
+Enable verbose logging with the `DEVELCAKES_DEBUG` environment variable (the older `CRABCAKES_DEBUG` name still works for one release):
 
 ```bash
-CRABCAKES_DEBUG=1 python3 main.py
+DEVELCAKES_DEBUG=1 python3 main.py
 ```
 
 This sets the log level to `DEBUG` (default is `WARNING`). You will see:
 - LLM API request/response details
 - WebSocket event routing
-- KB lookup queries and scores
 - Tool execution details
 - Gateway connection lifecycle
 
@@ -304,7 +244,7 @@ For raw WebSocket frame dumps:
 CRABCAKES_GATEWAY_DEBUG=1 python3 main.py
 ```
 
-This is independent of `CRABCAKES_DEBUG` and dumps all WebSocket frames.
+This is independent of `DEVELCAKES_DEBUG` and dumps all WebSocket frames.
 
 ---
 
@@ -316,30 +256,30 @@ This is independent of `CRABCAKES_DEBUG` and dumps all WebSocket frames.
 
 ```bash
 # Backup first
-cp -r ~/.config/crabcakes ~/.config/crabcakes.backup
+cp -r ~/.config/develcakes ~/.config/develcakes.backup
 
 # Remove config
-rm -rf ~/.config/crabcakes
+rm -rf ~/.config/develcakes
 ```
 
-CrabCakes will start fresh on next launch with the first-run wizard.
+DevelCakes will start fresh on next launch with the first-run wizard.
 
 ### Partial Reset
 
 **Reset only providers (keep agents, projects, favorites):**
 
 ```bash
-rm ~/.config/crabcakes/providers.yaml
-rm ~/.config/crabcakes/agent.json
+rm ~/.config/develcakes/providers.yaml
+rm ~/.config/develcakes/agent.json
 ```
 
 **Reset only agent definitions (keep providers):**
 
 ```bash
-rm -rf ~/.config/crabcakes/agents/
+rm -rf ~/.config/develcakes/agents/
 ```
 
-**Reset a single project's CrabCakes data:**
+**Reset a single project's DevelCakes data:**
 
 ```bash
 rm -rf /path/to/project/.crabcakes/
@@ -352,10 +292,10 @@ This removes team config, bug journals, rules, workflow state, and feed data for
 `providers.yaml` contains API keys. Ensure it is readable only by the owner:
 
 ```bash
-chmod 600 ~/.config/crabcakes/providers.yaml
+chmod 600 ~/.config/develcakes/providers.yaml
 ```
 
-CrabCakes warns at startup if this file is group or world-readable.
+DevelCakes warns at startup if this file is group or world-readable.
 
 ---
 
@@ -396,7 +336,7 @@ MiniMax returns body-level errors with HTTP 200. The status codes:
 
 ## Getting Help
 
-- **Built-in help:** Ask the CrabCakes 🦀 (Auxilium) agent — it can answer questions from the local KB without any API key
+- **Built-in help:** Ask the DevelCakes 🦀 (Auxilium) agent — it answers through your configured provider
 - **Command help:** Type `/help` in any chat input
 - **Gateway docs:** See OpenClaw documentation at `https://docs.openclaw.ai`
-- **Debug mode:** Always run with `CRABCAKES_DEBUG=1` when reporting bugs — the logs are essential for diagnosis
+- **Debug mode:** Always run with `DEVELCAKES_DEBUG=1` when reporting bugs — the logs are essential for diagnosis

@@ -1,14 +1,14 @@
-# Agents in CrabCakes
+# Agents in DevelCakes
 
-CrabCakes has two categories of agents: **special agents** (local, running inside the app via `AgentRuntime`) and **gateway agents** (remote, running on an OpenClaw gateway server). This page covers special agents in detail. For gateway agents, see [Gateway](gateway.md).
+DevelCakes has two categories of agents: **special agents** (local, running inside the app via `AgentRuntime`) and **gateway agents** (remote, running on an OpenClaw gateway server). This page covers special agents in detail. For gateway agents, see [Gateway](gateway.md).
 
 ---
 
 ## What Are Special Agents?
 
-Special agents are built-in and user-defined AI assistants that run locally within CrabCakes. Each one has its own `AgentRuntime` instance, conversation history, tool set, and LLM provider configuration. They operate within your project directory and can read, write, search, and execute commands (with approval).
+Special agents are built-in and user-defined AI assistants that run locally within DevelCakes. Each one has its own `AgentRuntime` instance, conversation history, tool set, and LLM provider configuration. They operate within your project directory and can read, write, search, and execute commands (with approval).
 
-Special agents are defined by YAML files stored in `~/.config/crabcakes/agents/`. Built-in defaults (Coder, Debugger, Auxilium) are seeded automatically on first launch from `prompts/default_agents/`.
+Special agents are defined by YAML files stored in `~/.config/develcakes/agents/`. Built-in defaults (Coder, Debugger, Auxilium) are seeded automatically on first launch from `prompts/default_agents/`.
 
 ---
 
@@ -38,46 +38,17 @@ The Debugger is a diagnostics and adversarial-audit agent. It can read files, ru
 
 ### Auxilium (🦀)
 
-Auxilium is the always-on help agent. It answers questions from the local **knowledge base** (the files in `knowledge/*.md`), falling back to a remote LLM provider when the KB can't answer.
+Auxilium is the always-on help agent. It answers questions through whichever provider you configure (Settings → Providers) — the one-click presets make this a paste-your-key operation.
 
 - **Role:** `helper`
 - **Session key:** `special:auxilium`
 - **Tools:** `list_files`, `read_file` (minimal — for safety)
-- **Provider:** `local-kb` (the KB HTTP server on `127.0.0.1:18790`)
-- **Fallback:** Configurable via `fallback_provider` / `fallback_model` in the agent YAML
+- **Provider:** none on fresh install — configure one in Settings → Providers
 - **Self-improvement:** `project_rules` only
 - **Auto-open:** Yes (`auto_open: true`) — opens a tab on every app launch
 - **Auto-add to projects:** Yes (`auto_add_to_projects: true`) — added to every new project as an onboarding guide
 
 Auxilium does **not** require an active project — it's the only special agent that works without one.
-
----
-
-## The Auxilium KB Provider System
-
-### How It Works
-
-When you ask Auxilium a question, the system follows a fallback chain:
-
-1. **KB HTTP Server** (`local-kb` provider): Your question is sent to a local HTTP server at `http://127.0.0.1:18790/v1/chat/completions`. This server wraps a semantic search over the project's `knowledge/*.md` files.
-2. **Semantic search**: The server embeds your question using the `BAAI/bge-small-en-v1.5` model (384-dimensional, ~130MB, runs on CPU), then computes cosine similarity against pre-built chunk embeddings stored in `knowledge/.index/`.
-3. **Confidence check**: The top-K chunks (K=5) must pass a minimum score threshold of 0.35, and the best chunk must score at least 0.55. If not, the server returns `[KB_OUT_OF_SCOPE]`.
-4. **Fallback**: If the KB returns `[KB_OUT_OF_SCOPE]`, the runtime retries the question using the configured `fallback_provider` and `fallback_model` — typically a remote LLM like OpenRouter.
-
-### KB Index Files
-
-The KB index lives in `knowledge/.index/`:
-- `chunks.json` — list of `{id, source, section, text}` objects
-- `embeddings.npy` — float32 numpy array, shape `(N, 384)`, L2-normalized
-
-The index is built offline by `scripts/rebuild_kb_index.py` and committed to the repo. The server only starts if the index is available.
-
-### KB Server Lifecycle
-
-- Started by `AgentRuntimeHandler.__init__()` if the KB index exists
-- Stopped by `AgentRuntimeHandler.stop_all()` on window shutdown
-- Binds to `127.0.0.1` only — no external access
-- Uses pure Python stdlib (`http.server`) — no external dependencies
 
 ---
 
@@ -93,15 +64,14 @@ The Agent Builder is a GTK4 dialog accessible from the sidebar. It lets you crea
 2. **Name**: Enter a display name (e.g. "Reviewer"). This becomes the tab title.
 3. **Role**: Enter a role identifier (e.g. `reviewer`). This maps to `prompts/system/{role}.md` for the system prompt.
 4. **Provider**: Select an LLM provider from the dropdown. Options come from `providers.yaml`. If no providers are configured, open Settings first.
-5. **Fallback Provider/Model**: Visible only when the primary provider is `local-kb`. Lets you specify a remote fallback (e.g. OpenRouter) for questions the KB can't answer.
 6. **System Prompts**: Check one or more `.md` files from `prompts/system/`. These are concatenated to form the agent's system prompt.
 7. **Tools**: Check the tools this agent can use. Preset buttons:
    - **Full Access** — all tools enabled
    - **Read Only** — read_file, list_files, search_files, web_search, web_fetch
    - **Custom** — leave current state as-is
    Tools are grouped into categories: Read, Write, Execute, Web.
-8. **MCP Servers**: Check any configured MCP servers (from `~/.config/crabcakes/mcp-servers.json`).
-9. Click **Create**. The agent is saved to `~/.config/crabcakes/agents/{name}.yaml`.
+8. **MCP Servers**: Check any configured MCP servers (from `~/.config/develcakes/mcp-servers.json`).
+9. Click **Create**. The agent is saved to `~/.config/develcakes/agents/{name}.yaml`.
 
 **To edit an existing agent:** Click the edit button on an agent's tab. The form pre-fills with current values. Save writes back to the same YAML file.
 
@@ -109,7 +79,7 @@ The **Save button** is disabled until all four required fields are filled: name,
 
 ### Via YAML Files
 
-Agent definitions are stored in `~/.config/crabcakes/agents/*.yaml` (or `.json`). You can create or edit these files directly.
+Agent definitions are stored in `~/.config/develcakes/agents/*.yaml` (or `.json`). You can create or edit these files directly.
 
 #### Full YAML Field Reference
 
@@ -133,7 +103,7 @@ llm_name: MiniMax M2.7         # Provider name (must exist in providers.yaml)
 
 # Optional fields
 model: MiniMax-M2.7            # Model override (defaults to provider's default_model)
-fallback_provider: openrouter  # Used when primary provider returns [KB_OUT_OF_SCOPE]
+fallback_provider: openrouter  # Used when the primary provider fails
 fallback_model: owl-alpha      # Fallback model
 mcp_servers:                   # MCP server names (from mcp-servers.json)
   - memory
@@ -216,9 +186,9 @@ Rule of thumb: if it should change agent behavior *this session*, diary; if it's
 
 ## MCP Server Integration
 
-Agents can connect to MCP (Model Context Protocol) servers for extended tool access. MCP servers are configured in `~/.config/crabcakes/mcp-servers.json`.
+Agents can connect to MCP (Model Context Protocol) servers for extended tool access. MCP servers are configured in `~/.config/develcakes/mcp-servers.json`.
 
-### How MCP Works in CrabCakes
+### How MCP Works in DevelCakes
 
 - MCP tool calls are namespaced as `server_name/tool_name` (e.g. `memory/store`)
 - The runtime routes any tool name containing `/` to the MCP client
@@ -229,7 +199,7 @@ Agents can connect to MCP (Model Context Protocol) servers for extended tool acc
 ### Configuring MCP Servers
 
 ```json
-// ~/.config/crabcakes/mcp-servers.json
+// ~/.config/develcakes/mcp-servers.json
 {
   "memory": {
     "command": "npx",
@@ -255,7 +225,7 @@ Only enabled servers appear in the Agent Builder UI checkboxes.
 
 | Aspect | Special Agents | Gateway Agents |
 |--------|---------------|----------------|
-| **Execution** | Local (`AgentRuntime` in CrabCakes process) | Remote (on OpenClaw gateway server) |
+| **Execution** | Local (`AgentRuntime` in DevelCakes process) | Remote (on OpenClaw gateway server) |
 | **Authentication** | None — they're local | Ed25519 device auth via WebSocket |
 | **Tools** | 8 local tools (file, exec, web) | Gateway-managed tool set |
 | **Provider config** | Per-agent `llm_name` in YAML | Configured on the gateway server |
@@ -300,7 +270,6 @@ Providers are resolved by explicit `caller` field in `providers.yaml`, or by mod
 - **Anthropic** (`anthropic/*`)
 - **OpenRouter** (`openrouter/*`)
 - **ZAI** (`zai/*`)
-- **local-kb** — the KB HTTP server (no external API calls)
 
 ---
 
@@ -315,7 +284,7 @@ Special agents (except Auxilium) require an active project. Open a project from 
 This usually means the LLM provider is misconfigured. Check:
 1. `providers.yaml` has the correct `base_url`, `api_key`, and `default_model`
 2. The agent's `llm_name` matches a provider name in `providers.yaml`
-3. For `local-kb`, ensure `knowledge/.index/` exists
+3. The provider's `enabled` flag is true
 
 ### exec_command always denied
 
@@ -323,4 +292,4 @@ The approval callback requires a feed handler. If no feed cards appear, the UI m
 
 ### Auxilium can't answer my question
 
-The KB confidence threshold is 0.55. If your question doesn't closely match content in `knowledge/*.md`, the KB returns `[KB_OUT_OF_SCOPE]` and falls through to the fallback provider. Make sure `fallback_provider` is set in `auxilium.yaml`.
+Auxilium answers through your configured provider. Verify the provider card passes **Test** in Settings → Providers, and that Auxilium's `llm_name` in `agents/auxilium.yaml` matches it. If the provider rate-limits or errors, configure a `fallback_provider`.

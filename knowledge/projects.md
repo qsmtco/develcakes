@@ -1,14 +1,14 @@
-# Projects in CrabCakes
+# Projects in DevelCakes
 
-Projects are the primary unit of work in CrabCakes. They organize code, agents, and conversations into self-contained workspaces. Every special agent (except Auxilium) requires an active project to operate.
+Projects are the primary unit of work in DevelCakes. They organize code, agents, and conversations into self-contained workspaces. Every special agent (except Auxilium) requires an active project to operate.
 
 ---
 
 ## What Is a Project?
 
-A project is a directory on your filesystem that CrabCakes opens as a workspace. It contains your code files, a `.crabcakes/` configuration directory, and optionally a git repository. Projects live under `~/projects/` by default (configurable via `$CRABCAKES_PROJECTS_DIR`).
+A project is a directory on your filesystem that DevelCakes opens as a workspace. It contains your code files, a `.crabcakes/` configuration directory, and optionally a git repository. Projects live under `~/projects/` by default (configurable via `$CRABCAKES_PROJECTS_DIR`).
 
-When you open a project, CrabCakes:
+When you open a project, DevelCakes:
 1. Creates a project chat tab for team communication
 2. Loads team members from `.crabcakes/team.json`
 3. Refreshes the agent list with +/− membership buttons
@@ -28,7 +28,7 @@ You can create a new project from the file tree:
 2. Enter a project name
 3. Optionally specify a custom path (defaults to `$CRABCAKES_PROJECTS_DIR/<name>`)
 
-CrabCakes then:
+DevelCakes then:
 - Creates the directory (`os.makedirs`)
 - Initializes `.crabcakes/` with awareness artifacts
 - Auto-adds onboarding agents to the team
@@ -39,7 +39,7 @@ CrabCakes then:
 
 ### Opening an Existing Project
 
-Double-click a project directory in the file tree. CrabCakes opens it as a project tab, loads the team, and populates the routing table.
+Double-click a project directory in the file tree. DevelCakes opens it as a project tab, loads the team, and populates the routing table.
 
 ### Closing a Project
 
@@ -65,7 +65,7 @@ The project manifest. Contains the project name, description, and any project-sp
 <!-- Any project-specific context. -->
 ```
 
-If a `crabcakes.md` file exists at the project root (legacy format), it's migrated to `.crabcakes/project.md`.
+If a `develcakes.md` file exists at the project root (legacy format), it's migrated to `.crabcakes/project.md`.
 
 ### `team.json`
 
@@ -184,7 +184,7 @@ This forwards the question to all team members.
 
 ### Overview
 
-CrabCakes reviews agent writes through **feed cards**: enforcement results surface as cards and are accepted or rejected right on the project feed, with a standalone git-backed revert available from the file drawer. (The older checkpoint/diff/accept/reject review mode was removed — see "Checkpoint-Based Review — removed" below.)
+DevelCakes reviews agent writes through **feed cards**: enforcement results surface as cards and are accepted or rejected right on the project feed, with a standalone git-backed revert available from the file drawer. (The older checkpoint/diff/accept/reject review mode was removed — see "Checkpoint-Based Review — removed" below.)
 
 ### Feed Card Review (Primary)
 
@@ -280,10 +280,10 @@ When the enforcement layer catches issues (syntax errors, test failures, lint vi
 
 ### Configuration Paths
 
-- **Config directory:** `~/.config/crabcakes/` (respects `$XDG_CONFIG_HOME`)
+- **Config directory:** `~/.config/develcakes/` (respects `$XDG_CONFIG_HOME`)
 - **Projects root:** `~/projects/` (configurable via `$CRABCAKES_PROJECTS_DIR`)
 - **Per-project config:** `<project_path>/.crabcakes/`
-- **Project membership (legacy):** `~/.config/crabcakes/projects/<name>/members.json`
+- **Project membership (legacy):** `~/.config/develcakes/projects/<name>/members.json`
 
 ### `.crabcakes/` File Summary
 

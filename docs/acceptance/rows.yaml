@@ -193,3 +193,11 @@
   mutation: tests/mutations/R-22.diff
   runner: plain
   added: 2026-11-18
+
+- id: R-66S
+  claim: "The knowledge/ sweep holds: no file references the removed KB subsystem (local-kb, kb_server, port 18790, ensure_kb_provider, rebuild_kb_index, KB_OUT_OF_SCOPE, sentence-transformers, kb-provider.md), and no file uses the pre-rename product name (CrabCakes / bare crabcakes; the .crabcakes/ project-dir name and CRABCAKES_* env fallbacks are legal)."
+  source: "docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §12.8 (renumbered R-23 → R-66S per PM ruling 2026-11-22; SPEC-67 keeps R-23)"
+  node: tests/test_spec66_package.py::test_knowledge_sweep_no_stale_product_or_subsystem_refs
+  mutation: tests/mutations/R-66S.diff
+  runner: plain
+  added: 2026-11-22

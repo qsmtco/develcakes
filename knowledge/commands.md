@@ -1,6 +1,6 @@
 # Command Reference
 
-CrabCakes supports slash commands typed directly in the chat input. Commands are parsed by `CommandHandler` (in `ui/handlers/command_handler.py`) and dispatched to the appropriate handler. Commands only work when typed at the beginning of a message (must start with `/`).
+DevelCakes supports slash commands typed directly in the chat input. Commands are parsed by `CommandHandler` (in `ui/handlers/command_handler.py`) and dispatched to the appropriate handler. Commands only work when typed at the beginning of a message (must start with `/`).
 
 ## Command Syntax Rules
 

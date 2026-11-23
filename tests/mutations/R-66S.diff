@@ -1,0 +1,10 @@
+--- a/knowledge/setup.md
++++ b/knowledge/setup.md
+@@ -1,6 +1,6 @@
+ # Quick Start Guide
+ 
+-## How do I install Develcakes?
++## How do I install Develcakes? (formerly CrabCakes — local-kb users see the old guide)
+ 
+ See the detailed guide: **[Installing Develcakes](install.md)**
+ 

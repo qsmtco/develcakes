@@ -444,3 +444,80 @@ def test_grep_subprocess_gets_the_scrubbed_env_not_the_app_env(monkeypatch):
     _run_grep("needle", "/tmp")
     assert "OPENAI_API_KEY" not in seen["env"]
     assert seen["env"] == get_scrubbed_env()
+
+
+# ── §12.9 fetch edge rows ─────────────────────────────────────────────────
+# SPEC-66 v4 §12.9: pin the IP-literal and mixed-DNS edge cases. Every test
+# mocks socket.getaddrinfo — no network. The restricted gate is default-ON.
+
+
+def _restricted_default(monkeypatch):
+    monkeypatch.delenv("DEVELCAKES_WEB_FETCH_RESTRICT", raising=False)
+    monkeypatch.delenv("CRABCAKES_WEB_FETCH_RESTRICT", raising=False)
+
+
+class TestFetchEdgeRows:
+    """SPEC-66 §12.9 — the three fetch-edge rows (mocked DNS)."""
+
+    def test_ipv6_unspecified_literal_is_refused(self, monkeypatch):
+        """http://[::]/ is refused via is_private (getaddrinfo normalises)."""
+        from agent.tools import _reject_restricted_url
+
+        _restricted_default(monkeypatch)
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            # getaddrinfo("::") resolves to the unspecified v6 address
+            return [(10, 1, 6, "", ("::", 0, 0, 0))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            blocked = _reject_restricted_url("http://[::]/")
+        assert blocked is not None, "the unspecified IPv6 literal must be refused"
+        assert blocked.success is False
+
+    def test_ipv4_mapped_ipv6_loopback_is_refused(self, monkeypatch):
+        """http://[::ffff:127.0.0.1]/ — the mapped form reaches is_private."""
+        from agent.tools import _reject_restricted_url
+
+        _restricted_default(monkeypatch)
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            return [(10, 1, 6, "", ("::ffff:127.0.0.1", 0, 0, 0))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            blocked = _reject_restricted_url("http://[::ffff:127.0.0.1]/")
+        assert blocked is not None, (
+            "an IPv4-mapped loopback must not slip past the private check"
+        )
+        assert blocked.success is False
+
+    def test_mixed_dns_any_private_address_refuses(self, monkeypatch):
+        """A hostname resolving to [public, private] is refused: ANY private
+        address in the resolved set blocks the fetch."""
+        from agent.tools import _reject_restricted_url
+
+        _restricted_default(monkeypatch)
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            return [
+                (2, 1, 6, "", ("93.184.216.34", 0)),   # public
+                (2, 1, 6, "", ("192.168.1.10", 0)),    # private
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            blocked = _reject_restricted_url("http://mixed.example.com/")
+        assert blocked is not None, (
+            "a DNS answer containing ANY private address must be refused"
+        )
+        assert blocked.success is False
+
+    def test_all_public_dns_answer_is_allowed(self, monkeypatch):
+        """Control: a fully-public answer set passes the restricted gate."""
+        from agent.tools import _reject_restricted_url
+
+        _restricted_default(monkeypatch)
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            assert _reject_restricted_url("http://example.com/") is None

@@ -1,6 +1,6 @@
 # Configuring LLM Providers
 
-Auxilium and the other built-in agents (Coder, Debugger) need an LLM provider to function. This guide walks you through configuring one of the six supported providers — including the built-in local KB provider that needs no API key at all.
+Auxilium and the other built-in agents (Coder, Debugger) need an LLM provider to function. This guide walks you through configuring one of the supported providers — the one-click presets in Settings → Providers make it a paste-your-key operation.
 
 **One-click presets (Settings → Providers → `+ Add Provider`)** — Base URL, caller, and a default model are pre-filled; you paste only the key:
 
@@ -18,7 +18,7 @@ MiniMax and Z.ai presets are deferred until their endpoints/model IDs can be liv
 | Provider | Best for | Cost | Setup time |
 |---|---|---|---|
 | **Local KB** | Zero-config help on fresh install | Free (no API key) | 0 minutes |
-| **OpenRouter free** | Trying CrabCakes with an external LLM | Free tier | 1 minute |
+| **OpenRouter free** | Trying DevelCakes with an external LLM | Free tier | 1 minute |
 | **Ollama (local)** | Privacy, offline use, no API key | Free (uses your hardware) | 5 minutes |
 | **OpenAI** | Highest quality (GPT-4o) | Pay-per-token | 2 minutes |
 | **Anthropic** | Best long-context (Claude 3.5) | Pay-per-token | 2 minutes |
@@ -28,7 +28,7 @@ MiniMax and Z.ai presets are deferred until their endpoints/model IDs can be liv
 
 ## How Provider Configuration Works
 
-CrabCakes stores provider settings in `~/.config/crabcakes/providers.yaml` (with `agent.json` as a legacy fallback). Each provider has:
+DevelCakes stores provider settings in `~/.config/develcakes/providers.yaml` (with `agent.json` as a legacy fallback). Each provider has:
 
 - `name` — display name
 - `base_url` — API endpoint
@@ -53,14 +53,14 @@ The `caller` field determines which API client handles requests. Most modern pro
 1. Go to https://openrouter.ai and create an account
 2. Navigate to **Keys** and click **Create New Key**
 3. Copy the key (starts with `sk-or-v1-...`)
-4. In CrabCakes, run the first-run wizard and select **(a) OpenRouter free**
+4. In DevelCakes, run the first-run wizard and select **(a) OpenRouter free**
 5. Paste the key when prompted
 
 The wizard will write the configuration and verify the connection.
 
 ### Manual configuration (if not using the wizard)
 
-Edit `~/.config/crabcakes/agent.json`:
+Edit `~/.config/develcakes/agent.json`:
 
 ```json
 {
@@ -133,11 +133,11 @@ Free-tier rate limits: ~20 requests/minute, ~50 requests/day. Sufficient for get
    ollama pull qwen2.5-coder:7b   # 4.4GB, better for code
    ```
 
-4. **In CrabCakes:** Run the first-run wizard, select **(b) Ollama local**. The wizard detects `ollama` on PATH and verifies the endpoint at `http://localhost:11434`.
+4. **In DevelCakes:** Run the first-run wizard, select **(b) Ollama local**. The wizard detects `ollama` on PATH and verifies the endpoint at `http://localhost:11434`.
 
 ### Manual configuration
 
-Edit `~/.config/crabcakes/agent.json`:
+Edit `~/.config/develcakes/agent.json`:
 
 ```json
 {
@@ -195,7 +195,7 @@ Edit `~/.config/crabcakes/agent.json`:
 2. Add a payment method (API access is pay-as-you-go)
 3. Navigate to **API Keys** and click **Create new secret key**
 4. Copy the key (starts with `sk-...`)
-5. In CrabCakes: first-run wizard → **(c) Bring your own key** → select **OpenAI** → paste key
+5. In DevelCakes: first-run wizard → **(c) Bring your own key** → select **OpenAI** → paste key
 
 ### Pricing
 
@@ -255,7 +255,7 @@ A typical Auxilium conversation uses ~5K tokens total. Cost: ~$0.01 with GPT-4o,
 2. Add a payment method
 3. Navigate to **Settings → API Keys** and create a new key
 4. Copy the key (starts with `sk-ant-...`)
-5. In CrabCakes: first-run wizard → **(c) Bring your own key** → select **Anthropic** → paste key
+5. In DevelCakes: first-run wizard → **(c) Bring your own key** → select **Anthropic** → paste key
 
 ### Pricing
 
@@ -310,7 +310,7 @@ Claude 3.5 Haiku: ~$0.80 per 1M input tokens, ~$4 per 1M output tokens.
 2. Click **Get API Key** in the left sidebar
 3. Create a new key (or use the default)
 4. Copy the key
-5. In CrabCakes: first-run wizard → **(c) Bring your own key** → select **Google** → paste key
+5. In DevelCakes: first-run wizard → **(c) Bring your own key** → select **Google** → paste key
 
 ### Pricing
 
@@ -339,7 +339,7 @@ Gemini 1.5 Pro: Free tier available, then ~$1.25 per 1M input tokens.
 }
 ```
 
-**Note:** Google Gemini has an OpenAI-compatible endpoint at the same `base_url` with `/openai/` appended. If you prefer the native Gemini API, use `caller: "openai"` with the `base_url` above — CrabCakes handles the format translation.
+**Note:** Google Gemini has an OpenAI-compatible endpoint at the same `base_url` with `/openai/` appended. If you prefer the native Gemini API, use `caller: "openai"` with the `base_url` above — DevelCakes handles the format translation.
 
 ### Available models
 
@@ -357,11 +357,11 @@ Gemini 1.5 Pro: Free tier available, then ~$1.25 per 1M input tokens.
 
 ## Switching Providers Mid-Session
 
-You can change providers without restarting CrabCakes:
+You can change providers without restarting DevelCakes:
 
-1. Edit `~/.config/crabcakes/agent.json`
+1. Edit `~/.config/develcakes/agent.json`
 2. Update `default_provider` and `default_model`
-3. In CrabCakes, click **Settings → Reload Config** (if available) or restart the app
+3. In DevelCakes, click **Settings → Reload Config** (if available) or restart the app
 
 Or use the first-run wizard's "reconfigure" option (if the wizard supports re-runs).
 
@@ -382,7 +382,7 @@ Or use the first-run wizard's "reconfigure" option (if the wizard supports re-ru
 **Fix:**
 1. Regenerate the key at the provider's dashboard
 2. Update `agent.json` with the new key
-3. Restart CrabCakes
+3. Restart DevelCakes
 
 ### "429 Too Many Requests" / "Rate Limit Exceeded"
 
@@ -398,8 +398,8 @@ Or use the first-run wizard's "reconfigure" option (if the wizard supports re-ru
 
 **Fix:**
 1. Check `curl https://<provider_base_url>/` from your terminal
-2. If that fails, it's a network/provider issue, not a CrabCakes issue
-3. Try a different provider to confirm CrabCakes is working
+2. If that fails, it's a network/provider issue, not a DevelCakes issue
+3. Try a different provider to confirm DevelCakes is working
 
 ### "Model not found" / "Invalid model"
 
@@ -411,15 +411,15 @@ Or use the first-run wizard's "reconfigure" option (if the wizard supports re-ru
 
 ## Storing API Keys Securely
 
-**CrabCakes does NOT encrypt `agent.json`.** The file is plaintext JSON with your API keys in it.
+**DevelCakes does NOT encrypt `agent.json`.** The file is plaintext JSON with your API keys in it.
 
 Best practices:
 
 1. **Restrict file permissions:**
    ```bash
-   chmod 600 ~/.config/crabcakes/agent.json
+   chmod 600 ~/.config/develcakes/agent.json
    ```
-   CrabCakes warns at startup if the file is group/world-readable.
+   DevelCakes warns at startup if the file is group/world-readable.
 
 2. **Use a separate API key per provider.** Don't reuse keys across services.
 
@@ -427,90 +427,7 @@ Best practices:
 
 4. **Rotate keys** periodically. Most providers support multiple active keys.
 
-5. **For shared/team machines**, use a secrets manager (e.g., `pass`, `vault`, `1password-cli`) and source keys via `agent.json` templating. CrabCakes does not currently support env-var interpolation in `agent.json` — if you need this, file a feature request.
-
----
-
-## The Local KB Provider (Zero-Config Help)
-
-**What it is:** A built-in knowledge base provider that serves answers from CrabCakes' own documentation — no external API, no API key, no internet required.
-
-**How it works:**
-
-1. The KB HTTP server (`agent/kb_server.py`) runs on `localhost:18790`
-2. It exposes an OpenAI-compatible `/v1/chat/completions` endpoint
-3. When Auxilium receives a question, the KB server searches indexed documentation using cosine similarity
-4. The index is built from `knowledge/*.md` files using the `BAAI/bge-small-en-v1.5` embedding model
-5. If the question matches with high confidence (score ≥ 0.55), the relevant KB chunks are returned as the response
-
-**Auto-setup on fresh install:**
-
-The `ensure_kb_provider()` function (in `utils/providers_store.py`) runs automatically when `AgentRuntimeHandler` initializes:
-1. Seeds a `local-kb` provider entry into `providers.yaml` if missing
-2. Patches the Auxilium agent to use `local-kb` as its primary provider if it has no provider set
-
-This means **Auxilium works out of the box** — you can ask it questions about CrabCakes without configuring anything.
-
-### The Fallback Chain
-
-When the KB server cannot answer a question (score below the 0.55 confidence threshold), it returns the sentinel `[KB_OUT_OF_SCOPE]`. If a fallback provider is configured, the runtime automatically:
-
-1. Detects the `[KB_OUT_OF_SCOPE]` sentinel
-2. Swaps the conversation model to the fallback provider
-3. Retries the LLM call with the external provider
-4. Restores the original `local-kb` model after the call
-
-This is guarded by a one-shot flag (`conv._fallback_attempted`) to prevent infinite loops.
-
-### Configuring Fallback
-
-In the Agent Builder UI, set the **Fallback Provider** dropdown to an external provider (e.g. `openrouter`). When Auxilium's KB can't answer, it will use the fallback provider instead.
-
-You can also configure fallback in `agent.json`:
-```json
-{
-  "fallback_provider": "openrouter",
-  "fallback_model": "openrouter/auto"
-}
-```
-
-### Rebuilding the KB Index
-
-When KB content changes (e.g. after updating documentation), rebuild the index:
-
-```bash
-cd /path/to/crabcakes
-python3 scripts/rebuild_kb_index.py
-```
-
-This re-embeds all `knowledge/*.md` files and writes:
-- `knowledge/.index/chunks.json` — chunk metadata
-- `knowledge/.index/embeddings.npy` — float32 embedding array
-
-**Requirements:**
-- `sentence-transformers` package
-- `numpy` package
-- ~130MB model download on first run
-
-### local-kb Provider Configuration
-
-The auto-seeded configuration in `providers.yaml`:
-
-```yaml
-- name: local-kb
-  base_url: http://localhost:18790/v1
-  api_key: "***"
-  default_model: local-kb
-  caller: openai
-  enabled: true
-  supports_tools: false
-  supports_streaming: false
-  max_tokens: 4096
-```
-
-Note: `caller: openai` because the KB server implements the OpenAI-compatible API format. `supports_tools: false` because the KB server never calls tools. `supports_streaming: false` because it returns blocking responses.
-
-For full details on the KB provider architecture, see [kb-provider.md](kb-provider.md).
+5. **For shared/team machines**, use a secrets manager (e.g., `pass`, `vault`, `1password-cli`) and source keys via `agent.json` templating. DevelCakes does not currently support env-var interpolation in `agent.json` — if you need this, file a feature request.
 
 ---
 
@@ -518,15 +435,15 @@ For full details on the KB provider architecture, see [kb-provider.md](kb-provid
 
 After configuring a provider, test it:
 
-1. Open Auxilium (or Coder) in CrabCakes
+1. Open Auxilium (or Coder) in DevelCakes
 2. Send a simple test message: "Hello, who are you?"
 3. If you get a response, the provider is working
 4. If you get an error, check the error message against the **Common Errors** section above
 
-For deeper debugging, run CrabCakes with `CRABCAKES_DEBUG=1`:
+For deeper debugging, run DevelCakes with `DEVELCAKES_DEBUG=1`:
 
 ```bash
-CRABCAKES_DEBUG=1 crabcakes
+DEVELCAKES_DEBUG=1 develcakes
 ```
 
 This shows API request/response logs in the terminal.

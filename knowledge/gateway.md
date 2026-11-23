@@ -1,12 +1,12 @@
-# OpenClaw Gateway in CrabCakes
+# OpenClaw Gateway in DevelCakes
 
-The OpenClaw gateway is the bridge between CrabCakes and remote AI agents. While special agents (Coder, Debugger, Auxilium) run locally inside CrabCakes, **gateway agents** run on an OpenClaw gateway server and communicate with CrabCakes over WebSocket.
+The OpenClaw gateway is the bridge between DevelCakes and remote AI agents. While special agents (Coder, Debugger, Auxilium) run locally inside DevelCakes, **gateway agents** run on an OpenClaw gateway server and communicate with DevelCakes over WebSocket.
 
 ---
 
 ## What Is the OpenClaw Gateway?
 
-The gateway is a separate service (part of the OpenClaw ecosystem) that hosts AI agents, manages their sessions, and routes messages. CrabCakes connects to it as a client — receiving agent messages, sending user input, and monitoring agent health.
+The gateway is a separate service (part of the OpenClaw ecosystem) that hosts AI agents, manages their sessions, and routes messages. DevelCakes connects to it as a client — receiving agent messages, sending user input, and monitoring agent health.
 
 When connected, the gateway provides:
 - **Agent discovery** — A snapshot of available agents and their recent sessions
@@ -16,18 +16,18 @@ When connected, the gateway provides:
 
 ---
 
-## How CrabCakes Connects
+## How DevelCakes Connects
 
 ### Connection Protocol
 
-CrabCakes uses a **WebSocket** connection with **Ed25519 device authentication** (protocol v3/v4):
+DevelCakes uses a **WebSocket** connection with **Ed25519 device authentication** (protocol v3/v4):
 
-1. **WebSocket connect** — CrabCakes opens a WebSocket to the gateway URL (default `ws://localhost:18789`)
+1. **WebSocket connect** — DevelCakes opens a WebSocket to the gateway URL (default `ws://localhost:18789`)
 2. **Receive nonce** — Gateway sends a nonce challenge
-3. **Sign payload** — CrabCakes signs a v3 auth payload with the device's Ed25519 private key
+3. **Sign payload** — DevelCakes signs a v3 auth payload with the device's Ed25519 private key
 4. **Send connect request** — Includes device ID, public key, signature, device token, scopes, and client metadata
 5. **Receive hello-ok** — Gateway validates the signature and returns a snapshot of agent health
-6. **Listen** — CrabCakes pumps the WebSocket for events and responses
+6. **Listen** — DevelCakes pumps the WebSocket for events and responses
 
 ### Auth Payload Format
 
@@ -41,7 +41,7 @@ Signed with the device's Ed25519 private key, then base64-encoded.
 
 ### Device Identity Files
 
-CrabCakes loads device credentials from `~/.openclaw/identity/`:
+DevelCakes loads device credentials from `~/.openclaw/identity/`:
 
 - **`device-auth.json`** — Contains `deviceId` and `tokens` (operator token used for auth)
 - **`device.json`** — Contains `privateKeyPem` (Ed25519 private key in PEM format)
@@ -91,7 +91,7 @@ If not set, defaults to `ws://localhost:18789`.
 
 ### Identity Directory
 
-Device identity lives at `~/.openclaw/identity/` by default. This path is not configurable via CrabCakes — it's owned by OpenClaw.
+Device identity lives at `~/.openclaw/identity/` by default. This path is not configurable via DevelCakes — it's owned by OpenClaw.
 
 To set up identity:
 ```bash
@@ -108,11 +108,11 @@ Enable raw WebSocket message logging:
 export CRABCAKES_GATEWAY_DEBUG=1
 ```
 
-This sets the gateway client logger to DEBUG level, showing raw message frames. Independent of the general `CRABCAKES_DEBUG` flag.
+This sets the gateway client logger to DEBUG level, showing raw message frames. Independent of the general `DEVELCAKES_DEBUG` flag.
 
 ### Settings File
 
-CrabCakes configuration lives at `~/.config/crabcakes/` (respects `$XDG_CONFIG_HOME`):
+DevelCakes configuration lives at `~/.config/develcakes/` (respects `$XDG_CONFIG_HOME`):
 
 - `config.json` — General settings
 - `agent.json` — LLM provider configuration
@@ -127,10 +127,10 @@ CrabCakes configuration lives at `~/.config/crabcakes/` (respects `$XDG_CONFIG_H
 
 | Aspect | Special Agents | Gateway Agents |
 |--------|---------------|----------------|
-| **Where they run** | Locally, inside CrabCakes (via `AgentRuntime`) | Remotely, on the OpenClaw gateway server |
+| **Where they run** | Locally, inside DevelCakes (via `AgentRuntime`) | Remotely, on the OpenClaw gateway server |
 | **How they authenticate** | No auth needed — they're local processes | Ed25519 device authentication over WebSocket |
 | **Tool execution** | Direct: `subprocess.run()`, file I/O, httpx | Proxied through the gateway server |
-| **LLM calls** | Direct from CrabCakes to the LLM provider | Handled by the gateway server |
+| **LLM calls** | Direct from DevelCakes to the LLM provider | Handled by the gateway server |
 | **System prompts** | `prompts/system/{role}.md` files | Managed in gateway agent configuration |
 | **Conversation storage** | In-memory + JSON files (`<config_dir>/conversations/`) | Managed by the gateway server |
 | **Session keys** | `special:{role}` (e.g. `special:coder`) | `agent:{name}:{platform}:{channel}:{id}` |
@@ -144,7 +144,7 @@ CrabCakes configuration lives at `~/.config/crabcakes/` (respects `$XDG_CONFIG_H
 - **Special agents** — Local development, offline work, direct file manipulation, running tests, custom tool configurations
 - **Gateway agents** — Remote work, multi-device access, agents managed by OpenClaw, integrations with external services
 
-Both types can coexist in the same CrabCakes session. Project teams can include both special and gateway agents.
+Both types can coexist in the same DevelCakes session. Project teams can include both special and gateway agents.
 
 ---
 
@@ -287,7 +287,7 @@ This usually means the `GatewayClient` reference wasn't synced to `ChatHandler`.
 
 ### Snapshot validation failure
 
-The `SnapshotValidationError` is raised when the gateway's hello-ok response doesn't match the expected schema. This indicates a protocol version mismatch between CrabCakes and the gateway. Update both to the latest version.
+The `SnapshotValidationError` is raised when the gateway's hello-ok response doesn't match the expected schema. This indicates a protocol version mismatch between DevelCakes and the gateway. Update both to the latest version.
 
 ---
 

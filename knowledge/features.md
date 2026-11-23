@@ -1,6 +1,6 @@
 # Features Guide
 
-CrabCakes provides a rich set of features for multi-agent development. This guide covers each feature in detail.
+DevelCakes provides a rich set of features for multi-agent development. This guide covers each feature in detail.
 
 ## Multi-Agent Collaboration in Project Tabs
 
@@ -86,7 +86,7 @@ through the activity pill above.
 
 ## Self-Improvement System
 
-CrabCakes agents can learn from their mistakes and adapt to your project over time.
+DevelCakes agents can learn from their mistakes and adapt to your project over time.
 
 ### Bug Journal
 
@@ -198,9 +198,9 @@ The system prompt is assembled in layers:
 
 1. `prompts/system/default.md` — Base instructions
 2. `prompts/system/collab.md` — Collaboration protocol
-3. `prompts/system/crabcakes-context.md` — CrabCakes-specific context
+3. `prompts/system/develcakes-context.md` — DevelCakes-specific context
 4. `prompts/system/project-awareness.md` — Project awareness block
-5. `prompts/system/crabcakes-commands.md` — Command reference
+5. `prompts/system/develcakes-commands.md` — Command reference
 6. `prompts/system/project-onboarding.md` — Onboarding context
 7. `prompts/system/code-review.md` — Code review protocol
 8. Role-specific prompt (e.g. `coder.md`, `debugger.md`)
@@ -208,51 +208,16 @@ The system prompt is assembled in layers:
 
 ---
 
-## KB Provider and Fallback Chain
-
-### Local KB Provider
-
-CrabCakes includes a built-in knowledge base (KB) provider that works without any external LLM API key. This is the **local-kb provider**, which serves answers from the indexed CrabCakes documentation.
-
-### How Auxilium Works Without an LLM
-
-On fresh install, the `ensure_kb_provider()` function (in `utils/providers_store.py`) automatically:
-
-1. Seeds a `local-kb` provider entry into `providers.yaml`
-2. Patches the Auxilium (helper) agent to use `local-kb` as its primary provider
-
-The KB HTTP server (`agent/kb_server.py`) runs on `localhost:18790` and presents an OpenAI-compatible `/v1/chat/completions` endpoint. When Auxilium receives a question, it calls the KB server just like any other LLM provider.
-
-### KB Lookup
-
-The KB server uses `agent/kb_lookup.py` for retrieval:
-- Embeds the user's question using `BAAI/bge-small-en-v1.5` (384-dim, ~130MB)
-- Performs cosine similarity against pre-indexed KB chunks
-- Returns the top 5 chunks with score ≥ 0.35
-- Requires top score ≥ 0.55 (confidence threshold) to return results
-
-### Fallback Chain
-
-When the KB server cannot answer a question (score below confidence threshold), it returns the sentinel `[KB_OUT_OF_SCOPE]`. If a fallback provider is configured, the runtime automatically:
-
-1. Detects the `[KB_OUT_OF_SCOPE]` sentinel in the response
-2. Swaps the conversation model to the fallback provider
-3. Retries the LLM call with the external provider
-4. Restores the original model after the fallback call
-
-The one-shot guard (`conv._fallback_attempted`) prevents infinite fallback loops.
-
-See the dedicated [kb-provider.md](kb-provider.md) guide for full details.
 
 ---
 
 ## MCP Server Integration
 
-CrabCakes supports Model Context Protocol (MCP) servers for extending agent capabilities with external tools.
+DevelCakes supports Model Context Protocol (MCP) servers for extending agent capabilities with external tools.
 
 ### Configuration
 
-MCP servers are configured in `~/.config/crabcakes/mcp-servers.json`:
+MCP servers are configured in `~/.config/develcakes/mcp-servers.json`:
 
 ```json
 {

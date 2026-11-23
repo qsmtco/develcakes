@@ -117,3 +117,42 @@ def test_render_package_is_importable_source():
         "render/ has no __init__.py — packages.find cannot discover it even "
         "with render* in the include list"
     )
+
+
+def test_knowledge_sweep_no_stale_product_or_subsystem_refs():
+    """R-66S NODE (SPEC-66 §12.8 renumbered): the knowledge/ sweep.
+
+    Pins three claims:
+    (a) no knowledge/ file mentions the removed KB subsystem
+        (local-kb, kb_server, kb_lookup, port 18790, ensure_kb_provider,
+        rebuild_kb_index, KB_OUT_OF_SCOPE, sentence-transformers);
+    (b) no knowledge/ file uses the pre-rename product name (CrabCakes or a
+        bare crabcakes path/URL — the .crabcakes/ PROJECT-DIR name is legal);
+    (c) knowledge/kb-provider.md no longer exists (the file documented the
+        removed subsystem end-to-end).
+    """
+    import pathlib
+    root = pathlib.Path(_ROOT)
+    knowledge = root / "knowledge"
+
+    stale_subsystem = (
+        "local-kb", "kb_server", "kb_lookup", "18790",
+        "ensure_kb_provider", "rebuild_kb_index", "KB_OUT_OF_SCOPE",
+        "sentence-transformers", "kb-provider",
+    )
+    offenders = []
+    for md in sorted(knowledge.glob("*.md")):
+        text = md.read_text(encoding="utf-8")
+        # .crabcakes (project dir) and CRABCAKES_* (one-release env fallback)
+        # are legal; a bare lowercase 'crabcakes' elsewhere is stale.
+        masked = text.replace(".crabcakes", "\x00").replace("CRABCAKES_", "\x01")
+        for needle in stale_subsystem:
+            if needle in text:
+                offenders.append(f"{md.name}: subsystem ref {needle!r}")
+        if "CrabCakes" in masked or "crabcakes" in masked:
+            offenders.append(f"{md.name}: pre-rename product name")
+    assert not offenders, "stale references survived the sweep:\n" + "\n".join(offenders)
+
+    assert not (knowledge / "kb-provider.md").exists(), (
+        "knowledge/kb-provider.md returned — it documents the removed KB subsystem"
+    )
