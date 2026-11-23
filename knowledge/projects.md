@@ -1,6 +1,6 @@
 # Projects in DevelCakes
 
-Projects are the primary unit of work in DevelCakes. They organize code, agents, and conversations into self-contained workspaces. Every special agent (except Auxilium) requires an active project to operate.
+Projects are the primary unit of work in DevelCakes. They organize code, agents, and conversations into self-contained workspaces. Every special agent requires an active project to operate.
 
 ---
 
@@ -84,7 +84,7 @@ The team roster — a JSON file listing all agent members. Each member has:
 }
 ```
 
-Agents with `auto_add_to_projects: true` (like Auxilium) are automatically added here on project creation.
+Agents with `auto_add_to_projects: true` are automatically added here on project creation.
 
 ### `context.md`
 
@@ -117,7 +117,7 @@ This toggles membership in `.crabcakes/team.json` and updates the routing table.
 
 ### Auto-Added Onboarding Agents
 
-Agents with `auto_add_to_projects: true` in their YAML definition are automatically added to every new project. By default, Auxilium (🦀) has this enabled. These agents serve as onboarding guides — they receive the project-onboarding prompt template when the project hasn't been fully onboarded yet.
+Agents with `auto_add_to_projects: true` in their YAML definition are automatically added to every new project. None of the three built-in agents has this enabled by default, so project teams start empty and you add members yourself. Such agents serve as onboarding guides — they receive the project-onboarding prompt template when the project hasn't been fully onboarded yet.
 
 ### Solo DM Mode
 

@@ -4,7 +4,7 @@ DevelCakes is a GTK4 desktop application for multi-agent AI software development
 
 **Platform:** Linux only (GTK4 + PyGObject). macOS and Windows are not supported.
 
-**Tech stack:** Python 3.11+, GTK4 (via PyGObject), WebSocket client for OpenClaw gateway connectivity, Ed25519 device authentication.
+**Tech stack:** Python 3.11+, GTK4 (via PyGObject), local agents with direct LLM provider API calls.
 
 ---
 
@@ -28,17 +28,16 @@ DevelCakes is built for developers who want AI agents that participate in real p
 | **Project tabs** | No project concept | Open multiple projects as tabs; each has its own team, feed, and chat |
 | **File access** | Upload files manually | Agents read/write files directly from your project directory |
 | **Code review** | Copy-paste diffs | File-change feed cards with accept/reject, plus standalone git-backed revert |
-| **Agent collaboration** | One assistant | Multiple agents (Coder, Debugger, gateway agents) work in the same project |
+| **Agent collaboration** | One assistant | Multiple agents (Coder, Debugger, Supervisor) work in the same project |
 | **Feed cards** | Linear chat | Structured feed cards for audit reports, file diffs, tool calls, and task assignments |
 | **Multi-agent teams** | Not supported | Add/remove agents to project teams; fan-out messages to all members |
 | **Slash commands** | Limited or none | Full command system: `/ask`, `/status`, and more |
-| **Offline help** | Requires API | Auxilium answers from local knowledge base without any external LLM call |
 
 ---
 
 ## What are the three built-in special agents?
 
-DevelCakes includes three special agents that run locally — no gateway required. They are defined in YAML files under `~/.config/develcakes/agents/` and seeded from `prompts/default_agents/` on first launch.
+DevelCakes includes three special agents that run locally. They are defined in YAML files under `~/.config/develcakes/agents/` and seeded from `prompts/default_agents/` on first launch.
 
 ### 🛠️ Coder
 
@@ -68,35 +67,22 @@ The Debugger is a diagnostics and adversarial-audit agent. It can:
 
 **Default provider:** MiniMax (configurable)
 
-### 🦀 Auxilium
+### 🎩 Supervisor
 
-Auxilium is the always-on help assistant and project onboarding guide. It can:
+The Supervisor is the project onboarding and implementation orchestrator. It can:
 
 - Answer questions about DevelCakes itself (installation, configuration, features)
-- Search and read files
+- Plan work and delegate tasks to the other agents
+- Read and write files, and execute commands
 - Fetch web pages
-**Tools:** `read_file`, `list_files`, `write_file`, `web_search`, `web_fetch`
+
+**Tools:** `read_file`, `write_file`, `edit_file`, `exec_command`, `list_files`, `search_files`, `diary`, `project_memory`, `feed_card`
 
 **Default provider:** none on fresh install — configure one in Settings → Providers (any preset works)
 
 **Special properties:**
-- `auto_open: true` — opens a tab automatically on every launch
-- `auto_add_to_projects: true` — added to every project team automatically
-
----
-
-## What's the difference between gateway agents and special agents?
-
-| Aspect | Special Agents (Coder, Debugger, Auxilium) | Gateway Agents |
-|--------|---------------------------------------------|----------------|
-| **Where they run** | Locally inside DevelCakes | On a remote OpenClaw gateway |
-| **How they connect** | Direct API calls to your configured LLM provider | WebSocket connection to `ws://localhost:18789` (default) |
-| **Authentication** | Your API keys in `providers.yaml` | Ed25519 device auth via `~/.openclaw/identity/` |
-| **Config location** | `~/.config/develcakes/agents/*.yaml` | Discovered dynamically from gateway |
-| **Tools** | Defined in agent YAML | Provided by the gateway runtime |
-| **Appearance** | Always available (even offline) | Appear in the Agents tab after connecting |
-
-Both types can participate in project teams. You can mix gateway agents and special agents in the same project — messages fan out to all team members regardless of type.
+- `auto_open: false` — no tab opens automatically
+- `auto_add_to_projects: false` — add it per project with the **+** button in the Agents tab
 
 ---
 
@@ -107,7 +93,6 @@ DevelCakes is for developers who:
 - Want AI agents that can **actually work in their codebase** — not just suggest snippets, but open files, edit code, run tests, and make commits
 - Work on **multiple projects** and want AI assistance scoped to each project's context
 - Want **review control** over what agents write before it lands in their codebase
-- Are already using (or interested in) **OpenClaw** and want a rich desktop client
 - Prefer a **native Linux desktop app** over a browser-based tool
 - Want **multi-agent collaboration** — different agents with different specialties working together
 
@@ -160,11 +145,10 @@ Here's a quick tour of major features:
 | `~/.config/develcakes/` | Main config directory (chmod 0o700) |
 | `~/.config/develcakes/agent.json` | Legacy provider config (being replaced by `providers.yaml`) |
 | `~/.config/develcakes/providers.yaml` | Canonical provider configuration (chmod 0o600) |
-| `~/.config/develcakes/agents/*.yaml` | Agent definitions (Coder, Debugger, Auxilium, custom) |
+| `~/.config/develcakes/agents/*.yaml` | Agent definitions (Coder, Debugger, Supervisor, custom) |
 | `~/.config/develcakes/favorites.json` | Prompt library favorites |
 | `~/.config/develcakes/projects/` | Per-project config (members, etc.) |
 | `$CRABCAKES_PROJECTS_DIR` (default: `~/projects`) | Browsable project root for the file tree |
-| `~/.openclaw/identity/` | OpenClaw device identity (Ed25519 keys) |
 | `.crabcakes/` (per project) | Project-specific team, workflow, and context data |
 
 ---
@@ -176,10 +160,9 @@ Most AI IDEs (Cursor, GitHub Copilot, etc.) integrate AI as a feature inside an 
 - **Agent-first, not editor-first** — The primary interface is agent interaction, not a code editor. Agents do the editing; you review and direct.
 - **Multi-agent, not single-assistant** — Multiple specialized agents work simultaneously in each project, each with distinct roles and tools.
 - **Local-first architecture** — Special agents run locally with direct API calls. No need for a complex server setup just to get started.
-- **OpenClaw integration** — Connects to the OpenClaw gateway for remote agent teams, device auth, and cross-machine workflows.
 
 ---
 
 ## What if I just want to chat with an AI?
 
-That works too! Open the Auxilium 🦀 tab and start typing. Auxilium answers through whichever provider you've configured (Settings → Providers). You don't need a project open or a gateway connection to talk to Auxilium.
+That works too! Create a project, add an agent (the Supervisor 🎩 is a good starting point), and start typing. Every agent answers through whichever provider you've configured (Settings → Providers).

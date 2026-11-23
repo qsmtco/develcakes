@@ -43,16 +43,9 @@ DEVELCAKES_DEBUG=1 python3 main.py
 ## What happens on first launch?
 
 1. `~/.config/develcakes/` is created with default config
-2. Add a provider (see above) — every agent, including Auxilium, answers
-   through the provider you configure
+2. Add a provider (see above) — every agent answers through the provider you
+   configure
 3. The project/agent panel opens empty until you create a project
-
-## How do I connect to the OpenClaw gateway?
-
-See **[Gateway Guide](gateway.md)**.
-
-1. Start the gateway: `openclaw gateway start`
-2. Gateway agents appear in the left panel once the gateway is reachable
 
 ## How do I create a project?
 
@@ -66,6 +59,7 @@ See **[Projects Guide](projects.md)** for details.
 
 ## Where do I get help?
 
-- Ask **Auxilium** (🦀) — click its tab and type your question
+- Ask the **Supervisor** (🎩) — add it with the **+** button in the Agents
+  tab, then type your question in its tab
 - See **[Troubleshooting](troubleshooting.md)** for common errors
 - Check logs at `~/.config/develcakes/logs/`

@@ -4,7 +4,7 @@ This guide walks you through installing DevelCakes on Linux, verifying all depen
 
 **Audience:** First-time users on a fresh system.
 
-**Platform support:** DevelCakes is a **Linux-only** application. The GTK4 toolchain and OpenClaw gateway client target Linux. macOS and Windows are not supported. If you need to run on those platforms, use a Linux VM or WSL2.
+**Platform support:** DevelCakes is a **Linux-only** application. The GTK4 toolchain targets Linux. macOS and Windows are not supported. If you need to run on those platforms, use a Linux VM or WSL2.
 
 ---
 
@@ -19,7 +19,7 @@ pip install -e .
 develcakes
 ```
 
-That's it. The first launch creates `~/.config/develcakes/` with default configs and seeds the three built-in agents (Coder, Debugger, Auxilium).
+That's it. The first launch creates `~/.config/develcakes/` with default configs and seeds the three built-in agents (Coder, Debugger, Supervisor).
 
 ---
 
@@ -80,8 +80,8 @@ These are listed in `pyproject.toml` and installed when you run `pip install -e 
 | Package | Minimum version | Why |
 |---------|-----------------|-----|
 | **PyGObject** | 3.48+ | Python bindings for GTK4 / GObject |
-| **websockets** | 12.0+ | WebSocket client for OpenClaw gateway communication |
-| **cryptography** | 41.0+ | Ed25519 device authentication for gateway |
+| **websockets** | 12.0+ | WebSocket client used by the `transport/` package |
+| **cryptography** | 41.0+ | Declared dependency; the current code paths no longer import it |
 | **GitPython** | 3.1+ | Git operations for the code review layer |
 
 ### Optional (recommended) packages
@@ -152,7 +152,7 @@ DevelCakes copies built-in agent definitions from `prompts/default_agents/` into
 
 - `coder.yaml` — The 🛠️ Coder agent
 - `debugger.yaml` — The 🐛 Debugger agent
-- `auxilium.yaml` — The 🦀 Auxilium agent
+- `supervisor.yaml` — The 🎩 Supervisor agent
 
 **Note:** If you already have agent YAML files in the `agents/` directory, defaults are NOT seeded — your existing configuration is preserved.
 
@@ -160,9 +160,9 @@ DevelCakes copies built-in agent definitions from `prompts/default_agents/` into
 
 An `agent.json` file is created with example provider configurations (OpenAI, MiniMax). This file gets `chmod 0o600` permissions.
 
-### 4. Auxilium tab opens
+### 4. The project/agent panel opens empty
 
-The Auxilium 🦀 tab opens automatically (`auto_open: true`). If no verified provider is configured, a first-run wizard may appear.
+The left panel opens with no project selected. No agent tab opens automatically — the project/agent panel stays empty until you create a project, then you add agents to it with the **+** button.
 
 ---
 
@@ -195,15 +195,14 @@ develcakes
 
 **Expected behavior:**
 - The DevelCakes window opens
-- The Auxilium 🦀 tab is visible
 - The left panel shows Prompts, Agents, and Projects tabs
 - No error messages in the terminal
 
-### Step 4: Ask Auxilium a question
+### Step 4: Ask an agent a question
 
-In the Auxilium 🦀 tab, type: "How do I configure a provider?"
+Create a project, add an agent (for example the Supervisor 🎩) with the **+** button in the Agents tab, then type: "How do I configure a provider?"
 
-Auxilium answers through whichever provider you configured in the first-run wizard (Settings → Providers).
+The agent answers through whichever provider you configured in Settings → Providers.
 
 ### Headless verification (no display)
 
@@ -367,7 +366,6 @@ Dev dependencies (`[dev]` extra):
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CRABCAKES_PROJECTS_DIR` | `~/projects` | Root directory for the Projects file tree |
-| `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
 | `DEVELCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging (legacy `CRABCAKES_DEBUG` still honored) |
 | `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size for voice input |
 | `XDG_CONFIG_HOME` | `~/.config` | Base config directory (DevelCakes uses `$XDG_CONFIG_HOME/develcakes/`) |

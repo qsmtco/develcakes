@@ -1,6 +1,6 @@
 # Agents in DevelCakes
 
-DevelCakes has two categories of agents: **special agents** (local, running inside the app via `AgentRuntime`) and **gateway agents** (remote, running on an OpenClaw gateway server). This page covers special agents in detail. For gateway agents, see [Gateway](gateway.md).
+DevelCakes has one category of built-in agents: **special agents** (local, running inside the app via `AgentRuntime`). They are defined by YAML files and run entirely on your machine. This page covers them in detail.
 
 ---
 
@@ -8,7 +8,7 @@ DevelCakes has two categories of agents: **special agents** (local, running insi
 
 Special agents are built-in and user-defined AI assistants that run locally within DevelCakes. Each one has its own `AgentRuntime` instance, conversation history, tool set, and LLM provider configuration. They operate within your project directory and can read, write, search, and execute commands (with approval).
 
-Special agents are defined by YAML files stored in `~/.config/develcakes/agents/`. Built-in defaults (Coder, Debugger, Auxilium) are seeded automatically on first launch from `prompts/default_agents/`.
+Special agents are defined by YAML files stored in `~/.config/develcakes/agents/`. Built-in defaults (Coder, Debugger, Supervisor) are seeded automatically on first launch from `prompts/default_agents/`.
 
 ---
 
@@ -36,19 +36,19 @@ The Debugger is a diagnostics and adversarial-audit agent. It can read files, ru
 - **Tools:** `read_file`, `exec_command`, `list_files`, `search_files`, `web_search`, `web_fetch`
 - **Self-improvement:** `bug_journal` and `project_rules` enabled; `enforcement`, `structured_feedback`, and `dream_consolidation` disabled (no write access)
 
-### Auxilium (🦀)
+### Supervisor (🎩)
 
-Auxilium is the always-on help agent. It answers questions through whichever provider you configure (Settings → Providers) — the one-click presets make this a paste-your-key operation.
+The Supervisor is the project onboarding and implementation orchestrator. It plans work, delegates to the other agents, and answers setup questions. It answers through whichever provider you configure (Settings → Providers) — the one-click presets make this a paste-your-key operation.
 
-- **Role:** `helper`
-- **Session key:** `special:auxilium`
-- **Tools:** `list_files`, `read_file` (minimal — for safety)
+- **Role:** `supervisor`
+- **Session key:** `special:supervisor`
+- **Tools:** `list_files`, `read_file`, `write_file`, `edit_file`, `exec_command`, `search_files`, `diary`, `project_memory`, `jev_ask`, `canvas`, `talk`, `feed_card`, `agent_context`, `read_tool_output`, `set_timer`, `cancel_timer`
 - **Provider:** none on fresh install — configure one in Settings → Providers
-- **Self-improvement:** `project_rules` only
-- **Auto-open:** Yes (`auto_open: true`) — opens a tab on every app launch
-- **Auto-add to projects:** Yes (`auto_add_to_projects: true`) — added to every new project as an onboarding guide
+- **Self-improvement:** `bug_journal`, `project_rules`, and `enforcement` enabled
+- **Auto-open:** No (`auto_open: false`)
+- **Auto-add to projects:** No (`auto_add_to_projects: false`) — add it with the **+** button in the Agents tab
 
-Auxilium does **not** require an active project — it's the only special agent that works without one.
+The Supervisor requires an active project, like the other special agents.
 
 ---
 
@@ -221,28 +221,12 @@ Only enabled servers appear in the Agent Builder UI checkboxes.
 
 ---
 
-## How Special Agents Differ from Gateway Agents
-
-| Aspect | Special Agents | Gateway Agents |
-|--------|---------------|----------------|
-| **Execution** | Local (`AgentRuntime` in DevelCakes process) | Remote (on OpenClaw gateway server) |
-| **Authentication** | None — they're local | Ed25519 device auth via WebSocket |
-| **Tools** | 8 local tools (file, exec, web) | Gateway-managed tool set |
-| **Provider config** | Per-agent `llm_name` in YAML | Configured on the gateway server |
-| **System prompt** | `prompts/system/{role}.md` | Managed by gateway agent config |
-| **Conversation** | In-memory + JSON persistence | Managed by gateway server |
-| **Availability** | Always available (offline-capable) | Requires gateway connection |
-
-See [Gateway](gateway.md) for details on gateway agents.
-
----
-
 ## Session Keys and Routing
 
 Each special agent has a session key following the pattern `special:{role}`:
 - `special:coder` — Coder agent
 - `special:debugger` — Debugger agent
-- `special:auxilium` — Auxilium agent
+- `special:supervisor` — Supervisor agent
 
 When agents are added to projects, their session keys are stored in `.crabcakes/team.json` and routed via `AgentRoutingTable`.
 
@@ -277,7 +261,7 @@ Providers are resolved by explicit `caller` field in `providers.yaml`, or by mod
 
 ### Agent shows "Open a project first"
 
-Special agents (except Auxilium) require an active project. Open a project from the Projects tab first.
+Special agents require an active project. Open a project from the Projects tab first.
 
 ### Agent returns no content
 
@@ -290,6 +274,6 @@ This usually means the LLM provider is misconfigured. Check:
 
 The approval callback requires a feed handler. If no feed cards appear, the UI may not be fully initialized. Also check that the command isn't on the hardcoded blocklist.
 
-### Auxilium can't answer my question
+### An agent can't answer my question
 
-Auxilium answers through your configured provider. Verify the provider card passes **Test** in Settings → Providers, and that Auxilium's `llm_name` in `agents/auxilium.yaml` matches it. If the provider rate-limits or errors, configure a `fallback_provider`.
+Every agent answers through your configured provider. Verify the provider card passes **Test** in Settings → Providers, and that the agent's `llm_name` in its `agents/{name}.yaml` matches it. If the provider rate-limits or errors, configure a `fallback_provider`.

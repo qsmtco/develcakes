@@ -45,7 +45,7 @@ Open a project. The team appears. You type a message, it fans out to every membe
   [type a message...]          <img src="icons/emoji/classic_mic.png" width="18" alt="mic" /> <img src="icons/emoji/paperclip.png" width="18" alt="attach" /> <img src="icons/emoji/sparkle.png" width="18" alt="improve" />
 ```
 
-**It runs standalone.** Three built-in coding agents — **Coder**, **Debugger**, and **Supervisor** — work locally on your machine with full file access and shell execution. No cloud, no account, no API key required to start. Connect to [OpenClaw](https://github.com/openclaw/openclaw) and your remote agents join seamlessly — but you don't have to. This is the first **PDE** — a *Project Development Environment*.
+**It runs standalone.** Three built-in coding agents — **Coder**, **Debugger**, and **Supervisor** — work locally on your machine with full file access and shell execution. No cloud, no account, no API key required to start. This is the first **PDE** — a *Project Development Environment*.
 
 > Develcakes is not a harness. A harness wraps API calls. Develcakes is where AI and humans build software together. The **project** is the first-class citizen. Agents, humans, git, files, reviews — those all orbit the project.
 
@@ -96,7 +96,7 @@ The chat transcript is **one WebKit document** too — HTML-native agent replies
 
 **Coder** reads your architecture docs, your project context, your conventions. Writes production code. Every file change gets a diff card in the feed. **Debugger** attaches to failed sessions, analyzes the error, proposes a fix, validates it against your test suite. **Supervisor** phases the work, delegates each phase, and verifies independently — see [The Autonomous Coding Loop](#-autonomous-coding-loop).
 
-All three run locally against **OpenAI**, **MiniMax**, **Anthropic**, or any OpenAI-compatible API. No gateway required.
+All three run locally against **OpenAI**, **MiniMax**, **Anthropic**, or any OpenAI-compatible API.
 
 > Built-in agents are just YAML files in `prompts/default_agents/`. Drop a new one in `~/.config/develcakes/agents/` and it appears in your team — with your choice of provider, model, system prompt, emoji, color, and tool set. No code required. No fork needed.
 
@@ -379,12 +379,6 @@ develcakes           # ← supported entry point
 
 `python main.py` also works, but the **`develcakes` launcher is the supported path**: run under the `develcakes-python` AppArmor profile so WebKit's `bwrap` sandbox can start on Ubuntu 24.04 (`kernel.apparmor_restrict_unprivileged_userns`).
 
-```bash
-# Optional: connect to OpenClaw for remote agents
-openclaw gateway start
-# Then click Connect in the Develcakes toolbar
-```
-
 ### First Steps
 
 1. **Browse prompts** in the left sidebar — click any system prompt to load it
@@ -425,7 +419,7 @@ Every `DEVELCAKES_*` variable also answers to its legacy `CRABCAKES_*` name for 
 ├─────────────────────────────────────────────────────────┤
 │  transport/        models/           agent/             │
 │  Telegram          Pure data         Local agent        │
-│  OpenClaw relay    No UI deps        runtime            │
+│  WebSocket relay   No UI deps        runtime            │
 │  No UI deps        No transport      No UI deps         │
 │                    deps                                  │
 ├─────────────────────────────────────────────────────────┤
@@ -497,7 +491,7 @@ develcakes/
 │       #                              failure_classifier · failure_policy · cost ·
 │       #                              extractors · convert · streaming)
 ├── transport/                       # Remote transports — no UI deps
-│   ├── base.py · telegram.py · openclaw.py   # Protocol · Telegram · OpenClaw
+│   ├── base.py · telegram.py · openclaw.py   # Protocol · Telegram · WebSocket relay
 ├── ui/                              # GTK4 presentation layer
 │   ├── window.py                    # Composition root — builds + wires everything
 │   ├── styles.py · wiring.py · constants.py  # CSS · wiring · constants

@@ -1,6 +1,6 @@
 # Configuring LLM Providers
 
-Auxilium and the other built-in agents (Coder, Debugger) need an LLM provider to function. This guide walks you through configuring one of the supported providers — the one-click presets in Settings → Providers make it a paste-your-key operation.
+All built-in agents (Coder, Debugger, Supervisor) need an LLM provider to function. This guide walks you through configuring one of the supported providers — the one-click presets in Settings → Providers make it a paste-your-key operation.
 
 **One-click presets (Settings → Providers → `+ Add Provider`)** — Base URL, caller, and a default model are pre-filled; you paste only the key:
 
@@ -17,7 +17,6 @@ MiniMax and Z.ai presets are deferred until their endpoints/model IDs can be liv
 
 | Provider | Best for | Cost | Setup time |
 |---|---|---|---|
-| **Local KB** | Zero-config help on fresh install | Free (no API key) | 0 minutes |
 | **OpenRouter free** | Trying DevelCakes with an external LLM | Free tier | 1 minute |
 | **Ollama (local)** | Privacy, offline use, no API key | Free (uses your hardware) | 5 minutes |
 | **OpenAI** | Highest quality (GPT-4o) | Pay-per-token | 2 minutes |
@@ -202,7 +201,7 @@ Edit `~/.config/develcakes/agent.json`:
 GPT-4o: ~$2.50 per 1M input tokens, ~$10 per 1M output tokens.
 GPT-4o-mini: ~$0.15 per 1M input tokens, ~$0.60 per 1M output tokens.
 
-A typical Auxilium conversation uses ~5K tokens total. Cost: ~$0.01 with GPT-4o, ~$0.001 with GPT-4o-mini.
+A typical agent conversation uses ~5K tokens total. Cost: ~$0.01 with GPT-4o, ~$0.001 with GPT-4o-mini.
 
 ### Manual configuration
 
@@ -435,7 +434,7 @@ Best practices:
 
 After configuring a provider, test it:
 
-1. Open Auxilium (or Coder) in DevelCakes
+1. Open any agent (the Supervisor is a good starting point) in DevelCakes
 2. Send a simple test message: "Hello, who are you?"
 3. If you get a response, the provider is working
 4. If you get an error, check the error message against the **Common Errors** section above
@@ -452,7 +451,7 @@ This shows API request/response logs in the terminal.
 
 ## Next Steps
 
-- **First conversation with Auxilium:** Try asking "How do I create a project?" or "What does the Coder agent do?"
+- **First conversation with the Supervisor:** Try asking "How do I create a project?" or "What does the Coder agent do?"
 - **Configure multiple providers:** Add a second provider to `agent.json` and switch between them
 - **Set up project-specific agents:** See `agents.md` for creating custom agents per project
 - **Explore features:** See `features.md` for the full feature list

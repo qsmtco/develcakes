@@ -12,7 +12,7 @@ All config lives under `~/.config/develcakes/` (respecting `$XDG_CONFIG_HOME` if
 |------|---------|-------------|
 | `providers.yaml` | **Canonical** provider configuration (LLM API keys, base URLs, models) | `0o600` |
 | `agent.json` | Legacy provider config + enforcement/runtime settings | `0o600` |
-| `agents/*.yaml` | Agent definitions (Coder, Debugger, Auxilium, custom agents) | `0o600` |
+| `agents/*.yaml` | Agent definitions (Coder, Debugger, Supervisor, custom agents) | `0o600` |
 | `favorites.json` | Prompt library favorites | default |
 | `projects/` | Per-project config (e.g., `members.json`) | default |
 | `providers.yaml.tmp` | Atomic-write temp file (renamed on save) | `0o600` |
@@ -151,8 +151,8 @@ These fields control the agent runtime behavior (defined in `agent/config.py`):
 | `cost_limit` | float \| null | `null` | Per-conversation USD spending cap (null = no limit) |
 | `step_limit` | int \| null | `null` | Per-conversation turn limit (null = no limit) |
 | `enforcement` | object | (see below) | Post-write verification settings |
-| `fallback_provider` | str \| null | `null` | KB provider fallback (e.g., `"openrouter"`) |
-| `fallback_model` | str \| null | `null` | KB provider fallback model (e.g., `"openrouter/owl-alpha"`) |
+| `fallback_provider` | str \| null | `null` | Fallback provider (e.g., `"openrouter"`) |
+| `fallback_model` | str \| null | `null` | Fallback provider model (e.g., `"openrouter/owl-alpha"`) |
 
 ### EnforcementConfig fields
 
@@ -297,7 +297,7 @@ Three default agents are seeded from `prompts/default_agents/` on first launch:
 
 | Agent | File | Role | Key traits |
 |-------|------|------|------------|
-| 🦀 Auxilium | `auxilium.yaml` | `helper` | `auto_open: true`, `auto_add_to_projects: true` |
+| 🎩 Supervisor | `supervisor.yaml` | `supervisor` | Onboarding/orchestration, write tools, enforcement enabled; added manually per project |
 | 🛠️ Coder | `coder.yaml` | `coder` | Has write tools, enforcement enabled, full self-improvement |
 | 🐛 Debugger | `debugger.yaml` | `debugger` | Read-only (no write tools), enforcement disabled |
 
@@ -329,7 +329,7 @@ self_improvement:
 
 ### Legacy migration
 
-If you have an old `develcakes.yaml` agent file (from before the Auxilium rename), it's automatically migrated to `auxilium.yaml` on next launch. The `name`, `role`, and prompt references are updated in-place.
+Agent files from older releases are left untouched — if an `agents/*.yaml` file references a role or prompt that no longer exists, DevelCakes reports the problem when the agent loads rather than migrating the file silently.
 
 ---
 
@@ -405,33 +405,10 @@ This is a warning only — DevelCakes does not refuse to start.
 |----------|---------|---------|
 | `XDG_CONFIG_HOME` | `~/.config` | Base config directory |
 | `CRABCAKES_PROJECTS_DIR` | `~/projects` | Root directory for the Projects file tree |
-| `CRABCAKES_GATEWAY_URL` | `ws://localhost:18789` | OpenClaw gateway WebSocket URL |
 | `DEVELCAKES_DEBUG` | (unset) | Set to `1` for verbose debug logging (legacy `CRABCAKES_DEBUG` still honored) |
 | `STT_MODEL_SIZE` | `tiny.en` | faster-whisper model size for voice input |
 
-These are resolved centrally in `utils/config.py`. All path lookups go through `get_config_dir()`, `get_projects_dir()`, `get_gateway_url()`, or `get_identity_dir()` — never hardcoded paths.
-
----
-
-## Configuring the OpenClaw Gateway Connection
-
-DevelCakes connects to an OpenClaw gateway via WebSocket for remote agent access.
-
-### Default connection
-
-- **URL:** `ws://localhost:18789` (configurable via `$CRABCAKES_GATEWAY_URL`)
-- **Auth:** Ed25519 device keys from `~/.openclaw/identity/`
-- **Protocol:** v3 device-auth handshake
-
-### Connecting
-
-1. Click the **Connect** button in the toolbar
-2. The status label shows "connecting…" then "connected" or an error
-3. Once connected, gateway agents appear in the left panel under the **Agents** tab
-
-### Without a gateway
-
-You do NOT need a gateway connection to use DevelCakes. The three special agents (Coder, Debugger, Auxilium) run locally with direct API calls. The gateway is only needed for remote OpenClaw agents.
+These are resolved centrally in `utils/config.py`. All path lookups go through `get_config_dir()`, `get_projects_dir()`, or `get_project_root()` — never hardcoded paths.
 
 ---
 
@@ -486,6 +463,5 @@ Here's a complete setup with two providers, three agents, and enforcement:
 This setup gives you:
 - OpenAI for general-purpose agents
 - MiniMax for the Coder (large 1M token context)
-- Local KB for Auxilium (free, offline help)
 - Enforcement enabled for write-capable agents
 - A $5 per-conversation cost cap and 100-turn limit

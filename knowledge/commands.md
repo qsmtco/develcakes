@@ -106,7 +106,7 @@ Members in my-app:
 
 ### `/cost`
 
-Shows a spending summary for the current project's members. Note: detailed cost data requires OpenClaw usage tracking to be enabled on the gateway side.
+Shows a spending summary for the current project's members.
 
 ```
 /cost

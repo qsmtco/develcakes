@@ -123,13 +123,15 @@ def test_knowledge_sweep_no_stale_product_or_subsystem_refs():
     """R-66S NODE (SPEC-66 §12.8 renumbered): the knowledge/ sweep.
 
     Pins three claims:
-    (a) no knowledge/ file mentions the removed KB subsystem
+    (a) no knowledge/ file mentions a removed subsystem: the KB stack
         (local-kb, kb_server, kb_lookup, port 18790, ensure_kb_provider,
-        rebuild_kb_index, KB_OUT_OF_SCOPE, sentence-transformers);
+        rebuild_kb_index, KB_OUT_OF_SCOPE, sentence-transformers), or the two
+        removed FEATURES — Auxilium (a seeded agent that no longer ships) and
+        OpenClaw (the gateway UI; BUG #6);
     (b) no knowledge/ file uses the pre-rename product name (CrabCakes or a
         bare crabcakes path/URL — the .crabcakes/ PROJECT-DIR name is legal);
-    (c) knowledge/kb-provider.md no longer exists (the file documented the
-        removed subsystem end-to-end).
+    (c) the docs for the removed KB subsystem and the removed gateway UI
+        (knowledge/kb-provider.md, knowledge/gateway.md) no longer exist.
     """
     import pathlib
     root = pathlib.Path(_ROOT)
@@ -139,15 +141,22 @@ def test_knowledge_sweep_no_stale_product_or_subsystem_refs():
         "local-kb", "kb_server", "kb_lookup", "18790",
         "ensure_kb_provider", "rebuild_kb_index", "KB_OUT_OF_SCOPE",
         "sentence-transformers", "kb-provider",
+        # BUG #6: both features are removed from the product, so neither may
+        # survive in the docs. Lowercase here, matched against a lowered copy.
+        "auxilium", "openclaw",
     )
     offenders = []
     for md in sorted(knowledge.glob("*.md")):
         text = md.read_text(encoding="utf-8")
+        low = text.lower()
         # .crabcakes (project dir) and CRABCAKES_* (one-release env fallback)
         # are legal; a bare lowercase 'crabcakes' elsewhere is stale.
         masked = text.replace(".crabcakes", "\x00").replace("CRABCAKES_", "\x01")
         for needle in stale_subsystem:
-            if needle in text:
+            # `low` makes the prose spellings ("Auxilium", "OpenClaw") match
+            # their lowercase needles without losing the case-SENSITIVE ones
+            # (KB_OUT_OF_SCOPE only ever appears in caps).
+            if needle in text or needle in low:
                 offenders.append(f"{md.name}: subsystem ref {needle!r}")
         if "CrabCakes" in masked or "crabcakes" in masked:
             offenders.append(f"{md.name}: pre-rename product name")
@@ -155,4 +164,8 @@ def test_knowledge_sweep_no_stale_product_or_subsystem_refs():
 
     assert not (knowledge / "kb-provider.md").exists(), (
         "knowledge/kb-provider.md returned — it documents the removed KB subsystem"
+    )
+    assert not (knowledge / "gateway.md").exists(), (
+        "knowledge/gateway.md returned — it documents the removed OpenClaw "
+        "gateway UI (BUG #6)"
     )

@@ -90,60 +90,9 @@ The `providers.yaml` fallback scan: if neither the conversation nor the provider
 
 ---
 
-## Gateway Connection Issues
-
-### Toolbar Shows "Offline" or "Connecting..." Indefinitely
-
-**Check:**
-
-1. **Gateway is running:**
-   ```bash
-   openclaw gateway status
-   ```
-
-2. **Gateway URL is correct:** Check Settings → Gateway URL. Default is `ws://localhost:18789`.
-
-3. **Port is accessible:** Test connectivity:
-   ```bash
-   curl -s http://localhost:18789/health
-   ```
-
-4. **Device key is registered:**
-   ```bash
-   openclaw device list
-   ```
-
-5. **Check logs:** Run with `DEVELCAKES_DEBUG=1` to see WebSocket connection details:
-   ```bash
-   DEVELCAKES_DEBUG=1 develcakes
-   ```
-
-### Gateway Disconnects Randomly
-
-**Symptom:** Connection drops intermittently, agents stop responding.
-
-**Fix:**
-
-- The `GatewayClient` (in `gateway/client.py`) has built-in reconnect logic. Check that the gateway process is stable.
-- Network instability between client and gateway can cause this — check if the gateway host is reachable.
-- Review gateway-side logs for session timeouts or rate limiting.
-
----
-
 ## Agent Not Responding
 
-### Gateway Agents (discovered via gateway)
-
-**Symptom:** Messages sent but no response from a gateway agent.
-
-**Check:**
-
-1. Verify the agent has an active session (check if the agent appears in the Agents tab)
-2. Check gateway status — is the agent process running?
-3. Look for error messages in the chat tab or activity drawer
-4. Run with `DEVELCAKES_DEBUG=1` to see event routing
-
-### Special Agents (Coder, Debugger, custom)
+### Special Agents (Coder, Debugger, Supervisor, custom)
 
 **Symptom:** Special agent shows no response or an error message.
 
@@ -232,19 +181,7 @@ DEVELCAKES_DEBUG=1 python3 main.py
 
 This sets the log level to `DEBUG` (default is `WARNING`). You will see:
 - LLM API request/response details
-- WebSocket event routing
 - Tool execution details
-- Gateway connection lifecycle
-
-### Gateway Debug
-
-For raw WebSocket frame dumps:
-
-```bash
-CRABCAKES_GATEWAY_DEBUG=1 python3 main.py
-```
-
-This is independent of `DEVELCAKES_DEBUG` and dumps all WebSocket frames.
 
 ---
 
@@ -336,7 +273,6 @@ MiniMax returns body-level errors with HTTP 200. The status codes:
 
 ## Getting Help
 
-- **Built-in help:** Ask the DevelCakes 🦀 (Auxilium) agent — it answers through your configured provider
+- **Built-in help:** Ask the **Supervisor** (🎩) in its tab — it answers through your configured provider
 - **Command help:** Type `/help` in any chat input
-- **Gateway docs:** See OpenClaw documentation at `https://docs.openclaw.ai`
 - **Debug mode:** Always run with `DEVELCAKES_DEBUG=1` when reporting bugs — the logs are essential for diagnosis

@@ -27,9 +27,9 @@ Solo DM state is tracked per-project in `ProjectHandler._solo_targets`.
 
 ### Agent Routing
 
-Agent-to-project routing is managed by `AgentRoutingTable` (in `models/routing.py`). When a gateway agent responds, `ChatHandler` looks up which project the agent belongs to and routes the response to the correct project tab.
+Agent-to-project routing is managed by `AgentRoutingTable` (in `models/routing.py`). When an agent responds, `ChatHandler` looks up which project the agent belongs to and routes the response to the correct project tab.
 
-Special agents (Coder, Debugger, custom agents) are routed through `AgentRuntimeHandler.send_to_special_agent()` instead of the gateway, but the project tab routing works the same way.
+Special agents (Coder, Debugger, Supervisor, custom agents) are routed through `AgentRuntimeHandler.send_to_special_agent()`, and the project tab routing works the same way.
 
 ---
 
@@ -249,12 +249,12 @@ The Agent Builder is a modal dialog for creating and editing custom agents. It i
 1. Click the **+** button in the Agents tab or use the agent builder button
 2. Fill in the agent definition:
    - **Name** — Display name for the agent
-   - **Role** — Agent role identifier (e.g. `coder`, `debugger`, `helper`, `tester`)
+   - **Role** — Agent role identifier (e.g. `coder`, `debugger`, `supervisor`, `tester`)
    - **System Prompt** — Custom instructions for the agent
    - **LLM Provider** — Which provider to use (dropdown from configured providers)
    - **Model** — Specific model identifier
    - **API Key** — Optional per-agent API key override
-   - **Fallback Provider** — Provider to use when KB returns out-of-scope
+   - **Fallback Provider** — Provider to use when the primary provider fails
    - **Tools** — Which tools the agent can use (read_file, write_file, edit_file, exec_command, etc.)
    - **MCP Servers** — MCP server configurations for external tools
 3. Click **Save** — The agent is saved to `agents/*.yaml` and immediately available
