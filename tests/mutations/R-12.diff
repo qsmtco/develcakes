@@ -1,134 +1,234 @@
+--- a/agent/runtime.py
++++ b/agent/runtime.py
+@@ -476,11 +476,6 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
+     gate decision, so the approval gate below and the ``bypass_approval``
+     flag further down cannot disagree with each other. When neither form
+     is sensitive the resolved form is returned unchanged.
+-
+-    SPEC-66 BUG #1 (report #6): both of those forms describe ONE name. A
+-    SENSITIVE name that is a symlink or a hard link to the plain
+-    destination (including a DANGLING link the write would create through)
+-    is invisible to both, so the alias walk is the third disjunct.
+     """
+     if not isinstance(path_arg, str) or not path_arg.strip():
+         return None
+@@ -488,7 +483,6 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
+         _resolve_project_path,
+         _project_relpath,
+         _lexical_relpath,
+-        _sensitive_alias_of,
+         is_sensitive_path,
+     )
+ 
+@@ -501,9 +495,6 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
+     lexical = _lexical_relpath(path_arg, project_path)
+     if is_sensitive_path(lexical):
+         return lexical
+-    alias = _sensitive_alias_of(resolved, project_path)
+-    if alias is not None:
+-        return _project_relpath(alias, project_path)
+     return rel
+ 
+ 
 --- a/agent/tools.py
 +++ b/agent/tools.py
-@@ -646,31 +646,6 @@ def _project_relpath(resolved: str, project_path: str) -> str:
+@@ -19,7 +19,6 @@ import re
+ import shlex
+ import shutil
+ import signal
+-import stat
+ import subprocess
+ import threading
+ import time
+@@ -672,164 +671,6 @@ def _lexical_relpath(path: str, project_path: str) -> str:
      return rel.replace("\\", "/")
  
  
--def _lexical_relpath(path: str, project_path: str) -> str:
--    """Project-relative form of the UNRESOLVED path (no symlink following).
+-# ── SPEC-66 BUG #1 (report #6): inode/symlink alias detection ────────────────
+-#
+-# The lexical and resolved checks both describe ONE path. They are blind to
+-# the case where a SENSITIVE name and a PLAIN name refer to the same bytes:
+-#   .crabcakes/enforcement.json --symlink--> notes/enforcement.json
+-#   .crabcakes/enforcement.json --hardlink-- notes/enforcement.json
+-# Writing `notes/enforcement.json` is a write to the sensitive file, but
+-# neither name is sensitive-looking in that direction. So before gating we
+-# walk the sensitive dirs and ask whether any entry there aliases the
+-# destination.
+-#
+-# `.crabcakes/` and `.github/` are walked fully (they are small). `.git/` is
+-# walked at the TOP LEVEL and in `refs/` only: `objects/` holds content-
+-# addressed hash names that cannot be name-aliased to a working file, and a
+-# full object walk costs tens of thousands of stats per write.
+-_SENSITIVE_ALIAS_DIRS = (".crabcakes", ".git", ".github")
+-_GIT_ALIAS_SUBDIRS = ("refs",)
 -
--    SPEC-66 BUG #2: `os.path.realpath` in _resolve_project_path follows
--    symlinks, so a sensitive NAME pointing at a plain target (a cloned
--    repo can ship `.crabcakes/enforcement.json -> notes/enforcement.json`)
--    hides its sensitivity from the resolved-path check. The lexical form
--    normalizes `.`/`..` only.
+-# project_real → (dirs, mtimes_tuple, [(path, lstat, readlink_or_None)])
+-# SPEC-66 BUG #1 perf: a write must not rescan .crabcakes/ + .git/ every
+-# time. Adding or removing an entry bumps the containing directory's mtime,
+-# so the signature is one (mtime_ns, dev, ino) triple per directory the last
+-# walk VISITED — not per entry. A rejected signature costs a handful of
+-# lstat calls; only a real change pays for a tree walk.
+-_ALIAS_ENTRY_CACHE: dict[str, tuple[tuple, tuple, list[tuple]]] = {}
 -
--    This is a COMPLEMENT to _project_relpath, never a replacement: the
--    resolved form says where the bytes land, the lexical form says what
--    the path is CALLED. A write needs approval when either is sensitive.
+-
+-def _alias_scan_roots(project_real: str) -> list[tuple[str, bool]]:
+-    """(root_dir, recurse) for the sensitive dirs that can hold an alias."""
+-    roots: list[tuple[str, bool]] = []
+-    for name in _SENSITIVE_ALIAS_DIRS:
+-        top = os.path.join(project_real, name)
+-        if name == ".git":
+-            # Top level only, plus refs/ — objects/ is content-addressed
+-            # hash names and a full walk costs tens of thousands of stats.
+-            roots.append((top, False))
+-            for sub in _GIT_ALIAS_SUBDIRS:
+-                roots.append((os.path.join(top, sub), True))
+-        else:
+-            roots.append((top, True))
+-    return roots
+-
+-
+-def _alias_signature(dirs: tuple) -> tuple:
+-    """(dir, None) when absent, else (dir, mtime_ns, dev, ino) per dir."""
+-    signature: list[tuple] = []
+-    for directory in dirs:
+-        try:
+-            st = os.lstat(directory)
+-        except OSError:
+-            signature.append((directory, None))
+-        else:
+-            signature.append((directory, st.st_mtime_ns, st.st_dev, st.st_ino))
+-    return tuple(signature)
+-
+-
+-def _alias_scan(project_real: str) -> list[tuple]:
+-    """(path, lstat, readlink_or_None) for every entry in the sensitive dirs."""
+-    roots = _alias_scan_roots(project_real)
+-    root_dirs = tuple(root for root, _recurse in roots)
+-
+-    cached = _ALIAS_ENTRY_CACHE.get(project_real)
+-    if cached is not None and _alias_signature(cached[0]) == cached[1]:
+-        return cached[2]
+-
+-    entries: list[tuple] = []
+-    visited: list[str] = []
+-
+-    def visit(directory: str, recurse: bool) -> None:
+-        visited.append(directory)
+-        subdirs: list[str] = []
+-        try:
+-            with os.scandir(directory) as it:
+-                paths = [e.path for e in it]
+-        except OSError:
+-            return
+-        for path in paths:
+-            try:
+-                est = os.lstat(path)
+-            except OSError:
+-                continue
+-            link = None
+-            if stat.S_ISLNK(est.st_mode):
+-                try:
+-                    link = os.readlink(path)
+-                except OSError:
+-                    link = None
+-            entries.append((path, est, link))
+-            if recurse and stat.S_ISDIR(est.st_mode):
+-                subdirs.append(path)
+-        for sub in sorted(subdirs):
+-            visit(sub, recurse)
+-
+-    for root, recurse in roots:
+-        visit(root, recurse)
+-    dirs = root_dirs + tuple(d for d in visited if d not in root_dirs)
+-    _ALIAS_ENTRY_CACHE[project_real] = (dirs, _alias_signature(dirs), entries)
+-    return entries
+-
+-
+-def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
+-    """Sensitive path that ALIASES the destination (same inode or symlink target).
+-
+-    SPEC-66 BUG #1 (report #6): writing the plain TARGET name updates the
+-    inode a sensitive name already refers to (symlink or hard link), so the
+-    lexical and resolved checks both see an ordinary path. This walks the
+-    sensitive dirs and returns the aliasing sensitive path, or None.
+-
+-    Two comparisons per entry E:
+-      (a) inode: lstat(E) vs the DESTINATION's stat() — catches hard links
+-          (requires dest to exist). Dest is stat()'d because the resolved
+-          form has already dereferenced any symlink on the written path;
+-          entry stats are lstat()'d so a link is never mistaken for its
+-          target.
+-      (b) symlink target path: when E is a symlink, its target resolved
+-          against dirname(E) equals resolved_dest — catches existing links
+-          and DANGLING ones (dest not yet created; the write would create
+-          it, and there is no inode to compare).
+-
+-    Performance: `.crabcakes/` and `.github/` are walked fully (small).
+-    `.git/` walks ONLY the top level and `refs/` — `objects/` is
+-    content-addressed hash names (not name-aliasable to a working file) and a
+-    full object walk costs tens of thousands of stats per write. Cache the
+-    per-project entry list keyed on the visited dirs' mtimes (any entry
+-    add/remove bumps the dir mtime) so repeated writes don't rescan.
 -    """
+-    if not resolved_dest or not project_path:
+-        return None
 -    project_real = os.path.realpath(project_path)
--    if os.path.isabs(path):
--        joined = os.path.normpath(path)
--    else:
--        joined = os.path.normpath(os.path.join(project_real, path))
 -    try:
--        rel = os.path.relpath(joined, project_real)
--    except ValueError:
--        rel = joined
--    return rel.replace("\\", "/")
+-        dest_st = os.stat(resolved_dest)  # realpath'd already; may not exist
+-    except OSError:
+-        dest_st = None
+-    dest_key = (dest_st.st_dev, dest_st.st_ino) if dest_st is not None else None
+-    dest_norm = os.path.normpath(resolved_dest)
+-
+-    for entry, entry_st, link in _alias_scan(project_real):
+-        if os.path.normpath(entry) == dest_norm:
+-            continue  # the destination IS the sensitive name; the lexical check has it
+-        # (a) same inode — hard links, and existing symlink targets via (b).
+-        if dest_key is not None and not stat.S_ISLNK(entry_st.st_mode):
+-            if (entry_st.st_dev, entry_st.st_ino) == dest_key:
+-                return entry
+-        if link is None:
+-            continue
+-        # (b) symlink target path — also catches the DANGLING link, where
+-        # nothing exists yet and there is no inode to compare.
+-        if os.path.exists(entry):
+-            target_path = os.path.realpath(entry)
+-        else:
+-            target_path = os.path.normpath(
+-                os.path.join(os.path.dirname(entry), link)
+-            )
+-        if os.path.normpath(target_path) == dest_norm:
+-            return entry
+-    return None
 -
 -
  def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
      """Write content to a file relative to project_path."""
      resolved = _resolve_project_path(path, project_path)
-@@ -681,22 +656,14 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
-     # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
-     # The raw model string (`./.crabcakes/x`, `foo/../.crabcakes/x`) does
-     # not start with `.crabcakes/`, so gating on it skipped approval.
--    # SPEC-66 BUG #2: also gate on the LEXICAL form. A symlink can give a
--    # sensitive NAME a plain target (`.crabcakes/enforcement.json ->
--    # notes/enforcement.json`), so the resolved form alone is blind. The
--    # resolved spelling wins in the approval args (it is where the bytes
--    # land); the lexical form is used when only it is sensitive.
-     rel = _project_relpath(resolved, project_path)
--    lex = _lexical_relpath(path, project_path)
--    sensitive_rel = rel if is_sensitive_path(rel) else (
--        lex if is_sensitive_path(lex) else None)
--    if sensitive_rel is not None:
--        approved = _get_approval(session_key, "write_file", {"path": sensitive_rel}, approval_callback=approval_callback)
-+    if is_sensitive_path(rel):
-+        approved = _get_approval(session_key, "write_file", {"path": rel}, approval_callback=approval_callback)
+@@ -849,13 +690,6 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
+     lex = _lexical_relpath(path, project_path)
+     sensitive_rel = rel if is_sensitive_path(rel) else (
+         lex if is_sensitive_path(lex) else None)
+-    # SPEC-66 BUG #1 (report #6): neither form is sensitive when the plain
+-    # TARGET name is written while the sensitive name is an alias (symlink or
+-    # hard link) to it. Name the SENSITIVE side on the card.
+-    if sensitive_rel is None:
+-        alias = _sensitive_alias_of(resolved, project_path)
+-        if alias is not None:
+-            sensitive_rel = _project_relpath(alias, project_path)
+     if sensitive_rel is not None:
+         approved = _get_approval(session_key, "write_file", {"path": sensitive_rel}, approval_callback=approval_callback)
          if not approved:
-             return ToolResult(
-                 success=False,
-                 error=(
--                    f"write_file blocked: {sensitive_rel} is a sensitive path\n"
-+                    f"write_file blocked: {rel} is a sensitive path\n"
-                     f"(credential, secret, SSH key, or cloud config file).\n"
-                     f"PM approval is required before writing to this file."
-                 ),
-@@ -893,20 +860,14 @@ def _edit_file(
- 
-     # HIGH-1: Sensitive-path guard — require PM approval before editing.
-     # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
--    # SPEC-66 BUG #2: the LEXICAL form is checked too — a symlinked
--    # sensitive name (`.crabcakes/enforcement.json -> notes/x.json`)
--    # resolves to a plain path and would otherwise edit without approval.
-     rel = _project_relpath(resolved, project_path)
--    lex = _lexical_relpath(path, project_path)
--    sensitive_rel = rel if is_sensitive_path(rel) else (
--        lex if is_sensitive_path(lex) else None)
--    if sensitive_rel is not None:
--        approved = _get_approval(session_key, "edit_file", {"path": sensitive_rel}, approval_callback=approval_callback)
-+    if is_sensitive_path(rel):
-+        approved = _get_approval(session_key, "edit_file", {"path": rel}, approval_callback=approval_callback)
+@@ -1066,12 +900,6 @@ def _edit_file(
+     lex = _lexical_relpath(path, project_path)
+     sensitive_rel = rel if is_sensitive_path(rel) else (
+         lex if is_sensitive_path(lex) else None)
+-    # SPEC-66 BUG #1 (report #6): a plain TARGET name whose sensitive alias
+-    # (symlink or hard link) points at it — gate on the SENSITIVE name.
+-    if sensitive_rel is None:
+-        alias = _sensitive_alias_of(resolved, project_path)
+-        if alias is not None:
+-            sensitive_rel = _project_relpath(alias, project_path)
+     if sensitive_rel is not None:
+         approved = _get_approval(session_key, "edit_file", {"path": sensitive_rel}, approval_callback=approval_callback)
          if not approved:
-             return ToolResult(
-                 success=False,
-                 error=(
--                    f"edit_file blocked: {sensitive_rel} is a sensitive path\n"
-+                    f"edit_file blocked: {rel} is a sensitive path\n"
-                     f"(credential, secret, SSH key, or cloud config file).\n"
-                     f"PM approval is required before editing this file."
-                 ),
---- a/agent/runtime.py
-+++ b/agent/runtime.py
-@@ -467,35 +467,15 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
-     path against the project and returns its project-relative form, the
-     same normalization ``agent/tools.py`` applies. None when the path does
-     not resolve inside the project (nothing to gate — the tool refuses it).
--
--    SPEC-66 BUG #2: ``os.path.realpath`` follows symlinks, so a sensitive
--    NAME pointed at a plain target (a cloned repo can ship
--    ``.crabcakes/enforcement.json -> notes/enforcement.json``) looked
--    benign to the resolved check. Both forms are therefore tested, and the
--    sensitive one is returned — this function is the single source of the
--    gate decision, so the approval gate below and the ``bypass_approval``
--    flag further down cannot disagree with each other. When neither form
--    is sensitive the resolved form is returned unchanged.
-     """
-     if not isinstance(path_arg, str) or not path_arg.strip():
-         return None
--    from agent.tools import (
--        _resolve_project_path,
--        _project_relpath,
--        _lexical_relpath,
--        is_sensitive_path,
--    )
-+    from agent.tools import _resolve_project_path, _project_relpath
- 
-     resolved = _resolve_project_path(path_arg, project_path)
-     if resolved is None:
-         return None
--    rel = _project_relpath(resolved, project_path)
--    if is_sensitive_path(rel):
--        return rel
--    lexical = _lexical_relpath(path_arg, project_path)
--    if is_sensitive_path(lexical):
--        return lexical
--    return rel
-+    return _project_relpath(resolved, project_path)
- 
- 
- def _coder_shell_allowed(command: str, project_path: str) -> str | None:
-@@ -2963,9 +2943,6 @@ class AgentRuntime:
-                 # never matched the sensitive prefixes, so the bypass was NOT
-                 # taken for a path the gate had just approved — the tool then
-                 # asked for approval a second time.
--                # SPEC-66 BUG #2: rel_path is the form _sensitive_relpath found
--                # sensitive (resolved preferred, lexical fallback), so a
--                # symlinked sensitive name gates AND bypasses consistently.
-                 bypass_approval = (tool_name == "exec_command" or
-                                    (tool_name in ("write_file", "edit_file") and
-                                     rel_path is not None and

@@ -476,6 +476,11 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
     gate decision, so the approval gate below and the ``bypass_approval``
     flag further down cannot disagree with each other. When neither form
     is sensitive the resolved form is returned unchanged.
+
+    SPEC-66 BUG #1 (report #6): both of those forms describe ONE name. A
+    SENSITIVE name that is a symlink or a hard link to the plain
+    destination (including a DANGLING link the write would create through)
+    is invisible to both, so the alias walk is the third disjunct.
     """
     if not isinstance(path_arg, str) or not path_arg.strip():
         return None
@@ -483,6 +488,7 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
         _resolve_project_path,
         _project_relpath,
         _lexical_relpath,
+        _sensitive_alias_of,
         is_sensitive_path,
     )
 
@@ -495,6 +501,9 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
     lexical = _lexical_relpath(path_arg, project_path)
     if is_sensitive_path(lexical):
         return lexical
+    alias = _sensitive_alias_of(resolved, project_path)
+    if alias is not None:
+        return _project_relpath(alias, project_path)
     return rel
 
 

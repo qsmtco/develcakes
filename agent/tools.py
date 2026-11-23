@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -671,6 +672,164 @@ def _lexical_relpath(path: str, project_path: str) -> str:
     return rel.replace("\\", "/")
 
 
+# ── SPEC-66 BUG #1 (report #6): inode/symlink alias detection ────────────────
+#
+# The lexical and resolved checks both describe ONE path. They are blind to
+# the case where a SENSITIVE name and a PLAIN name refer to the same bytes:
+#   .crabcakes/enforcement.json --symlink--> notes/enforcement.json
+#   .crabcakes/enforcement.json --hardlink-- notes/enforcement.json
+# Writing `notes/enforcement.json` is a write to the sensitive file, but
+# neither name is sensitive-looking in that direction. So before gating we
+# walk the sensitive dirs and ask whether any entry there aliases the
+# destination.
+#
+# `.crabcakes/` and `.github/` are walked fully (they are small). `.git/` is
+# walked at the TOP LEVEL and in `refs/` only: `objects/` holds content-
+# addressed hash names that cannot be name-aliased to a working file, and a
+# full object walk costs tens of thousands of stats per write.
+_SENSITIVE_ALIAS_DIRS = (".crabcakes", ".git", ".github")
+_GIT_ALIAS_SUBDIRS = ("refs",)
+
+# project_real → (dirs, mtimes_tuple, [(path, lstat, readlink_or_None)])
+# SPEC-66 BUG #1 perf: a write must not rescan .crabcakes/ + .git/ every
+# time. Adding or removing an entry bumps the containing directory's mtime,
+# so the signature is one (mtime_ns, dev, ino) triple per directory the last
+# walk VISITED — not per entry. A rejected signature costs a handful of
+# lstat calls; only a real change pays for a tree walk.
+_ALIAS_ENTRY_CACHE: dict[str, tuple[tuple, tuple, list[tuple]]] = {}
+
+
+def _alias_scan_roots(project_real: str) -> list[tuple[str, bool]]:
+    """(root_dir, recurse) for the sensitive dirs that can hold an alias."""
+    roots: list[tuple[str, bool]] = []
+    for name in _SENSITIVE_ALIAS_DIRS:
+        top = os.path.join(project_real, name)
+        if name == ".git":
+            # Top level only, plus refs/ — objects/ is content-addressed
+            # hash names and a full walk costs tens of thousands of stats.
+            roots.append((top, False))
+            for sub in _GIT_ALIAS_SUBDIRS:
+                roots.append((os.path.join(top, sub), True))
+        else:
+            roots.append((top, True))
+    return roots
+
+
+def _alias_signature(dirs: tuple) -> tuple:
+    """(dir, None) when absent, else (dir, mtime_ns, dev, ino) per dir."""
+    signature: list[tuple] = []
+    for directory in dirs:
+        try:
+            st = os.lstat(directory)
+        except OSError:
+            signature.append((directory, None))
+        else:
+            signature.append((directory, st.st_mtime_ns, st.st_dev, st.st_ino))
+    return tuple(signature)
+
+
+def _alias_scan(project_real: str) -> list[tuple]:
+    """(path, lstat, readlink_or_None) for every entry in the sensitive dirs."""
+    roots = _alias_scan_roots(project_real)
+    root_dirs = tuple(root for root, _recurse in roots)
+
+    cached = _ALIAS_ENTRY_CACHE.get(project_real)
+    if cached is not None and _alias_signature(cached[0]) == cached[1]:
+        return cached[2]
+
+    entries: list[tuple] = []
+    visited: list[str] = []
+
+    def visit(directory: str, recurse: bool) -> None:
+        visited.append(directory)
+        subdirs: list[str] = []
+        try:
+            with os.scandir(directory) as it:
+                paths = [e.path for e in it]
+        except OSError:
+            return
+        for path in paths:
+            try:
+                est = os.lstat(path)
+            except OSError:
+                continue
+            link = None
+            if stat.S_ISLNK(est.st_mode):
+                try:
+                    link = os.readlink(path)
+                except OSError:
+                    link = None
+            entries.append((path, est, link))
+            if recurse and stat.S_ISDIR(est.st_mode):
+                subdirs.append(path)
+        for sub in sorted(subdirs):
+            visit(sub, recurse)
+
+    for root, recurse in roots:
+        visit(root, recurse)
+    dirs = root_dirs + tuple(d for d in visited if d not in root_dirs)
+    _ALIAS_ENTRY_CACHE[project_real] = (dirs, _alias_signature(dirs), entries)
+    return entries
+
+
+def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
+    """Sensitive path that ALIASES the destination (same inode or symlink target).
+
+    SPEC-66 BUG #1 (report #6): writing the plain TARGET name updates the
+    inode a sensitive name already refers to (symlink or hard link), so the
+    lexical and resolved checks both see an ordinary path. This walks the
+    sensitive dirs and returns the aliasing sensitive path, or None.
+
+    Two comparisons per entry E:
+      (a) inode: lstat(E) vs the DESTINATION's stat() — catches hard links
+          (requires dest to exist). Dest is stat()'d because the resolved
+          form has already dereferenced any symlink on the written path;
+          entry stats are lstat()'d so a link is never mistaken for its
+          target.
+      (b) symlink target path: when E is a symlink, its target resolved
+          against dirname(E) equals resolved_dest — catches existing links
+          and DANGLING ones (dest not yet created; the write would create
+          it, and there is no inode to compare).
+
+    Performance: `.crabcakes/` and `.github/` are walked fully (small).
+    `.git/` walks ONLY the top level and `refs/` — `objects/` is
+    content-addressed hash names (not name-aliasable to a working file) and a
+    full object walk costs tens of thousands of stats per write. Cache the
+    per-project entry list keyed on the visited dirs' mtimes (any entry
+    add/remove bumps the dir mtime) so repeated writes don't rescan.
+    """
+    if not resolved_dest or not project_path:
+        return None
+    project_real = os.path.realpath(project_path)
+    try:
+        dest_st = os.stat(resolved_dest)  # realpath'd already; may not exist
+    except OSError:
+        dest_st = None
+    dest_key = (dest_st.st_dev, dest_st.st_ino) if dest_st is not None else None
+    dest_norm = os.path.normpath(resolved_dest)
+
+    for entry, entry_st, link in _alias_scan(project_real):
+        if os.path.normpath(entry) == dest_norm:
+            continue  # the destination IS the sensitive name; the lexical check has it
+        # (a) same inode — hard links, and existing symlink targets via (b).
+        if dest_key is not None and not stat.S_ISLNK(entry_st.st_mode):
+            if (entry_st.st_dev, entry_st.st_ino) == dest_key:
+                return entry
+        if link is None:
+            continue
+        # (b) symlink target path — also catches the DANGLING link, where
+        # nothing exists yet and there is no inode to compare.
+        if os.path.exists(entry):
+            target_path = os.path.realpath(entry)
+        else:
+            target_path = os.path.normpath(
+                os.path.join(os.path.dirname(entry), link)
+            )
+        if os.path.normpath(target_path) == dest_norm:
+            return entry
+    return None
+
+
 def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
     """Write content to a file relative to project_path."""
     resolved = _resolve_project_path(path, project_path)
@@ -690,6 +849,13 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
     lex = _lexical_relpath(path, project_path)
     sensitive_rel = rel if is_sensitive_path(rel) else (
         lex if is_sensitive_path(lex) else None)
+    # SPEC-66 BUG #1 (report #6): neither form is sensitive when the plain
+    # TARGET name is written while the sensitive name is an alias (symlink or
+    # hard link) to it. Name the SENSITIVE side on the card.
+    if sensitive_rel is None:
+        alias = _sensitive_alias_of(resolved, project_path)
+        if alias is not None:
+            sensitive_rel = _project_relpath(alias, project_path)
     if sensitive_rel is not None:
         approved = _get_approval(session_key, "write_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
@@ -900,6 +1066,12 @@ def _edit_file(
     lex = _lexical_relpath(path, project_path)
     sensitive_rel = rel if is_sensitive_path(rel) else (
         lex if is_sensitive_path(lex) else None)
+    # SPEC-66 BUG #1 (report #6): a plain TARGET name whose sensitive alias
+    # (symlink or hard link) points at it — gate on the SENSITIVE name.
+    if sensitive_rel is None:
+        alias = _sensitive_alias_of(resolved, project_path)
+        if alias is not None:
+            sensitive_rel = _project_relpath(alias, project_path)
     if sensitive_rel is not None:
         approved = _get_approval(session_key, "edit_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
