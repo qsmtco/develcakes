@@ -195,6 +195,26 @@ def _is_eval_flag(tok: str, prefixes: tuple[str, ...]) -> bool:
     return tok in prefixes or any(tok.startswith(p) for p in prefixes)
 
 
+def _is_clustered_eval_flag(tok: str, letters: tuple[str, ...]) -> bool:
+    """True when a SHORT-OPTION CLUSTER carries an eval letter.
+
+    SPEC-66 BUG #3: shlex keeps `python3 -ic 'x'` as one token `-ic`; the
+    prefix matcher never sees it, but Python runs it as -i + -c. A cluster
+    is a token starting with exactly one `-` (not `--`), whose letter run
+    (after stripping an `=value` suffix) contains one of `letters`.
+    False positives are accepted (same posture as the pytest -c note):
+    e.g. `python3 -mc` would be refused though -m consumes the rest.
+
+    Long options are deliberately excluded — `--config` / `--print` are
+    the prefix matcher's business, and treating them as clusters would
+    refuse legitimate names containing `c` or `p`.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return False
+    cluster = tok.split("=", 1)[0][1:]  # strip leading '-', strip =value
+    return any(ch in letters for ch in cluster)
+
+
 def _validate_test_command(command: str | None) -> bool:
     """Return True if `command`'s first token is in _ALLOWED_BINARIES.
 
@@ -205,12 +225,26 @@ def _validate_test_command(command: str | None) -> bool:
     SPEC-66 §2.2 + §11.1: after the first-token allowlist passes, the command is
     split with `shlex` and interpreter eval flags are refused:
 
-      * python/python3 → any token starting with `-c` (NOT `--config`).
-      * node → any token starting with `-e` or `--eval`.
+      * python/python3 → any token starting with `-c` (NOT `--config`), or any
+        SHORT-OPTION CLUSTER whose letter run contains `c` (`-ic`, `-qc`, `-ic=1`).
+      * node → any token starting with `-e`, `--eval` or `--print`, or any
+        SHORT-OPTION CLUSTER whose letter run contains `e` or `p` (`-pe`, `-p`).
+        `node -p` / `node --print` are themselves eval flags ("evaluate script
+        and print result" per `node --help`).
+
+    SPEC-66 BUG #3: a cluster is one shlex token starting with exactly one `-`
+    whose letters contain an eval letter — `python3 -ic 'code'` runs as
+    `-i` + `-c` inside Python, so the prefix matcher alone was blind to it.
+    Long options are NOT clusters (`python3 --config`, `node --print`).
 
     ACCEPTED FALSE POSITIVE (SPEC-66 §11.1): `python3 -m pytest -c setup.cfg`
     is REFUSED — pytest's own config flag collides with python's `-c`. Projects
-    must pass pytest config via environment variables or file arguments.
+    must pass pytest config via environment variables or file arguments. The
+    cluster rule widens this class of intentional over-refusal: `-mc`-style
+    clusters (`python3 -mc ...`, where `-m` would consume the rest) and
+    legitimate `node -p` non-eval uses are refused too. Refusal is the safe
+    direction; verbatim-free spellings (`--config`, `node -c`, `node -v`,
+    `node -r`) stay allowed.
 
     `shlex.ValueError` (unbalanced quotes) returns False — an unparseable
     command is not trusted.
@@ -232,9 +266,15 @@ def _validate_test_command(command: str | None) -> bool:
 
     base = os.path.basename(argv[0]).lower()
     flags = argv[1:]
-    if base in ("python", "python3") and any(_is_eval_flag(tok, ("-c",)) for tok in flags):
+    if base in ("python", "python3") and any(
+        _is_eval_flag(tok, ("-c",)) or _is_clustered_eval_flag(tok, ("c",)) for tok in flags
+    ):
         return False
-    if base == "node" and any(_is_eval_flag(tok, ("-e", "--eval")) for tok in flags):
+    if base == "node" and any(
+        _is_eval_flag(tok, ("-e", "--eval", "--print"))
+        or _is_clustered_eval_flag(tok, ("e", "p"))
+        for tok in flags
+    ):
         return False
     return True
 

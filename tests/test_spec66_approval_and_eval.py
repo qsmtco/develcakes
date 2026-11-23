@@ -312,8 +312,11 @@ def test_resolved_sensitive_path_and_python_c(tmp_path):
     )
     assert rt_asked, "runtime gate missed the symlinked sensitive name"
 
-    # And the eval flag is refused.
+    # And the eval flag is refused (BUG #3: the clustered spelling too, so the
+    # node documents the fully closed chain — symlink write refused → eval
+    # refused in both spellings).
     assert _validate_test_command("python3 -c 'import os'") is False
+    assert _validate_test_command("python3 -ic 'import os'") is False
 
 
 # ── Item 2: interpreter eval flags ──────────────────────────────────────────
@@ -328,10 +331,18 @@ def test_resolved_sensitive_path_and_python_c(tmp_path):
         "python3 -c=import os",
         "python3 -cimport os",
         "python3 -m pytest -c setup.cfg",
+        # SPEC-66 BUG #3: clustered short options — Python runs any cluster
+        # containing `c` as `-c` (all verified by execution).
+        "python3 -ic 'import os'",
+        "python3 -qc 'import os'",
+        "python3 -Bc 'import os'",
+        "python3 -uc 'import os'",
+        "python3 -Oc 'import os'",
+        "python3 -ic=1 'import os'",
     ],
 )
 def test_python_eval_flags_are_refused(command):
-    """python/python3: any token starting with `-c` is refused.
+    """python/python3: any token starting with `-c`, or any cluster with `c`.
 
     `python3 -m pytest -c setup.cfg` is the DOCUMENTED FALSE POSITIVE
     (SPEC-66 §11.1): pytest's config flag collides with python's `-c`.
@@ -347,6 +358,12 @@ def test_python_eval_flags_are_refused(command):
         'node -e"require(\"fs\")"',
         "node --eval 'require(\"fs\")'",
         "node --eval=require(\"fs\")",
+        # SPEC-66 BUG #3: node clusters carrying `e` or `p`, plus `--print`
+        # (`node -p` / `--print` evaluate the script and print the result).
+        "node -pe 'x=1'",
+        "node -p 'x=1'",
+        "node --print 'x=1'",
+        "node -ie 'x=1'",
     ],
 )
 def test_node_eval_flags_are_refused(command):
@@ -361,6 +378,13 @@ def test_node_eval_flags_are_refused(command):
         "ruff check .",
         "pytest tests/",
         "node script.js",
+        # SPEC-66 BUG #3 boundaries: long options and non-eval letters stay
+        # allowed so the cluster rule does not over-refuse ordinary flags.
+        "python3 --config setup.cfg",
+        "node -c script.js",
+        "node -v",
+        "node -r module.js",
+        "python3 -i script.py",
     ],
 )
 def test_ordinary_commands_are_allowed(command):
@@ -389,6 +413,23 @@ def test_eval_flag_matcher_is_prefix_based():
     assert _is_eval_flag("--config", ("-c",)) is False
     assert _is_eval_flag("--eval=x", ("-e", "--eval")) is True
     assert _is_eval_flag("-e", ("-e", "--eval")) is True
+
+
+def test_clustered_eval_flag_matcher():
+    """The cluster matcher: one `-`, `=value` stripped, letters scanned.
+
+    SPEC-66 BUG #3: `-ic` is `-i` + `-c` for python, so prefix matching alone
+    never sees it. Long options belong to the prefix matcher, not this one.
+    """
+    from agent.enforcement import _is_clustered_eval_flag
+
+    assert _is_clustered_eval_flag("-ic", ("c",)) is True
+    assert _is_clustered_eval_flag("--config", ("c",)) is False
+    assert _is_clustered_eval_flag("-c", ("c",)) is True
+    assert _is_clustered_eval_flag("-e", ("e", "p")) is True
+    assert _is_clustered_eval_flag("script.py", ("c",)) is False
+    assert _is_clustered_eval_flag("--print", ("e", "p")) is False
+    assert _is_clustered_eval_flag("-ic=1", ("c",)) is True
 
 
 # ── Item 2/3 (R-14 scope): scrubbed grep env + fetch default ───────────────
