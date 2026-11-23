@@ -107,9 +107,9 @@
   added: 2026-11-18
 
 - id: R-13
-  claim: "A closing tag inside fenced project content cannot close the fence: the angle brackets are stripped (inert for the HTML reader AND for a model scanning for the terminator), case-insensitively and whitespace-tolerantly."
-  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.3 + §11.4
-  node: tests/test_spec66_fence.py::test_fence_body_cannot_close_the_fence
+  claim: "A closing tag inside fenced project content cannot close the fence: the angle brackets are stripped (inert for the HTML reader AND for a model scanning for the terminator), case-insensitively and whitespace-tolerantly; and build_awareness_dict routes file-derived CURRENT_TASK and WORKFLOW_STATUS through the fence (§2.4)."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.3 + §2.4 + §11.4
+  node: tests/test_spec66_fence.py::test_task_and_workflow_are_fenced
   mutation: tests/mutations/R-13.diff
   runner: plain
   added: 2026-11-18

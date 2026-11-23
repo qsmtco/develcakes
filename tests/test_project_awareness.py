@@ -27,6 +27,19 @@ from utils.project_awareness import (
 )
 
 
+def _fence_body(value: str) -> str:
+    """Extract the body of an _untrusted_fence-wrapped string.
+
+    The wrapper writes content followed by one newline before the closing
+    tag, so that one newline is dropped — the returned body is the
+    file-derived text itself.
+    """
+    start = value.find(">\n") + 2
+    end = value.rfind("</untrusted-project-data>")
+    body = value[start:end]
+    return body[:-1] if body.endswith("\n") else body
+
+
 class TestGetCrabcakesDir:
     def test_returns_correct_path(self, tmp_path):
         result = get_crabcakes_dir(str(tmp_path))
@@ -222,7 +235,10 @@ class TestGetCurrentTask:
         init_project_config(str(tmp_path), "p")
         save_project_context(str(tmp_path), "## 2026-07-20 — Phase A1 complete\n")
         d = build_awareness_dict(str(tmp_path))
-        assert d["CURRENT_TASK"] == "2026-07-20 — Phase A1 complete"
+        assert d["CURRENT_TASK"].startswith(
+            '<untrusted-project-data source="context.md">'
+        )
+        assert _fence_body(d["CURRENT_TASK"]) == "2026-07-20 — Phase A1 complete"
 
 
 class TestContextReadCap:
@@ -302,7 +318,11 @@ class TestAwarenessCaps:
             f.write("\nTAIL_MARKER_CURRENT_PHASE_MUST_SURVIVE\n")
 
         d = build_awareness_dict(str(tmp_path))
-        wf = d["WORKFLOW_STATUS"]
+        assert d["WORKFLOW_STATUS"].startswith(
+            '<untrusted-project-data source="workflow.md">'
+        )
+        # The cap applies to the file-derived value, which lives in the fence.
+        wf = _fence_body(d["WORKFLOW_STATUS"])
         marker = "[... workflow status truncated ...]"
         assert marker in wf, f"Expected truncation marker. Length was {len(wf)}"
         assert "TAIL_MARKER_CURRENT_PHASE_MUST_SURVIVE" in wf, \
@@ -322,8 +342,11 @@ class TestAwarenessCaps:
             f.write(body)
 
         d = build_awareness_dict(str(tmp_path))
-        assert d["WORKFLOW_STATUS"] == body
-        assert "truncated" not in d["WORKFLOW_STATUS"]
+        assert d["WORKFLOW_STATUS"].startswith(
+            '<untrusted-project-data source="workflow.md">'
+        )
+        assert _fence_body(d["WORKFLOW_STATUS"]) == body
+        assert "truncated" not in _fence_body(d["WORKFLOW_STATUS"])
 
 
 class TestAwarenessCacheFixes:
@@ -334,12 +357,12 @@ class TestAwarenessCacheFixes:
         init_project_config(str(tmp_path), "p")
         save_project_context(str(tmp_path), "## Task1 complete\n")
         d1 = build_awareness_dict(str(tmp_path))
-        assert d1["CURRENT_TASK"] == "Task1 complete", \
+        assert _fence_body(d1["CURRENT_TASK"]) == "Task1 complete", \
             f"Baseline wrong: {d1['CURRENT_TASK']!r}"
         # Write again immediately (same filesystem second)
         save_project_context(str(tmp_path), "## Task1 complete\n\n## Task2 in progress\n")
         d2 = build_awareness_dict(str(tmp_path))
-        assert d2["CURRENT_TASK"] == "Task2 in progress", \
+        assert _fence_body(d2["CURRENT_TASK"]) == "Task2 in progress", \
             f"Cache returned stale value: {d2['CURRENT_TASK']!r}"
 
     def test_returned_dict_isolated_from_cache(self, tmp_path):
@@ -349,7 +372,7 @@ class TestAwarenessCacheFixes:
         d1 = build_awareness_dict(str(tmp_path))
         d1["CURRENT_TASK"] = "TAMPERED"
         d2 = build_awareness_dict(str(tmp_path))
-        assert d2["CURRENT_TASK"] == "Real task", \
+        assert _fence_body(d2["CURRENT_TASK"]) == "Real task", \
             f"Cache was poisoned by caller mutation: {d2['CURRENT_TASK']!r}"
 
     def test_cache_invalidates_on_same_length_write(self, tmp_path):
@@ -365,7 +388,7 @@ class TestAwarenessCacheFixes:
         assert len(content_a) == len(content_b)
         save_project_context(str(tmp_path), content_a)
         d1 = build_awareness_dict(str(tmp_path))
-        assert d1["CURRENT_TASK"] == "Task A complete now", \
+        assert _fence_body(d1["CURRENT_TASK"]) == "Task A complete now", \
             f"Baseline wrong: {d1['CURRENT_TASK']!r}"
         # Grab the reference mtime BEFORE the second write
         crab_dir = os.path.join(str(tmp_path), ".crabcakes")
@@ -381,7 +404,7 @@ class TestAwarenessCacheFixes:
         for p in all_paths:
             os.utime(p, ns=(m_ref, m_ref))
         d2 = build_awareness_dict(str(tmp_path))
-        assert d2["CURRENT_TASK"] == "Task B complete now", \
+        assert _fence_body(d2["CURRENT_TASK"]) == "Task B complete now", \
             f"Cache stale (BUG #8): {d2['CURRENT_TASK']!r}"
 
 

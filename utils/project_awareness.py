@@ -1213,10 +1213,14 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
         parts["MEMORY_INDEX"] = ""
 
     # Current task — extracted from the latest context.md heading.
-    # Injected as TRUSTED data (not in the untrusted fence) because it is
-    # an operational directive the agent must follow.
+    # The heading comes from an agent-writable file inside cloned repos, so it
+    # is UNTRUSTED project data: it is fenced like any other file-derived text.
+    # Only the three invented sentences below are trusted, so they stay unfenced.
     task = get_current_task(project_path)
-    parts["CURRENT_TASK"] = task if task else "(no current task recorded)"
+    if task:
+        parts["CURRENT_TASK"] = _untrusted_fence(task, "context.md")
+    else:
+        parts["CURRENT_TASK"] = "(no current task recorded)"
 
     # Workflow status — lazy import to avoid circular dependency
     try:
@@ -1226,13 +1230,15 @@ def build_awareness_dict(project_path: str) -> dict[str, str]:
             parts["WORKFLOW_STATUS"] = "(workflow.md not yet initialized)"
         elif len(wf) > WORKFLOW_STATUS_MAX_CHARS:
             # Keep the TAIL: the current phase is at the end of workflow.md,
-            # and that is what the agent needs to act on.
-            parts["WORKFLOW_STATUS"] = (
+            # and that is what the agent needs to act on. The marker is inside
+            # the fence so the whole shown value is one untrusted block.
+            parts["WORKFLOW_STATUS"] = _untrusted_fence(
                 wf[-WORKFLOW_STATUS_MAX_CHARS:]
-                + "\n[... workflow status truncated ...]"
+                + "\n[... workflow status truncated ...]",
+                "workflow.md",
             )
         else:
-            parts["WORKFLOW_STATUS"] = wf
+            parts["WORKFLOW_STATUS"] = _untrusted_fence(wf, "workflow.md")
     except Exception:
         parts["WORKFLOW_STATUS"] = "(workflow state unavailable)"
 
