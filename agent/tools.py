@@ -646,6 +646,31 @@ def _project_relpath(resolved: str, project_path: str) -> str:
     return rel.replace("\\", "/")
 
 
+def _lexical_relpath(path: str, project_path: str) -> str:
+    """Project-relative form of the UNRESOLVED path (no symlink following).
+
+    SPEC-66 BUG #2: `os.path.realpath` in _resolve_project_path follows
+    symlinks, so a sensitive NAME pointing at a plain target (a cloned
+    repo can ship `.crabcakes/enforcement.json -> notes/enforcement.json`)
+    hides its sensitivity from the resolved-path check. The lexical form
+    normalizes `.`/`..` only.
+
+    This is a COMPLEMENT to _project_relpath, never a replacement: the
+    resolved form says where the bytes land, the lexical form says what
+    the path is CALLED. A write needs approval when either is sensitive.
+    """
+    project_real = os.path.realpath(project_path)
+    if os.path.isabs(path):
+        joined = os.path.normpath(path)
+    else:
+        joined = os.path.normpath(os.path.join(project_real, path))
+    try:
+        rel = os.path.relpath(joined, project_real)
+    except ValueError:
+        rel = joined
+    return rel.replace("\\", "/")
+
+
 def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
     """Write content to a file relative to project_path."""
     resolved = _resolve_project_path(path, project_path)
@@ -656,14 +681,22 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
     # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
     # The raw model string (`./.crabcakes/x`, `foo/../.crabcakes/x`) does
     # not start with `.crabcakes/`, so gating on it skipped approval.
+    # SPEC-66 BUG #2: also gate on the LEXICAL form. A symlink can give a
+    # sensitive NAME a plain target (`.crabcakes/enforcement.json ->
+    # notes/enforcement.json`), so the resolved form alone is blind. The
+    # resolved spelling wins in the approval args (it is where the bytes
+    # land); the lexical form is used when only it is sensitive.
     rel = _project_relpath(resolved, project_path)
-    if is_sensitive_path(rel):
-        approved = _get_approval(session_key, "write_file", {"path": rel}, approval_callback=approval_callback)
+    lex = _lexical_relpath(path, project_path)
+    sensitive_rel = rel if is_sensitive_path(rel) else (
+        lex if is_sensitive_path(lex) else None)
+    if sensitive_rel is not None:
+        approved = _get_approval(session_key, "write_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
             return ToolResult(
                 success=False,
                 error=(
-                    f"write_file blocked: {rel} is a sensitive path\n"
+                    f"write_file blocked: {sensitive_rel} is a sensitive path\n"
                     f"(credential, secret, SSH key, or cloud config file).\n"
                     f"PM approval is required before writing to this file."
                 ),
@@ -860,14 +893,20 @@ def _edit_file(
 
     # HIGH-1: Sensitive-path guard — require PM approval before editing.
     # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
+    # SPEC-66 BUG #2: the LEXICAL form is checked too — a symlinked
+    # sensitive name (`.crabcakes/enforcement.json -> notes/x.json`)
+    # resolves to a plain path and would otherwise edit without approval.
     rel = _project_relpath(resolved, project_path)
-    if is_sensitive_path(rel):
-        approved = _get_approval(session_key, "edit_file", {"path": rel}, approval_callback=approval_callback)
+    lex = _lexical_relpath(path, project_path)
+    sensitive_rel = rel if is_sensitive_path(rel) else (
+        lex if is_sensitive_path(lex) else None)
+    if sensitive_rel is not None:
+        approved = _get_approval(session_key, "edit_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
             return ToolResult(
                 success=False,
                 error=(
-                    f"edit_file blocked: {rel} is a sensitive path\n"
+                    f"edit_file blocked: {sensitive_rel} is a sensitive path\n"
                     f"(credential, secret, SSH key, or cloud config file).\n"
                     f"PM approval is required before editing this file."
                 ),

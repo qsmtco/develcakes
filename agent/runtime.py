@@ -467,15 +467,35 @@ def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
     path against the project and returns its project-relative form, the
     same normalization ``agent/tools.py`` applies. None when the path does
     not resolve inside the project (nothing to gate — the tool refuses it).
+
+    SPEC-66 BUG #2: ``os.path.realpath`` follows symlinks, so a sensitive
+    NAME pointed at a plain target (a cloned repo can ship
+    ``.crabcakes/enforcement.json -> notes/enforcement.json``) looked
+    benign to the resolved check. Both forms are therefore tested, and the
+    sensitive one is returned — this function is the single source of the
+    gate decision, so the approval gate below and the ``bypass_approval``
+    flag further down cannot disagree with each other. When neither form
+    is sensitive the resolved form is returned unchanged.
     """
     if not isinstance(path_arg, str) or not path_arg.strip():
         return None
-    from agent.tools import _resolve_project_path, _project_relpath
+    from agent.tools import (
+        _resolve_project_path,
+        _project_relpath,
+        _lexical_relpath,
+        is_sensitive_path,
+    )
 
     resolved = _resolve_project_path(path_arg, project_path)
     if resolved is None:
         return None
-    return _project_relpath(resolved, project_path)
+    rel = _project_relpath(resolved, project_path)
+    if is_sensitive_path(rel):
+        return rel
+    lexical = _lexical_relpath(path_arg, project_path)
+    if is_sensitive_path(lexical):
+        return lexical
+    return rel
 
 
 def _coder_shell_allowed(command: str, project_path: str) -> str | None:
@@ -2943,6 +2963,9 @@ class AgentRuntime:
                 # never matched the sensitive prefixes, so the bypass was NOT
                 # taken for a path the gate had just approved — the tool then
                 # asked for approval a second time.
+                # SPEC-66 BUG #2: rel_path is the form _sensitive_relpath found
+                # sensitive (resolved preferred, lexical fallback), so a
+                # symlinked sensitive name gates AND bypasses consistently.
                 bypass_approval = (tool_name == "exec_command" or
                                    (tool_name in ("write_file", "edit_file") and
                                     rel_path is not None and

@@ -99,7 +99,7 @@
   added: 2026-11-15
 
 - id: R-12
-  claim: "A path that resolves to a sensitive location asks for approval at BOTH the tool gate and the runtime gate, in every spelling ('./.crabcakes/x', 'foo/../.crabcakes/x', absolute-in-project); `python3 -c` is not a valid test command."
+  claim: "A path that resolves to a sensitive location asks for approval at BOTH the tool gate and the runtime gate, in every spelling ('./.crabcakes/x', 'foo/../.crabcakes/x', absolute-in-project), and a symlinked sensitive name (either direction) still requires approval (BUG #2); `python3 -c` is not a valid test command."
   source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.1 + §12.1 + §11.1/§11.2
   node: tests/test_spec66_approval_and_eval.py::test_resolved_sensitive_path_and_python_c
   mutation: tests/mutations/R-12.diff

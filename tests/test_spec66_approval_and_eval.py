@@ -265,6 +265,53 @@ def test_resolved_sensitive_path_and_python_c(tmp_path):
         )
         assert asked, f"runtime gate requested no approval for {path!r}"
 
+    # (c) SPEC-66 BUG #2 — a symlinked sensitive NAME asks at BOTH gates.
+    # A resolved-only check passes (a)-(b) and fails here, so the R-12
+    # mutation (which reverts both gates to resolved-only) is not vacuous.
+    # See test_symlink_sensitive_name_to_plain_target_asks_approval for the
+    # full attack; this is the row's own pin.
+    project2, _target = _make_symlinked_sensitive_name(tmp_path / "links")
+    assert is_sensitive_path("notes/enforcement.json") is False
+    assert is_sensitive_path(".crabcakes/enforcement.json") is True
+
+    asked = []
+
+    def deny_link(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    for tool_name, args in (
+        ("write_file", {"path": ".crabcakes/enforcement.json", "content": "{}"}),
+        ("edit_file", {"path": ".crabcakes/enforcement.json",
+                       "old_text": "{}", "new_text": "{ }"}),
+    ):
+        result = execute_tool(tool_name, dict(args), project2, "agent:coder",
+                              approval_callback=deny_link)
+        assert result.success is False, tool_name
+
+    rt_asked = []
+
+    def deny_link_rt(session_key, tool_name, args, _asked=rt_asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt = AgentRuntime(_make_cfg())
+    rt._dispatch_approval = deny_link_rt
+    conv2 = Conversation(
+        agent_name="Coder",
+        agent_role="coder",
+        project_path=project2,
+    )
+    rt._execute_tool_batch(
+        "agent:coder",
+        None,
+        conv2,
+        "",
+        [("c1", "write_file", {"path": ".crabcakes/enforcement.json", "content": "{}"})],
+        1,
+    )
+    assert rt_asked, "runtime gate missed the symlinked sensitive name"
+
     # And the eval flag is refused.
     assert _validate_test_command("python3 -c 'import os'") is False
 
@@ -521,3 +568,263 @@ class TestFetchEdgeRows:
 
         with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
             assert _reject_restricted_url("http://example.com/") is None
+
+
+# ── SPEC-66 BUG #2: symlink-aware sensitive-path approval ─────────────────
+#
+# `_resolve_project_path` calls realpath, so a sensitive NAME pointing at a
+# plain target hides its sensitivity from the resolved-path check. Both gates
+# must consult the lexical (unresolved) form as well. These tests are the
+# external report's exact attack plus the reverse direction (so a future
+# refactor cannot trade one for the other) and the `.crabcakes`-is-a-dir
+# -symlink variant that only the lexical check can catch.
+#
+# Note the two forms differ in BOTH directions and the gates must catch either:
+#   .crabcakes/enforcement.json -> notes/enforcement.json : lexical sensitive
+#   notes/innocent.txt          -> .crabcakes/enforcement.json : resolved sensitive
+
+
+def _make_symlinked_sensitive_name(tmp_path):
+    """The attack: a sensitive NAME whose target is a plain file."""
+    (tmp_path / ".crabcakes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "notes").mkdir(exist_ok=True)
+    target = tmp_path / "notes" / "enforcement.json"
+    target.write_text("{}\n")
+    link = tmp_path / ".crabcakes" / "enforcement.json"
+    os.symlink(target, link)
+    return str(tmp_path), target
+
+
+def test_symlink_sensitive_name_to_plain_target_asks_approval(tmp_path):
+    """The report's attack, write_file: symlinked sensitive NAME must ask.
+
+    Before BUG #2 the gate saw only `notes/enforcement.json` (the target),
+    approved nothing, and wrote the payload through the link — which the
+    enforcement loader then read back as a legal command.
+    """
+    from agent.tools import is_sensitive_path
+
+    project, target = _make_symlinked_sensitive_name(tmp_path)
+
+    # Precondition: the resolved form is NOT sensitive, the lexical one IS.
+    # Without this the test would pass for the wrong reason.
+    assert is_sensitive_path("notes/enforcement.json") is False
+    assert is_sensitive_path(".crabcakes/enforcement.json") is True
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    payload = '{"test_commands": ["node pwn.js"]}\n'
+    result = execute_tool(
+        "write_file",
+        {"path": ".crabcakes/enforcement.json", "content": payload},
+        project,
+        "agent:coder",
+        approval_callback=deny,
+    )
+    assert len(asked) == 1, f"expected exactly one approval request, got {asked!r}"
+    assert asked[0][0] == "write_file"
+    # The card must name a sensitive form (here: the lexical one, since the
+    # resolved target is plain).
+    assert is_sensitive_path(asked[0][1]["path"]) is True, asked[0][1]["path"]
+    assert asked[0][1]["path"] == ".crabcakes/enforcement.json"
+    assert result.success is False
+    assert "sensitive" in (result.error or "").lower()
+    # Denied means the target was NOT written through the link.
+    assert target.read_text() == "{}\n", "a denied write still reached the target"
+
+    # Approving lets the write through — the gate is a gate, not a wall.
+    result_ok = execute_tool(
+        "write_file",
+        {"path": ".crabcakes/enforcement.json", "content": payload},
+        project,
+        "agent:coder",
+        approval_callback=lambda *a, **k: True,
+    )
+    assert result_ok.success is True, result_ok.error
+    assert target.read_text() == payload
+
+
+def test_symlink_sensitive_name_to_plain_target_asks_approval_edit(tmp_path):
+    """Same fixture through edit_file."""
+    from agent.tools import is_sensitive_path
+
+    project, target = _make_symlinked_sensitive_name(tmp_path)
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool(
+        "edit_file",
+        {"path": ".crabcakes/enforcement.json", "old_text": "{}", "new_text": "{ }"},
+        project,
+        "agent:coder",
+        approval_callback=deny,
+    )
+    assert len(asked) == 1, f"expected exactly one approval request, got {asked!r}"
+    assert asked[0][0] == "edit_file"
+    assert is_sensitive_path(asked[0][1]["path"]) is True, asked[0][1]["path"]
+    assert result.success is False
+    assert target.read_text() == "{}\n", "a denied edit still reached the target"
+
+    result_ok = execute_tool(
+        "edit_file",
+        {"path": ".crabcakes/enforcement.json", "old_text": "{}", "new_text": "{ }"},
+        project,
+        "agent:coder",
+        approval_callback=lambda *a, **k: True,
+    )
+    assert result_ok.success is True, result_ok.error
+    assert target.read_text() == "{ }\n"
+
+
+def test_symlink_sensitive_name_asks_approval_at_runtime_gate(tmp_path):
+    """The same attack through the RUNTIME gate (agent/runtime.py).
+
+    Mirrors `test_runtime_gate_asks_approval_for_every_spelling`: the gate
+    fires before execution and the denied call never reaches the tool.
+    """
+    project, target = _make_symlinked_sensitive_name(tmp_path)
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def boom(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = boom
+    conv = Conversation(
+        agent_name="Coder",
+        agent_role="coder",
+        project_path=project,
+    )
+    rt._execute_tool_batch(
+        "agent:coder",
+        None,
+        conv,
+        "",
+        [("c1", "write_file",
+          {"path": ".crabcakes/enforcement.json",
+           "content": '{"test_commands": ["node pwn.js"]}\n'})],
+        1,
+    )
+    assert asked, "runtime gate requested no approval for a symlinked sensitive name"
+    assert asked[0][0] == "write_file"
+    assert target.read_text() == "{}\n", "the denied runtime call wrote through the link"
+
+
+def test_symlink_plain_name_to_sensitive_target_asks_approval(tmp_path):
+    """The REVERSE direction: a plain NAME pointing at a sensitive target.
+
+    This direction already worked (the resolved form is sensitive) — it is
+    pinned here so adding the lexical check can never be done by dropping
+    the resolved one.
+    """
+    from agent.tools import is_sensitive_path
+
+    (tmp_path / ".crabcakes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "notes").mkdir(exist_ok=True)
+    sensitive = tmp_path / ".crabcakes" / "enforcement.json"
+    sensitive.write_text("{}\n")
+    link = tmp_path / "notes" / "innocent.txt"
+    os.symlink(sensitive, link)
+    project = str(tmp_path)
+
+    # Here it is the RESOLVED form that is sensitive.
+    assert is_sensitive_path("notes/innocent.txt") is False
+    assert is_sensitive_path(".crabcakes/enforcement.json") is True
+
+    for tool, args in (
+        ("write_file", {"path": "notes/innocent.txt", "content": '{"a": 1}\n'}),
+        ("edit_file", {"path": "notes/innocent.txt", "old_text": "{}", "new_text": "{ }"}),
+    ):
+        asked = []
+
+        def deny(session_key, tool_name, a, _asked=asked):
+            _asked.append((tool_name, a))
+            return False
+
+        result = execute_tool(tool, dict(args), project, "agent:coder",
+                             approval_callback=deny)
+        assert asked, f"{tool}: no approval for a plain name -> sensitive target"
+        assert is_sensitive_path(asked[0][1]["path"]) is True, asked[0][1]["path"]
+        assert result.success is False
+        assert sensitive.read_text() == "{}\n"
+
+    # And the runtime gate catches it too.
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def boom(session_key, tool_name, a, _asked=asked):
+        _asked.append((tool_name, a))
+        return False
+
+    rt._dispatch_approval = boom
+    conv = Conversation(agent_name="Coder", agent_role="coder", project_path=project)
+    rt._execute_tool_batch(
+        "agent:coder", None, conv, "",
+        [("c1", "write_file", {"path": "notes/innocent.txt", "content": '{"a": 1}\n'})],
+        1,
+    )
+    assert asked, "runtime gate missed a plain name -> sensitive target"
+    assert sensitive.read_text() == "{}\n"
+
+
+def test_symlinked_crabcakes_dir_asks_approval(tmp_path):
+    """`.crabcakes` ITSELF is a symlink to `notes/`.
+
+    Resolving `.crabcakes/enforcement.json` lands in `notes/`, which is not
+    sensitive — so ONLY the lexical check catches this one.
+    """
+    from agent.tools import is_sensitive_path
+
+    (tmp_path / "notes").mkdir(parents=True, exist_ok=True)
+    os.symlink(tmp_path / "notes", tmp_path / ".crabcakes")
+    target = tmp_path / "notes" / "enforcement.json"
+    project = str(tmp_path)
+
+    assert is_sensitive_path("notes/enforcement.json") is False
+    assert is_sensitive_path(".crabcakes/enforcement.json") is True
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool(
+        "write_file",
+        {"path": ".crabcakes/enforcement.json",
+         "content": '{"test_commands": ["node pwn.js"]}\n'},
+        project,
+        "agent:coder",
+        approval_callback=deny,
+    )
+    assert asked, "no approval for a write through a symlinked .crabcakes dir"
+    assert is_sensitive_path(asked[0][1]["path"]) is True, asked[0][1]["path"]
+    assert result.success is False
+    assert not target.exists(), "a denied write created the target through the dir link"
+
+    # The runtime gate must see it as well.
+    rt = AgentRuntime(_make_cfg())
+    rt_asked = []
+
+    def boom(session_key, tool_name, args, _asked=rt_asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = boom
+    conv = Conversation(agent_name="Coder", agent_role="coder", project_path=project)
+    rt._execute_tool_batch(
+        "agent:coder", None, conv, "",
+        [("c1", "write_file",
+          {"path": ".crabcakes/enforcement.json", "content": '{"a": 1}\n'})],
+        1,
+    )
+    assert rt_asked, "runtime gate missed a symlinked .crabcakes dir"
+    assert not target.exists()
