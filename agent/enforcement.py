@@ -227,10 +227,19 @@ def _validate_test_command(command: str | None) -> bool:
 
       * python/python3 → any token starting with `-c` (NOT `--config`), or any
         SHORT-OPTION CLUSTER whose letter run contains `c` (`-ic`, `-qc`, `-ic=1`).
-      * node → any token starting with `-e`, `--eval` or `--print`, or any
-        SHORT-OPTION CLUSTER whose letter run contains `e` or `p` (`-pe`, `-p`).
-        `node -p` / `node --print` are themselves eval flags ("evaluate script
-        and print result" per `node --help`).
+      * node → any token starting with `-e`, `--eval`, `--print` or
+        `--require`, or any SHORT-OPTION CLUSTER whose letter run contains
+        `e`, `p` or `r` (`-pe`, `-p`, `-r`, `-ir`). `node -p` / `node
+        --print` are themselves eval flags ("evaluate script and print
+        result" per `node --help`); `node -r` / `--require` PRELOADS a
+        module (arbitrary execution before the entry point runs).
+      * node positionals (SPEC-66 BUG #4) → in a PROJECT-SUPPLIED test
+        command a node positional is a SCRIPT PATH: `node evil.js` executes
+        arbitrary code with no test grammar behind it. A node command with
+        any positional is refused unless `--check` / `-c` is present —
+        syntax-parse only, no execution, which is what our own syntax tier
+        (`node --check {path}`) uses. python/python3 positionals are NOT
+        gated this round (a PM-level posture ruling, flagged separately).
 
     SPEC-66 BUG #3: a cluster is one shlex token starting with exactly one `-`
     whose letters contain an eval letter — `python3 -ic 'code'` runs as
@@ -243,8 +252,14 @@ def _validate_test_command(command: str | None) -> bool:
     cluster rule widens this class of intentional over-refusal: `-mc`-style
     clusters (`python3 -mc ...`, where `-m` would consume the rest) and
     legitimate `node -p` non-eval uses are refused too. Refusal is the safe
-    direction; verbatim-free spellings (`--config`, `node -c`, `node -v`,
-    `node -r`) stay allowed.
+    direction; verbatim-free spellings (`--config`, `node -c`, `node -v`)
+    stay allowed.
+
+    SPEC-66 BUG #4 widens the node over-refusal deliberately: a project wanting
+    a node-based runner can no longer spell it as a bare script
+    (`node runner.js`) in enforcement.json — `node --check` remains (and is
+    exactly what our own syntax tier uses). Project node suites must go
+    through a shell-free runner they can spell without a node positional.
 
     `shlex.ValueError` (unbalanced quotes) returns False — an unparseable
     command is not trusted.
@@ -271,11 +286,19 @@ def _validate_test_command(command: str | None) -> bool:
     ):
         return False
     if base == "node" and any(
-        _is_eval_flag(tok, ("-e", "--eval", "--print"))
-        or _is_clustered_eval_flag(tok, ("e", "p"))
+        _is_eval_flag(tok, ("-e", "--eval", "--print", "--require"))
+        or _is_clustered_eval_flag(tok, ("e", "p", "r"))
         for tok in flags
     ):
         return False
+    # SPEC-66 BUG #4: a node positional in a PROJECT-SUPPLIED command is a
+    # script path — arbitrary execution with no test grammar behind it. Only
+    # `--check`/`-c` (syntax parse, no execution) may take a script path.
+    if base == "node":
+        has_check = any(tok in ("--check", "-c") for tok in flags)
+        positional = [tok for tok in flags if not tok.startswith("-")]
+        if positional and not has_check:
+            return False
     return True
 
 # ── Data models ────────────────────────────────────────────────────────────────

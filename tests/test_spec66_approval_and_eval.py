@@ -364,6 +364,13 @@ def test_python_eval_flags_are_refused(command):
         "node -p 'x=1'",
         "node --print 'x=1'",
         "node -ie 'x=1'",
+        # SPEC-66 BUG #4: preload (`-r` / `--require` runs a module before the
+        # entry point) and bare script paths (a positional IS the script).
+        "node -r ./m.js app.js",
+        "node --require ./m.js app.js",
+        "node --require=./m.js app.js",
+        "node evil.js",
+        "node ./scripts/run.js",
     ],
 )
 def test_node_eval_flags_are_refused(command):
@@ -377,14 +384,16 @@ def test_node_eval_flags_are_refused(command):
         "python3 -m pytest",
         "ruff check .",
         "pytest tests/",
-        "node script.js",
         # SPEC-66 BUG #3 boundaries: long options and non-eval letters stay
         # allowed so the cluster rule does not over-refuse ordinary flags.
         "python3 --config setup.cfg",
-        "node -c script.js",
         "node -v",
-        "node -r module.js",
         "python3 -i script.py",
+        # SPEC-66 BUG #4 boundary: `--check` / `-c` is syntax-parse only (no
+        # execution) and is what our own syntax tier template uses, so a node
+        # positional WITH a check flag stays allowed.
+        "node --check script.js",
+        "node -c script.js",
     ],
 )
 def test_ordinary_commands_are_allowed(command):
@@ -430,6 +439,24 @@ def test_clustered_eval_flag_matcher():
     assert _is_clustered_eval_flag("script.py", ("c",)) is False
     assert _is_clustered_eval_flag("--print", ("e", "p")) is False
     assert _is_clustered_eval_flag("-ic=1", ("c",)) is True
+    # SPEC-66 BUG #4: node's `r` (require/preload) is a cluster letter too.
+    assert _is_clustered_eval_flag("-r", ("e", "p", "r")) is True
+    assert _is_clustered_eval_flag("-ir", ("e", "p", "r")) is True
+    assert _is_clustered_eval_flag("-v", ("e", "p", "r")) is False
+
+
+def test_node_positional_requires_check_flag():
+    """SPEC-66 BUG #4: a node positional in a project-supplied command is a
+    script path — arbitrary execution with no test grammar behind it, and
+    `enforcement.json` arrives pre-poisoned in a cloned repo. Only
+    `--check` / `-c` (syntax-parse, no execution) may take a script path.
+    """
+    assert _validate_test_command("node x.js") is False
+    assert _validate_test_command("node a.js b.js") is False
+    assert _validate_test_command("node --check x.js") is True
+    assert _validate_test_command("node -c x.js") is True
+    # no positionals → no script to execute, check flag not needed
+    assert _validate_test_command("node -v") is True
 
 
 # ── Item 2/3 (R-14 scope): scrubbed grep env + fetch default ───────────────
