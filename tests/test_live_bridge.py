@@ -287,8 +287,13 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
 
     conv_dir = tmp_path / "conversations"
     conv_dir.mkdir()
-    json_path = conv_dir / "agent:sk.json"
+    # SPEC-66 §2.5: the live filename is `<session_key>__<sha16>.json`. R-1
+    # must stay non-vacuous under this name, and /clear also removes a legacy
+    # `<session_key>.json` when one is present.
+    json_path = conv_dir / "agent:sk__0123456789abcdef.json"
     json_path.write_text("{}", encoding="utf-8")
+    legacy_path = conv_dir / "agent:sk.json"
+    legacy_path.write_text("{}", encoding="utf-8")
 
     arh = AgentRuntimeHandler.__new__(AgentRuntimeHandler)
     arh._agents = {"agent:sk": types.SimpleNamespace(display_name="T")}
@@ -320,9 +325,12 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
     assert conv.messages == [] and conv.step_count == 0
     assert conv.task_card == ""
     assert not json_path.exists()
+    # §12.5: the legacy file is removed too — /clear is durable under both names.
+    assert not legacy_path.exists()
     assert dropped == ["agent:sk", "compile:agent:sk", "map:agent:sk"]
 
     json_path.write_text("{}", encoding="utf-8")
+    legacy_path.write_text("{}", encoding="utf-8")
     rt.is_loop_active = lambda sk: True
     conv.messages = [1]
     conv.task_card = "stay"
@@ -332,3 +340,4 @@ def test_clear_conversation_deletes_json_only(tmp_path, monkeypatch):
     assert conv.task_card == "stay"
     assert dropped == []
     assert json_path.exists()
+    assert legacy_path.exists()

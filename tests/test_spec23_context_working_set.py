@@ -197,16 +197,21 @@ def test_task_card_round_trip_and_wire_prefix(tmp_path, monkeypatch):
 
     with patch("agent.persistence.conversations_dir", return_value=str(tmp_path)):
         save_conversation_to_disk(conv, "agent:card")
-        loaded, _meta = load_conversation_from_disk("agent:card")
+        # SPEC-66 §2.5: the file is `<session_key>__<slug>.json`; this
+        # conversation has no project, so the slug is `none`.
+        from agent.persistence import conversation_store_name
+
+        name = conversation_store_name("agent:card", conv.project_path)
+        loaded, _meta, _adopted = load_conversation_from_disk("agent:card")
         assert loaded.task_card == conv.task_card
-        raw = json.loads((tmp_path / "agent:card.json").read_text())
+        raw = json.loads((tmp_path / name).read_text())
         del raw["task_card"]
-        (tmp_path / "agent:card.json").write_text(json.dumps(raw))
-        old, _meta = load_conversation_from_disk("agent:card")
+        (tmp_path / name).write_text(json.dumps(raw))
+        old, _meta, _adopted = load_conversation_from_disk("agent:card")
         assert old.task_card == ""
         raw["task_card"] = 12
-        (tmp_path / "agent:card.json").write_text(json.dumps(raw))
-        bad, _meta = load_conversation_from_disk("agent:card")
+        (tmp_path / name).write_text(json.dumps(raw))
+        bad, _meta, _adopted = load_conversation_from_disk("agent:card")
         assert bad.task_card == ""
 
 

@@ -109,19 +109,27 @@ class RuntimeSessionMixin:
             )
 
         # Delete the persisted JSON so a restart doesn't restore the old
-        # state. Best-effort: a missing file is fine (nothing to delete),
-        # other OSErrors are logged but don't fail the whole operation —
-        # the in-memory state is already cleared.
+        # state. SPEC-66 §12.5: files are now `<session_key>__<sha16>.json`
+        # (one per project) — delete every scoped file for this session AND
+        # the legacy `<session_key>.json`. Best-effort: a missing file is
+        # fine (nothing to delete), other OSErrors are logged but don't fail
+        # the whole operation — the in-memory state is already cleared.
         try:
             from utils.config import get_config_dir
+            import glob
             import os
             conv_dir = os.path.join(get_config_dir(), "conversations")
-            conv_path = os.path.join(conv_dir, f"{session_key}.json")
-            os.remove(conv_path)
-            _mod().logger.info(
-                "clear_conversation: deleted persisted conversation %s",
-                conv_path,
+            scoped = glob.glob(
+                os.path.join(conv_dir, glob.escape(session_key) + "__*.json")
             )
+            for conv_path in [*scoped, os.path.join(conv_dir, f"{session_key}.json")]:
+                if not os.path.isfile(conv_path):
+                    continue
+                os.remove(conv_path)
+                _mod().logger.info(
+                    "clear_conversation: deleted persisted conversation %s",
+                    conv_path,
+                )
         except FileNotFoundError:
             pass  # No persisted file — that's fine.
         except OSError as exc:

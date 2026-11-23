@@ -721,7 +721,7 @@ class ProjectHandler:
         Spec: docs/specs/SPEC-token-tracking-fix.md AC-2/3/5.
 
         Authoritative source: the persisted conversation file at
-        ``<config_dir>/conversations/<session_key>.json`` (which the
+        ``<config_dir>/conversations/<session_key>__<slug>.json`` (which the
         runtime updates via `record_usage` and saves to disk after every
         turn). Used for local agent:* session keys.
 
@@ -732,18 +732,26 @@ class ProjectHandler:
         Returns (total_tokens, total_cost). Returns (0, 0.0) when neither
         source is available or both fail to parse — never raises.
         """
-        # Authoritative: persisted conversation file
+        # Authoritative: persisted conversation file. SPEC-66 §12.5: the file
+        # is `<session_key>__<slug>.json` (one per project) — glob every
+        # scoped variant and prefer the most recently written one.
         try:
             from utils.config import get_config_dir
-            import json, os
-            conv_path = os.path.join(
-                get_config_dir(), "conversations", f"{session_key}.json"
+            import glob, json, os
+            conv_dir = os.path.join(get_config_dir(), "conversations")
+            candidates = glob.glob(
+                os.path.join(conv_dir, glob.escape(session_key) + "__*.json")
             )
-            with open(conv_path, encoding="utf-8") as f:
-                data = json.load(f)
-            tokens = int(data.get("total_tokens", 0) or 0)
-            cost = float(data.get("total_cost", 0.0) or 0.0)
-            return (tokens, cost)
+            legacy = os.path.join(conv_dir, f"{session_key}.json")
+            if os.path.isfile(legacy):
+                candidates.append(legacy)
+            if candidates:
+                conv_path = max(candidates, key=os.path.getmtime)
+                with open(conv_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                tokens = int(data.get("total_tokens", 0) or 0)
+                cost = float(data.get("total_cost", 0.0) or 0.0)
+                return (tokens, cost)
         except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError, TypeError):
             pass
 

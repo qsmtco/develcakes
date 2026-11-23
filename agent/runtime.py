@@ -1640,8 +1640,10 @@ class AgentRuntime:
                 "could not save flushed room lines for %s", session_key, exc_info=True
             )
 
-    def cancel(self, session_key: str) -> None:
-        """Cancel an in-progress conversation.
+    def cancel(self, session_key: str) -> tuple[int, int]:
+        """Cancel an in-progress conversation and kill its processes.
+
+        Returns ``(killed, unkillable)`` from ``cancel_all_processes``.
 
         Signals the running thread and dispatches a user-facing cancellation
         message. Uses the active turn token from ``_turn_tokens[session_key]``
@@ -1701,6 +1703,10 @@ class AgentRuntime:
             self._on_error, session_key, CANCEL_MESSAGE,
             _turn_token=active_tk,
         )
+        # SPEC-66 §2.6: kill the processes this session registered. Outside
+        # _lock — the SIGTERM→2s→SIGKILL escalation must not block state.
+        from agent.tools import cancel_all_processes
+        return cancel_all_processes(session_key)
 
     def cancel_peer(self, session_key: str) -> None:
         """Ask one other session's loop to stop. Marks only a live loop.
@@ -1714,8 +1720,10 @@ class AgentRuntime:
         """
         if not isinstance(session_key, str) or not session_key:
             return
+        was_live = False
         with self._lock:
             if session_key in self._active_loops:
+                was_live = True
                 self._cancelled.add(session_key)
             self._cancelled_epochs.add(session_key)
             for sk in list(self._pending_approvals):
@@ -1725,6 +1733,11 @@ class AgentRuntime:
                     ev.set()
                     self._pending_approvals.pop(sk, None)
             logger.info("cancel_peer: marked %s (only if its loop was live)", session_key)
+        if was_live:
+            # Outside _lock (the kill escalation blocks); an idle peer is not
+            # killed — unrelated processes in this session must survive.
+            from agent.tools import cancel_all_processes
+            cancel_all_processes(session_key)
 
     def stop_all(self) -> dict[str, str]:
         """Cancel every in-flight turn + kill every registered process. sk -> outcome.
@@ -1756,8 +1769,7 @@ class AgentRuntime:
             # prefix semantics cancel itself uses).
             with self._lock:
                 denied = sum(1 for k in self._pending_approvals if k.startswith(sk))
-            self.cancel(sk)
-            killed, unkillable = cancel_all_processes(sk)
+            killed, unkillable = self.cancel(sk)
             parts = ["cancelled"]
             if denied:
                 parts.append(f"denied:{denied}")
@@ -5257,12 +5269,27 @@ class AgentRuntime:
             path = save_conversation_to_disk(conv, session_key)
         return path
 
-    def load_conversation(self, session_key: str) -> bool:
-        """Load a conversation from disk into the runtime. Returns True if found."""
-        result = load_conversation_from_disk(session_key)
+    def load_conversation(self, session_key: str, project_path: str | None) -> bool:
+        """Load a conversation for this project into the runtime.
+
+        Returns True if found. ``project_path`` has no default: a silent empty
+        conversation on omission is the failure mode (SPEC-66 §11.7). A legacy
+        file adopted for this project is written back under its scoped name
+        before the next launch; a failed save is logged and the in-memory
+        conversation is still used.
+        """
+        result = load_conversation_from_disk(session_key, project_path)
         if result is None:
             return False
-        conv, _ = result
+        conv, _, legacy_adopted = result
+        if legacy_adopted:
+            try:
+                save_conversation_to_disk(conv, session_key)
+            except Exception:
+                logger.warning(
+                    "could not write the scoped transcript for %s", session_key,
+                    exc_info=True,
+                )
         with self._lock:
             self._conversations[session_key] = conv
         return True
@@ -5357,7 +5384,12 @@ class AgentRuntime:
         )
 
     def list_conversations(self) -> list[tuple[str, str]]:
-        """List all saved conversations: [(session_key, agent_name)]."""
+        """List all saved conversations: [(session_key, agent_name)].
+
+        Files are ``<session_key>__<sha16>.json`` (or a legacy
+        ``<session_key>.json``): the slug is stripped so callers see the
+        session key, never ``sk__slug`` (§12.5).
+        """
         d = conversations_dir()
         try:
             files = [f for f in os.listdir(d) if f.endswith(".json")]
@@ -5367,6 +5399,10 @@ class AgentRuntime:
         result = []
         for fname in files:
             sk = fname[:-5]  # strip .json
+            if "__" in sk:
+                sk = sk.split("__", 1)[0]
+                if not sk:
+                    continue
             # W13: lightweight read — only extract agent_name, skip full
             # Conversation/Message deserialization + api_key re-resolution.
             agent_name = "unknown"

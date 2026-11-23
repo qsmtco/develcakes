@@ -1074,6 +1074,12 @@ def _collect_agents(project_path, config_dir, body_cap, now):
     degraded = False
     for name in names:
         session_key = name[:-len(".json")]
+        # SPEC-66 §12.5: files are `<session_key>__<sha16>.json` — strip the
+        # project slug so the report key resolves to a real agent.
+        if "__" in session_key:
+            session_key = session_key.split("__", 1)[0]
+            if not session_key:
+                continue
         path = os.path.join(conv_dir, name)
         mtime = _mtime(path)
         entry = {"session_key": session_key, "agent_name": None, "model": None,

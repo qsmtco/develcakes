@@ -447,6 +447,64 @@ class AgentRuntimeHandler(
         finally:
             self._stop_all_in_progress = False
 
+    def cancel_agent(self, session_key: str) -> str:
+        """Cancel one local agent and kill its registered processes.
+
+        Returns ``unknown`` when the session key is not in ``self._agents``,
+        ``no_runtime`` when that agent has no runtime yet, otherwise
+        ``cancelled``, ``cancelled+killed:N``, or with an unkillable suffix.
+        ``rt.cancel`` returns ``(killed, unkillable)``.
+
+        SPEC-66 §2.9: ``/stop @X`` reaches the runtime through this method
+        (window.py wires it). It kills the PROCESSES of that session only —
+        ``cancel`` marks a loop only when one is live, so an idle agent is a
+        no-op rather than a kill of unrelated processes.
+        """
+        agent_def = None
+        agents = getattr(self, "_agents", None)
+        if isinstance(agents, dict):
+            agent_def = agents.get(session_key)
+            if agent_def is None:
+                return "unknown"
+        runtime = self._get_runtime_for_session(session_key, agent_def)
+        if runtime is None:
+            return "no_runtime"
+        try:
+            killed, unkillable = runtime.cancel(session_key)
+        except Exception:
+            logger.exception("cancel_agent: runtime cancel raised for %r", session_key)
+            return "cancelled"
+        outcome = "cancelled"
+        if killed:
+            outcome += f"+killed:{killed}"
+        if unkillable:
+            outcome += f"+{unkillable}-unkillable"
+        return outcome
+
+    def _get_runtime_for_session(self, session_key: str, agent_def) -> object | None:
+        """Return the runtime already holding this session, or None.
+
+        Never constructs a runtime: /stop on an agent that has not run yet has
+        nothing to cancel.
+        """
+        runtimes = getattr(self, "_runtimes", None)
+        if not isinstance(runtimes, dict):
+            return None
+        name = getattr(agent_def, "display_name", None) if agent_def is not None else None
+        if name:
+            runtime = runtimes.get(name)
+            if runtime is not None:
+                return runtime
+        for runtime in runtimes.values():
+            getter = getattr(runtime, "get_conversation", None)
+            if callable(getter):
+                try:
+                    if getter(session_key) is not None:
+                        return runtime
+                except Exception:
+                    continue
+        return None
+
     def stop_all_in_progress(self) -> bool:
         """True while stop-all is running. Review checkpoints read this
         BEFORE git_ops.commit and abort instead (no commit under stop-all)."""
@@ -1081,7 +1139,10 @@ class AgentRuntimeHandler(
             effective_project_path = worktree_cwd or project_path
 
             if rt.get_conversation(session_key) is None:
-                loaded = rt.load_conversation(session_key)
+                # §2.7: the store slug uses the project ROOT (the argument),
+                # not the worktree cwd, so a worktree turn and a root turn
+                # share one transcript.
+                loaded = rt.load_conversation(session_key, project_path)
                 if loaded:
                     logger.info("send_to_special_agent: loaded persisted conversation for %s", session_key)
                     # Re-apply the active project to the loaded conversation. The
@@ -1228,7 +1289,11 @@ class AgentRuntimeHandler(
                     # resolve_session_workspace(None, ...) with LOW-2.
                     # Reconcile here too, inside the same prep lock, so the
                     # loaded conversation always carries the active project.
-                    rt.load_conversation(session_key)
+                    rt.load_conversation(
+                        session_key,
+                        self._active_project[1]
+                        if self._active_project is not None else None,
+                    )
                     if rt.get_conversation(session_key) is not None:
                         rt._rebuild_conversation_context(
                             session_key,

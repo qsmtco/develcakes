@@ -1,0 +1,14 @@
+--- a/ui/feed/review.py
++++ b/ui/feed/review.py
+@@ -64,5 +64,4 @@
+             # SPEC-66 §11.3: compare git's report to the REPO-RELATIVE
+             # NORMALIZED form of the card's path (./x, an absolute path and
+             # sub/../x must all match), never to the raw card.file_path.
+-            resolved = os.path.realpath(os.path.join(os.path.realpath(project_path), card.file_path))
+-            staged_rel = os.path.relpath(resolved, os.path.realpath(project_path)).replace("\\", "/")
++            staged_rel = card.file_path
+@@ -71,3 +70,3 @@
+                 # Path-limited staging: only THIS card's file, never stage_all.
+-                result_stage = _mod().git_ops.stage_paths(project_path, [card.file_path])
++                result_stage = _mod().git_ops.stage_all(project_path)
+                 if not result_stage.success:

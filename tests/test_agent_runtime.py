@@ -1464,7 +1464,7 @@ class TestPersistence:
 
             rt2 = AgentRuntime(_make_cfg())
             rt2.start()
-            ok = rt2.load_conversation(sk)
+            ok = rt2.load_conversation(sk, tmpdir)
             assert ok is True
             conv = rt2.get_conversation(sk)
             assert conv is not None
@@ -3085,13 +3085,13 @@ class TestLoadConversationStaleTolerance:
             "total_cost": 0.0,
             "step_count": 0,
         }
-        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger__none.json").write_text(_json.dumps(persisted))
 
         # Act
         from agent.persistence import load_conversation_from_disk
         result = load_conversation_from_disk("agent:debugger")
         assert result is not None, "load() should still find the file"
-        conv, _ = result
+        conv, _, _adopted = result
 
         # Assert: stale values are NOT applied
         assert conv.project_path is None, (
@@ -3127,10 +3127,10 @@ class TestLoadConversationStaleTolerance:
             "fallback_provider": "openrouter",
             "fallback_model": "openrouter/owl-alpha",
         }
-        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger__none.json").write_text(_json.dumps(persisted))
 
         from agent.persistence import load_conversation_from_disk
-        conv, _ = load_conversation_from_disk("agent:debugger")
+        conv, _, _adopted = load_conversation_from_disk("agent:debugger")
 
         assert conv is not None
         assert conv.agent_name == "Debugger"
@@ -3325,13 +3325,13 @@ class TestAgentRuntimeContextReconciliationFullPath:
             "step_count": 0,
             "agent_role": "debugger",
         }
-        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger__none.json").write_text(_json.dumps(persisted))
 
         rt = _make_runtime()
         # Simulate the production path: load() restores the conversation,
         # then the handler (or build_system_prompt) calls rebuild with the
         # active project.
-        ok = rt.load_conversation("agent:debugger")
+        ok = rt.load_conversation("agent:debugger", None)
         assert ok
         conv = rt.get_conversation("agent:debugger")
         assert conv is not None
@@ -3666,7 +3666,7 @@ class TestAllowedToolsFallback:
             # KEY: allowed_tools: null — the bug condition.
             "allowed_tools": None,
         }
-        (d / "agent:debugger.json").write_text(_json.dumps(persisted))
+        (d / "agent:debugger__none.json").write_text(_json.dumps(persisted))
 
         # Patch get_special_agent to return a read-only Debugger def.
         # Mirrors the production Debugger YAML (read-only).
@@ -3687,7 +3687,7 @@ class TestAllowedToolsFallback:
         from agent.persistence import load_conversation_from_disk
         result = load_conversation_from_disk("agent:debugger")
         assert result is not None
-        conv, _ = result
+        conv, _, _adopted = result
 
         # Assert: fallback fired — conv.allowed_tools is the live list,
         # not None. The execute_tool gate will now deny write_file /
@@ -3729,7 +3729,7 @@ class TestAllowedToolsFallback:
             "step_count": 1,
             "allowed_tools": persisted_tools,  # stale creation-time cache
         }
-        (d / "agent:coder.json").write_text(_json.dumps(persisted))
+        (d / "agent:coder__none.json").write_text(_json.dumps(persisted))
 
         # Patch get_special_agent to return the LIVE list — what the
         # agent yaml says today. This must win over the cache.
@@ -3749,7 +3749,7 @@ class TestAllowedToolsFallback:
         from agent.persistence import load_conversation_from_disk
         result = load_conversation_from_disk("agent:coder")
         assert result is not None
-        conv, _ = result
+        conv, _, _adopted = result
 
         # Assert: the live def refreshed the stale cache
         assert conv.allowed_tools == ["read_file", "write_file", "set_timer", "cancel_timer"], (
@@ -3782,7 +3782,7 @@ class TestAllowedToolsFallback:
             "step_count": 0,
             "allowed_tools": persisted_tools,
         }
-        (d / "adhoc:session.json").write_text(_json.dumps(persisted))
+        (d / "adhoc:session__none.json").write_text(_json.dumps(persisted))
         monkeypatch.setattr(
             "agent.special_agents.get_special_agent", MagicMock(return_value=None)
         )
@@ -3791,7 +3791,7 @@ class TestAllowedToolsFallback:
         from agent.persistence import load_conversation_from_disk
         result = load_conversation_from_disk("adhoc:session")
         assert result is not None
-        conv, _ = result
+        conv, _, _adopted = result
 
         # Assert: no def -> persisted list preserved
         assert conv.allowed_tools == persisted_tools
@@ -3820,7 +3820,7 @@ class TestAllowedToolsFallback:
             "step_count": 0,
             "allowed_tools": None,
         }
-        (d / "agent:deleted_agent.json").write_text(_json.dumps(persisted))
+        (d / "agent:deleted_agent__none.json").write_text(_json.dumps(persisted))
 
         # Agent not in registry
         monkeypatch.setattr(
@@ -3830,7 +3830,7 @@ class TestAllowedToolsFallback:
         from agent.persistence import load_conversation_from_disk
         result = load_conversation_from_disk("agent:deleted_agent")
         assert result is not None
-        conv, _ = result
+        conv, _, _adopted = result
 
         # Stays None — the gate is skipped, same as before the fallback
         assert conv.allowed_tools is None

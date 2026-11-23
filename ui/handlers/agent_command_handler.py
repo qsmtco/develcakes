@@ -318,6 +318,9 @@ class AgentCommandHandler:
         self._project_path_provider: Any = None   # Callable[] → str | None
         self._agent_defs_loader: Any = None     # Callable[] → list[dict]
         self._on_audit_report: Any = None         # Callable(dict) → None
+        # SPEC-66 §2.8: /stop sink. __new__-constructed test doubles lack this
+        # attribute, so every read uses getattr(self, "_on_cancel_session", None).
+        self._on_cancel_session: Any = None       # Callable(session_key) → None
 
     # ── Setters (wired by window.py) ─────────────────────────────────────────
 
@@ -348,6 +351,13 @@ class AgentCommandHandler:
     def set_agent_defs_loader(self, loader: Any) -> None:
         """Callable that loads agent definitions for self_improvement lookup."""
         self._agent_defs_loader = loader
+
+    def set_on_cancel_session(self, callback: Any) -> None:
+        """Callback for /stop issued by an agent. Signature: callback(session_key) -> None.
+
+        Wired by window.py to AgentRuntimeHandler.cancel_agent (SPEC-66 §2.8).
+        """
+        self._on_cancel_session = callback
 
     def set_on_audit_report(self, callback: Any) -> None:
         """Callback for audit report feed cards. Signature: callback(report_dict) -> None.
@@ -441,6 +451,23 @@ class AgentCommandHandler:
                 result = self._command_handler.process_input(session_key, candidate,
                                                              skip_dispatch=True)
 
+                # SPEC-66 §2.8(c): /stop from an agent — cancel the target and
+                # count the command, then CONTINUE. A break here would drop the
+                # other commands in the same response.
+                if result.handled and result.cancel_session_key:
+                    cb = getattr(self, "_on_cancel_session", None)
+                    if cb is not None:
+                        try:
+                            cb(result.cancel_session_key)
+                            command_count += 1
+                            continue
+                        except Exception:
+                            logger.exception(
+                                "[agent-cmd] cancel callback failed for %r",
+                                result.cancel_session_key,
+                            )
+                    # No sink wired: fall through to the action-result path so
+                    # the issuing agent still sees the outcome.
                 if result.handled and result.forward_to and result.forward_text:
                     route_key = self._route_command(
                         result, project_name, depth, source_sk=session_key,

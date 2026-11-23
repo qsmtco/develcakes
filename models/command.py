@@ -75,6 +75,8 @@ class CommandResult:
         forward_to:    Session key to send forward_text to (for routing to a specific agent).
         forward_text:  Text content to forward (when forward_to is set).
         broadcast_targets: List of session keys for @-all broadcast fan-out.
+        cancel_session_key: Session key whose agent the caller must cancel
+                        (/stop). LAST field so positional constructors hold.
     """
     handled: bool = False
     response_text: str | None = None
@@ -82,6 +84,7 @@ class CommandResult:
     forward_to: str | None = None
     forward_text: str | None = None
     broadcast_targets: list[str] = field(default_factory=list)   # BUG #4 fix: fan-out targets for @ broadcast
+    cancel_session_key: str | None = None
 
 
 # ── Command registry ───────────────────────────────────────────────────────────

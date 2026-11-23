@@ -144,7 +144,7 @@ class _FakeRuntime:
             self.get_gate.wait(timeout=5)
         return self.conv if self.conv_exists else None
 
-    def load_conversation(self, session_key):
+    def load_conversation(self, session_key, project_path=None):
         self.load_calls.append(session_key)
         self.load_started.set()
         if self.load_gate is not None:

@@ -50,7 +50,7 @@ class TestSaveLoadRoundtrip:
         assert os.stat(path).st_mode & 0o777 == 0o600
         result = load_conversation_from_disk("agent:coder")
         assert result is not None
-        loaded, _data = result
+        loaded, _data, _adopted = result
         assert loaded.agent_name == "Coder"
         assert loaded.project_path is None
         assert loaded.system_prompt == ""
@@ -83,7 +83,7 @@ class TestSaveLoadRoundtrip:
         provider.name = "openai"
         provider.api_key = "sk-REAL"
         with patch("utils.providers_store.load_providers", return_value=[provider]):
-            loaded, raw = load_conversation_from_disk("agent:coder")
+            loaded, raw, _adopted = load_conversation_from_disk("agent:coder")
         assert loaded is not None
         assert loaded.api_key == "sk-REAL"
         assert raw["api_key"] == "sk-SECRET"

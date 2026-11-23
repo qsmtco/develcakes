@@ -321,7 +321,7 @@ class TestDigestPersistence:
             token_estimate=123,
         )
         save_conversation_to_disk(conv, "agent:digest")
-        loaded, data = load_conversation_from_disk("agent:digest")
+        loaded, data, _adopted = load_conversation_from_disk("agent:digest")
         assert loaded is not None
         assert data["digest"]["arc"] == "fix auth"
         assert loaded.digest is not None
@@ -342,7 +342,7 @@ class TestDigestPersistence:
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         conv.digest = ConversationDigest()  # empty
         save_conversation_to_disk(conv, "agent:emptydigest")
-        loaded, _data = load_conversation_from_disk("agent:emptydigest")
+        loaded, _data, _adopted = load_conversation_from_disk("agent:emptydigest")
         assert loaded is not None
         assert loaded.digest is None
 
@@ -355,7 +355,7 @@ class TestDigestPersistence:
 
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         save_conversation_to_disk(conv, "agent:nodigest")
-        loaded, data = load_conversation_from_disk("agent:nodigest")
+        loaded, data, _adopted = load_conversation_from_disk("agent:nodigest")
         assert loaded is not None
         assert loaded.digest is None
         assert data.get("digest") is None
@@ -375,7 +375,7 @@ class TestSpec48Phase3Fixes:
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         conv.digest = ConversationDigest(constraints=["must support offline mode"])
         save_conversation_to_disk(conv, "fix:f1onlyconstraints")
-        loaded, data = load_conversation_from_disk("fix:f1onlyconstraints")
+        loaded, data, _adopted = load_conversation_from_disk("fix:f1onlyconstraints")
         assert loaded is not None
         assert loaded.digest is not None
         assert loaded.digest.constraints == ["must support offline mode"]
@@ -392,7 +392,7 @@ class TestSpec48Phase3Fixes:
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         conv.digest = ConversationDigest(token_estimate=321)
         save_conversation_to_disk(conv, "fix:f1onlytokens")
-        loaded, _data = load_conversation_from_disk("fix:f1onlytokens")
+        loaded, _data, _adopted = load_conversation_from_disk("fix:f1onlytokens")
         assert loaded is not None
         assert loaded.digest is not None
         assert loaded.digest.token_estimate == 321
@@ -416,7 +416,7 @@ class TestSpec48Phase3Fixes:
         conv = Conversation(agent_name="Coder", model="openai/gpt-4o", provider="openai")
         conv.digest = {"arc": "x"}  # plain dict, not a ConversationDigest
         save_conversation_to_disk(conv, "fix:f3plainict")
-        loaded, data = load_conversation_from_disk("fix:f3plainict")
+        loaded, data, _adopted = load_conversation_from_disk("fix:f3plainict")
         assert loaded is not None
         assert data["digest"] is None
         assert loaded.digest is None

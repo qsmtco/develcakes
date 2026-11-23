@@ -1,0 +1,14 @@
+--- a/agent/persistence.py
++++ b/agent/persistence.py
+@@ -307,10 +307,6 @@
+         if legacy_data is not None:
+             stored = legacy_data.get("project_path")
+-            if (
+-                isinstance(stored, str)
+-                and stored
+-                and os.path.realpath(stored) == os.path.realpath(project_path)
+-            ):
++            if True:
+                 data = legacy_data
+                 legacy_adopted = True
+     if data is None:

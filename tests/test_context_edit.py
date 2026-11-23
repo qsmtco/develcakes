@@ -177,7 +177,12 @@ def test_self_edit_writes_the_in_memory_conversation_back(tmp_path, monkeypatch)
     assert [m.content for m in conv.messages] == ["use sqlite", "trim your context", ""]
     assert conv.messages[-1].tool_calls[0].tool_name == "agent_context"
 
-    path = tmp_path / "conversations" / "agent:supervisor.json"
+    # SPEC-66 §2.5: scoped filename `<session_key>__<sha16|none>.json`.
+    from agent.persistence import conversation_store_name
+
+    path = tmp_path / "conversations" / conversation_store_name(
+        "agent:supervisor", conv.project_path
+    )
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert [m["content"] for m in saved["messages"]] == ["use sqlite", "trim your context"]
 

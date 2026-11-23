@@ -43,7 +43,17 @@ class CollabHandler:
         return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text=cmd.body)
 
     def cmd_stop(self, cmd: Command) -> CommandResult:
-        """/stop @agent → send stop signal to agent."""
+        """/stop @agent → cancel that agent's loop and processes.
+
+        SPEC-66 §2.8: the target is reported as ``cancel_session_key`` so the
+        caller (window wiring → AgentRuntimeHandler.cancel_agent) performs the
+        real cancel. No forward_to/forward_text — a forwarded "stop" string
+        reached the agent as a chat message, not a cancel.
+        """
         if not cmd.target_session_key:
             return CommandResult(handled=True, response_text="No target agent. Usage: /stop @agent")
-        return CommandResult(handled=True, forward_to=cmd.target_session_key, forward_text="stop")
+        return CommandResult(
+            handled=True,
+            cancel_session_key=cmd.target_session_key,
+            response_text=f"Stopping {cmd.target_session_key}",
+        )

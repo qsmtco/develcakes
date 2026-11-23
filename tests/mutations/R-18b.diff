@@ -1,0 +1,26 @@
+--- a/agent/runtime.py
++++ b/agent/runtime.py
+@@ -1703,7 +1703,4 @@
+             self._on_error, session_key, CANCEL_MESSAGE,
+             _turn_token=active_tk,
+         )
+-        # SPEC-66 §2.6: kill the processes this session registered. Outside
+-        # _lock — the SIGTERM→2s→SIGKILL escalation must not block state.
+-        from agent.tools import cancel_all_processes
+-        return cancel_all_processes(session_key)
++        return 0, 0
+--- a/ui/handlers/agent_runtime_handler.py
++++ b/ui/handlers/agent_runtime_handler.py
+@@ -472,11 +472,6 @@
+         try:
+             killed, unkillable = runtime.cancel(session_key)
+         except Exception:
+             logger.exception("cancel_agent: runtime cancel raised for %r", session_key)
+             return "cancelled"
+-        outcome = "cancelled"
+-        if killed:
+-            outcome += f"+killed:{killed}"
+-        if unkillable:
+-            outcome += f"+{unkillable}-unkillable"
+-        return outcome
++        return "cancelled"

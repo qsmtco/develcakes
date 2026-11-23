@@ -8,6 +8,7 @@ Security:
 Pure Python — no GTK, no network, no agent.runtime imports.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -39,16 +40,45 @@ def conversations_dir() -> str:
     return d
 
 
+_SESSION_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def conversation_store_name(session_key: str, project_path: str | None) -> str:
+    """Basename of the conversation file. Raises ValueError on a bad key.
+
+    session_key must match ``[A-Za-z0-9._:-]+`` and must not contain ``..``.
+    The slug is 16 hex chars of sha256(realpath(project_path)), or ``none``
+    when project_path is empty. The separator is ``__``.
+    """
+    if (
+        not isinstance(session_key, str)
+        or not _SESSION_KEY_RE.fullmatch(session_key)
+        or ".." in session_key
+    ):
+        raise ValueError(f"refusing session key for a filename: {session_key!r}")
+    if not isinstance(project_path, str) or not project_path:
+        slug = "none"
+    else:
+        slug = hashlib.sha256(
+            os.path.realpath(project_path).encode("utf-8")
+        ).hexdigest()[:16]
+    return f"{session_key}__{slug}.json"
+
+
 def save_conversation_to_disk(conv: "Conversation", session_key: str) -> str:
-    """Save a conversation to <conversations_dir>/<session_key>.json.
+    """Save a conversation to <conversations_dir>/<session_key>__<slug>.json.
 
     Writes a temp file in the same directory, fsyncs it, then os.replace
     onto the live path. A crash before replace leaves the previous file.
 
     HIGH-3: api_key is NOT serialized. It is re-resolved on load from
     providers.yaml keyed by conv.model / conv.provider.
+
+    The filename carries a slug of the conversation's project so one session
+    key keeps one transcript per project. A bad session key raises ValueError.
     """
-    path = os.path.join(conversations_dir(), f"{session_key}.json")
+    name = conversation_store_name(session_key, conv.project_path)
+    path = os.path.join(conversations_dir(), name)
     # F3 (SPEC-48 Phase 3 fix): null-safe AND type-safe — a plain dict (or
     # missing attribute) must not crash the save; write None in that case.
     from models.conversation import ConversationDigest
@@ -243,24 +273,56 @@ def resolve_api_key_for_conversation(data: dict) -> str | None:
         return None
 
 
-def load_conversation_from_disk(session_key: str) -> tuple["Conversation", dict] | None:
-    """Load a conversation from disk. Returns (Conversation, metadata) or None.
-
-    HIGH-3: api_key is re-resolved from providers.yaml. A saved api_key
-    field, if present, is ignored.
-    """
-    path = os.path.join(conversations_dir(), f"{session_key}.json")
-    if not os.path.isfile(path):
-        return None
+def _load_json(path: str) -> dict | None:
+    """Read a JSON object from path. None on any read/parse failure."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def load_conversation_from_disk(
+    session_key: str, project_path: str | None = None
+) -> tuple["Conversation", dict, bool] | None:
+    """Load a conversation for (session_key, project_path).
+
+    Returns ``(conversation, metadata, legacy_adopted)`` or None.
+
+    Load order: the scoped ``<session_key>__<sha16>.json`` first, then the
+    legacy ``<session_key>.json`` when its stored ``project_path`` realpaths
+    to the same project as ``project_path``. The legacy file is never
+    deleted; ``legacy_adopted`` tells the caller to write the scoped copy.
+
+    HIGH-3: api_key is re-resolved from providers.yaml. A saved api_key
+    field, if present, is ignored.
+    """
+    path = os.path.join(conversations_dir(), conversation_store_name(session_key, project_path))
+    legacy_adopted = False
+    data = _load_json(path) if os.path.isfile(path) else None
+    if data is None and project_path:
+        legacy = os.path.join(conversations_dir(), f"{session_key}.json")
+        legacy_data = _load_json(legacy) if os.path.isfile(legacy) else None
+        if legacy_data is not None:
+            stored = legacy_data.get("project_path")
+            if (
+                isinstance(stored, str)
+                and stored
+                and os.path.realpath(stored) == os.path.realpath(project_path)
+            ):
+                data = legacy_data
+                legacy_adopted = True
+    if data is None:
+        return None
 
     conv = _conversation_from_data(data)
     _apply_loaded_fallbacks(conv, session_key, data)
-    return conv, data
+    if legacy_adopted:
+        # §10.3: the conversation must carry the validated project BEFORE the
+        # caller saves, so the scoped file gets the real slug, not __none.
+        conv.project_path = data.get("project_path")
+    return conv, data, legacy_adopted
 
 
 def resolve_session_workspace(project_path: str | None, session_key: str) -> str:

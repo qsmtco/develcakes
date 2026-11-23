@@ -5,6 +5,7 @@
 # New dependency: gitpython (pip install gitpython).
 # Import: import git (as gitpython to avoid shadowing the module name).
 
+import os
 import re
 import git as gitpython
 from dataclasses import dataclass
@@ -101,6 +102,34 @@ def stage_all(project_path: str) -> GitResult:
         repo = gitpython.Repo(project_path)
         # Use git add -A via the git command to stage everything
         repo.git.add("-A")
+        return GitResult(success=True, stdout="", error="", sha=None)
+    except Exception as e:
+        return GitResult(success=False, stdout="", error=_safe_error(e), sha=None)
+
+
+def stage_paths(project_path: str, paths: list[str]) -> GitResult:
+    """Stage exactly these project-relative or absolute paths.
+
+    A path that realpath's outside project_path returns success=False and
+    stages nothing. An empty list returns success=False, error="no paths".
+    Does not call ``git add -A``. Any exception becomes ``_safe_error``.
+    """
+    if not paths:
+        return GitResult(success=False, stdout="", error="no paths", sha=None)
+    try:
+        project_real = os.path.realpath(project_path)
+        safe: list[str] = []
+        for raw in paths:
+            resolved = os.path.realpath(os.path.join(project_real, raw))
+            if os.path.commonpath([project_real, resolved]) != project_real:
+                return GitResult(
+                    success=False, stdout="",
+                    error=f"path escapes the project: {raw}", sha=None,
+                )
+            safe.append(resolved)
+        repo = gitpython.Repo(project_path)
+        # "--" before the paths: a path that looks like a flag is data.
+        repo.git.add("--", *safe)
         return GitResult(success=True, stdout="", error="", sha=None)
     except Exception as e:
         return GitResult(success=False, stdout="", error=_safe_error(e), sha=None)

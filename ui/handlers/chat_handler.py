@@ -60,6 +60,9 @@ class ChatHandler:
         self._on_res_confirmed: Callable[[str], None] | None = None  # pre-flight confirm via res
         self._agent_runtime_handler = None  # injected via set_agent_runtime_handler()
         self._agent_mgr = None  # injected via set_agent_manager() after gateway connect
+        # SPEC-66 §2.8: cancel sink for /stop (window wires it to
+        # AgentRuntimeHandler.cancel_agent). None = stop is not wired.
+        self._on_cancel_session: Callable[[str], None] | None = None
 
     def set_chat_render_handler(self, handler):
         """"Inject ChatRenderHandler. Called by window.py._build()."""
@@ -101,6 +104,14 @@ class ChatHandler:
     def set_agent_manager(self, agent_mgr) -> None:
         """Inject the live AgentManager after gateway connect. Called by window.py."""
         self._agent_mgr = agent_mgr
+
+    def set_on_cancel_session(self, cb: Callable[[str], None]) -> None:
+        """/stop sink: cb(session_key) cancels that agent (SPEC-66 §2.8).
+
+        Wired by window.py to AgentRuntimeHandler.cancel_agent. Handlers never
+        import each other, so the cancel reaches the runtime through this seam.
+        """
+        self._on_cancel_session = cb
 
     def _send_local(self, session_key: str, text: str,
                     reply_target: str | None = None) -> None:
@@ -231,6 +242,32 @@ class ChatHandler:
             result = self._command_handler.process_input(session_key, text)
             if result.handled:
                 buf.set_text("")
+                # SPEC-66 §2.8: /stop must CANCEL, not forward a "stop" string
+                # as chat text. Fire the wired sink and stop here — no
+                # _send_local, no forward path.
+                if result.cancel_session_key:
+                    cb = getattr(self, "_on_cancel_session", None)
+                    if cb is not None:
+                        # The wired path: cancel, and let the existing
+                        # command-text path show result.response_text (no
+                        # second render here — that would double the bubble).
+                        cb(result.cancel_session_key)
+                        return
+
+                    # Unwired: say so, and never forward a bare "stop".
+                    def _show_stop_text():
+                        try:
+                            if self._chat_render_handler is not None:
+                                self._chat_render_handler.render_sync(
+                                    "System", "Stop is not wired.", session_key,
+                                )
+                        except Exception:
+                            _logger.exception(
+                                "[chat] Could not show the stop result for %r",
+                                session_key,
+                            )
+                    self._dispatch(_show_stop_text)
+                    return
                 # Forward-to commands: show echo and route via gateway
                 if result.forward_to and result.forward_text:
                     target = result.forward_to

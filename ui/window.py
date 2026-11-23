@@ -737,6 +737,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self._command_handler.set_special_agents(self._agent_runtime_handler.get_special_agents())
         # Wire FeedHandler into AgentRuntimeHandler (Phase D: tool call feed cards)
         self._agent_runtime_handler.set_feed_handler(self._feed_handler)
+        # SPEC-66 §2.8: /stop wiring. Both the chat input and the agent-response
+        # command loop reach the runtime through these seams (handlers never
+        # import each other). Idle /stop is a no-op message in cancel_agent.
+        self._chat_handler.set_on_cancel_session(
+            self._agent_runtime_handler.cancel_agent
+        )
+        self._agent_command_handler.set_on_cancel_session(
+            self._agent_runtime_handler.cancel_agent
+        )
         # Wire AgentRoutingTable into AgentRuntimeHandler (solo DM response routing)
         self._agent_runtime_handler.set_agent_routing(self._agent_to_project)
         # Wire ProjectHandler → AgentRuntimeHandler for /clear command.

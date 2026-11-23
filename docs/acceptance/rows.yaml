@@ -121,3 +121,35 @@
   mutation: tests/mutations/R-14.diff
   runner: plain
   added: 2026-11-18
+
+- id: R-16
+  claim: "One session key keeps one transcript per project: a transcript for project A is invisible from project B, and the legacy `<sk>.json` is adopted ONLY when its stored project_path realpaths to the requested project."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.5 + §12.6
+  node: tests/test_spec66_transcript_scope.py::TestScopedTranscripts::test_legacy_file_is_rejected_on_realpath_mismatch
+  mutation: tests/mutations/R-16.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-17
+  claim: "Accept stages only the card's path (never stage_all) and compares git's index report to the repo-relative NORMALIZED form of that path, so 'b.txt', './b.txt', an absolute path and 'sub/../b.txt' all match the same index entry."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.9 + §11.3
+  node: tests/test_spec66_accept.py::TestNormalizedIndexComparison::test_stage_all_is_never_called_on_accept
+  mutation: tests/mutations/R-17.diff
+  runner: xvfb
+  added: 2026-11-18
+
+- id: R-18
+  claim: "`/stop @X` reports the target as cancel_session_key and forwards nothing — the word 'stop' is never sent to the agent as chat text."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.8 + §12.7
+  node: tests/test_spec66_stop.py::TestStopIsACancel::test_stop_returns_cancel_session_key_and_does_not_forward
+  mutation: tests/mutations/R-18.diff
+  runner: plain
+  added: 2026-11-18
+
+- id: R-18b
+  claim: "The /stop path cancels through the runtime and reports the kill: cancel_agent drives rt.cancel, whose kill of that session's process group surfaces as 'cancelled+killed:N'."
+  source: docs/specs/SPEC-66-FIX-PRIORITY-PASS.md §2.6 + §2.9
+  node: tests/test_spec66_stop.py::TestCancelAgent::test_cancel_agent_kills_process_group
+  mutation: tests/mutations/R-18b.diff
+  runner: xvfb
+  added: 2026-11-18

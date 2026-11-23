@@ -491,7 +491,7 @@ class _RoomFakeRuntime:
     def get_conversation(self, session_key):
         return self.conv
 
-    def load_conversation(self, session_key):
+    def load_conversation(self, session_key, project_path=None):
         self.load_calls.append(session_key)
         if self.loaded_from_disk:
             # Simulate the persistence contract: _conversation_from_data

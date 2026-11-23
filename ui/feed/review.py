@@ -1,6 +1,7 @@
 """Review, accept, reject, and batch-accept actions."""
 from __future__ import annotations
 
+import os
 import time
 
 from ui.feed._facade import _mod
@@ -41,13 +42,40 @@ class FeedReviewMixin:
 
         if card.card_type in ("diff", "file_created", "file_modified", "file_deleted"):
             project_path = card.metadata.get("project_path", "") or self._project_paths.get(card.project_name, "")
+
+            def _fail(message: str) -> None:
+                """Record an accept failure on the card (main thread: update_card upserts)."""
+                def _apply() -> None:
+                    card.metadata["accept_error"] = message
+                    card.metadata["status"] = "error"
+                    self.update_card(card_id, card)
+                if getattr(_mod(), "_GLib", None) is not None:
+                    _mod()._GLib.idle_add(_apply)
+                else:
+                    _apply()
+
             if not project_path:
+                _fail("no project path")
+                return
+            if not card.file_path:
+                _fail("this card has no file path")
                 return
 
+            # SPEC-66 §11.3: compare git's report to the REPO-RELATIVE
+            # NORMALIZED form of the card's path (./x, an absolute path and
+            # sub/../x must all match), never to the raw card.file_path.
+            resolved = os.path.realpath(os.path.join(os.path.realpath(project_path), card.file_path))
+            staged_rel = os.path.relpath(resolved, os.path.realpath(project_path)).replace("\\", "/")
+
             def _git_accept():
-                result_stage = _mod().git_ops.stage_all(project_path)
+                # Path-limited staging: only THIS card's file, never stage_all.
+                result_stage = _mod().git_ops.stage_paths(project_path, [card.file_path])
                 if not result_stage.success:
-                    _mod()._logger.warning("handle_accept: git stage failed for %s", project_path)
+                    _mod()._logger.warning(
+                        "handle_accept: git stage failed for %s: %s",
+                        project_path, result_stage.error,
+                    )
+                    _fail(result_stage.error or "stage failed")
                     return
 
                 # Generate the commit message from the ACTUAL staged files,
@@ -85,6 +113,23 @@ class FeedReviewMixin:
                     )
                     return
 
+                # Refuse when anything OTHER than this card's file is staged:
+                # the commit would silently sweep up unrelated work. Those
+                # files stay staged (no git reset).
+                index_paths = {
+                    (d.a_path or d.b_path or "").replace("\\", "/")
+                    for d in staged
+                }
+                index_paths.discard("")
+                others = sorted(index_paths - {staged_rel})
+                if others:
+                    _mod()._logger.warning(
+                        "handle_accept: index has other staged files for %s: %s",
+                        project_path, others,
+                    )
+                    _fail("index has other staged files")
+                    return
+
                 # Build a descriptive message from the actual files
                 file_list = sorted({d.a_path or d.b_path for d in staged if d.a_path or d.b_path})
                 if len(file_list) == 1:
@@ -105,6 +150,12 @@ class FeedReviewMixin:
                         self._update_card_visual(card_id, accepted=True)
                     self._GLib.idle_add(_mark)
                     self._GLib.idle_add(lambda: self._add_git_card(card, result_commit))
+                else:
+                    _mod()._logger.warning(
+                        "handle_accept: commit failed for %s: %s",
+                        project_path, result_commit.error,
+                    )
+                    _fail(result_commit.error or "commit failed")
 
             # Record path for echo suppression BEFORE starting git thread.
             # CrabWatch will fire events when git modifies the filesystem;

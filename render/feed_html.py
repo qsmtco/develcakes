@@ -392,6 +392,11 @@ def _main_body(card: FeedCardData, meta: dict, card_id: str, *, revealed: bool) 
         parts.append('<div class="feed-card-body"></div>')
     if card.card_type == "task" and card.task_id:
         parts.append(f'<p class="feed-task-id">ID: {_esc(card.task_id)}</p>')
+    if meta.get("accept_error"):
+        # SPEC-66 §2.9: an accept the git index refused leaves the reason visible.
+        parts.append(
+            f'<p class="feed-accept-error">{_esc(meta.get("accept_error"))}</p>'
+        )
     return "".join(parts)
 
 

@@ -1,0 +1,10 @@
+--- a/ui/handlers/collab_handler.py
++++ b/ui/handlers/collab_handler.py
+@@ -53,7 +53,6 @@
+         if not cmd.target_session_key:
+             return CommandResult(handled=True, response_text="No target agent. Usage: /stop @agent")
+         return CommandResult(
+             handled=True,
+-            cancel_session_key=cmd.target_session_key,
+             response_text=f"Stopping {cmd.target_session_key}",
+         )
