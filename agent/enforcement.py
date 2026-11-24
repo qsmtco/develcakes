@@ -46,9 +46,14 @@ logger = logging.getLogger(__name__)
 SYNTAX_CHECKERS: dict[str, str] = {
     ".py": "python3 -m py_compile {path}",
     ".js": "node --check {path}",
-    ".ts": "npx tsc --noEmit {path}",
+    # CONSOLIDATED audit Fix 7a/M5: `npx` is banned everywhere (it
+    # auto-installs-and-runs arbitrary npm packages — the squatted "tsc"
+    # package demonstrated a live download+execute during verification).
+    # .ts/.tsx use tsc DIRECTLY; when tsc is absent from PATH the tier
+    # skips (see _check_syntax) rather than lying with a JS-only parse.
+    ".ts": "tsc --noEmit {path}",
     ".jsx": "node --check {path}",
-    ".tsx": "npx tsc --noEmit {path}",
+    ".tsx": "tsc --noEmit {path}",
     ".sh": "bash -n {path}",
     ".bash": "bash -n {path}",
     ".zsh": "zsh -n {path}",
@@ -919,6 +924,17 @@ def _detect_test_framework(project_path: str) -> tuple[str, list[str]] | None:
             pass
 
     # Jest — package.json with "jest" in devDependencies
+    #
+    # CONSOLIDATED audit M5 (Fix 7a's rationale, applied to the same defect in
+    # the TESTS tier): these used to return `["npx", "jest", ...]` /
+    # `["npx", "vitest", ...]`. `npx` is a package RUNNER (registry fetch +
+    # execute), and SPEC-66 §11.2 removed it from _ALLOWED_BINARIES with the
+    # note "Do not re-add it". This branch never validated its argv against
+    # that allowlist at all, and the resolved-binary gate ADMITS an `npx`
+    # that resolves into the trusted HOME root — so a cloned repository's
+    # package.json could still reach a registry fetch through the tests tier.
+    # They now resolve the real binary on PATH, exactly like the lint tier; no
+    # binary on PATH → no JS test tier (dropping it is the correct trade).
     pkg_json = os.path.join(project_path, "package.json")
     if os.path.isfile(pkg_json):
         try:
@@ -927,9 +943,13 @@ def _detect_test_framework(project_path: str) -> tuple[str, list[str]] | None:
                 data = json.load(f)
             dev_deps = data.get("devDependencies", {}) or data.get("dependencies", {})
             if "jest" in dev_deps:
-                return ("jest", ["npx", "jest", "--no-coverage"])
+                jest = shutil.which("jest")
+                if jest:
+                    return ("jest", [jest, "--no-coverage"])
             if "vitest" in dev_deps:
-                return ("vitest", ["npx", "vitest", "run"])
+                vitest = shutil.which("vitest")
+                if vitest:
+                    return ("vitest", [vitest, "run"])
         except Exception:
             pass
 
@@ -1211,6 +1231,156 @@ def _substitute_venv_python(argv: list[str], venv_python: str | None) -> list[st
     return result
 
 
+# ── Tests-tier configuration ISOLATION (CONSOLIDATED audit Fix 3 / C2) ──────
+#
+# C2: a CLONED repository's own pytest.ini / setup.cfg carried
+# `addopts = -p evilplugin`, and `pytest` — run with `cwd=project_path` and
+# no `-c` — honoured it. The plugin was imported and executed on the agent's
+# first ordinary write, with no approval card anywhere, and the tier
+# reported PASSED. Same class: a shipped `conftest.py`, which pytest IMPORTS
+# on the collection path.
+#
+# The fix is the audit's Inversion 2: the project's configuration is DATA,
+# but which code the tool LOADS is ours to control. The tier therefore runs
+# pytest under an APP-OWNED ini and under an app-chosen conftest boundary.
+#
+# `_TIER_PYTEST_INI` is deliberately minimal: our own tier needs no ini
+# options at all, so an empty `addopts` is the whole content. It is written
+# once into `get_config_dir()/tier/` (app-owned; a project cannot write
+# there — it is outside the project sandbox).
+_TIER_PYTEST_INI = """[pytest]
+# App-owned pytest configuration for the develcakes ENFORCEMENT TIER.
+#
+# CONSOLIDATED audit Fix 3 (C2): the tier runs pytest with `-c <this file>`
+# so a checked project's own pytest.ini / setup.cfg / tox.ini `addopts`
+# (e.g. `-p evilplugin`, which pytest IMPORTS and executes) cannot reach the
+# tier's run. This file is app-owned: it lives under get_config_dir(), which
+# is outside every project sandbox. Do not move it into a project.
+addopts =
+"""
+# Env var handed to the tests-tier subprocess. pytest reads it itself and it
+# can only SUPPRESS loading (setuptools entry-point plugins via
+# `-p`/`PYTEST_PLUGINS` autoload), never add one — which is why allowing it
+# in the scrubbed env is the safe direction (see utils/env_security.py).
+_TIER_PYTEST_ENV = {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+
+
+def _project_is_app(project_path: str) -> bool:
+    """True when the checked project IS the running app (or one of its worktrees).
+
+    Same identity rule the interpreter fallback uses (SP6 Phase 2): the app's
+    own tree is ours; anything else is foreign.
+    """
+    if not project_path:
+        return False
+    if os.path.realpath(os.path.abspath(project_path)) == _APP_ROOT:
+        return True
+    try:
+        return _is_app_worktree(project_path)
+    except Exception:
+        return False
+
+
+def _tier_pytest_config() -> tuple[str, str] | None:
+    """(ini_path, confcutdir) for the app-owned tests-tier pytest config.
+
+    Written ONCE into ``get_config_dir()/tier/pytest.ini`` and re-written only
+    when its content drifts, so the tests tier costs one read in the steady
+    state. Returns None when the config dir is unusable — the caller then
+    falls back to the ini-override spelling (still isolated, see
+    ``_pytest_isolation_args``), never to "no isolation at all".
+    """
+    try:
+        from utils.config import get_config_dir
+
+        tier_dir = os.path.join(get_config_dir(), "tier")
+        os.makedirs(tier_dir, exist_ok=True)
+        ini = os.path.join(tier_dir, "pytest.ini")
+        existing: str | None
+        try:
+            with open(ini, "r", encoding="utf-8") as f:
+                existing = f.read()
+        except OSError:
+            existing = None
+        if existing != _TIER_PYTEST_INI:
+            with open(ini, "w", encoding="utf-8") as f:
+                f.write(_TIER_PYTEST_INI)
+        return ini, tier_dir
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("[enforcement] tier pytest config unavailable: %s", e)
+        return None
+
+
+def _is_pytest_argv(argv: list[str]) -> bool:
+    """True when argv invokes pytest (``pytest`` or ``<python> -m pytest``)."""
+    if not argv:
+        return False
+    base = os.path.basename(argv[0]).lower()
+    if base in ("pytest", "pytest.exe"):
+        return True
+    if base.startswith("python") and len(argv) >= 3:
+        return argv[1] == "-m" and argv[2] == "pytest"
+    return False
+
+
+def _pytest_isolation_args(project_path: str) -> list[str]:
+    """pytest args that keep the PROJECT from choosing what pytest loads.
+
+    Three layers, all app-chosen:
+
+    1. ``-c <app-owned ini>`` — the project's pytest.ini / setup.cfg /
+       tox.ini is not read at all, so its ``addopts`` (``-p evilplugin``)
+       cannot import code.
+    2. ``--confcutdir <app tier dir>`` — the audit's prescribed boundary.
+       NOTE (deviation, measured against pytest 9's implementation):
+       ``confcutdir`` only restricts the conftest search to *at or below*
+       the confcut dir, so pointing it at an app dir does NOT by itself stop
+       a project's root conftest from loading. It stays as belt.
+    3. ``--noconftest`` for a NON-app project — pytest imports every
+       ``conftest.py`` on the collection path, which is arbitrary code from
+       someone else's repository (C2's second half, probe M3b). The app's
+       OWN tree keeps its conftest: this repo's ``tests/conftest.py`` is the
+       hermeticity guard (config isolation, display guard), it is our code,
+       and an agent editing it gets an approval card (Fix 2).
+    """
+    args: list[str] = []
+    config = _tier_pytest_config()
+    if config is not None:
+        ini, tier_dir = config
+        args.extend(["-c", ini, "--confcutdir", tier_dir])
+    else:
+        # Fallback: no app ini available. Neutralise the project's addopts
+        # from the command line instead of trusting the loaded ini.
+        args.extend(["-o", "addopts="])
+    if not _project_is_app(project_path):
+        args.append("--noconftest")
+    return args
+
+
+def _inject_pytest_isolation(
+    argv: list[str], project_path: str
+) -> tuple[list[str], dict[str, str]]:
+    """(argv, env_overrides) with the tests-tier isolation applied.
+
+    Isolation args go IMMEDIATELY after the pytest token so they cannot be
+    overridden by anything later on the command line. Non-pytest argv (a
+    project may set ``command`` to another allowlisted binary) is returned
+    unchanged — the plugin autoload suppression still applies, since it is
+    inert for non-pytest programs.
+    """
+    if not _is_pytest_argv(argv):
+        return list(argv), dict(_TIER_PYTEST_ENV)
+    isolation = _pytest_isolation_args(project_path)
+    out = list(argv)
+    base = os.path.basename(out[0]).lower()
+    if base.startswith("python") and out[1:3] == ["-m", "pytest"]:
+        at = 3
+    else:
+        at = 1
+    out[at:at] = isolation
+    return out, dict(_TIER_PYTEST_ENV)
+
+
 def _resolve_tests_python(project_path: str, venv_python: str | None) -> str | None:
     """Resolve the tests-tier interpreter when the venv probe missed.
 
@@ -1402,7 +1572,15 @@ def _check_tests(
             return None
 
     try:
-        run = _run_timed_command(argv, project_path, test_timeout)
+        # CONSOLIDATED audit Fix 3 (C2): the tests tier never lets the CHECKED
+        # PROJECT choose which pytest code is loaded. An app-owned ini (`-c`),
+        # an app-chosen conftest boundary, and `--noconftest` for a foreign
+        # project — see _pytest_isolation_args. `PYTEST_DISABLE_PLUGIN_AUTOLOAD`
+        # rides in the subprocess env (_TIER_PYTEST_ENV), so even a plugin
+        # spelling we did not anticipate cannot be auto-loaded through an
+        # entry point.
+        argv, tier_env = _inject_pytest_isolation(argv, project_path)
+        run = _run_timed_command(argv, project_path, test_timeout, extra_env=tier_env)
         if run is None:
             # SPEC-09 SP0 (V1): resolved-binary gate refused argv[0] —
             # surface the refusal as a FAILED check, never a silent skip
@@ -1499,23 +1677,47 @@ def _detect_linter(file_path: str, project_path: str) -> tuple[str, list[str]] |
                 pass
 
     # eslint — JS/TS
+    #
+    # SPEC-66 §11.2 / CONSOLIDATED audit M5: this used to emit
+    # `["npx", "eslint", file_path]`. `npx` is a package RUNNER — it
+    # downloads and executes an arbitrary package from the npm registry — and
+    # SPEC-66 §11.2 removed it from _ALLOWED_BINARIES with the note "Do not
+    # re-add it". The lint path was missed, and it never went through
+    # _validate_test_command. It now emits the RESOLVED `eslint` binary (the
+    # same PATH resolution the tier's resolved-binary gate then re-checks),
+    # and `_check_lint` validates the argv against the token allowlist. No
+    # JS lint tier exists when `eslint` is not installed — dropping the tier
+    # is the correct trade against a registry fetch.
     if ext in (".js", ".jsx", ".ts", ".tsx"):
         eslintrc = os.path.join(project_path, ".eslintrc")
         eslint_config = os.path.join(project_path, "eslint.config.js")
         if os.path.isfile(eslintrc) or os.path.isfile(eslint_config):
-            if shutil.which("npx"):
-                return ("eslint", ["npx", "eslint", file_path])
+            eslint = shutil.which("eslint")
+            if eslint:
+                return ("eslint", [eslint, file_path])
 
     return None
 
 
-def _run_timed_command(argv: list[str], project_path: str, timeout: int) -> tuple[subprocess.CompletedProcess, int] | None:
+def _run_timed_command(
+    argv: list[str],
+    project_path: str,
+    timeout: int,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess, int] | None:
     """Run a subprocess with argv list, shell=False, scrubbed env.
 
     Returns (result, duration_ms), or None when the V1 resolved-binary gate
     refuses argv[0] (SPEC-09 SP0: PATH-bleed — a shim planted in a
     user-writable PATH dir must never execute). Raises on timeout.
     CRIT-1/CRIT-2: shell=False is enforced. Env is scrubbed to PATH/HOME/LANG only. (Phase 0)
+
+    *extra_env* adds tier-specific variables ON TOP of the scrubbed env — used
+    by the tests tier for `PYTEST_DISABLE_PLUGIN_AUTOLOAD` (CONSOLIDATED
+    audit Fix 3). Every name it may carry is on the
+    `ALLOWED_SUBPROCESS_ENV_VARS` allowlist, so this is a narrowing addition,
+    never a widening one; a name not on the allowlist is dropped with a
+    warning rather than forwarded.
     """
     # SPEC-09 SP0 (V1): token allowlist upstream stays as defense in depth;
     # this is the resolution-side gate on the actual binary that would run.
@@ -1525,11 +1727,23 @@ def _run_timed_command(argv: list[str], project_path: str, timeout: int) -> tupl
             argv, project_path,
         )
         return None
+    env = _get_scrubbed_env()
+    if extra_env:
+        from utils.env_security import ALLOWED_SUBPROCESS_ENV_VARS
+
+        for name, value in extra_env.items():
+            if name in ALLOWED_SUBPROCESS_ENV_VARS:
+                env[name] = value
+            else:
+                logger.warning(
+                    "[enforcement] extra_env dropped (not on the scrubbed "
+                    "allowlist): %s", name,
+                )
     start = time.monotonic()
     result = subprocess.run(
         argv, shell=False, capture_output=True,
         cwd=project_path, timeout=timeout,
-        env=_get_scrubbed_env(),
+        env=env,
     )
     return result, int((time.monotonic() - start) * 1000)
 
@@ -1567,6 +1781,26 @@ def _check_lint(
         return None
 
     linter_name, argv = linter
+
+    # CONSOLIDATED audit Fix 7a (M5): the token allowlist was applied to the
+    # TESTS tier only — the lint tier's argv went straight to the
+    # resolved-binary gate, so an `npx` first token (a registry fetch) was
+    # admitted. Same validator, same contract: a refused argv is a visible
+    # FAILED check naming the surface, never a silent skip.
+    lint_command = " ".join(shlex.quote(tok) for tok in argv)
+    if not _validate_test_command(lint_command):
+        logger.warning(
+            "[enforcement] lint command rejected by token allowlist: %r", argv,
+        )
+        return EnforcementCheck(
+            tier="lint", tool="write_file", file=file_path,
+            passed=False,
+            detail=(
+                "REFUSED: lint command — first token is not an allowlisted "
+                f"binary (argv={argv!r})"
+            ),
+            output="", duration_ms=0,
+        )
 
     # Check if the linter binary is available
     binary = linter_name
