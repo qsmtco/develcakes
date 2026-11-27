@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import socket
-import subprocess
 import uuid
 from unittest.mock import patch
 
@@ -450,9 +449,18 @@ def test_node_eval_flags_are_refused(command):
         "pytest tests/",
         # SPEC-66 BUG #3 boundaries: long options and non-eval letters stay
         # allowed so the cluster rule does not over-refuse ordinary flags.
-        "python3 --config setup.cfg",
+        # C-C (PM RULING 2026-11-23) forced the `=` spelling here: the
+        # space-separated `python3 --config setup.cfg` carries a positional
+        # (`setup.cfg`) and is refused by the python script-positional ban.
+        # What this row still pins is the `--config` ≠ `-c` boundary.
+        "python3 --config=setup.cfg",
         "node -v",
-        "python3 -i script.py",
+        # C-C (PM RULING 2026-11-23): `python3 -i script.py` is now REFUSED —
+        # a script positional is banned whether or not the flag is an eval
+        # flag. The non-eval-flag boundary it used to pin is kept here in a
+        # spelling that survives the ban (module invocation, so `-i` is just
+        # an interpreter flag with a resolved module behind it).
+        "python3 -i -m pytest -q",
         # SPEC-66 BUG #4 boundary: `--check` / `-c` is syntax-parse only (no
         # execution) and is what our own syntax tier template uses, so a node
         # positional WITH a check flag stays allowed.
@@ -521,6 +529,115 @@ def test_node_positional_requires_check_flag():
     assert _validate_test_command("node -c x.js") is True
     # no positionals → no script to execute, check flag not needed
     assert _validate_test_command("node -v") is True
+
+
+# ── C-C (PM RULING 2026-11-23): the python positional ban ──────────────────
+
+
+def test_python_script_positional_is_refused():
+    """C-C: `python3 <script>.py` is a SCRIPT PATH — banned, like node's.
+
+    A project-supplied `test.command` of `python3 runner.py` runs code the
+    project chose, with no test grammar behind it. `-m <allowlisted module>`
+    is the only surviving way to hand python a target.
+    """
+    for command in (
+        "python3 runner.py",
+        "python3 ./scripts/run.py",
+        "python3 tests/run_all.py -q",
+        "python -m pytest_runner.py",
+        "python3 -i script.py",          # non-eval flag does not launder it
+        "python3 -B script.py",
+        "python3 -v runner.py",
+    ):
+        assert _validate_test_command(command) is False, command
+
+
+def test_python_module_invocation_stays_allowed():
+    """C-C boundary: `-m <allowlisted module>` is untouched by the ban.
+
+    `python3 -m pytest ...` is the tests tier's OWN default argv shape, so a
+    ban that swallowed it would disable the tier everywhere. Interpreter
+    flags BEFORE the `-m` are fine too — the module is what runs.
+    """
+    for command in (
+        "python3 -m pytest -q",
+        "python3 -m pytest tests/ -v",
+        "python3 -m pytest",
+        "python3 -i -m pytest -q",
+        "python3 -B -m pytest -x",
+        "python3 -m ruff check .",
+        "python3 -m mypy src/",
+    ):
+        assert _validate_test_command(command) is True, command
+
+
+def test_interpreter_value_flag_value_is_not_skipped():
+    """C-C decision: value-taking interpreter flags do NOT consume a value here.
+
+    `-W`, `-X` and `-Q` take an argument, so `python3 -W error script.py` has
+    only ONE positional by python's own grammar — but this rule does not model
+    per-flag arity, and a wrong guess is a bypass (`python3 -W evil.py` reads
+    as "flag + value" and leaves python reading stdin). Over-refusal is the
+    documented safe direction (SPEC-66 §11.1), so the value reads as a
+    positional and the command is refused.
+    """
+    assert _validate_test_command("python3 -W error script.py") is False
+    assert _validate_test_command("python3 -W error") is False
+    assert _validate_test_command("python3 -X dev runner.py") is False
+    assert _validate_test_command("python3 -Q old script.py") is False
+    # The flag stays usable once a module resolves — the module is the target.
+    assert _validate_test_command("python3 -W ignore -m pytest -q") is True
+
+
+def test_python_positional_refusal_reason_names_the_rule():
+    """C-C: a refusal carries a reason that says it is the positional rule.
+
+    A silent False cannot be told apart from a token-allowlist miss; the
+    tier detail needs the rule that fired.
+    """
+    from agent.enforcement import argv_refusal
+
+    reason = argv_refusal(["python3", "runner.py"])
+    assert reason is not None
+    assert "positional" in reason
+    assert "runner.py" in reason
+    assert argv_refusal(["python3", "-m", "pytest", "-q"]) is None
+
+
+def test_unknown_module_invocation_is_refused():
+    """C-C decision: `python3 -m <unknown module>` is REFUSED, pinned.
+
+    `-m` is not a blanket escape from the positional ban. `runner` is not in
+    `_KNOWN_PYTHON_MODULES`, so no per-binary rule applies to whatever it
+    runs — and `python3 -m runner` imports and executes `runner.py`, the very
+    code the positional ban exists to keep out. Only modules we can apply
+    rules to are admitted.
+    """
+    assert _validate_test_command("python3 -m unknownmod x") is False
+    assert _validate_test_command("python3 -m runner") is False
+    assert _validate_test_command("python3 -m runner --flag") is False
+    assert _validate_test_command("python3 -m unknownmod") is False
+    # The allowlist is what decides — a KNOWN module still resolves.
+    assert _validate_test_command("python3 -m pytest -q") is True
+
+
+def test_python_positional_rule_reddens_if_reverted():
+    """C-C revert guard: fails if the python positional rule is removed.
+
+    Pre-C-C `argv_refusal` only refused node positionals, so the bare
+    `python3 runner.py` shape had no refusal at all. If the
+    `_python_positional_refusal` call is deleted (or gated back to node only),
+    this test fails while `python3 -m pytest` keeps passing.
+    """
+    from agent.enforcement import argv_refusal
+
+    assert argv_refusal(["python3", "runner.py"]) is not None
+    assert argv_refusal(["python", "runner.py"]) is not None
+    assert argv_refusal(["py", "runner.py"]) is not None
+    # node's rule and the module path are unaffected by the revert.
+    assert argv_refusal(["node", "x.js"]) is not None
+    assert argv_refusal(["python3", "-m", "pytest", "-q"]) is None
 
 
 # ── Item 2/3 (R-14 scope): scrubbed grep env + fetch default ───────────────
@@ -1222,11 +1339,13 @@ def test_write_via_hardlink_alias_asks_approval_edit(tmp_path):
 
 
 def test_nested_alias_and_cache_invalidation(tmp_path):
-    """The walk recurses, and the mtime cache does not go stale.
+    """The walk recurses, and a planted alias cannot hide.
 
     `.crabcakes/agents/enforcement.json` is two levels deep; a top-level-only
-    scan misses it. The second half pins the cache: aliases created AFTER a
-    cached scan must still be found (a stale cache is a silent bypass).
+    scan misses it. CONSOLIDATED audit Fix 4: the mtime-signature cache is
+    GONE — aliases planted after any earlier scan are found by construction
+    (every call walks fresh), so the old "cache must notice" half of this
+    test is now the default behavior.
     """
     from agent.tools import _ALIAS_ENTRY_CACHE, _sensitive_alias_of
 
@@ -1235,14 +1354,14 @@ def test_nested_alias_and_cache_invalidation(tmp_path):
     nested = tmp_path / ".crabcakes" / "agents"
     nested.mkdir()
 
-    # A first call populates the cache for this project.
+    # A first call walks the tree (Fix 4: no cache to populate).
     resolved_plain = str(tmp_path / "notes" / "deep.txt")
     assert _sensitive_alias_of(resolved_plain, project) is None
 
-    # Now alias it from a nested sensitive dir — the cache must notice.
+    # Now alias it from a nested sensitive dir — the next call must find it.
     os.link(tmp_path / "notes" / "deep.txt", nested / "enforcement.json")
     found = _sensitive_alias_of(resolved_plain, project)
-    assert found is not None, "nested alias missed (walk not recursive or cache stale)"
+    assert found is not None, "nested alias missed (walk not recursive)"
     assert found.replace("\\", "/").endswith(".crabcakes/agents/enforcement.json")
 
     # And removing it again is seen too.
@@ -1251,28 +1370,917 @@ def test_nested_alias_and_cache_invalidation(tmp_path):
     assert isinstance(_ALIAS_ENTRY_CACHE, dict)
 
 
-def test_alias_scan_cache_is_reused_without_rescanning(tmp_path):
-    """Perf pin: repeated writes must not re-walk the tree.
+def test_alias_scan_is_uncached_and_utime_defeat_is_dead(tmp_path):
+    """CONSOLIDATED audit Fix 4 (M3) replacement for the removed perf pin.
 
-    Prices the SPEC-66 BUG #1 requirement "100 sequential plain writes
-    without rescan cost": the second and later calls on an unchanged tree
-    return the cached entry list (object identity proves no rebuild), and a
-    tree of 200 entries is walked once, not per write.
+    The old test pinned the mtime-signature cache: "repeated writes must
+    not re-walk the tree". That cache was the VULNERABILITY — its
+    signature could be restored with os.utime after planting an entry, and
+    the planted alias then rode the cached entry list forever. The cache
+    is removed; every gate call scans the (bounded) sensitive dirs fresh.
+
+    This test pins the fix's actual regression: (1) an alias planted
+    after an earlier scan is found IMMEDIATELY, (2) restoring the
+    containing dir's mtime to its pre-plant value does NOT hide it, and
+    (3) there is no cached entry list left to inspect.
     """
     from agent.tools import _ALIAS_ENTRY_CACHE, _sensitive_alias_of
 
     project, _sensitive, _target = _make_alias_project(tmp_path)
     (tmp_path / ".crabcakes" / "many").mkdir()
-    for i in range(200):
-        (tmp_path / ".crabcakes" / "many" / f"f{i}.txt").write_text("x\n")
     plain = tmp_path / "notes" / "plain.txt"
     plain.write_text("hi\n")
 
-    _ALIAS_ENTRY_CACHE.pop(str(tmp_path), None)
+    # Baseline: a clean walk of a small sensitive tree, no alias.
     assert _sensitive_alias_of(str(plain), project) is None
-    first = _ALIAS_ENTRY_CACHE[str(tmp_path)][2]
-    assert len(first) >= 200
 
-    for _ in range(20):
-        assert _sensitive_alias_of(str(plain), project) is None
-        assert _ALIAS_ENTRY_CACHE[str(tmp_path)][2] is first, "cache was rebuilt"
+    # Plant the alias INSIDE a walked dir.
+    planted = tmp_path / ".crabcakes" / "many" / "enforcement.json"
+    os.link(plain, planted)
+
+    # (1) Found immediately — no scan signature to invalidate by hand.
+    assert _sensitive_alias_of(str(plain), project) is not None
+
+    # (2) utime-defeat: restore the dir's PRE-PLANT mtime exactly.
+    many_dir = tmp_path / ".crabcakes" / "many"
+    pre = many_dir.stat()
+    # The planted link already bumped it; put it back by hand.
+    os.utime(many_dir, ns=(pre.st_atime_ns - 100, pre.st_mtime_ns - 100))
+    assert _sensitive_alias_of(str(plain), project) is not None, (
+        "planted alias hidden by a restored mtime — the old cache is back"
+    )
+
+    # (3) No cached entry list survives: the name is kept (empty, never
+    # read or written) only so stale imports fail loudly.
+    assert not _ALIAS_ENTRY_CACHE, (
+        "entries were cached — Fix 4's contract is 'scan fresh every call'"
+    )
+
+
+# ── CONSOLIDATED audit P0 round (2026-11-23) ─────────────────────────────────
+#
+# Fix 1 — complete the .git alias walk (C1, M1, M2, M7)
+# Fix 2 — gate the files the toolchain imports (C3, D1, D2, L1)
+#
+# C1's chain, verbatim from the audit:
+#   1. os.link(<project>/.git/hooks/pre-commit, <project>/notes/plain.md)
+#   2. write_file("notes/plain.md")  ← neither name is sensitive-looking
+#   3. the bytes land on the HOOK's inode
+#   4. PM clicks Accept → git commit runs pre-commit → the agent's script
+#      executes, with NO approval card anywhere on that path.
+# Step 2 is the gate's job: it must ask, and a denial must leave the hook's
+# bytes untouched (a gate that asks and then writes anyway is not a gate).
+
+
+def _make_git_project(tmp_path):
+    """A project with a ``.git/`` skeleton and a ``notes/`` dir to alias from."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "notes").mkdir(exist_ok=True)
+    return str(tmp_path)
+
+
+def _hook_result(project, plain_name, content, cb, tool="write_file"):
+    """write_file (or edit_file) the plain name with *cb* installed."""
+    if tool == "edit_file":
+        return execute_tool(
+            "edit_file",
+            {"path": plain_name, "old_text": "OLD", "new_text": content},
+            project, "agent:coder", approval_callback=cb)
+    return execute_tool("write_file",
+                        {"path": plain_name, "content": content},
+                        project, "agent:coder", approval_callback=cb)
+
+
+@pytest.mark.parametrize("hook_name", ["pre-commit", "prepare-commit-msg",
+                                       "post-checkout", "pre-push"])
+def test_git_hooks_alias_write_asks_approval_and_preserves_hook(tmp_path, hook_name):
+    """C1: the FULL chain — deny refuses and the hook's bytes are unchanged.
+
+    The hook is mode 0755 and stays 0755 across a hard link, so it is
+    directly executable by git. The plain name is `notes/plain.md`, which is
+    non-sensitive by construction (asserted) — only the walk can catch it.
+    """
+    from agent.tools import is_sensitive_path
+
+    project = _make_git_project(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / hook_name
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    original = "#!/bin/sh\necho benign\n"
+    hook.write_text(original)
+    hook.chmod(0o755)
+    plain = tmp_path / "notes" / "plain.md"
+
+    # Precondition (the audit's A1 false-positive correction): the PLAIN name
+    # must not be sensitive on its own, or this test proves nothing.
+    assert is_sensitive_path("notes/plain.md") is False
+
+    os.link(hook, plain)
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    payload = "#!/bin/sh\ntouch /tmp/PWNED\n"
+    result = _hook_result(project, "notes/plain.md", payload, deny)
+
+    assert asked, f"no approval requested for the {hook_name} alias"
+    assert asked[0][0] == "write_file"
+    assert result.success is False
+    assert "sensitive" in (result.error or "").lower()
+    # The card names the SENSITIVE side.
+    assert "hook" in asked[0][1]["path"], asked[0][1]["path"]
+    # The hook is byte-identical and still executable.
+    assert hook.read_text() == original, "a DENIED write changed the hook"
+    assert os.access(hook, os.X_OK), "hook lost its executable bit"
+    assert plain.read_text() == original
+
+
+def test_git_hooks_alias_write_approved_proceeds(tmp_path):
+    """C1 control: approval lets the write through — the gate is a gate."""
+    project = _make_git_project(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\necho benign\n")
+    hook.chmod(0o755)
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(hook, plain)
+
+    asked = []
+
+    def ok(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return True
+
+    result = _hook_result(project, "notes/plain.md", "#!/bin/sh\necho hi\n", ok)
+    assert len(asked) == 1, f"asked {len(asked)} times: {asked!r}"
+    assert result.success is True, result.error
+    assert hook.read_text() == "#!/bin/sh\necho hi\n"
+
+
+def test_git_hooks_alias_edit_asks_approval(tmp_path):
+    """C1 through edit_file (the second tool-gate site)."""
+    project = _make_git_project(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-merge"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("OLD\n")
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(hook, plain)
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = _hook_result(project, "notes/plain.md", "PWNED\n", deny,
+                          tool="edit_file")
+    assert asked, "edit_file did not ask for the hook alias"
+    assert asked[0][0] == "edit_file"
+    assert result.success is False
+    assert hook.read_text() == "OLD\n"
+
+
+def test_git_hooks_path_is_sensitive_on_its_own_name(tmp_path):
+    """Fix 1 item 3: `.git/hooks/` is a sensitive NAME, not only an alias.
+
+    The alias scan is the second line. A direct write to
+    `.git/hooks/pre-commit` (no alias at all) must ask too — which it did
+    before only because the *hook* substring matched a glob; the prefix rule
+    makes the intent explicit and keeps nested `.git/hooks/` spellings gated.
+    """
+    from agent.tools import is_sensitive_path
+
+    assert is_sensitive_path(".git/hooks/pre-commit") is True
+    assert is_sensitive_path(".git/hooks/post-receive") is True
+    # A nested `.git/hooks/` (not the root-anchored `.git/`) is still gated.
+    assert is_sensitive_path("sub/.git/hooks/pre-commit") is True
+    # And the control: an ordinary path is not.
+    assert is_sensitive_path("notes/plain.md") is False
+
+
+def test_root_gitattributes_alias_asks_approval(tmp_path):
+    """M7: root `.gitattributes` is git-EXECUTED config (filter=/diff=).
+
+    Its own name is leading-dot sensitive; the ALIAS direction was not. The
+    project root is not a walked dir, so this is handled as a direct stat.
+    """
+    from agent.tools import is_sensitive_path
+
+    project = _make_git_project(tmp_path)
+    attrs = tmp_path / ".gitattributes"
+    attrs.write_text("*.py text\n")
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(attrs, plain)
+
+    assert is_sensitive_path("notes/plain.md") is False
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = _hook_result(project, "notes/plain.md", "*.py filter=pwn\n", deny)
+    assert asked, "root .gitattributes alias was not gated"
+    assert asked[0][1]["path"] == ".gitattributes", asked[0][1]["path"]
+    assert result.success is False
+    assert attrs.read_text() == "*.py text\n"
+
+
+def test_root_gitignore_alias_asks_approval(tmp_path):
+    """M7: same for `.gitignore`."""
+    project = _make_git_project(tmp_path)
+    ignore = tmp_path / ".gitignore"
+    ignore.write_text("build/\n")
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(ignore, plain)
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = _hook_result(project, "notes/plain.md", "x\n", deny)
+    assert asked, "root .gitignore alias was not gated"
+    assert asked[0][1]["path"] == ".gitignore", asked[0][1]["path"]
+    assert result.success is False
+    assert ignore.read_text() == "build/\n"
+
+
+@pytest.mark.parametrize("subtree", ["info", "logs", "branches", "worktrees",
+                                     "modules"])
+def test_each_newly_walked_git_subtree_gates_its_alias(tmp_path, subtree):
+    """M2: one test per newly-walked subtree — a hard link OUT of it gates.
+
+    Each carries git-executed state: info/attributes and
+    worktrees/*/config.worktree name commands git runs; logs/ is the reflog;
+    branches/ is legacy branch config; modules/ is a submodule's git dir.
+    """
+    from agent.tools import _ALIAS_ENTRY_CACHE, _sensitive_alias_of
+
+    project = _make_git_project(tmp_path)
+    sensitive = tmp_path / ".git" / subtree / "payload" / "sensitive.cfg"
+    sensitive.parent.mkdir(parents=True, exist_ok=True)
+    sensitive.write_text("original\n")
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(sensitive, plain)
+
+    _ALIAS_ENTRY_CACHE.pop(str(tmp_path), None)
+    found = _sensitive_alias_of(str(plain), project)
+    assert found is not None, f".git/{subtree}/ is not in the alias walk"
+    assert f".git/{subtree}/" in found.replace("\\", "/")
+
+
+def test_git_objects_stays_excluded(tmp_path):
+    """M2: `objects/` stays out, on the documented hash-name argument.
+
+    An object's NAME is a content hash of its BYTES, so no working-tree name
+    can be chosen to alias one — the alias direction is not constructible.
+    This test pins the exclusion so widening it is a deliberate act (a full
+    object walk costs tens of thousands of stats per write).
+    """
+    from agent.tools import _ALIAS_ENTRY_CACHE, _GIT_ALIAS_SUBDIRS, _alias_scan_roots
+
+    assert "objects" not in _GIT_ALIAS_SUBDIRS
+    assert set(_GIT_ALIAS_SUBDIRS) == {"refs", "hooks", "info", "worktrees",
+                                       "modules", "logs", "branches"}
+
+    project = _make_git_project(tmp_path)
+    obj = tmp_path / ".git" / "objects" / "ab" / "cdef0123"
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_text("blob\n")
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(obj, plain)
+
+    _ALIAS_ENTRY_CACHE.pop(str(tmp_path), None)
+    from agent.tools import _sensitive_alias_of
+    assert _sensitive_alias_of(str(plain), project) is None
+
+    walked = {os.path.basename(root) for root, _r in
+              _alias_scan_roots(os.path.realpath(project))}
+    assert "objects" not in walked
+
+
+def test_git_hooks_alias_gated_at_runtime_gate(tmp_path):
+    """M1 — the RUNTIME gate (`_sensitive_relpath`) sees the same alias.
+
+    Tool gate and runtime gate share the walk, so a fix that only touched the
+    tool gate would leave the approval card unfired (the runtime is the one
+    that fires it). This mirrors the tool-gate C1 test through
+    `_execute_tool_batch`.
+    """
+    from agent.runtime import _sensitive_relpath
+
+    project = _make_git_project(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\necho benign\n")
+    hook.chmod(0o755)
+    plain = tmp_path / "notes" / "plain.md"
+    os.link(hook, plain)
+
+    rel = _sensitive_relpath("notes/plain.md", project)
+    assert rel is not None
+    assert "hook" in rel, f"runtime gate named {rel!r}, not the hook"
+
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def boom(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = boom
+    conv = Conversation(agent_name="Coder", agent_role="coder",
+                        project_path=project)
+    rt._execute_tool_batch(
+        "agent:coder", None, conv, "",
+        [("c1", "write_file",
+          {"path": "notes/plain.md", "content": "#!/bin/sh\ntouch /tmp/PWNED\n"})],
+        1,
+    )
+    assert asked, "runtime gate requested no approval for the hook alias"
+    assert hook.read_text() == "#!/bin/sh\necho benign\n"
+
+    # §12.1 MED-1: an APPROVED alias write must ask exactly ONCE — the gate
+    # approves, then `bypass_approval` must see the same sensitive relpath.
+    approved_asked = []
+
+    def ok(session_key, tool_name, args, _asked=approved_asked):
+        _asked.append((tool_name, args))
+        return True
+
+    rt2 = AgentRuntime(_make_cfg())
+    rt2._dispatch_approval = ok
+    rt2._execute_tool_batch(
+        "agent:coder", None,
+        Conversation(agent_name="Coder", agent_role="coder",
+                     project_path=project),
+        "",
+        [("c1", "write_file",
+          {"path": "notes/plain.md", "content": "#!/bin/sh\necho hi\n"})],
+        1,
+    )
+    assert len(approved_asked) == 1, (
+        f"approved hook-alias write asked {len(approved_asked)} times "
+        f"(bypass_approval disagreed with the gate): {approved_asked!r}"
+    )
+
+
+# ── Fix 2: the files the toolchain imports/reads ────────────────────────────
+
+
+_TOOLCHAIN_FILES = (
+    "conftest.py",
+    "tests/conftest.py",
+    "pytest.ini",
+    "setup.cfg",
+    "tox.ini",
+    "mypy.ini",
+    "eslint.config.js",
+    "package.json",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "noxfile.py",
+    "sitecustomize.py",
+    "usercustomize.py",
+)
+
+
+@pytest.mark.parametrize("rel", _TOOLCHAIN_FILES)
+def test_toolchain_files_are_sensitive_at_any_depth(rel):
+    """Fix 2 + D3: the "any depth" claim is now TRUE for conftest.py.
+
+    D3 found the prefix comment lied: `sub/.crabcakes/x` was not sensitive.
+    The glob kind is a BASENAME match, so `conftest.py` is gated wherever
+    pytest would import it; the prefix kinds stay root-anchored and SAY so.
+    """
+    from agent.tools import is_sensitive_path
+
+    assert is_sensitive_path(rel) is True, rel
+    nested = "deep/nested/" + rel
+    assert is_sensitive_path(nested) is True, nested
+
+
+@pytest.mark.parametrize("rel", ["conftest.py", "tests/conftest.py",
+                                 "pytest.ini", "eslint.config.js",
+                                 "package.json"])
+def test_toolchain_file_write_asks_approval_at_both_gates(tmp_path, rel):
+    """C3: writing `conftest.py` asks at the TOOL gate and the RUNTIME gate.
+
+    C3's chain was two steps: plant the conftest (no approval), then write
+    anything — the tier imports and runs it. This pins step one at both gates.
+    """
+    from agent.runtime import _sensitive_relpath
+
+    project = str(tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+
+    # RUNTIME gate first (it is the one that fires the card in the app).
+    assert _sensitive_relpath(rel, project) is not None
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool("write_file",
+                          {"path": rel,
+                           "content": "from pathlib import Path\n"
+                                      "Path('/tmp/PWNED').write_text('x')\n"},
+                          project, "agent:coder", approval_callback=deny)
+    assert asked, f"no approval requested for {rel}"
+    assert result.success is False
+    assert not (tmp_path / rel).exists(), f"denied write created {rel}"
+
+    # Approve → the write lands (intended posture, no bypass).
+    def ok(session_key, tool_name, args):
+        return True
+
+    ok_result = execute_tool("write_file", {"path": rel, "content": "x = 1\n"},
+                             project, "agent:coder", approval_callback=ok)
+    assert ok_result.success is True, ok_result.error
+    assert (tmp_path / rel).read_text() == "x = 1\n"
+
+
+def test_toolchain_file_gated_at_runtime_gate_end_to_end(tmp_path):
+    """C3 through the real tool loop: plant a conftest, get a card.
+
+    The runtime dispatches the approval BEFORE execution, so a denied
+    conftest write must leave no file behind — which is exactly what makes
+    the two-step chain impossible.
+    """
+    project = str(tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "feature.py").write_text("x = 1\n")
+
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = deny
+    rt._execute_tool_batch(
+        "agent:coder", None,
+        Conversation(agent_name="Coder", agent_role="coder",
+                     project_path=project),
+        "",
+        [("c1", "write_file",
+          {"path": "tests/conftest.py",
+           "content": "from pathlib import Path\n"
+                      "Path('/tmp/PWNED').write_text('x')\n"})],
+        1,
+    )
+    assert asked, "runtime gate did not ask for tests/conftest.py"
+    assert not (tmp_path / "tests" / "conftest.py").exists(), (
+        "a DENIED conftest write created the file"
+    )
+
+
+def test_plain_source_file_still_does_not_ask(tmp_path):
+    """Fix 2 control: `src/main.py` is ordinary — no card, no regression.
+
+    The toolchain-file gating must not turn the gate into "ask for
+    everything": that would train the PM to click Accept.
+    """
+    from agent.runtime import _sensitive_relpath
+
+    project = str(tmp_path)
+    (tmp_path / "src").mkdir()
+    # Fix 6 contract: when nothing is sensitive there is no card and no
+    # name to show — None (the plain relpath return was the pre-Fix-6
+    # contract; the runtime gate only needs the sensitive name).
+    assert _sensitive_relpath("src/main.py", project) is None
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool("write_file",
+                          {"path": "src/main.py", "content": "x = 1\n"},
+                          project, "agent:coder", approval_callback=deny)
+    assert asked == [], f"false positive on src/main.py: {asked!r}"
+    assert result.success is True, result.error
+
+
+def test_d3_prefix_is_root_anchored_and_says_so():
+    """D3: the comment said "any depth"; the code is root-anchored.
+
+    The fix is to make the COMMENT true rather than to widen the prefix (a
+    nested `.git/` is not read by git). Glob/component kinds carry the
+    any-depth cases; `prefix` does not, and this pins that.
+    """
+    from agent.tools import is_sensitive_path
+
+    # Root-anchored prefix: root yes, nested no.
+    assert is_sensitive_path(".crabcakes/enforcement.json") is True
+    assert is_sensitive_path("sub/.crabcakes/enforcement.json") is False
+    # Any-depth BASENAME glob (the real "any depth" mechanism).
+    assert is_sensitive_path("a/b/conftest.py") is True
+    assert is_sensitive_path("a/b/pytest.ini") is True
+
+
+# ── CONSOLIDATED audit C-A: the test file the tier IMPORTS ───────────────────
+#
+# The chain: the clone (or the agent) ships tests/test_feature.py with
+# top-level code; the agent writes an ordinary source file; `_check_tests`
+# points pytest at the test file; pytest IMPORTS it — payload runs, tier
+# reports PASSED. Fix 3 isolated the CONFIG layer and could not touch the
+# CODE layer, so the WRITE is what must ask. These tests fail if the gate is
+# reverted (the write asks for nothing and lands).
+
+
+@pytest.mark.parametrize("path", [
+    "tests/test_feature.py",     # the audit's exact payload name
+    "tests/feature_test.py",     # the `{module}_test.py` convention
+    "test_root.py",              # root-level: probe 16 P5 behaved identically
+    "tests/nested/test_deep.py",  # any depth, like the toolchain globs
+])
+def test_test_file_write_asks_approval_and_lands_nothing(tmp_path, path):
+    """C-A: writing a test file asks the PM; a denial writes nothing."""
+    project = str(tmp_path)
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("def test_old():\n    assert True\n")
+    before = target.read_text()
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool("write_file",
+                          {"path": path,
+                           "content": "import pathlib\n"
+                                      "pathlib.Path('/tmp/PWNED').write_text('x')\n"
+                                      "def test_x():\n    assert True\n"},
+                          project, "agent:coder", approval_callback=deny)
+    assert asked, f"tool gate asked for nothing on {path!r} — the tier will import it"
+    assert asked[0][1]["path"].endswith(os.path.basename(path)), asked
+    assert result.success is False
+    assert target.read_text() == before, "denied write landed anyway"
+
+
+def test_test_file_edit_asks_approval_and_lands_nothing(tmp_path):
+    """C-A: `edit_file` is the same surface — the tier imports the result."""
+    project = str(tmp_path)
+    target = tmp_path / "tests" / "test_feature.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_ok():\n    assert True\n")
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool(
+        "edit_file",
+        {"path": "tests/test_feature.py",
+         "old_text": "def test_ok():\n    assert True\n",
+         "new_text": "import os\nos.system('touch /tmp/PWNED')\n"},
+        project, "agent:coder", approval_callback=deny)
+    assert asked, "edit_file asked for nothing on a test file"
+    assert result.success is False
+    assert "test_ok" in target.read_text()
+
+
+def test_test_file_write_asks_at_the_runtime_gate_too(tmp_path):
+    """C-A: BOTH gates, like the other sensitive names.
+
+    The tool gate alone is not enough: the runtime gate is the one that
+    fires the approval card, and its decision has to come from the same
+    `sensitive_reason` — which this asserts by observing the call.
+    """
+    project = str(tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_feature.py").write_text("def test_ok():\n    pass\n")
+
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = deny
+    conv = Conversation(agent_name="Coder", agent_role="coder",
+                        project_path=project)
+    rt._execute_tool_batch(
+        "agent:coder", None, conv, "",
+        [("c1", "write_file",
+          {"path": "tests/test_feature.py", "content": "def test_ok():\n    pass\n"})],
+        1,
+    )
+    assert asked, "runtime gate requested no approval for a test file write"
+
+
+def test_tests_dir_convention_write_asks_approval(tmp_path):
+    """M-1 (re-audit): `src/__tests__/{module}.py` is a test the tier IMPORTs.
+
+    It is `_find_related_test`'s fourth candidate; its basename is just the
+    module name, so the old name-only gate never covered it — the tier
+    imported a file the gate did not see. Both gates must ask, and the
+    lookalike that is NOT under a `__tests__` directory must not.
+    """
+    from agent.tools import is_sensitive_path
+
+    project = str(tmp_path)
+    target = tmp_path / "src" / "__tests__"
+    target.mkdir(parents=True)
+    (target / "feature.py").write_text("def test_ok():\n    assert True\n")
+    assert is_sensitive_path("src/__tests__/feature.py", project) is True
+    assert is_sensitive_path(os.path.join(project, "src/__tests__/feature.py"),
+                             project) is True
+    # Lookalikes: a directory of the same SHAPE but not the convention.
+    for name in ("src/tests/feature.py", "src/__test__/feature.py",
+                 "src/__tests__/feature.js", "src/feature.py"):
+        assert is_sensitive_path(name, project) is False, name
+
+    # THE TOOL gate, observed: an unapproved write lands nothing.
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool(
+        "write_file",
+        {"path": "src/__tests__/feature.py",
+         "content": "import pathlib\npathlib.Path('/tmp/PWNED').touch()\n"},
+        project, "agent:coder", approval_callback=deny)
+    assert asked, "M-1 OPEN: the TOOL gate asked nothing for a __tests__ write"
+    assert result.success is False
+    assert "test_ok" in (target / "feature.py").read_text()
+
+
+def test_tests_dir_convention_write_asks_approval_at_runtime(tmp_path):
+    """THE gate, not just the predicate: a write of it produces a card."""
+    project = str(tmp_path)
+    (tmp_path / "src" / "__tests__").mkdir(parents=True)
+
+    rt = AgentRuntime(_make_cfg())
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    rt._dispatch_approval = deny
+    conv = Conversation(agent_name="Coder", agent_role="coder",
+                        project_path=project)
+    rt._execute_tool_batch(
+        "agent:coder", None, conv, "",
+        [("c1", "write_file",
+          {"path": "src/__tests__/feature.py",
+           "content": "def test_ok():\n    pass\n"})],
+        1,
+    )
+    assert asked, "M-1 OPEN: no approval card for a __tests__ test-file write"
+
+
+def test_test_file_gate_does_not_flag_lookalike_names(tmp_path):
+    """C-A boundary: only the names the tier would COLLECT are gated."""
+    from agent.tools import is_sensitive_path, is_test_file_name
+
+    assert is_sensitive_path("tests/test_feature.py") is True
+    assert is_sensitive_path("pkg/mod_test.py") is True
+    for name in ("tests/contest.py", "tests/testing_utils.py",
+                 "src/testimony.py", "src/main.py", "tests/utils.py"):
+        assert is_sensitive_path(name) is False, name
+        assert is_test_file_name(name) is False, name
+
+
+def test_test_file_gate_scope_is_one_switch(tmp_path, monkeypatch):
+    """C-A scope lives in ONE function, so the PM ruling is one edit.
+
+    PM RULING 2026-11-23: the gate covers EVERY project, the app's own
+    included — there is no app-exempt alternative left to decide. This test
+    pins the ruling's shape: the switch answers True for any project, and it
+    is actually consulted by the gate (turning it off turns the gate off
+    everywhere it is asked).
+    """
+    import agent.tools as tools_mod
+
+    project = str(tmp_path)
+    (tmp_path / "tests").mkdir()
+    target = tmp_path / "tests" / "test_feature.py"
+    target.write_text("def test_ok():\n    pass\n")
+
+    assert tools_mod.test_file_write_gate_applies(project) is True
+
+    monkeypatch.setattr(tools_mod, "test_file_write_gate_applies",
+                        lambda project_path="": False)
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool(
+        "write_file",
+        {"path": "tests/test_feature.py", "content": "def test_ok():\n    pass\n"},
+        project, "agent:coder", approval_callback=deny)
+    assert asked == [], "the switch was not consulted by the gate"
+    assert result.success is True, result.error
+
+
+# ── CONSOLIDATED audit M-A: the alias scan in a LINKED WORKTREE ─────────────
+#
+# `<worktree>/.git` is a FILE (`gitdir: <path>`), so `os.scandir` raised and
+# the whole alias walk yielded ZERO entries — the C1 chain was fully open in
+# an agent's default working directory (`<repo>/.worktrees/<id>`). The scan
+# now follows the pointer (bounded, each link sanity-checked) and walks the
+# worktree git dir plus the common dir whose `hooks/` git executes.
+
+
+def _make_linked_worktree(tmp_path):
+    """(worktree_path, main_git_dir) — a synthesized linked worktree.
+
+    Mirrors the real layout closely enough for the scan: the worktree has a
+    `.git` FILE, the main repo has `.git/` with `HEAD` + `hooks/`, and the
+    worktree git dir carries a `commondir` file pointing back at the main
+    repo (that is where git finds `hooks/` to run).
+    """
+    main = tmp_path / "main"
+    main_git = main / ".git"
+    (main_git / "hooks").mkdir(parents=True)
+    (main_git / "HEAD").write_text("ref: refs/heads/main\n")
+    wt_git = main_git / "worktrees" / "wt"
+    wt_git.mkdir(parents=True)
+    (wt_git / "HEAD").write_text("ref: refs/heads/wt\n")
+    (wt_git / "commondir").write_text("../..\n")
+
+    wt = tmp_path / "wt"
+    (wt / "notes").mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {wt_git}\n")
+    return str(wt), str(main_git)
+
+
+def test_worktree_alias_scan_yields_entries(tmp_path):
+    """M-A T3: the walk is not inert — the worktree git dirs are covered."""
+    from agent.tools import _alias_scan, _alias_scan_roots
+
+    wt, main_git = _make_linked_worktree(tmp_path)
+    (tmp_path / "main" / ".git" / "hooks" / "pre-commit").write_text(
+        "#!/bin/sh\necho benign\n")
+
+    roots = [os.path.realpath(r) for r, _recurse in _alias_scan_roots(wt)]
+    assert any(r.startswith(os.path.realpath(main_git)) for r in roots), (
+        f"the common dir (where hooks/ lives) is not walked: {roots}"
+    )
+    assert _alias_scan(os.path.realpath(wt)), (
+        "the alias scan yields zero entries in a linked worktree"
+    )
+
+
+def test_worktree_shared_hooks_alias_asks_approval(tmp_path):
+    """M-A T1: a hard link from the worktree to the SHARED hook must ask."""
+    from agent.tools import _sensitive_alias_of
+
+    wt, main_git = _make_linked_worktree(tmp_path)
+    hook = os.path.join(main_git, "hooks", "pre-commit")
+    with open(hook, "w") as fh:
+        fh.write("#!/bin/sh\necho benign\n")
+    os.chmod(hook, 0o755)
+    plain = os.path.join(wt, "notes", "plain.md")
+    os.link(hook, plain)
+
+    found = _sensitive_alias_of(plain, wt)
+    assert found is not None, "the shared .git/hooks alias is invisible here"
+    assert "hook" in found.replace("\\", "/")
+
+    asked = []
+
+    def deny(session_key, tool_name, args, _asked=asked):
+        _asked.append((tool_name, args))
+        return False
+
+    result = execute_tool("write_file",
+                          {"path": "notes/plain.md",
+                           "content": "#!/bin/sh\ntouch /tmp/PWNED\n"},
+                          wt, "agent:coder", approval_callback=deny)
+    assert asked, "tool gate asked for nothing on the shared hook alias"
+    assert result.success is False
+    with open(hook) as fh:
+        assert fh.read() == "#!/bin/sh\necho benign\n", "the denied write landed"
+
+
+def test_worktree_config_worktree_alias_asks_approval(tmp_path):
+    """M-A T2: `.git/worktrees/<n>/config.worktree` names commands git runs."""
+    from agent.tools import _sensitive_alias_of
+
+    wt, main_git = _make_linked_worktree(tmp_path)
+    sensitive = os.path.join(main_git, "worktrees", "wt", "config.worktree")
+    with open(sensitive, "w") as fh:
+        fh.write("[core]\n\thooksPath = hooks\n")
+    plain = os.path.join(wt, "notes", "plain.md")
+    os.link(sensitive, plain)
+
+    found = _sensitive_alias_of(plain, wt)
+    assert found is not None, "config.worktree is not in the worktree walk"
+    assert "config.worktree" in found.replace("\\", "/")
+
+
+def test_worktree_gitdir_pointer_cannot_steer_the_scan(tmp_path):
+    """M-A constraint: a bogus `gitdir:` must not widen the walk.
+
+    The pointer is project-supplied and may name a directory outside the
+    root. It is followed through a bounded chain whose every link must look
+    like a git dir, so it can only add a directory git itself would use for
+    THIS worktree — and it cannot subtract coverage, because the name-based
+    rule still gates `.git/hooks/...` lexically.
+    """
+    from agent.tools import _alias_scan_roots, _worktree_git_dirs, is_sensitive_path
+
+    wt = tmp_path / "wt"
+    (wt / "notes").mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {tmp_path}\n")  # NOT a git dir
+
+    assert _worktree_git_dirs(os.path.realpath(str(wt))) == []
+    walked = [r for r, _recurse in _alias_scan_roots(os.path.realpath(str(wt)))]
+    git_roots = [r for r in walked
+                 if r == os.path.join(str(wt), ".git")
+                 or r.startswith(os.path.join(str(wt), ".git") + os.sep)]
+    assert git_roots == [], f"a bogus pointer steered the scan: {git_roots}"
+
+    # The name direction is untouched by the pointer's refusal.
+    assert is_sensitive_path(".git/hooks/pre-commit") is True
+
+
+# ── CONSOLIDATED audit Fix 5 (L-B): O_NOFOLLOW has zero coverage ────────────
+#
+# L-B: with `O_NOFOLLOW` reverted to a plain `open(dest, "w")`, the whole
+# suite still passed. These tests fail under that revert: the final-component
+# symlink swap must be REFUSED and the bytes must stay on the approved inode.
+
+
+def test_atomic_write_nofollow_refuses_final_component_symlink(tmp_path):
+    """Fix 5 unit: a symlinked final component is ELOOP, not a redirect."""
+    import errno as _errno
+
+    from agent.tools import _atomic_write_nofollow
+
+    approved = tmp_path / "notes" / "plain.md"
+    approved.parent.mkdir()
+    approved.write_text("approved\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("victim\n")
+
+    # The swap the gate cannot see: it happens after the check.
+    os.unlink(approved)
+    os.symlink(victim, approved)
+
+    with pytest.raises(OSError) as exc:
+        _atomic_write_nofollow(str(approved), b"PWNED\n")
+    assert exc.value.errno == _errno.ELOOP, exc.value
+    assert victim.read_text() == "victim\n", (
+        "the bytes followed the swapped symlink — O_NOFOLLOW is gone"
+    )
+
+
+def test_write_file_refuses_symlink_swapped_after_the_gate(tmp_path, monkeypatch):
+    """Fix 5 end to end: the tool refuses, the victim keeps its bytes.
+
+    The swap is injected through `sensitive_reason` — which `_write_file`
+    calls AFTER it has resolved the destination and BEFORE it writes — so
+    this is exactly the TOCTOU window Fix 5 closes.
+    """
+    import agent.tools as tools_mod
+
+    project = str(tmp_path)
+    (tmp_path / "notes").mkdir()
+    approved = tmp_path / "notes" / "plain.md"
+    approved.write_text("approved\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("victim\n")
+
+    real_reason = tools_mod.sensitive_reason
+
+    def swap_then_decide(path_arg, project_path):
+        if not os.path.islink(str(approved)) and approved.exists():
+            os.unlink(str(approved))
+            os.symlink(victim, approved)
+        return real_reason(path_arg, project_path)
+
+    monkeypatch.setattr(tools_mod, "sensitive_reason", swap_then_decide)
+
+    result = execute_tool("write_file",
+                          {"path": "notes/plain.md", "content": "PWNED\n"},
+                          project, "agent:coder",
+                          approval_callback=lambda *a: True)
+    assert result.success is False, (
+        "the write succeeded through a swapped symlink — Fix 5 reverted"
+    )
+    assert "ELOOP" in (result.error or ""), result.error
+    assert victim.read_text() == "victim\n"
+    assert os.path.islink(str(approved)), "the swap was undone instead of refused"

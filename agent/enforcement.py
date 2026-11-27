@@ -20,6 +20,37 @@
 # the project IS the app (venv-claim scan: dir/interpreter hops/pyvenv.cfg/
 # site-packages, all realpath'd). Host-level attacks (a malicious HOME,
 # a compromised system bin) are OUT of scope by this ruling.
+#
+# THREAT MODEL ADDENDUM (CONSOLIDATED Fix 12/D5 — PM ruling 2026-11-19,
+# option B, documentation only): these tiers are a QUALITY control, not a
+# security control against a hostile repository. They catch the agent's own
+# mistakes. A project's own .crabcakes/enforcement.json is itself
+# project-supplied, so it can add `skip_patterns` and switch tiers off,
+# silencing syntax, test, and lint together. `skip_patterns` behavior is
+# deliberately unchanged — the feature works exactly as documented. Judge
+# the repository, not the tiers, on the trust question.
+#
+# C-A-1 (re-audit 2026-11-23 — PM RULING: ACCEPTED, documentation only):
+# the test-file WRITE gate stops the AGENT from planting a payload. It does
+# NOT stop a test file a cloned repository ALREADY SHIPS from being imported
+# and executed when the tests tier runs — no write occurs, so no card is
+# shown, and `--noconftest` does not stop pytest importing the file it is
+# told to collect. PM ruling: accepted as a risk. The tests tier is a
+# QUALITY control; opening a repository you do not trust is the precondition.
+# Do not run the agent against an untrusted repository. No behavior change
+# was made for this finding, and none should be made without a new ruling.
+#
+# BY DESIGN — write surfaces outside the sensitive-path gate (CONSOLIDATED
+# Fix 13/L2, L3): `diary` → .crabcakes/context.md (via
+# utils/project_awareness.append_project_context) and write_file's
+# append-only branch for that same file; `project_memory` →
+# .crabcakes/memory/ (path-escape probed and refuted, audit R15);
+# agent/persistence → the conversation transcript under .crabcakes/; and
+# feed_card's `file` field (validated project-relative, audit R16). For all
+# of these the PATH is the app's own and the CONTENT is agent-controlled.
+# None is in this gate's threat model: the gate stops a project-supplied
+# path from steering the agent into host-sensitive locations, not
+# agent-authored text landing in app-owned state directories.
 
 from __future__ import annotations
 
@@ -28,6 +59,7 @@ from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import fnmatch
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -243,8 +275,16 @@ def _validate_test_command(command: str | None) -> bool:
         arbitrary code with no test grammar behind it. A node command with
         any positional is refused unless `--check` / `-c` is present —
         syntax-parse only, no execution, which is what our own syntax tier
-        (`node --check {path}`) uses. python/python3 positionals are NOT
-        gated this round (a PM-level posture ruling, flagged separately).
+        (`node --check {path}`) uses.
+      * python/python3 positionals (C-C, **PM RULING 2026-11-23**) → BANNED
+        in project-supplied commands, the same rule as node and for the same
+        reason: `python3 runner.py` runs project-supplied code with no test
+        grammar behind it. `python3 -m <allowlisted module>` STAYS allowed
+        (`-m pytest` is the tier's own default shape). The ruling supersedes
+        the earlier "NOT gated this round (a PM-level posture ruling)"
+        posture, which is no longer true. See `_python_positional_refusal`
+        for what counts as a positional, including value-taking interpreter
+        flags and an unknown `-m` module.
 
     SPEC-66 BUG #3: a cluster is one shlex token starting with exactly one `-`
     whose letters contain an eval letter — `python3 -ic 'code'` runs as
@@ -268,6 +308,14 @@ def _validate_test_command(command: str | None) -> bool:
 
     `shlex.ValueError` (unbalanced quotes) returns False — an unparseable
     command is not trusted.
+
+    CONSOLIDATED audit C-B: a `-m <module>` python invocation is keyed on
+    the MODULE, not on `python3`. The tests tier's own auto-detected argv is
+    ``["python3", "-m", "pytest"]``, so keying the per-binary flag rules on
+    ``base == "pytest"`` missed every flag of the shape the tier itself
+    emits: ``python3 -m pytest -p evilplugin`` passed while the bare
+    ``pytest -p evilplugin`` was refused. `_module_base` resolves the
+    module, so both spellings hit the same rules.
     """
     if not command or not command.strip():
         return False
@@ -284,18 +332,166 @@ def _validate_test_command(command: str | None) -> bool:
     if not argv:
         return False
 
-    base = os.path.basename(argv[0]).lower()
-    flags = argv[1:]
-    if base in ("python", "python3") and any(
-        _is_eval_flag(tok, ("-c",)) or _is_clustered_eval_flag(tok, ("c",)) for tok in flags
-    ):
+    return argv_refusal(argv) is None
+
+
+# CONSOLIDATED audit C-B: the modules whose argv the per-binary rules know.
+# `python3 -m pytest` IS a pytest invocation; anything else stays a python
+# invocation (the `-m` module is just a positional to us).
+_KNOWN_PYTHON_MODULES = ("pytest", "ruff", "mypy", "eslint", "go", "node")
+_PYTHON_BASES = ("python", "python3", "py")
+
+
+def _module_base(base: str, flags: list[str]) -> tuple[str, list[str]]:
+    """(effective binary, the flags that binary owns) with `-m` resolved.
+
+    CONSOLIDATED audit C-B: ``python3 -m pytest -p evil`` must be refused
+    exactly like ``pytest -p evil``. When the interpreter is followed by
+    ``-m <known module>``, the rules key on the module and the flags AFTER
+    it; everything else keeps the interpreter's own rules.
+
+    The interpreter's OWN flags are checked before this runs (see
+    `argv_refusal`), so `python3 -ic -m pytest` is still an eval-flag
+    refusal — resolving the module does not launder the flags before it.
+    """
+    if base in _PYTHON_BASES:
+        for i, tok in enumerate(flags):
+            if tok == "-m" and i + 1 < len(flags):
+                module = os.path.basename(flags[i + 1]).lower()
+                if module in _KNOWN_PYTHON_MODULES:
+                    return module, flags[i + 2:]
+                break
+    return base, flags
+
+
+def _python_positional_refusal(base: str, args: list[str]) -> str | None:
+    """Refusal reason when a python interpreter carries a script positional.
+
+    C-C (PM RULING 2026-11-23): `python3 <script>.py` in a PROJECT-SUPPLIED
+    command is a SCRIPT PATH — the project chooses the code that runs, with
+    no test grammar behind it, exactly like `node evil.js` (SPEC-66 BUG #4).
+    `-m <allowlisted module>` stays allowed: the module keys the per-binary
+    rules (`_module_base`), and `python3 -m pytest` is the tests tier's own
+    default shape.
+
+    Called only when `_module_base` did NOT resolve an allowlisted module, so
+    the effective base is still the interpreter. `args` therefore includes the
+    `-m` and its module name.
+
+    DECISION — value-taking interpreter flags (`-W`, `-X`, `-Q`): their VALUE
+    is NOT skipped. `python3 -W error script.py` is refused because `error`
+    reads as a positional. Skipping values would mean teaching this function
+    Python's flag arity, and a wrong arity guess is a bypass (`python3 -W
+    evil.py` looks like "flag + value" but leaves python reading stdin or,
+    with one more token, running a script); over-refusal is the documented
+    safe direction (SPEC-66 §11.1). The usable spellings survive module
+    resolution: `python3 -W ignore -m pytest -q` resolves to `pytest` and is
+    allowed. A bare `python3 -W error` with no script is harmless and still
+    refused — the cost is a project that must spell intent as `-m <module>`.
+
+    DECISION — `python3 -m <unknown module>`: REFUSED. The module name is not
+    in `_KNOWN_PYTHON_MODULES`, so it is not a module we can apply rules to;
+    it would otherwise run project-supplied code (`-m runner` imports and runs
+    `runner.py`) with no test grammar behind it. Refusing the unresolvable
+    case keeps the rule "only modules we understand, and only through `-m`".
+    """
+    if base not in _PYTHON_BASES:
+        return None
+    positional = [tok for tok in args if not tok.startswith("-")]
+    if positional:
+        return (
+            f"{base}: script positional refused "
+            f"({positional[0]!r}) — use `-m <allowlisted module>`"
+        )
+    return None
+
+
+def _looks_like_file_target(token: str) -> bool:
+    """True when `token` names a FILE rather than a directory to collect.
+
+    C-B-1: a pytest positional that names a file is an IMPORT TARGET — pytest
+    imports the module it is pointed at, so the project chooses code to run.
+    The distinction is syntactic because `argv_refusal` is a pure string
+    function with no project or filesystem context: the final path component
+    carrying an extension (a dot) reads as a file, an extensionless component
+    reads as a directory/collection root.
+    """
+    if not token or token.startswith("-"):
         return False
+    last = token.replace("\\", "/").rstrip("/").split("/")[-1]
+    return "." in last
+
+
+def _pytest_positional_refusal(args: list[str]) -> str | None:
+    """Refusal when a PROJECT-SUPPLIED pytest argv names a file to import.
+
+    C-B-1 (PM RULING 2026-11-23): the python and node positional rules left
+    pytest's positional uncovered. `pytest evil.py` imports `evil.py`, exactly
+    as it imports a test file, so it is the same arbitrary-execution surface
+    in the one spelling that was still admitted.
+
+    SCOPE — PROJECT-SUPPLIED FRAGMENTS ONLY. The tests tier appends its own
+    ``abs_test`` positional to the argv, and a blanket rule on the assembled
+    argv would refuse the tier's own default invocation and disable the tests
+    tier everywhere. `_check_tests` therefore validates BEFORE it appends
+    that path (see the `_validate_test_extra_args` call), and the appended
+    path never reaches this function.
+
+    DIRECTORY TARGETS STAY ALLOWED. `pytest tests/` names a collection root,
+    not a file to import; refusing it would break the shipped
+    `docs/templates/enforcement-template.json` and every project that spells
+    it, turning an ordinary project's full-suite tier into a permanent
+    FAILED check. What a directory collects is the clone-shipped-test-file
+    exposure C-A-1 ruled ACCEPTED, not a tournament this rule can win.
+    """
+    for token in args:
+        if _looks_like_file_target(token):
+            return f"pytest: import target refused ({token!r})"
+    return None
+
+
+def argv_refusal(argv: list[str]) -> str | None:
+    """Refusal reason for a project-supplied argv shape, or None when allowed.
+
+    ONE derivation of the per-binary flag rules. `_validate_test_command`
+    delegates here, and `_check_tests` calls it on the final tests-tier argv
+    (detected argv + ``test.extra_args``) so the surface audit C-B found —
+    `extra_args` reaching the pytest argv unvalidated — is refused by the
+    same rules as every other project-supplied command fragment.
+
+    The caller has already gated argv[0] itself (the token allowlist);
+    this function is only about the argv BEHIND the binary.
+    """
+    if not argv:
+        return None
+    base = os.path.basename(argv[0]).lower()
+    args = argv[1:]
+
+    # The INTERPRETER's own rules run on the whole tail FIRST — a `-c`
+    # anywhere (including before `-m pytest`) is an eval flag, and module
+    # resolution must not launder it.
+    if base in _PYTHON_BASES and any(
+        _is_eval_flag(tok, ("-c",)) or _is_clustered_eval_flag(tok, ("c",)) for tok in args
+    ):
+        return f"{base}: eval flag (-c) refused"
+
+    base, flags = _module_base(base, args)
+
+    # C-C (PM RULING 2026-11-23): a python script positional is a script path,
+    # banned exactly like a node one. Runs AFTER `_module_base`, so a resolved
+    # `-m <allowlisted module>` has already re-keyed the rules onto the module
+    # (`python3 -m pytest -q` → base "pytest", never reaching this).
+    if base in _PYTHON_BASES:
+        python_refusal = _python_positional_refusal(base, flags)
+        if python_refusal is not None:
+            return python_refusal
+
     if base == "node" and any(
         _is_eval_flag(tok, ("-e", "--eval", "--print", "--require"))
         or _is_clustered_eval_flag(tok, ("e", "p", "r"))
         for tok in flags
     ):
-        return False
+        return f"{base}: eval/preload flag refused"
     # SPEC-66 BUG #4: a node positional in a PROJECT-SUPPLIED command is a
     # script path — arbitrary execution with no test grammar behind it. Only
     # `--check`/`-c` (syntax parse, no execution) may take a script path.
@@ -303,8 +499,84 @@ def _validate_test_command(command: str | None) -> bool:
         has_check = any(tok in ("--check", "-c") for tok in flags)
         positional = [tok for tok in flags if not tok.startswith("-")]
         if positional and not has_check:
-            return False
-    return True
+            return f"{base}: script positional refused (no --check)"
+    # CONSOLIDATED audit Fix 8 (M6): the flag grammar stops at python and
+    # node — pytest/ruff/mypy/eslint/go each carry config, plugin, or
+    # subcommand surfaces that smuggle execution past a bare-binary
+    # allowlist. Per-binary rules close each one; over-refusal stays the
+    # documented safe direction (SPEC-66 §11.1).
+    if base == "pytest":
+        if _has_forbidden_flag(flags, ("-p", "--plugin", "-c", "--config")):
+            return f"{base}: plugin/config flag refused (-p/--plugin/-c/--config)"
+        # C-B-1 (PM RULING 2026-11-23): the flag half of this surface was
+        # closed above; the positional half is the spelling that IMPORTS a
+        # project-chosen file. Project-supplied fragments only — the tier
+        # appends its own related-test path AFTER validating (see
+        # `_check_tests`), so the tier's default invocation is untouched.
+        pytest_refusal = _pytest_positional_refusal(flags)
+        if pytest_refusal is not None:
+            return pytest_refusal
+    if base == "ruff" and _has_forbidden_flag(flags, ("--config", "--config-file")):
+        return f"{base}: config flag refused"
+    if base == "mypy" and _has_forbidden_flag(flags, ("--config-file", "--shadow-file", "--python-executable")):
+        return f"{base}: config flag refused"
+    if base == "eslint" and _has_forbidden_flag(flags, ("--rulesdir", "--plugin", "--plugins", "-c", "--config")):
+        return f"{base}: plugin/config flag refused"
+    if base == "go":
+        # A go subcommand IS the grammar: `go run x.go`, `go generate`,
+        # `go tool`, `go env -w` execute; only the test/vet inspection
+        # verbs are admissible from a project-supplied command.
+        subcommand = next((tok for tok in flags if not tok.startswith("-")), None)
+        if subcommand is None or subcommand in ("run", "generate", "tool", "env", "build", "get", "install", "exec", "mod"):
+            return f"{base}: executable subcommand refused"
+        if _has_forbidden_flag(flags, ("-exec", "-toolexec", "-modfile")):
+            return f"{base}: exec/toolexec flag refused"
+    return None
+
+
+def _validate_test_extra_args(extra_args: str | None, base_argv: list[str]) -> str | None:
+    """Refusal reason for project-supplied ``test.extra_args``, or None.
+
+    CONSOLIDATED audit C-B: `extra_args` was appended to the tests-tier
+    pytest argv with NO validation at all, so `extra_args: "-p evilplugin"`
+    imported and executed project code while the tier reported PASSED.
+    It is validated here by the SAME rules as `command` (via
+    `argv_refusal`) against the framework argv it will be appended to, so
+    `python3 -m pytest -p evil` is refused by the module-keyed pytest rule.
+
+    A refusal is a visible FAILED tier — the caller turns the returned
+    reason into one; it is never a silent skip (a skip false-PASSes the
+    write) and never a pass.
+    """
+    if not extra_args or not extra_args.strip():
+        return None
+    import shlex
+    try:
+        extra = shlex.split(extra_args)
+    except ValueError:
+        return "extra_args is not parseable (unbalanced quotes)"
+    return argv_refusal(list(base_argv) + extra)
+
+
+
+def _has_forbidden_flag(flags: list[str], forbidden: tuple[str, ...]) -> bool:
+    """True when any argv flag token matches a forbidden flag for its binary.
+
+    Matches the exact flag, the `=`-attached form (`--config=x`), and — for
+    SHORT flags — the value-attached form pytest accepts (`-pno:cacheprovider`).
+    Over-refusal on lookalike short clusters is the documented safe direction.
+    """
+    for token in flags:
+        if not token.startswith("-") or token == "-" or token.startswith("--"):
+            if token in forbidden or any(token.startswith(f + "=") for f in forbidden):
+                return True
+            continue
+        for flag in forbidden:
+            if flag.startswith("--"):
+                continue
+            if token == flag or (token.startswith(flag) and len(token) > len(flag)):
+                return True
+    return False
 
 # ── Data models ────────────────────────────────────────────────────────────────
 
@@ -326,6 +598,36 @@ class EnforcementResult:
     """Aggregated result from all enforcement checks for one tool call."""
     checks: list[EnforcementCheck] = field(default_factory=list)
     appended_message: str = ""    # formatted message to append to tool result
+
+
+def _tests_refused_check(
+    file_path: str, field: str, command: str, reason: str | None,
+) -> EnforcementCheck:
+    """Build the visible FAILED tests check for a refused project command.
+
+    P3 (PM RULING 2026-11-23, C-C generalised): a refused project-supplied
+    command is a VISIBLE FAILED tier, never a silent skip. A skip reports no
+    tests check at all, which reads as "nothing to run" and lets the write
+    through — the same false-PASS shape C-B closed for `extra_args`. One
+    helper for all three refusal sites (`test.command` and both
+    `full_suite_command` branches) so the reported shape cannot drift.
+
+    `field` names the surface exactly as it appears in enforcement.json
+    (`test.command` / `test.full_suite_command`), `command` is the raw
+    configured string, and `reason` is the rule that fired, if the argv
+    grammar produced one. Returns a check only — nothing is executed and no
+    subprocess is started by this helper or by its callers on the refusal
+    path.
+    """
+    return EnforcementCheck(
+        tier="tests", tool="write_file", file=file_path,
+        passed=False,
+        detail=(
+            f"REFUSED: {field} — {command!r} "
+            f"({reason or 'non-allowed binary'})"
+        ),
+        output="", duration_ms=0,
+    )
 
 
 # ── Skip patterns — applied to basename, fnmatch-style ──────────────────────
@@ -407,78 +709,112 @@ class TestConfig:
 
 # ── Per-project enforcement config ───────────────────────────────────────────
 
-# TTL cache: project_path → (timestamp, data_or_None)
-_ENFORCEMENT_CONFIG_CACHE: dict[str, tuple[float, dict | None]] = {}
-_ENFORCEMENT_CONFIG_TTL = 30.0  # seconds
+# CONSOLIDATED audit Fix 11 (D4): cache validity is the file's CONTENT, not
+# elapsed time. An edited .crabcakes/enforcement.json used to keep serving the
+# old config for up to 30 s (the old TTL); now the entry is reused only while
+# the file's bytes still hash to the digest the entry was built from, so an
+# edit takes effect on the very next call with no cache clear and no sleep.
+# The hash requires a read but saves the JSON parse — which is the point of
+# the cache. Entries: project_path → (sha256_hex_or_None, parsed_or_None).
+# A `None` digest means "no usable content" (missing / unreadable), which is
+# also cached, exactly as the previous fail-soft contract cached it.
+_ENFORCEMENT_CONFIG_CACHE: dict[str, tuple[str | None, dict | None]] = {}
 
-# TTL cache for per-project test config: project_path → (timestamp, TestConfig | None)
-_TEST_CONFIG_CACHE: dict[str, tuple[float, TestConfig | None]] = {}
+# Kept for compatibility only — NO LONGER USED to decide cache validity.
+# Fix 11 (D4) replaced the time-based expiry with a content-hash test; the
+# name stays bound because it is part of this module's public-ish surface.
+_ENFORCEMENT_CONFIG_TTL = 30.0  # seconds — DEPRECATED (unused)
+
+# Same content-hash cache for the test section:
+# project_path → (sha256_hex_or_None, TestConfig_or_None)
+_TEST_CONFIG_CACHE: dict[str, tuple[str | None, TestConfig | None]] = {}
+
+
+def _enforcement_config_path(project_path: str) -> str:
+    """Return the path of the per-project enforcement config file."""
+    return os.path.join(project_path, ".crabcakes", "enforcement.json")
+
+
+def _read_enforcement_config(project_path: str) -> tuple[str | None, bytes | None]:
+    """Read the config once and return (content_digest, raw_bytes_or_None).
+
+    Reading and hashing in a single pass keeps the digest and the bytes that
+    are then parsed consistent with each other (no hash-then-reread race).
+    A missing or unreadable file yields (None, None) — the callers cache that
+    miss and return None (unchanged fail-soft contract).
+    """
+    try:
+        with open(_enforcement_config_path(project_path), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, None
+    return hashlib.sha256(raw).hexdigest(), raw
 
 
 def _load_test_config(project_path: str) -> TestConfig | None:
     """Load per-project test configuration from .crabcakes/enforcement.json.
 
     Separately cached from the enforcement tier toggles so each can evolve
-    independently. Shares the same TTL as the enforcement config.
+    independently. Both use the same content-hash validity rule (Fix 11/D4).
 
     Returns TestConfig or None if no test section in config.
     """
-    now = time.monotonic()
+    digest, raw = _read_enforcement_config(project_path)
+
     cached = _TEST_CONFIG_CACHE.get(project_path)
     if cached is not None:
-        ts, data = cached
-        if now - ts < _ENFORCEMENT_CONFIG_TTL:
-            return data
+        cached_digest, cached_value = cached
+        if cached_digest == digest:
+            return cached_value
 
-    cfg_path = os.path.join(project_path, ".crabcakes", "enforcement.json")
-    if not os.path.isfile(cfg_path):
-        _TEST_CONFIG_CACHE[project_path] = (now, None)
+    if raw is None:
+        _TEST_CONFIG_CACHE[project_path] = (None, None)
         return None
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(raw)
         test_section = data.get("test")
         if test_section and isinstance(test_section, dict):
             tc = TestConfig.from_dict(test_section)
-            _TEST_CONFIG_CACHE[project_path] = (now, tc)
+            _TEST_CONFIG_CACHE[project_path] = (digest, tc)
             return tc
-        _TEST_CONFIG_CACHE[project_path] = (now, None)
+        _TEST_CONFIG_CACHE[project_path] = (digest, None)
         return None
-    except (OSError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         logger.debug("[enforcement] test config unreadable: %s", e)
-        _TEST_CONFIG_CACHE[project_path] = (now, None)
+        _TEST_CONFIG_CACHE[project_path] = (digest, None)
         return None
-
 
 
 def _load_project_enforcement_config(project_path: str) -> dict | None:
     """
     §F — Load per-project enforcement override from .crabcakes/enforcement.json.
 
-    Results are cached for 30 seconds to avoid reading the file on every write.
+    Cached by content hash (Fix 11/D4): the parsed dict is reused only while
+    the file still hashes to the value the cache entry was built from, so an
+    edit to enforcement.json takes effect on the next call — no TTL, no sleep,
+    no manual cache clear. The file is still read; the parse is what is saved.
     Priority: .crabcakes/enforcement.json > agent.json enforcement section > defaults.
 
     Returns parsed dict or None if file doesn't exist / can't be read.
     """
-    now = time.monotonic()
+    digest, raw = _read_enforcement_config(project_path)
+
     cached = _ENFORCEMENT_CONFIG_CACHE.get(project_path)
     if cached is not None:
-        ts, data = cached
-        if now - ts < _ENFORCEMENT_CONFIG_TTL:
-            return data
+        cached_digest, cached_data = cached
+        if cached_digest == digest:
+            return cached_data
 
-    cfg_path = os.path.join(project_path, ".crabcakes", "enforcement.json")
-    if not os.path.isfile(cfg_path):
-        _ENFORCEMENT_CONFIG_CACHE[project_path] = (now, None)
+    if raw is None:
+        _ENFORCEMENT_CONFIG_CACHE[project_path] = (None, None)
         return None
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        _ENFORCEMENT_CONFIG_CACHE[project_path] = (now, data)
+        data = json.loads(raw)
+        _ENFORCEMENT_CONFIG_CACHE[project_path] = (digest, data)
         return data
-    except (OSError, json.JSONDecodeError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         logger.debug("[enforcement] per-project config unreadable: %s", e)
-        _ENFORCEMENT_CONFIG_CACHE[project_path] = (now, None)
+        _ENFORCEMENT_CONFIG_CACHE[project_path] = (digest, None)
         return None
 
 
@@ -967,6 +1303,56 @@ def _detect_test_framework(project_path: str) -> tuple[str, list[str]] | None:
     return None
 
 
+# ── The test-file CONVENTIONS the tier points pytest at ─────────────────────
+#
+# ONE definition, two readers (re-audit M-1). `_find_related_test` builds its
+# candidate paths from these names, and the C-A write gate
+# (`agent.tools.is_test_file_name`) asks whether a path the agent is writing
+# IS one of them. Before M-1 the gate matched only the first two names, so
+# the fourth candidate — `<src_dir>/__tests__/{module}.py` — was a file pytest
+# imports and the gate never covered.
+_TIER_TEST_NAME_PATTERNS: tuple[str, ...] = ("test_*.py", "*_test.py")
+_TIER_TEST_MIRROR_SUFFIX = "_test.py"     # the Jest/Vitest convention
+_TIER_TEST_MIRROR_DIR = "__tests__"       # the fourth candidate's directory
+
+
+def is_tier_test_target(path: str) -> bool:
+    """True when `path` is a name the tests tier could point pytest at.
+
+    M-1: the write gate and `_find_related_test` MUST agree on what counts as
+    a test file, so this is the single answer to "could the tier import this?"
+    — the conventions, not a guess at the basename:
+
+      * a ``.py`` file whose basename matches ``_TIER_TEST_NAME_PATTERNS``
+        (``test_{module}.py``, or the ``{module}_test.py`` Jest/Vitest name),
+        in the configured test dir or mirrored beside the source; or
+      * a ``.py`` file directly inside a ``__tests__`` directory — the
+        ``<src_dir>/__tests__/{module}.py`` convention (candidate 4), whose
+        basename is just the module name and matches neither pattern.
+
+    Deliberately PATH-shaped, not project-shaped: the write gate sees a
+    project-relative path and no project config, and "is this under a
+    `__tests__` directory?" needs no project root.
+
+    Two honest limits. The name patterns are matched at their DEFAULT
+    spelling, so a project that overrides ``test.naming_pattern`` can spell a
+    name outside them — that is the re-audit's D-1 residual, not M-1. And the
+    ``__tests__`` rule applies only to ``.py``, which is all candidate 4 ever
+    names (it hardcodes ``.py``).
+    """
+    if not path:
+        return False
+    parts = path.replace("\\", "/").rstrip("/").split("/")
+    basename = parts[-1]
+    if not basename.endswith(".py"):
+        return False
+    if any(
+        fnmatch.fnmatch(basename, pattern) for pattern in _TIER_TEST_NAME_PATTERNS
+    ):
+        return True
+    return len(parts) >= 2 and parts[-2] == _TIER_TEST_MIRROR_DIR
+
+
 def _find_related_test(
     file_path: str,
     project_path: str,
@@ -988,16 +1374,22 @@ def _find_related_test(
     basename = os.path.splitext(os.path.basename(file_path))[0]
     pattern = naming_pattern.replace("{module}", basename)
 
+    # Candidate 2 of the conventions in `is_tier_test_target` — the SHARED
+    # definition, so the gate cannot drift from what is actually searched
+    # (re-audit M-1). Candidate 1 is the project's `naming_pattern`, which
+    # the gate can only cover at its default spelling (D-1 residual).
     candidates = [
         os.path.join(project_path, test_dir, pattern),
-        os.path.join(project_path, test_dir, f"{basename}_test.py"),  # Jest/Vitest convention
+        os.path.join(project_path, test_dir, f"{basename}{_TIER_TEST_MIRROR_SUFFIX}"),
     ]
 
-    # Also check if there's a mirror in the same directory
+    # Also check if there's a mirror in the same directory. Candidate 4 is
+    # `<src_dir>/__tests__/{module}.py` — the convention `is_tier_test_target`
+    # gates on the DIRECTORY, since its basename is just the module name.
     src_dir = os.path.dirname(os.path.join(project_path, file_path))
     candidates.extend([
         os.path.join(src_dir, pattern),
-        os.path.join(src_dir, "__tests__", f"{basename}.py"),
+        os.path.join(src_dir, _TIER_TEST_MIRROR_DIR, f"{basename}.py"),
     ])
 
     for candidate in candidates:
@@ -1503,8 +1895,16 @@ def _check_tests(
     # Determine test timeout (project override or config default)
     test_timeout = test_config.timeout_seconds if test_config.timeout_seconds is not None else config.test_timeout_seconds
 
-    # If a custom command template is provided, use it directly
-    if test_config.command:
+    # If a custom command template is provided, use it directly.
+    #
+    # CONSOLIDATED audit M-E: `full_suite_command` was dead unless `command`
+    # was ALSO set — the whole selection block sat inside `if
+    # test_config.command:`, so the two `full_suite_command` reads below were
+    # unreachable for a project that set only that field. RESOLUTION: the
+    # field is made LIVE on its own (the audit's first option) — the branch
+    # is now entered by either field, and nothing is removed. A project can
+    # spell a full-suite override without inventing a `command` template.
+    if test_config.command or (test_config.run_full_suite and test_config.full_suite_command):
         related_test = _find_related_test(
             file_path, project_path,
             test_config.test_dir, test_config.naming_pattern,
@@ -1517,10 +1917,16 @@ def _check_tests(
             if not _validate_test_command(test_config.full_suite_command):
                 logger.warning("[enforcement] full_suite_command uses non-allowed binary: %s",
                                 test_config.full_suite_command)
-                return None
+                # P3: refusal is reported, never silently skipped — and it
+                # returns BEFORE any argv is built, so no subprocess starts.
+                return _tests_refused_check(
+                    file_path, "test.full_suite_command",
+                    test_config.full_suite_command,
+                    argv_refusal(_parse_command_to_argv(test_config.full_suite_command)),
+                )
             argv = _parse_command_to_argv(test_config.full_suite_command)
             argv = _substitute_venv_python(argv, venv_python)
-        elif related_test:
+        elif related_test and test_config.command:
             abs_test = os.path.join(project_path, related_test)
             cmd_str = test_config.command.replace("{test_file}", abs_test)
             # SP0 fix round (BUG#6): the `command` field previously bypassed
@@ -1530,19 +1936,48 @@ def _check_tests(
             # the resolved-binary gate rightly admits /usr/bin/sh; the token
             # allowlist is the only layer that refuses it). Same treatment
             # as the full_suite_command branches below.
-            if not _validate_test_command(cmd_str):
+            #
+            # C-B-1: `{test_file}` is the TIER's substitution, not a path the
+            # project chose. Validating `cmd_str` would hand the new pytest
+            # positional rule the tier's OWN inserted path — the TRAP: it
+            # would refuse `python3 -m pytest {test_file} -q` and disable the
+            # tests tier for every project that spells a template. So the
+            # PROJECT-SUPPLIED surface validated here is the TEMPLATE, the
+            # same posture `_validate_test_extra_args` takes for its
+            # fragment. Validating the template loses nothing: substitution
+            # replaces one token with the tier's own test path, and every
+            # other token in `cmd_str` is one the project wrote.
+            if not _validate_test_command(test_config.command):
                 logger.warning(
                     "[enforcement] test command uses non-allowed binary: %s",
                     test_config.command,
                 )
-                return None
+                # C-C (PM RULING 2026-11-23): a refused `test.command` is a
+                # VISIBLE FAILED tier, never a silent skip. A skip reports no
+                # tests check at all, which reads as "nothing to run" and lets
+                # the write through — the same false-PASS shape C-B closed for
+                # `extra_args`. The refusal reason is named so the PM can see
+                # which rule fired (e.g. a python/node script positional or a
+                # pytest positional import target).
+                # P3: shape shared with both `full_suite_command` branches
+                # via `_tests_refused_check` (one shape, not three copies).
+                return _tests_refused_check(
+                    file_path, "test.command", test_config.command,
+                    argv_refusal(_parse_command_to_argv(test_config.command)),
+                )
             argv = _parse_command_to_argv(cmd_str)
             argv = _substitute_venv_python(argv, venv_python)
         elif test_config.full_suite_command:
             if not _validate_test_command(test_config.full_suite_command):
                 logger.warning("[enforcement] full_suite_command uses non-allowed binary: %s",
                                 test_config.full_suite_command)
-                return None
+                # P3: same visible-refusal shape as the branch above; no
+                # argv is built, so nothing can execute on this path.
+                return _tests_refused_check(
+                    file_path, "test.full_suite_command",
+                    test_config.full_suite_command,
+                    argv_refusal(_parse_command_to_argv(test_config.full_suite_command)),
+                )
             argv = _parse_command_to_argv(test_config.full_suite_command)
             argv = _substitute_venv_python(argv, venv_python)
         else:
@@ -1559,6 +1994,29 @@ def _check_tests(
             file_path, project_path,
             test_config.test_dir, test_config.naming_pattern,
         )
+
+        # CONSOLIDATED audit C-B: `test.extra_args` is project-supplied and
+        # was appended to the pytest argv with NO validation at all —
+        # `extra_args: "-p evilplugin"` imported and executed project code
+        # while the tier reported PASSED. It is validated by the same rules
+        # as every other project-supplied fragment (`argv_refusal`, keyed on
+        # the MODULE so `python3 -m pytest -p evil` is caught), and a
+        # refusal is a VISIBLE FAILED tier naming the surface — never a
+        # silent skip (which false-PASSes the write) and never a pass.
+        if test_config.run_full_suite or related_test:
+            extra_refusal = _validate_test_extra_args(
+                test_config.extra_args, list(argv)
+            )
+            if extra_refusal is not None:
+                return EnforcementCheck(
+                    tier="tests", tool="write_file", file=file_path,
+                    passed=False,
+                    detail=(
+                        "REFUSED: test.extra_args — "
+                        f"{test_config.extra_args!r} ({extra_refusal})"
+                    ),
+                    output="", duration_ms=0,
+                )
 
         if test_config.run_full_suite:
             argv = list(argv) + test_config.extra_args.split() + ["--tb=short"]

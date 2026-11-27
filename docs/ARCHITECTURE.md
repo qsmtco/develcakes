@@ -1855,6 +1855,9 @@ def set_approval_callback(cb) -> None              # cb(session_key, tool_name, 
 | `file_search` | No | Find files by name OR content (P10 — uses `_find_matching_files` + `_run_grep`) |
 | `web_search` | No | Brave Search API |
 | `web_fetch` | No | Fetch URL as text |
+| `diary` | No (by design) | Append to `.crabcakes/context.md` via `utils/project_awareness.append_project_context`. No sensitive-path approval card — app-owned path, agent-controlled content (Fix 13/L2) |
+| `project_memory` | No (by design) | Write under `.crabcakes/memory/`. Path-escape probed and refuted (audit R15) — no sensitive-path approval card (Fix 13/L2) |
+| `feed_card` | No (by design) | Post a card to the project Feed; its `file` field is validated project-relative (audit R16), so it needs no sensitive-path approval card (Fix 13/L3) |
 
 **Sandbox:** All paths resolved relative to `project_path`. Escape attempt (`realpath` outside `project_path`) rejected with error result.
 
@@ -2420,9 +2423,10 @@ def check(tool_name, tool_args, tool_result, project_path, config) -> Enforcemen
 **Internal functions:**
 ```python
 def _detect_venv_prefix(project_path, venv_path) -> str   # POSIX "." activation prefix or ""
-def _load_test_config(project_path) -> TestConfig | None   # TTL-cached loader from .develcakes/enforcement.json test section
+def _load_test_config(project_path) -> TestConfig | None   # content-hash-cached loader from .develcakes/enforcement.json test section
 def _find_related_test(file_path, project_path, test_dir, naming_pattern) -> str | None
 def _check_tests(file_path, project_path, config, syntax_passed) -> EnforcementCheck | None
+def _tests_refused_check(file_path, field, command, reason) -> EnforcementCheck
 ```
 
 **Tiers:**
@@ -2430,10 +2434,29 @@ def _check_tests(file_path, project_path, config, syntax_passed) -> EnforcementC
 2. Test runner (`_check_tests`): detect framework (pytest, jest, make test), find related test file, run it. Skipped if syntax fails. Uses per-project `TestConfig` for custom command templates, venv activation (`_detect_venv_prefix`), configurable test directory and naming patterns, and timeout overrides.
 3. Lint check (`_check_lint`): detect linter (ruff, mypy, eslint), run on changed file. Skipped if syntax fails.
 
-**Per-project override (§F):** `.develcakes/enforcement.json` overrides global enforcement config. Two caches:
+**Per-project override (§F):** `.crabcakes/enforcement.json` overrides global enforcement config. Two caches:
 - `_ENFORCEMENT_CONFIG_CACHE` — tier toggles (syntax_check, test_run, lint_check, skip_patterns)
 - `_TEST_CONFIG_CACHE` — per-project test configuration (command, venv, naming, timeout)
-Both use 30-second TTL. Applied BEFORE all tier checks so `syntax_check: false` actually skips syntax.
+Both use the same validity rule: **content hash, not elapsed time** (CONSOLIDATED Fix 11/D4). Each entry stores the SHA-256 of the file bytes it was built from; on every call the file is re-read and re-hashed, and the cached parsed value is reused only while the digest still matches. An edit to `enforcement.json` therefore takes effect on the very next check — no TTL, no sleep, no cache clear — while an unchanged file skips the JSON parse (that parse is what the cache saves; the read is cheap and keeps validity honest). `_ENFORCEMENT_CONFIG_TTL` remains bound for compatibility but is no longer consulted. A missing or unreadable file caches `(None, None)` and returns `None` (unchanged fail-soft contract). Applied BEFORE all tier checks so `syntax_check: false` actually skips syntax.
+
+**These tiers are a QUALITY control, not a security control (CONSOLIDATED Fix 12/D5, PM ruling — option B, documentation only).** They catch the agent's own mistakes; they are not a defense against a hostile repository. A project's own `.crabcakes/enforcement.json` is itself project-supplied, so it can add `skip_patterns` and switch tiers off, silencing syntax, test, and lint together. `skip_patterns` behavior is deliberately unchanged — the feature works exactly as documented; treat a project config as trusted input and judge the repository, not the tiers, on the trust question.
+
+**ACCEPTED RISK — a clone-shipped test file is still imported and executed (re-audit C-A-1, PM RULING 2026-11-23: accepted, documentation only).** The test-file write gate stops the AGENT from planting a payload. It does NOT stop a test file that a cloned repository ALREADY SHIPS from executing when the tests tier runs: no write occurs, so no approval card is shown, and `--noconftest` does not stop pytest importing the file it is told to collect. PM ruling: accepted. The tests tier is a quality control; opening a repository you do not trust is the precondition — do not run the agent against an untrusted repository. No behavior change was made for this finding, and none should be made without a new ruling.
+
+**Project-supplied command rules (`_validate_test_command` → `argv_refusal`).** A `.crabcakes/enforcement.json` command is untrusted input: it arrives with a cloned repository and its argv is executed. Two layers apply, in order. (1) A first-token allowlist — `_ALLOWED_BINARIES` = python3, pytest, ruff, mypy, eslint, node, go (`npx`/`npm` deliberately excluded, §11.2). (2) Per-binary flag grammar on the argv behind that token: interpreter eval flags (`python3 -c`, clustered `-ic`; `node -e`/`-p`/`-r`) and plugin/config smuggling flags (`pytest -p`/`--plugin`/`-c`/`--config`, `ruff`/`mypy`/`eslint` config flags, `go` executable subcommands) are refused. A `-m <module>` python invocation is keyed on the MODULE, not on the interpreter, so `python3 -m pytest -p evil` hits the same rule as `pytest -p evil`. **Positionals are script paths and are banned:** `node evil.js` unless `--check`/`-c` (syntax-parse only) is present, and — per **PM RULING 2026-11-23 (C-C)** — `python3 runner.py` in every spelling (`_python_positional_refusal`). **A pytest positional that names a FILE is an import target (re-audit C-B-1, PM RULING 2026-11-23)** — `pytest evil.py` and `python3 -m pytest evil.py` are refused by `_pytest_positional_refusal`, because pytest imports the file it is told to collect while the tier reports PASSED. The rule is scoped to **project-supplied fragments only** (`test.extra_args`, `test.command`, `test.full_suite_command`): the tier appends its own related-test path as a positional, so a rule over the assembled argv would refuse the tier's own default invocation and disable the tests tier everywhere. `_check_tests` validates BEFORE it appends, and a `test.command` template is validated AS WRITTEN, so the `{test_file}` placeholder is the tier's substitution and never a project-chosen token. Directory targets (`pytest tests/`) stay admitted — a collection root is not a file to import, and refusing it would break the shipped template. The surviving way to hand python a target is `-m <allowlisted module>`, which is also the tests tier's own default argv. Two consequences are deliberate: value-taking interpreter flags (`-W`, `-X`, `-Q`) do not consume their value, so `python3 -W error script.py` is refused rather than modelled against Python's flag arity; and `python3 -m <unknown module>` is refused, because `-m runner` imports and runs `runner.py` with no rule applying to it. Over-refusal is the documented safe direction (SPEC-66 §11.1). The syntax tier is NOT routed through this grammar — it builds its argv from `SYNTAX_CHECKERS` (`python3 -m py_compile {path}`), so the ban cannot disable it.
+
+**A refusal is a VISIBLE FAILED tests check (P3, PM RULING 2026-11-23 C-C).** All three refusal sites in `_check_tests` — `test.command`, `run_full_suite and full_suite_command`, and the bare `elif full_suite_command` — report through one helper, `_tests_refused_check`, which returns `EnforcementCheck(tier="tests", passed=False)` with a detail of the shape `REFUSED: <field> — <command> (<rule>)`. The field is spelled as it appears in `enforcement.json` (`test.command` / `test.full_suite_command`). These sites used to `return None`, i.e. no tests check at all: a write whose only configured command was refused read as clean, which was the same false-PASS shape C-B closed for `extra_args` and C-C closed for `test.command`. The refusal is returned before any argv is built or parsed for execution, so no subprocess starts on the refusal path. Which commands are allowed or refused is unchanged — only the reporting changed.
+
+**The write gate asks the TIER's question, not a name guess (re-audit M-1).** `agent.tools.is_test_file_name` delegates to ONE shared definition, `agent.enforcement.is_tier_test_target`, which is the same set of conventions `_find_related_test` searches: `test_{module}.py`, the `{module}_test.py` Jest/Vitest name, and `<src_dir>/__tests__/{module}.py` — the fourth candidate, whose basename is just the module name and so matched neither name pattern before. Gated on the convention (a `.py` file directly inside a `__tests__` directory), not on the basename, so the gate and the tier cannot drift. Which files the tier COLLECTS is unchanged. A project that overrides `test.naming_pattern` can still spell a name outside the default patterns — the re-audit's D-1 residual, not M-1.
+
+**BY DESIGN — write surfaces outside the sensitive-path gate (CONSOLIDATED Fix 13/L2, L3).** These tools write paths that belong to the app itself, and the CONTENT they write is agent-controlled. They are not routed through the sensitive-path approval card, and that is intentional:
+- `diary` → `.crabcakes/context.md` (via `utils/project_awareness.append_project_context`)
+- `write_file`'s append-only special branch for that same `.crabcakes/context.md`
+- `project_memory` → `.crabcakes/memory/` (a path-escape was probed and refuted — audit R15)
+- `agent/persistence` → the conversation transcript under `.crabcakes/` (the path is the app's own; the content is agent-controlled)
+- `feed_card`'s `file` field, which is validated project-relative (audit R16)
+
+The gate exists to stop a project-supplied path from making the agent write into host-sensitive locations — not to review agent-authored text that lands in app-owned state directories.
 
 **Test config schema (`.develcakes/enforcement.json` → `test` section):**
 ```json

@@ -717,11 +717,20 @@ class TestExecCommand:
         assert "/usr/bin:/bin" in r.output or "PATH" in r.output
 
     def test_get_scrubbed_env_allowlist(self):
-        """MED-2: the allowlist in utils.env_security is the source of truth."""
+        """MED-2: the allowlist in utils.env_security is the source of truth.
+
+        CONSOLIDATED audit Fix 3 (C2) added exactly ONE entry:
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD — a pytest SUPPRESSION flag (it can
+        only refuse to auto-load an entry-point plugin, never add one), which
+        the tests tier hands to its own pytest run so a checked project's
+        plugin cannot be auto-loaded. The pin stays EXACT: any second
+        addition fails here, which is the point.
+        """
         from utils.env_security import ALLOWED_SUBPROCESS_ENV_VARS, get_scrubbed_env
-        # All allowed vars are documented shell/locale vars
+        # All allowed vars are documented shell/locale vars, plus the one
+        # pytest suppression variable.
         expected_safe = {"PATH", "HOME", "LANG", "LC_ALL", "LANGUAGES", "TZ", "TMPDIR", "PWD"}
-        assert ALLOWED_SUBPROCESS_ENV_VARS == frozenset(expected_safe)
+        assert ALLOWED_SUBPROCESS_ENV_VARS == frozenset(expected_safe | {"PYTEST_DISABLE_PLUGIN_AUTOLOAD"})
         # Function returns only those vars
         import os as _os
         _os.environ["MED2_TEST_SECRET"] = "should-not-appear"

@@ -30,6 +30,7 @@ from agent.enforcement import (
     _find_related_test,
     _is_app_worktree,
     _load_test_config,
+    _load_project_enforcement_config,
     _check_tests,
     _resolve_tests_python,
     check,
@@ -436,8 +437,13 @@ class TestLoadTestConfig:
         _TEST_CONFIG_CACHE.clear()
         assert _load_test_config(str(tmp_path)) is None
 
-    def test_cache_ttl(self, tmp_path):
-        """Test config is cached and reused within TTL."""
+    def test_content_change_invalidates_cache(self, tmp_path):
+        """CONSOLIDATED Fix 11 (D4): an edited file is picked up immediately.
+
+        This replaces the old test_cache_ttl assertion, which pinned the STALE
+        behavior (an edited enforcement.json kept serving the old value for up
+        to 30 s). Cache validity is now the file's content hash.
+        """
         crab_dir = tmp_path / ".crabcakes"
         crab_dir.mkdir()
         (crab_dir / "enforcement.json").write_text(json.dumps({
@@ -448,12 +454,12 @@ class TestLoadTestConfig:
         tc1 = _load_test_config(str(tmp_path))
         assert tc1.timeout_seconds == 20
 
-        # Update file — should still return cached value
+        # Update file — no cache clear, no sleep: the NEW value must win.
         (crab_dir / "enforcement.json").write_text(json.dumps({
             "test": {"timeout_seconds": 40}
         }))
         tc2 = _load_test_config(str(tmp_path))
-        assert tc2.timeout_seconds == 20  # Still cached
+        assert tc2.timeout_seconds == 40
 
     def test_cache_miss_returns_none(self, tmp_path):
         _TEST_CONFIG_CACHE.clear()
@@ -469,6 +475,67 @@ class TestLoadTestConfig:
         _TEST_CONFIG_CACHE.clear()
         tc = _load_test_config(str(tmp_path))
         assert tc.timeout_seconds == 60
+
+
+# ── CONSOLIDATED Fix 11 (D4): content-hash cache validity ───────────────────
+
+
+class TestEnforcementConfigContentHashCache:
+    """The loader caches on the file's CONTENT, not on elapsed time.
+
+    An edit to .crabcakes/enforcement.json must be visible on the very next
+    call — no cache clear, no sleep — while an unchanged file still comes from
+    the cache (the file is re-read; the JSON parse is what is saved).
+    """
+
+    def test_test_config_picks_up_content_change_without_clear(self, tmp_path):
+        """_load_test_config: new contents win on the next call."""
+        _write_enforcement_json(str(tmp_path), {"test": {"timeout_seconds": 20}})
+        # _write_enforcement_json clears the caches; from here on, nothing does.
+        assert _load_test_config(str(tmp_path)).timeout_seconds == 20
+
+        _write_enforcement_json(str(tmp_path), {"test": {"timeout_seconds": 45}})
+        assert _load_test_config(str(tmp_path)).timeout_seconds == 45
+
+    def test_project_config_picks_up_content_change_without_clear(self, tmp_path):
+        """_load_project_enforcement_config: new contents win on the next call."""
+        _write_enforcement_json(str(tmp_path), {"lint_check": True})
+        assert _load_project_enforcement_config(str(tmp_path))["lint_check"] is True
+
+        _write_enforcement_json(str(tmp_path), {"lint_check": False})
+        assert _load_project_enforcement_config(str(tmp_path))["lint_check"] is False
+
+    def test_unchanged_file_is_not_reparsed(self, tmp_path):
+        """An unchanged file is served from cache — json.loads runs once."""
+        _write_enforcement_json(str(tmp_path), {
+            "test": {"timeout_seconds": 20}, "test_run": True,
+        })
+
+        with patch("agent.enforcement.json.loads", wraps=json.loads) as spy:
+            tc1 = _load_test_config(str(tmp_path))
+            cfg1 = _load_project_enforcement_config(str(tmp_path))
+            assert spy.call_count == 2  # one parse per loader, first time only
+
+            tc2 = _load_test_config(str(tmp_path))
+            cfg2 = _load_project_enforcement_config(str(tmp_path))
+            assert spy.call_count == 2  # no re-parse: cache hit
+
+        assert tc1 is tc2
+        assert cfg1 is cfg2
+
+    def test_missing_file_stays_fail_soft_cached(self, tmp_path):
+        """Missing file: both loaders return None and cache the miss."""
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+        assert _load_test_config(str(tmp_path)) is None
+        assert _load_project_enforcement_config(str(tmp_path)) is None
+        assert _TEST_CONFIG_CACHE[str(tmp_path)] == (None, None)
+        assert _ENFORCEMENT_CONFIG_CACHE[str(tmp_path)] == (None, None)
+
+        # Still None, and still cached, on the next call.
+        assert _load_test_config(str(tmp_path)) is None
+        assert _load_project_enforcement_config(str(tmp_path)) is None
 
 
 # ── _find_related_test ──────────────────────────────────────────────────────
@@ -1427,6 +1494,16 @@ class TestV1ResolvedBinaryGate:
         self._shim(shim_dir, "pytest", marker)
         proj = self._victim_project(tmp_path)
         os.makedirs(os.path.join(proj, ".crabcakes"), exist_ok=True)
+        # Stale-test repair (2026-11-19): the autouse _isolate_config_resolution
+        # fixture (fa623cd6, 2026-10-11) pins HOME to tmp_path for EVERY test —
+        # which put the planted shim INSIDE the trusted HOME root (BUG#4 round-2
+        # ruling: the operator's home subtree is trusted tooling territory) and
+        # the gate correctly admitted it. The V1 threat this test pins is a PATH
+        # dir OUTSIDE the operator's home, so HOME gets a sibling fake home the
+        # shim does not live under. Production behavior is unchanged.
+        fake_home = tmp_path / "operator_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setenv("PATH", shim_dir + os.pathsep + os.environ["PATH"])
         result = self._run_check(proj, monkeypatch)
         assert not os.path.exists(marker), "shim EXECUTED — PATH-bleed open"
@@ -1479,6 +1556,14 @@ class TestV1ResolvedBinaryGate:
         self._shim(shim_dir, "pytest", marker)
         proj = self._victim_project(tmp_path)
         os.makedirs(os.path.join(proj, ".crabcakes"), exist_ok=True)
+        # Stale-test repair (2026-11-19), same as the sibling shim test: the
+        # autouse HOME-isolation fixture put the whole tmp tree inside the
+        # trusted HOME root, so `.`-resolved ./pytest was admitted. HOME gets
+        # a sibling fake home so the cwd shim stays OUTSIDE the trusted root —
+        # the `.`-vector this test pins. Production behavior is unchanged.
+        fake_home = tmp_path / "operator_home3"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
         # PATH with `.` FIRST and cwd = the shim dir when the gate runs —
         # `which` resolves `pytest` → ./pytest → the shim → REFUSED.
         monkeypatch.setenv("PATH", "." + os.pathsep + os.environ["PATH"])
@@ -1711,10 +1796,16 @@ class TestSP0FixRound:
             f"checks: {result.checks}"
         )
         tests_checks = [c for c in result.checks if c.tier == "tests"]
-        # The tier is silently skipped (return None) on token refusal —
-        # visible FAILED for token-refusal is a related finding, not in
-        # scope for BUG#6 (BUG#8 skip-DoS stays REGISTERED per the spec).
-        assert not tests_checks or tests_checks[0].passed is False
+        # C-C (PM RULING 2026-11-23) made a refused `test.command` a VISIBLE
+        # FAILED tier instead of a silent `return None` skip, so this probe can
+        # now assert the check EXISTS — the pre-C-C statement was the lenient
+        # `not tests_checks or ...`, which a silent skip also satisfied.
+        assert len(tests_checks) == 1, (
+            f"token refusal SKIPPED the tests tier instead of failing it: "
+            f"{result.checks}"
+        )
+        assert tests_checks[0].passed is False
+        assert "REFUSED" in tests_checks[0].detail, tests_checks[0].detail
 
     # ── BUG#4: HOME in trusted roots (fake-HOME trio) ──────────────────
 
@@ -1962,8 +2053,12 @@ class TestSP0FixRound2:
         tools_bin = proj / "tools"
         marker = str(tmp_path / "MARKER10")
         self._shim(str(tools_bin), "pytest", marker)
+        # C-B-1: no positional here. A `pytest tests/test_x.py` command is now
+        # refused by the argv grammar BEFORE the resolved-binary gate, which
+        # would make this test green for the wrong reason — it pins the
+        # containment rule, so its command must reach that gate.
         self._write_cfg(str(proj), {
-            "command": "pytest tests/test_x.py -q",
+            "command": "pytest -q",
             "venv_path": ".venv",
         })
         monkeypatch.setenv("HOME", str(fake_home))
@@ -2314,3 +2409,1056 @@ class TestSP0FixRound3:
             "SP2 contract broken: app worktree + symlinked venv refused at "
             f"the gate — {detail}"
         )
+
+
+# ── CONSOLIDATED audit Fix 3 (C2): the tier never runs project config ───────
+#
+# C2 was the strongest vector in the audit: a CLONED repository ships
+# `pytest.ini` with `addopts = -p evilplugin` (and/or a root `conftest.py`),
+# the tier ran `python3 -m pytest <file>` with cwd=project_path and no
+# `-c`/`--confcutdir`, pytest honoured the project's ini, imported the
+# plugin, executed it — and reported PASSED. No agent-authored file, no
+# exec_command, no approval card.
+#
+# These tests run the REAL tier (via _check_tests / check) against a project
+# whose venv python execs the running interpreter, so a marker that appears
+# means something genuinely executed. Marker ABSENT is the closed state.
+
+
+class TestConsolidatedFix3TierIsolation:
+    """C2: project-supplied pytest config cannot reach the tier."""
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    def _project(self, tmp_path, *, ini=None, conftest=None,
+                 test_conftest=None, plugin=True, marker_name="MARKER"):
+        """A foreign project with a real venv-backed tier and a shipped payload."""
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        marker = tmp_path / marker_name
+        if ini is not None:
+            (proj / "pytest.ini").write_text(ini)
+        if plugin:
+            # `-p evilplugin` resolves because pytest puts the rootdir (and a
+            # root conftest's dir) on sys.path — probe M1b.
+            (proj / "evilplugin.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('plugin ran')\n")
+        if conftest is not None:
+            (proj / "conftest.py").write_text(conftest)
+        if test_conftest is not None:
+            (proj / "tests" / "conftest.py").write_text(test_conftest)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {
+                "command": "python3 -m pytest {test_file} -v",
+                "venv_path": ".venv",
+            }
+        })
+        return str(proj), marker
+
+    def test_shipped_pytest_ini_addopts_plugin_does_not_execute(self, tmp_path):
+        """The audit's headline C2 probe (M1): `addopts = -p evilplugin`.
+
+        Pre-fix: marker exists and the tier reports PASSED. Post-fix: the
+        tier still runs and reports a real result, and the marker does NOT
+        exist — the project's ini was never read.
+        """
+        proj, marker = self._project(
+            tmp_path,
+            ini="[pytest]\naddopts = -p evilplugin\n",
+        )
+        config = _make_config()
+        result = _check_tests("feature.py", proj, config, syntax_passed=True)
+        assert result is not None, "the tier must still run (isolation, not disable)"
+        assert result.passed is True, result.detail
+        assert not marker.exists(), (
+            "C2 OPEN: the project's pytest.ini addopts plugin EXECUTED"
+        )
+
+    def test_shipped_setup_cfg_addopts_plugin_does_not_execute(self, tmp_path):
+        """C2's second half (probe M2): `setup.cfg` [tool:pytest] addopts.
+
+        `-c <app-owned ini>` suppresses setup.cfg for the same reason it
+        suppresses pytest.ini — the ini files are the same lookup.
+        """
+        proj, marker = self._project(tmp_path, plugin=True,
+                                     marker_name="MARKER_CFG")
+        (tmp_path / "proj" / "setup.cfg").write_text(
+            "[tool:pytest]\naddopts = -p evilplugin\n")
+        # No project pytest.ini at all: setup.cfg is the only config, so the
+        # framework detector's setup.cfg branch is what selects pytest.
+        config = _make_config()
+        result = _check_tests("feature.py", proj, config, syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+        assert not marker.exists(), (
+            "C2 OPEN: setup.cfg [tool:pytest] addopts plugin EXECUTED"
+        )
+
+    def test_shipped_root_conftest_does_not_execute(self, tmp_path):
+        """C2's conftest half (probe M3b): a shipped root conftest.py.
+
+        pytest IMPORTS every conftest on the collection path. `--noconftest`
+        for a non-app project is what closes this; the app's own tree keeps
+        its conftest (it is our hermeticity guard, and an agent editing it
+        gets an approval card).
+        """
+        proj, marker = self._project(
+            tmp_path,
+            conftest="from pathlib import Path\n"
+                     f"Path({str(tmp_path / 'MARKER_CONFTEST')!r})"
+                     ".write_text('conftest ran')\n",
+            plugin=False,
+        )
+        config = _make_config()
+        result = _check_tests("feature.py", proj, config, syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+        assert not (tmp_path / "MARKER_CONFTEST").exists(), (
+            "C2 OPEN: the project's root conftest.py EXECUTED"
+        )
+
+    def test_shipped_tests_conftest_does_not_execute(self, tmp_path):
+        """The conftest NEXT TO the test (probe M3b's placement)."""
+        proj, _marker = self._project(
+            tmp_path,
+            test_conftest="from pathlib import Path\n"
+                          f"Path({str(tmp_path / 'MARKER_TCONF')!r})"
+                          ".write_text('conftest ran')\n",
+            plugin=False,
+        )
+        config = _make_config()
+        result = _check_tests("feature.py", proj, config, syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+        assert not (tmp_path / "MARKER_TCONF").exists(), (
+            "C2 OPEN: tests/conftest.py EXECUTED"
+        )
+
+    def test_the_tier_still_reports_a_real_failure(self, tmp_path):
+        """Isolation must not degrade the tier into a rubber stamp.
+
+        A failing test still FAILS with the project's ini in place — the
+        tier's verdict comes from the tests, not from the isolation.
+        """
+        proj, _marker = self._project(
+            tmp_path, ini="[pytest]\naddopts = -p evilplugin\n")
+        (tmp_path / "proj" / "tests" / "test_feature.py").write_text(
+            "def test_broken():\n    assert False\n")
+        _TEST_CONFIG_CACHE.clear()
+        config = _make_config()
+        result = _check_tests("feature.py", proj, config, syntax_passed=True)
+        assert result is not None
+        assert result.passed is False, (
+            f"a failing test PASSED the isolated tier: {result.detail}"
+        )
+
+    def test_full_suite_run_still_collects_the_project_tests(self, tmp_path):
+        """The isolation must not move collection into the app-owned tier dir.
+
+        With `-c <app ini>` pytest's rootdir becomes the ini's directory. If
+        the run degraded to "No tests collected" (exit 5) the tier would
+        report ⏭ passed — a false PASS with extra steps. The app-owned ini
+        sets no `testpaths`, so pytest collects from the INVOCATION dir
+        (cwd = project_path): this asserts a real collection + result.
+        """
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\n")
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        _create_real_venv(str(proj))
+        # run_full_suite with NO custom command → the auto-detect branch.
+        _write_enforcement_json(str(proj), {
+            "test": {"run_full_suite": True, "venv_path": ".venv"},
+        })
+        config = _make_config()
+        result = _check_tests("feature.py", str(proj), config,
+                              syntax_passed=True)
+        assert result is not None
+        assert "No tests collected" not in result.detail, (
+            "the isolated full-suite run collected nothing — the tier is a "
+            f"false PASS: {result.detail}"
+        )
+        assert result.passed is True, result.detail
+        # Positive proof of a REAL collection, not just a non-5 exit code.
+        assert "1 passed" in (result.output + result.detail), (
+            f"the isolated run did not collect the project test: {result.detail}"
+        )
+
+    def test_app_owned_ini_is_written_under_the_config_dir(self, tmp_path,
+                                                          monkeypatch):
+        """The ini lives at get_config_dir()/tier/pytest.ini — outside any
+        project sandbox, so a checked project cannot rewrite it."""
+        from agent.enforcement import _TIER_PYTEST_INI, _tier_pytest_config
+
+        monkeypatch.setattr("utils.config.get_config_dir",
+                            lambda: str(tmp_path / "cfg"))
+        cfg = _tier_pytest_config()
+        assert cfg is not None
+        ini, tier_dir = cfg
+        assert ini == os.path.join(str(tmp_path / "cfg"), "tier", "pytest.ini")
+        assert os.path.isfile(ini)
+        with open(ini, encoding="utf-8") as f:
+            assert f.read() == _TIER_PYTEST_INI
+        # The app-owned ini declares NO addopts — that is the whole point.
+        lines = [ln.strip() for ln in _TIER_PYTEST_INI.splitlines()
+                 if not ln.strip().startswith("#")]
+        assert "addopts =" in lines
+        assert not any(ln.startswith("addopts =") and ln != "addopts ="
+                       for ln in lines), (
+            "the app-owned tier ini must declare an EMPTY addopts"
+        )
+
+    def test_isolation_args_for_a_foreign_project(self, tmp_path, monkeypatch):
+        """The argv shape: -c <app ini>, --confcutdir <app dir>, --noconftest."""
+        from agent.enforcement import _pytest_isolation_args
+
+        monkeypatch.setattr("utils.config.get_config_dir",
+                            lambda: str(tmp_path / "cfg"))
+        args = _pytest_isolation_args("/some/foreign/project")
+        assert "-c" in args
+        ini = args[args.index("-c") + 1]
+        assert ini.endswith(os.path.join("tier", "pytest.ini"))
+        assert "--confcutdir" in args
+        assert "--noconftest" in args
+
+    def test_isolation_args_keep_the_app_conftest(self, tmp_path, monkeypatch):
+        """The APP's own tree keeps its conftest — it is our guard, and Fix 2
+        gates edits to it."""
+        from agent.enforcement import _APP_ROOT, _pytest_isolation_args
+
+        monkeypatch.setattr("utils.config.get_config_dir",
+                            lambda: str(tmp_path / "cfg"))
+        args = _pytest_isolation_args(_APP_ROOT)
+        assert "-c" in args
+        assert "--noconftest" not in args, (
+            "the app's own conftest is its hermeticity guard — do not drop it"
+        )
+
+    def test_injection_covers_the_pytest_and_python_m_pytest_shapes(self,
+                                                                    tmp_path,
+                                                                    monkeypatch):
+        """Both spellings a project can use get the isolation, positioned so
+        nothing later on the command line can override it."""
+        from agent.enforcement import _inject_pytest_isolation
+
+        monkeypatch.setattr("utils.config.get_config_dir",
+                            lambda: str(tmp_path / "cfg"))
+        argv, env = _inject_pytest_isolation(
+            ["python3", "-m", "pytest", "tests/test_x.py", "-v"],
+            "/some/foreign/project")
+        assert argv[:3] == ["python3", "-m", "pytest"]
+        assert argv[3] == "-c"
+        assert "tests/test_x.py" in argv
+        assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+
+        bare, _env = _inject_pytest_isolation(
+            ["/usr/bin/pytest", "tests/test_x.py"], "/some/foreign/project")
+        assert bare[0] == "/usr/bin/pytest"
+        assert bare[1] == "-c"
+
+    def test_non_pytest_argv_is_untouched_but_env_still_set(self, tmp_path):
+        """A project `command` pointing at another allowlisted binary keeps
+        its argv (we do not inject pytest flags into ruff), while the
+        plugin-autoload suppression still rides along — it is inert there."""
+        from agent.enforcement import _inject_pytest_isolation
+
+        argv, env = _inject_pytest_isolation(["ruff", "check", "x.py"],
+                                            "/some/foreign/project")
+        assert argv == ["ruff", "check", "x.py"]
+        assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" in env
+
+    def test_extra_env_off_allowlist_is_dropped(self, tmp_path, monkeypatch):
+        """`_run_timed_command` forwards only allowlisted extra vars.
+
+        The widening guard: a future caller cannot smuggle a code-executing
+        variable (PYTEST_ADDOPTS, PYTHONPATH, NODE_OPTIONS) through
+        *extra_env*.
+        """
+        from agent.enforcement import _run_timed_command
+
+        monkeypatch.setattr(
+            "agent.enforcement._get_scrubbed_env",
+            lambda: {"PATH": os.environ.get("PATH", "")},
+        )
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured.update(kwargs)
+            import subprocess as _sp
+            return _sp.CompletedProcess(argv, 0, b"", b"")
+
+        monkeypatch.setattr("agent.enforcement.subprocess.run", fake_run)
+        # argv[0] must pass the resolved-binary gate; python3 is a system bin.
+        run = _run_timed_command(["python3", "-c", "pass"], str(tmp_path), 10,
+                                 extra_env={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+                                            "PYTEST_ADDOPTS": "-p evil"})
+        assert run is not None, "gate refused python3 unexpectedly"
+        env = captured["env"]
+        assert env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") == "1"
+        assert "PYTEST_ADDOPTS" not in env, (
+            "a non-allowlisted extra var reached the subprocess env"
+        )
+
+
+# ── CONSOLIDATED audit Fix 7a (M5): the lint tier emits no npx ──────────────
+
+
+class TestConsolidatedFix7aLintTier:
+    """M5: `_detect_linter` never emits `npx`; `_check_lint` validates argv."""
+
+    def test_detect_linter_never_emits_npx(self, tmp_path, monkeypatch):
+        """`npx` is a package RUNNER — a registry fetch-and-execute.
+
+        SPEC-66 §11.2 removed it from _ALLOWED_BINARIES with "Do not re-add
+        it"; the JS lint path was missed. It now emits the resolved eslint
+        binary, or nothing at all when eslint is absent.
+        """
+        from agent.enforcement import _detect_linter
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "eslint.config.js").write_text("export default [];\n")
+
+        # eslint present → the RESOLVED path, never the npx shim.
+        fake_eslint = str(tmp_path / "bin" / "eslint")
+        monkeypatch.setattr("agent.enforcement.shutil.which",
+                            lambda name: fake_eslint if name == "eslint" else None)
+        detected = _detect_linter("src/a.js", str(proj))
+        assert detected is not None
+        _name, argv = detected
+        assert argv[0] == fake_eslint, argv
+        assert "npx" not in " ".join(argv)
+
+        # eslint absent → NO JS lint tier. Dropping it is the trade.
+        monkeypatch.setattr("agent.enforcement.shutil.which", lambda name: None)
+        assert _detect_linter("src/a.js", str(proj)) is None
+
+    def test_lint_pass_through_validate_test_command(self, tmp_path, monkeypatch):
+        """The audit's I6a: `_check_lint` never called the token allowlist.
+
+        An npx-first argv (however it got there) must be a visible REFUSED
+        check, not an execution.
+        """
+        from agent.enforcement import _check_lint
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "src").mkdir()
+        (proj / "src" / "a.js").write_text("let x = 1;\n")
+
+        monkeypatch.setattr(
+            "agent.enforcement._detect_linter",
+            lambda fp, pp: ("eslint", ["npx", "eslint", "src/a.js"]),
+        )
+        monkeypatch.setattr("agent.enforcement.shutil.which",
+                            lambda name: "/usr/bin/" + name)
+
+        def explode(*a, **k):  # pragma: no cover - must never run
+            raise AssertionError("the lint tier EXECUTED an npx argv")
+
+        monkeypatch.setattr("agent.enforcement._run_timed_command", explode)
+
+        result = _check_lint("src/a.js", str(proj), _make_config(), True)
+        assert result is not None
+        assert result.passed is False
+        assert "REFUSED" in result.detail
+        assert "allowlisted" in result.detail
+
+    def test_lint_allowlisted_argv_still_runs(self, tmp_path, monkeypatch):
+        """Control: a legitimate eslint argv is NOT blocked by the validator."""
+        from agent.enforcement import _check_lint
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "src").mkdir()
+        (proj / "src" / "a.js").write_text("let x = 1;\n")
+
+        monkeypatch.setattr(
+            "agent.enforcement._detect_linter",
+            lambda fp, pp: ("eslint", ["/usr/bin/eslint", "src/a.js"]),
+        )
+        monkeypatch.setattr("agent.enforcement.shutil.which",
+                            lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(
+            "agent.enforcement._validate_resolved_binary",
+            lambda argv, project: (True, argv[0]),
+        )
+        import subprocess as _sp
+        monkeypatch.setattr(
+            "agent.enforcement._run_timed_command",
+            lambda argv, project, timeout, extra_env=None: (
+                _sp.CompletedProcess(argv, 0, b"", b""), 5),
+        )
+        result = _check_lint("src/a.js", str(proj), _make_config(), True)
+        assert result is not None
+        assert result.passed is True, result.detail
+
+    def test_test_framework_detector_never_emits_npx(self, tmp_path, monkeypatch):
+        """The SAME defect in the TESTS tier: `npx jest` / `npx vitest`.
+
+        A cloned repository's package.json selected this branch, and the argv
+        then skipped `_validate_test_command` entirely (the auto-detect path
+        never calls it). `npx` is a registry fetch-and-execute, so it is the
+        same M5 defect one tier over.
+        """
+        from agent.enforcement import _detect_test_framework
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "package.json").write_text(
+            '{"devDependencies": {"jest": "^29.0.0"}}')
+
+        fake_jest = str(tmp_path / "bin" / "jest")
+        monkeypatch.setattr("agent.enforcement.shutil.which",
+                            lambda name: fake_jest if name == "jest" else None)
+        detected = _detect_test_framework(str(proj))
+        assert detected is not None
+        name, argv = detected
+        assert name == "jest"
+        assert argv[0] == fake_jest, argv
+        assert "npx" not in " ".join(argv)
+
+        # No jest on PATH → no JS test tier at all.
+        monkeypatch.setattr("agent.enforcement.shutil.which", lambda name: None)
+        assert _detect_test_framework(str(proj)) is None
+
+        # vitest is the same branch.
+        (proj / "package.json").write_text(
+            '{"devDependencies": {"vitest": "^1.0.0"}}')
+        fake_vitest = str(tmp_path / "bin" / "vitest")
+        monkeypatch.setattr("agent.enforcement.shutil.which",
+                            lambda name: fake_vitest if name == "vitest" else None)
+        detected = _detect_test_framework(str(proj))
+        assert detected is not None
+        assert detected[0] == "vitest"
+        assert "npx" not in " ".join(detected[1])
+
+
+# ── CONSOLIDATED audit Fix 8 (L-C) + C-B: the pytest flag grammar ────────────
+#
+# L-C: with Fix 8 reverted (`_validate_test_command` back to the HEAD
+# version, which had no per-binary rules at all) the whole of
+# tests/test_enforcement.py still passed. These tests fail under that revert
+# — and under the narrower C-B defect the audit found, where the rules keyed
+# on `base == "pytest"` while the tier's own argv is `python3 -m pytest`.
+
+
+class TestConsolidatedFix8PytestFlagGrammar:
+    """Fix 8 (M6): per-binary flags, keyed on the MODULE (C-B)."""
+
+    @pytest.mark.parametrize("command", [
+        "pytest -p evilplugin",                 # the bare spelling Fix 8 closed
+        "pytest --plugin evilplugin",
+        "pytest -pno:cacheprovider",            # value-attached short form
+        "pytest -c evil.ini",
+        "pytest --config evil.ini",
+        # C-B: the tier's OWN argv shape. Pre-fix these were all True, so the
+        # rules that refused the bare spelling never fired on the real argv.
+        "python3 -m pytest -p evilplugin",
+        "python3 -m pytest --plugin evilplugin",
+        "python3 -m pytest -c evil.ini",
+        "python3 -m pytest --config evil.ini",
+    ])
+    def test_pytest_plugin_and_config_flags_are_refused(self, command):
+        from agent.enforcement import _validate_test_command
+
+        assert _validate_test_command(command) is False, command
+
+    @pytest.mark.parametrize("command", [
+        "pytest tests/",
+        "pytest -q -x tests/",
+        "python3 -m pytest tests/",
+        "python3 -m pytest -q",
+        "python3 -m pytest --tb=short tests/",
+    ])
+    def test_ordinary_pytest_commands_stay_allowed(self, command):
+        """The boundary: over-refusal must not swallow ordinary pytest flags."""
+        from agent.enforcement import _validate_test_command
+
+        assert _validate_test_command(command) is True, command
+
+    def test_module_keyed_rules_see_the_tier_default_shape(self):
+        """C-B: the refusal is the SAME rule, not a second spelling table.
+
+        `python3 -m pytest -p evil` and `pytest -p evil` must produce the
+        same refusal — the module resolution is what makes that true.
+        """
+        from agent.enforcement import _module_base, argv_refusal
+
+        assert _module_base("python3", ["-m", "pytest", "-p", "x"]) == ("pytest", ["-p", "x"])
+        assert argv_refusal(["python3", "-m", "pytest", "-p", "evil"]) is not None
+        assert argv_refusal(["pytest", "-p", "evil"]) is not None
+        # An UNKNOWN module is not a pytest invocation — it stays a python
+        # invocation, so the rules do not silently apply to something else.
+        assert _module_base("python3", ["-m", "mymod", "-p", "x"]) == (
+            "python3", ["-m", "mymod", "-p", "x"])
+
+
+class TestConsolidatedCBExtraArgsValidated:
+    """C-B: `test.extra_args` reaches the tier argv — so it is validated.
+
+    Pre-fix: `extra_args: "-p evilplugin"` imported and executed project code
+    while the tier reported PASSED (probe 4, P1). A refusal must be a
+    VISIBLE FAILED tier naming the surface — never a silent skip (a skip
+    false-PASSes the write) and never a pass.
+    """
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    def _project_with_extra_args(self, tmp_path, extra_args: str):
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\n")
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        marker = tmp_path / "MARKER_PLUGIN"
+        # A root-level plugin module is importable: `python -m` puts the cwd
+        # on sys.path[0] (the audit's syspath probe).
+        (proj / "evilplugin.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('plugin ran')\n")
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"extra_args": extra_args, "venv_path": ".venv"},
+        })
+        return str(proj), marker
+
+    def test_extra_args_plugin_is_a_visible_failed_tier(self, tmp_path):
+        proj, marker = self._project_with_extra_args(tmp_path, "-p evilplugin")
+        result = _check_tests("feature.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None, "extra_args refusal SKIPPED the tier (false PASS)"
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail
+        assert "extra_args" in result.detail, result.detail
+        assert not marker.exists(), "C-B OPEN: project-chosen plugin EXECUTED"
+
+    def test_extra_args_plugin_with_the_tier_default_shape(self, tmp_path):
+        """C-B item 2's shape: the tier argv is `python3 -m pytest`.
+
+        This is the row that stays open if the rules key on `base ==
+        "pytest"` instead of the module: the extra_args token is appended
+        after `-m pytest`, so a base-keyed rule never sees it.
+        """
+        proj, marker = self._project_with_extra_args(tmp_path, "--plugin evilplugin")
+        result = _check_tests("feature.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail
+        assert not marker.exists(), "C-B OPEN: --plugin EXECUTED"
+
+    def test_ordinary_extra_args_still_run(self, tmp_path):
+        """Control: the gate does not degrade the tier into a refusal machine."""
+        proj, _marker = self._project_with_extra_args(tmp_path, "-x -q")
+        result = _check_tests("feature.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+
+    def test_extra_args_validator_refuses_unparseable(self):
+        """An unparseable fragment is not trusted (same posture as `command`)."""
+        from agent.enforcement import _validate_test_extra_args
+
+        assert _validate_test_extra_args("-x -q", ["python3", "-m", "pytest"]) is None
+        assert _validate_test_extra_args("", ["python3", "-m", "pytest"]) is None
+        assert _validate_test_extra_args(
+            "-p 'evil", ["python3", "-m", "pytest"]) is not None
+
+
+class TestCCPythonPositionalThroughTheRealTier:
+    """C-C (PM RULING 2026-11-23) through `_check_tests`, end to end.
+
+    The unit tests pin `_validate_test_command`; this class pins the TIER:
+    a project whose `enforcement.json` `test.command` is `python3 runner.py`
+    must produce a visible FAILED tests check, and `runner.py` must not run.
+    A marker file written by the runner is the proof — if the command ever
+    executes, the marker exists.
+    """
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    def _project(self, tmp_path):
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\n")
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        return proj
+
+    def test_python_script_command_is_a_visible_failed_tier(self, tmp_path):
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_C_C"
+        # The script writes the marker the instant it runs — so its absence
+        # proves the refusal, not merely a failing script.
+        (proj / "runner.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n")
+        _write_enforcement_json(str(proj), {
+            "test": {"command": "python3 runner.py", "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, (
+            "C-C: a refused test.command SKIPPED the tier instead of failing it")
+        assert result.passed is False, result.detail
+        assert result.tier == "tests"
+        assert "REFUSED" in result.detail, result.detail
+        assert "positional" in result.detail, result.detail
+        assert not marker.exists(), "C-C OPEN: python3 runner.py EXECUTED"
+
+    def test_module_command_still_runs(self, tmp_path):
+        """Control: the ban does not disable the ordinary `-m pytest` shape."""
+        proj = self._project(tmp_path)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"command": "python3 -m pytest {test_file} -q",
+                     "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+
+
+class TestConsolidatedCB1PytestPositionalRefused:
+    """C-B-1 (PM RULING 2026-11-23): a pytest positional is an IMPORT target.
+
+    C-B closed the FLAG half of this surface (`-p`, `--plugin`, `-c`); the
+    positional half was the spelling still admitted, and pytest imports the
+    file it is told to collect — `pytest evil.py` runs `evil.py` while the
+    tier reports PASSED.
+
+    The rule applies to PROJECT-SUPPLIED argv only. The tier appends its own
+    related-test path as a positional, so a rule over the ASSEMBLED argv would
+    refuse the tier's own default invocation and silently disable the tests
+    tier everywhere (the TRAP). `_check_tests` validates before it appends;
+    the controls here are the proof that an ordinary project still RUNS.
+    """
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    def _project(self, tmp_path):
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\n")
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        return proj
+
+    def test_unit_pytest_positional_is_refused(self):
+        """Both spellings, because the rules key on the MODULE (C-B)."""
+        from agent.enforcement import argv_refusal
+
+        for argv in (["pytest", "evil.py"],
+                     ["python3", "-m", "pytest", "evil.py"]):
+            reason = argv_refusal(argv)
+            assert reason is not None, f"C-B-1 OPEN: {argv} admitted"
+            assert "import target" in reason, reason
+
+    def test_unit_pytest_flags_only_are_allowed(self):
+        """Control: the rule is about the positional, not about pytest."""
+        from agent.enforcement import argv_refusal
+
+        for argv in (["pytest", "-q"], ["python3", "-m", "pytest", "-q"],
+                     ["python3", "-m", "pytest"], ["pytest", "tests/"],
+                     ["pytest", "tests"]):
+            assert argv_refusal(argv) is None, argv
+
+    def test_extra_args_pytest_positional_is_a_visible_failed_tier(self, tmp_path):
+        """The payload is a ROOT-LEVEL module pytest would import."""
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_CB1"
+        (proj / "evil.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n")
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"extra_args": "evil.py", "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, (
+            "C-B-1: a refused extra_args SKIPPED the tier (false PASS)")
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail, result.detail
+        assert "extra_args" in result.detail, result.detail
+        assert not marker.exists(), "C-B-1 OPEN: pytest imported the payload"
+
+    def test_full_suite_command_pytest_positional_is_a_visible_failed_tier(
+        self, tmp_path
+    ):
+        """Third field: the full-suite template is project-supplied too."""
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_CB1_FULL"
+        (proj / "evil.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n")
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"full_suite_command": "python3 -m pytest evil.py",
+                     "run_full_suite": True, "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "C-B-1: refusal skipped the tier"
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail, result.detail
+        assert not marker.exists(), "C-B-1 OPEN: full_suite imported the payload"
+
+    def test_ordinary_project_tests_tier_still_runs(self, tmp_path):
+        """THE CONTROL (brief §1): no enforcement test section at all.
+
+        This is the run the TRAP would break: the tier builds its own argv,
+        appends the related test path, and must still pass.
+        """
+        proj = self._project(tmp_path)
+        _create_real_venv(str(proj))
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "the tests tier did not run at all"
+        assert result.passed is True, result.detail
+        assert "test_feature.py" in result.detail, result.detail
+
+    def test_ordinary_template_project_tests_tier_still_runs(self, tmp_path):
+        """THE CONTROL for `{test_file}`: the shipped template shape.
+
+        `python3 -m pytest {test_file} -q` must NOT be refused — the token the
+        project wrote is `{test_file}`, and the tier substitutes it after
+        validation.
+        """
+        proj = self._project(tmp_path)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"command": "python3 -m pytest {test_file} -q",
+                     "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "the tests tier did not run at all"
+        assert result.passed is True, result.detail
+
+
+class TestConsolidatedM1TestsDirConvention:
+    """M-1 (re-audit): `<src_dir>/__tests__/{module}.py` is a gate bypass.
+
+    That is `_find_related_test`'s FOURTH candidate, and its basename is just
+    the module name — neither `test_*.py` nor `*_test.py`. The gate matched
+    names, the tier follows conventions. Closed by ONE shared definition
+    (`agent.enforcement.is_tier_test_target`) that both readers use.
+    """
+
+    def test_unit_tests_dir_file_is_a_test_target(self):
+        from agent.enforcement import is_tier_test_target
+
+        assert is_tier_test_target("src/__tests__/feature.py") is True
+        assert is_tier_test_target("__tests__/feature.py") is True
+        # Lookalikes that are NOT under a `__tests__` directory stay out.
+        for name in ("src/feature.py", "src/tests/feature.py",
+                     "src/__test__/feature.py", "src/__tests__/feature.js",
+                     "src/__tests__/feature.txt"):
+            assert is_tier_test_target(name) is False, name
+
+    def test_unit_tier_and_gate_agree_on_every_candidate(self, tmp_path):
+        """THE point of M-1: one definition, so the two cannot drift.
+
+        Every path `_find_related_test` actually RETURNS for a project must be
+        a path the write gate treats as a test file. Each candidate is forced
+        in turn by removing the ones that would match first.
+        """
+        from agent.enforcement import _find_related_test
+        from agent.tools import is_test_file_name
+
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / "src").mkdir()
+        (proj / "src" / "feature.py").write_text("x = 1\n")
+
+        # (where the test lives, the files that must NOT exist for this row).
+        rows = [
+            ("tests/test_feature.py", []),
+            ("tests/feature_test.py", ["tests/test_feature.py"]),
+            ("src/test_feature.py",
+             ["tests/test_feature.py", "tests/feature_test.py"]),
+            ("src/__tests__/feature.py",
+             ["tests/test_feature.py", "tests/feature_test.py",
+              "src/test_feature.py"]),
+        ]
+        for rel, shadowed in rows:
+            for stale in shadowed:
+                (proj / stale).unlink(missing_ok=True)
+            path = proj / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("def test_ok():\n    assert True\n")
+            found = _find_related_test("src/feature.py", str(proj))
+            assert found == rel.replace("/", os.sep), (rel, found)
+            assert is_test_file_name(found) is True, found
+
+
+class TestConsolidatedMEFullSuiteCommandIsLive:
+    """M-E: `full_suite_command` alone was DEAD (only read inside the
+    `if test_config.command:` branch). RESOLUTION: made live on its own.
+
+    The project below has NO detectable framework (no ini, no pyproject, no
+    setup.cfg, no package.json, no Makefile), so `_detect_test_framework`
+    returns None. Pre-fix the tier therefore returned None — no check at
+    all; post-fix the configured full suite runs and reports.
+    """
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    def _project(self, tmp_path):
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "feature.py").write_text("x = 1\n")
+        # `other.py` deliberately has NO related test, so the full-suite
+        # branch is the one that produces the check (otherwise the detail
+        # would name the related test and prove nothing about the branch).
+        (proj / "other.py").write_text("y = 2\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        _create_real_venv(str(proj))
+        return str(proj)
+
+    def test_full_suite_command_runs_with_no_command_field(self, tmp_path):
+        from agent.enforcement import _detect_test_framework
+
+        proj = self._project(tmp_path)
+        assert _detect_test_framework(proj) is None, (
+            "the discriminator needs an undetectable framework")
+        _write_enforcement_json(proj, {
+            "test": {
+                "run_full_suite": True,
+                "full_suite_command": "python3 -m pytest tests/ -q",
+                "venv_path": ".venv",
+            },
+        })
+        result = _check_tests("other.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None, (
+            "M-E OPEN: full_suite_command alone produced NO check"
+        )
+        assert result.passed is True, result.detail
+        assert "Full test suite" in result.detail, result.detail
+
+    def test_unsafe_full_suite_command_is_still_refused(self, tmp_path):
+        """The now-live field keeps its token-allowlist gate.
+
+        P3: this used to accept `result is None or result.passed is False`,
+        i.e. it tolerated the silent skip. A skip reports no tests check at
+        all, which reads as a clean write — so the assertion is tightened to
+        the visible FAILED check the refusal must now produce.
+        """
+        marker = tmp_path / "PWNED_ME"
+        proj = self._project(tmp_path)
+        _write_enforcement_json(proj, {
+            "test": {
+                "run_full_suite": True,
+                "full_suite_command": f"sh -c 'touch {marker}'",
+                "venv_path": ".venv",
+            },
+        })
+        result = _check_tests("other.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None, "refused full_suite_command skipped silently"
+        assert result.passed is False
+        assert result.detail.startswith("REFUSED: test.full_suite_command"), result.detail
+        assert not marker.exists()
+        assert not os.path.exists("/tmp/PWNED_ME")
+
+    def test_command_field_still_wins_when_both_are_set(self, tmp_path):
+        """Unchanged behavior for projects that already set `command`."""
+        proj = self._project(tmp_path)
+        _write_enforcement_json(proj, {
+            "test": {
+                "command": "python3 -m pytest {test_file} -q",
+                "full_suite_command": "python3 -m pytest tests/ -q",
+                "run_full_suite": True,
+                "venv_path": ".venv",
+            },
+        })
+        result = _check_tests("other.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+        # run_full_suite + full_suite_command is the documented precedence.
+        assert "Full test suite" in result.detail, result.detail
+
+    # ── P3: a refused full_suite_command is a visible FAILED tier ──
+
+    def test_p3_refused_full_suite_alone_is_visible_failed(self, tmp_path):
+        """Only `full_suite_command` set (no `command`), refused value →
+        exactly one tests check, FAILED, naming the field. Pre-fix this
+        branch returned None and the write read as clean."""
+        marker = tmp_path / "P3_ALONE_RAN"
+        proj = self._project(tmp_path)
+        _write_enforcement_json(proj, {
+            "test": {
+                "run_full_suite": True,
+                "full_suite_command": f"sh -c 'touch {marker}'",
+                "venv_path": ".venv",
+            },
+        })
+        result = check(
+            "write_file", {"path": "other.py"},
+            ToolResult(success=True, output="", error="", duration_ms=1,
+                       stdout="", stderr="", exit_code=0),
+            proj, _make_config(),
+        )
+        tests_checks = [c for c in result.checks if c.tier == "tests"]
+        assert len(tests_checks) == 1, [c.tier for c in result.checks]
+        assert tests_checks[0].passed is False, tests_checks[0].detail
+        assert tests_checks[0].detail.startswith(
+            "REFUSED: test.full_suite_command"), tests_checks[0].detail
+        assert "sh" in tests_checks[0].detail, tests_checks[0].detail
+        assert not marker.exists(), "the refused command was EXECUTED"
+
+    def test_p3_refused_full_suite_beats_command_field(self, tmp_path):
+        """`command` also set + `run_full_suite` true + refused
+        `full_suite_command` → the FIRST full_suite branch refuses visibly
+        (that branch shadowed `command`, so its silent skip hid a live
+        project field)."""
+        marker = tmp_path / "P3_BOTH_RAN"
+        proj = self._project(tmp_path)
+        _write_enforcement_json(proj, {
+            "test": {
+                "command": "python3 -m pytest {test_file} -q",
+                "run_full_suite": True,
+                "full_suite_command": f"sh -c 'touch {marker}'",
+                "venv_path": ".venv",
+            },
+        })
+        result = check(
+            "write_file", {"path": "other.py"},
+            ToolResult(success=True, output="", error="", duration_ms=1,
+                       stdout="", stderr="", exit_code=0),
+            proj, _make_config(),
+        )
+        tests_checks = [c for c in result.checks if c.tier == "tests"]
+        assert len(tests_checks) == 1, [c.tier for c in result.checks]
+        assert tests_checks[0].passed is False, tests_checks[0].detail
+        assert tests_checks[0].detail.startswith(
+            "REFUSED: test.full_suite_command"), tests_checks[0].detail
+        assert not marker.exists(), "the refused command was EXECUTED"
+
+    def test_p3_allowed_full_suite_is_not_refused(self, tmp_path):
+        """Control: an allowed `full_suite_command` still runs and passes —
+        the refusal must not swallow legitimate commands."""
+        proj = self._project(tmp_path)
+        _write_enforcement_json(proj, {
+            "test": {
+                "run_full_suite": True,
+                "full_suite_command": "python3 -m pytest tests/ -q",
+                "venv_path": ".venv",
+            },
+        })
+        result = _check_tests("other.py", proj, _make_config(), syntax_passed=True)
+        assert result is not None
+        assert result.passed is True, result.detail
+        assert "REFUSED" not in result.detail, result.detail
+        assert "Full test suite" in result.detail, result.detail
+
+    def test_p3_refusal_reports_for_both_full_suite_spellings(self, tmp_path):
+        """The reachable `full_suite_command` refusal configs must all report
+        — reverting the executed branch to `return None` fails here.
+
+        NOTE ON BRANCH 2: the bare `elif test_config.full_suite_command`
+        site is currently UNREACHABLE. Any config that could get there is
+        already consumed by the guard `if related_test is None and not
+        run_full_suite: return None` or by the first `run_full_suite and
+        full_suite_command` branch, so both cases below actually exercise
+        the first branch. Branch 2 is still converted (it must not be a
+        silent skip if it ever becomes reachable); the structural test that
+        follows is what pins it.
+        """
+        marker = tmp_path / "P3_REVERT_RAN"
+        refused = f"sh -c 'touch {marker}'"
+        cases = {
+            "with_command": {
+                "command": "python3 -m pytest {test_file} -q",
+                "run_full_suite": True,
+                "full_suite_command": refused,
+                "venv_path": ".venv",
+            },
+            "without_command": {
+                "run_full_suite": True,
+                "full_suite_command": refused,
+                "venv_path": ".venv",
+            },
+        }
+        for name, test_cfg in cases.items():
+            _write_enforcement_json(self._project(tmp_path / name), {"test": test_cfg})
+            proj = str(tmp_path / name / "proj")
+            result = _check_tests("other.py", proj, _make_config(),
+                                  syntax_passed=True)
+            assert result is not None, f"{name}: refused full_suite_command skipped silently"
+            assert result.passed is False, f"{name}: {result.detail}"
+            assert result.detail.startswith(
+                "REFUSED: test.full_suite_command"), f"{name}: {result.detail}"
+        assert not marker.exists(), "a refused command was EXECUTED"
+
+    def test_p3_all_three_refusal_sites_use_the_shared_helper(self):
+        """Revert detector for every refusal site, including the currently
+        unreachable branch-2 `elif`: each `if not _validate_test_command(...)`
+        body must return through `_tests_refused_check`, and no such body may
+        contain a `return None`. Restoring the silent skip at any site fails
+        here even though only two sites are reachable behaviorally."""
+        import inspect
+
+        src = inspect.getsource(_check_tests)
+        assert src.count("_tests_refused_check(") == 3, (
+            "a refusal site no longer reports through the shared helper")
+
+        lines = src.splitlines()
+
+        def _refusal_body(idx: int, indent: int) -> str:
+            """Lines more-indented than the `if`, i.e. the refusal body."""
+            body = []
+            for line in lines[idx + 1:]:
+                if not line.strip():
+                    body.append(line)
+                    continue
+                if len(line) - len(line.lstrip()) <= indent:
+                    break
+                body.append(line)
+            return "\n".join(body)
+
+        sites = 0
+        for i, line in enumerate(lines):
+            if "if not _validate_test_command(" not in line:
+                continue
+            sites += 1
+            body = _refusal_body(i, len(line) - len(line.lstrip()))
+            assert "_tests_refused_check(" in body, (
+                f"refusal at line {i + 1} no longer reports a check:\n{body}")
+            assert "return None" not in body, (
+                f"refusal at line {i + 1} regressed to a silent skip:\n{body}")
+        assert sites == 3, f"expected 3 refusal sites, found {sites}"
+
+

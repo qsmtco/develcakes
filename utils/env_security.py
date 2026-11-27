@@ -5,11 +5,14 @@
 # post-write enforcement) must NOT inherit API keys, gateway tokens, or other
 # sensitive env vars. The allowlist is intentionally narrow:
 #   - PATH, HOME, LANG, LC_ALL, LANGUAGES, TZ, TMPDIR, PWD
+#   - PYTEST_DISABLE_PLUGIN_AUTOLOAD (CONSOLIDATED audit Fix 3)
 #
 # Anything not on the allowlist is dropped. This includes:
 #   - Provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 #   - Gateway tokens / device-auth
 #   - User shell customizations that might leak secrets
+#   - The code-executing vars: PYTEST_ADDOPTS, PYTHONPATH, PYTHONSTARTUP,
+#     NODE_OPTIONS, MYPY_CONFIG_FILE, RUFF_CONFIG, GOFLAGS, GIT_CONFIG_*
 #   - Anything the user happens to have in their environment
 #
 # The allowlist is the same one enforcement.py used previously (Phase 0).
@@ -32,6 +35,12 @@ ALLOWED_SUBPROCESS_ENV_VARS: frozenset[str] = frozenset({
     "TZ",        # timezone-aware tools
     "TMPDIR",    # temp file locations
     "PWD",       # shell prompts / some scripts
+    # CONSOLIDATED audit Fix 3 (C2): a SUPPRESSION variable, not a loader.
+    # pytest reads it itself and can only REFUSE to auto-load setuptools
+    # entry-point plugins — it cannot add one. Allowing it is strictly
+    # narrowing, which is why it belongs here while PYTEST_ADDOPTS (which
+    # injects arbitrary argv, `-p evilplugin` included) must stay out.
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
 })
 
 

@@ -458,53 +458,31 @@ _CODER_SHELL_REFUSAL = (
 
 
 def _sensitive_relpath(path_arg: str, project_path: str) -> str | None:
-    """Project-relative form of a tool call's path, or None.
+    """Sensitive project-relative name for a tool call's path, or None.
 
-    SPEC-66 §2.1/§12.1: the runtime-level approval gate used the RAW
-    model string (``./.crabcakes/x``, ``foo/../.crabcakes/x``), which does
-    not start with the ``.crabcakes/`` prefix ``is_sensitive_path``
-    matches — the exact input the gate exists to defeat. This resolves the
-    path against the project and returns its project-relative form, the
-    same normalization ``agent/tools.py`` applies. None when the path does
-    not resolve inside the project (nothing to gate — the tool refuses it).
+    CONSOLIDATED audit Fix 6 (M1): this is now a thin delegation to
+    ``agent.tools.sensitive_reason`` — the ONE derivation of the sensitive
+    gate decision (resolved form → lexical form → alias walk). Before,
+    the runtime re-derived the decision with its own copy of the same
+    three disjuncts; two copies could drift blind together on the next
+    edit. The tool gate (``_write_file``/``_edit_file``), the runtime
+    approval gate below, and the ``bypass_approval`` flag further down all
+    consume the same function now.
 
-    SPEC-66 BUG #2: ``os.path.realpath`` follows symlinks, so a sensitive
-    NAME pointed at a plain target (a cloned repo can ship
-    ``.crabcakes/enforcement.json -> notes/enforcement.json``) looked
-    benign to the resolved check. Both forms are therefore tested, and the
-    sensitive one is returned — this function is the single source of the
-    gate decision, so the approval gate below and the ``bypass_approval``
-    flag further down cannot disagree with each other. When neither form
-    is sensitive the resolved form is returned unchanged.
+    SPEC-66 §2.1/BUG #2/BUG #1 history is preserved inside
+    ``sensitive_reason``: resolved form (where the bytes land), lexical
+    form (a sensitive NAME spelled plainly), and the alias walk (a
+    sensitive name hard-linked or symlinked — including a DANGLING link —
+    to the plain destination).
 
-    SPEC-66 BUG #1 (report #6): both of those forms describe ONE name. A
-    SENSITIVE name that is a symlink or a hard link to the plain
-    destination (including a DANGLING link the write would create through)
-    is invisible to both, so the alias walk is the third disjunct.
+    Returns the project-relative SENSITIVE name, or None when the path
+    does not resolve inside the project or nothing about it is sensitive.
     """
     if not isinstance(path_arg, str) or not path_arg.strip():
         return None
-    from agent.tools import (
-        _resolve_project_path,
-        _project_relpath,
-        _lexical_relpath,
-        _sensitive_alias_of,
-        is_sensitive_path,
-    )
+    from agent.tools import sensitive_reason
 
-    resolved = _resolve_project_path(path_arg, project_path)
-    if resolved is None:
-        return None
-    rel = _project_relpath(resolved, project_path)
-    if is_sensitive_path(rel):
-        return rel
-    lexical = _lexical_relpath(path_arg, project_path)
-    if is_sensitive_path(lexical):
-        return lexical
-    alias = _sensitive_alias_of(resolved, project_path)
-    if alias is not None:
-        return _project_relpath(alias, project_path)
-    return rel
+    return sensitive_reason(path_arg, project_path)
 
 
 def _coder_shell_allowed(command: str, project_path: str) -> str | None:
@@ -2841,8 +2819,6 @@ class AgentRuntime:
         conv.add_assistant_message(text_content, tool_call_objects)
 
         # Import once per loop iteration (avoid repeated import overhead)
-        import agent.tools as agent_tools_module
-
         from agent.llm.extractors import TRUNCATED_ARGUMENTS, is_truncated_arguments
 
         runs = _parallel_runs(tool_calls_raw, is_truncated_arguments)
@@ -2936,7 +2912,17 @@ class AgentRuntime:
                 if tool_name in ("write_file", "edit_file"):
                     path_arg = args.get("path", "")
                     rel_path = _sensitive_relpath(path_arg, conv.project_path or "")
-                    if rel_path is not None and agent_tools_module.is_sensitive_path(rel_path):
+                    # CONSOLIDATED audit Fix 6 (M1) + C-A + M-A: `rel_path`
+                    # is the DECISION, not a candidate — `sensitive_reason`
+                    # returns non-None only when a sensitive name is
+                    # involved, and it is the one derivation the tool gate
+                    # uses too. Re-deriving here with a fresh
+                    # `is_sensitive_path(rel_path)` would be the drift Fix 6
+                    # removed, and it goes BLIND for an M-A worktree alias
+                    # whose sensitive path lies outside the project root
+                    # (`../main/.git/worktrees/wt/config.worktree` matches
+                    # no root-anchored prefix).
+                    if rel_path is not None:
                         approved = self._dispatch_approval(session_key, tool_name, args)
                         logger.debug("[tool-loop] sk=%s %s sensitive approval: %s",
                                      session_key, tool_name, approved)
@@ -2973,12 +2959,13 @@ class AgentRuntime:
                 # taken for a path the gate had just approved — the tool then
                 # asked for approval a second time.
                 # SPEC-66 BUG #2: rel_path is the form _sensitive_relpath found
-                # sensitive (resolved preferred, lexical fallback), so a
-                # symlinked sensitive name gates AND bypasses consistently.
+                # sensitive (resolved, lexical, or alias — including an M-A
+                # worktree alias outside the root), so a symlinked/hard-linked
+                # sensitive name gates AND bypasses consistently. Same
+                # single-decision rule as the gate above: non-None IS sensitive.
                 bypass_approval = (tool_name == "exec_command" or
                                    (tool_name in ("write_file", "edit_file") and
-                                    rel_path is not None and
-                                    agent_tools_module.is_sensitive_path(rel_path)))
+                                    rel_path is not None))
                 per_call_cb = (lambda *a: True) if bypass_approval else None
                 # LOW-2: validate the session workspace. The return value
                 # is unread (dead binding removed) — the required side

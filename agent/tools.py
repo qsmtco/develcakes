@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
 import re
@@ -351,37 +352,143 @@ _BLOCKLIST = [
     ":(){:|:&};:",    # fork bomb
 ]
 
-# HIGH-1: Sensitive path patterns — write/edit to these paths requires PM approval
-# even if the project sandbox would technically allow them.
-# Patterns use glob-style matching (fnmatch) relative to project root.
 # HIGH-1: Sensitive path patterns — write/edit to these requires PM approval.
 # Per security audit (HIGH-1) and Q5 user decision (2026-06-18).
-# Format: (kind, pattern) where kind is "prefix" or "glob".
+# Format: (kind, pattern). The four kinds and their exact matching rules —
+# an earlier comment claimed "any depth" for prefixes, which was FALSE
+# (CONSOLIDATED audit D3); each kind now states what it actually does:
+#
+#   "prefix"    — ROOT-ANCHORED: `norm.startswith(pattern)`, so it matches at
+#                 the project root only. `sub/.crabcakes/x` does NOT match.
+#   "component" — the component sequence may appear at ANY depth. Used where
+#                 a nested path is itself behaviour-bearing.
+#   "exact"     — ROOT-RELATIVE exact name: `norm == pattern`.
+#   "glob"      — BASENAME glob (fnmatch), so it matches at ANY depth by
+#                 construction. This is the real "any depth" mechanism (D3).
+#
+# Leading-dot files are handled separately in is_sensitive_path below.
 _SENSITIVE_PATH_PATTERNS: tuple[tuple[str, str], ...] = (
-    # Prefix matches — path components sensitive at any depth
+    # Root-anchored prefixes (project-relative from the root — see above)
     ("prefix", ".git/"),
     ("prefix", ".crabcakes/"),
     ("prefix", ".github/"),
-    # Basename glob matches
+    # CONSOLIDATED audit Fix 1 (C1): `.git/hooks/` is sensitive on the NAME
+    # alone, at any depth — the alias walk is the second line, not the only
+    # one. git EXECUTES every file here (pre-commit, prepare-commit-msg,
+    # post-checkout, ...), so a plain-name write that lands on one must ask
+    # even when no alias is visible to the walk.
+    ("component", ".git/hooks/"),
+    # CONSOLIDATED audit Fix 1 (M7): root-level git-executed CONFIG. The
+    # names are already leading-dot sensitive; their ALIAS (a hard link from
+    # a plain working-tree name) was not, and `.gitattributes`
+    # `filter=`/`diff=` lines name commands git RUNS.
+    ("exact", ".gitattributes"),
+    ("exact", ".gitignore"),
+    # Basename glob matches (any depth — the BASENAME is the subject)
     ("glob", "Makefile"),
     ("glob", "*.toml"),
     ("glob", "*.yml"),
     ("glob", "*.yaml"),
     ("glob", "*hook*"),
     ("glob", "*venv*"),
-    # Leading-dot files handled separately in is_sensitive_path below.
+    # CONSOLIDATED audit Fix 2 (C2, C3, D1, D2, L1): the files the
+    # ENFORCEMENT TOOLCHAIN reads or imports. These are ordinary project
+    # files — the PM will see approval cards for legitimate edits to
+    # setup.cfg / package.json. That is the INTENDED posture: the file the
+    # tool loads is not ours to trust. `pytest` IMPORTS every conftest.py on
+    # the collection path (arbitrary code), eslint EXECUTES
+    # eslint.config.js, and sitecustomize.py / usercustomize.py are imported
+    # by every interpreter that sees them on sys.path.
+    ("glob", "conftest.py"),          # ANY depth — pytest imports it
+    ("glob", "pytest.ini"),           # pytest config: addopts is code
+    ("glob", "setup.cfg"),            # [tool:pytest] + mypy config
+    ("glob", "tox.ini"),              # tox config
+    ("glob", "mypy.ini"),             # mypy config
+    ("glob", "eslint.config.js"),     # plain JS, EXECUTED by eslint
+    ("glob", "package.json"),         # jest/vitest detector reads it
+    ("glob", "requirements*.txt"),    # pip instantiates it
+    ("glob", "noxfile.py"),           # nox IMPORTS it
+    ("glob", "sitecustomize.py"),     # auto-imported by every python
+    ("glob", "usercustomize.py"),     # auto-imported by every python
 )
 
+# ── CONSOLIDATED audit C-A: the test file the tier IMPORTS ──────────────────
+#
+# `_check_tests` points pytest at the project's own test file, and pytest
+# COLLECTS AND IMPORTS every target — the module's top-level code runs. Fix 3
+# isolated the CONFIG layer (`-c`, `--confcutdir`, `--noconftest`,
+# PYTEST_DISABLE_PLUGIN_AUTOLOAD); it cannot isolate the CODE layer, because
+# the test file IS the code under test. So the WRITE is gated instead: a
+# write/edit of a test file asks the PM, exactly like the toolchain-config
+# names above. What the tier READS is unchanged — this is a gate on the
+# write, not a change to collection.
+#
+# The name patterns mirror `_find_related_test`'s conventions so the gate
+# covers every name the tier will actually point pytest at. Re-audit M-1: the
+# answer now comes from ONE definition
+# (`agent.enforcement.is_tier_test_target`), imported at use so the gate and
+# the tier cannot drift. Read it THERE — a second copy of the patterns in this
+# module is exactly the drift M-1 closed.
 
-def is_sensitive_path(path: str) -> bool:
+
+def test_file_write_gate_applies(project_path: str = "") -> bool:
+    """SCOPE of the C-A test-file write gate — EVERY project, app included.
+
+    PM RULING 2026-11-23 (closing the C-A open question): the gate covers
+    every project, with no exception for the app's own project. This is a
+    ruling, not a placeholder — there is no app-exempt alternative, so this
+    function takes no decision and always returns True.
+
+    The reason it is unconditional: the chain C-A describes is exactly a file
+    the TEST TIER imports. The app's own tree is the Coder's default working
+    directory, so an app exemption would leave that chain reachable in the
+    one place the agent works every day.
+    """
+    return True
+
+
+def is_test_file_name(path: str) -> bool:
+    """True when `path` is one the tests tier could point pytest at.
+
+    M-1 (re-audit): the answer is the SHARED definition
+    `agent.enforcement.is_tier_test_target` — the same conventions
+    `_find_related_test` searches, including `<src_dir>/__tests__/{module}.py`,
+    whose basename is just the module name. Imported at use, so the gate and
+    the tier cannot drift and `agent.tools` keeps no import-time dependency on
+    `agent.enforcement`.
+    """
+    if not path:
+        return False
+    from agent.enforcement import is_tier_test_target
+
+    return is_tier_test_target(path)
+
+
+def is_sensitive_path(path: str, project_path: str = "") -> bool:
     """Return True if `path` requires PM approval before write/edit.
 
     HIGH-1 (per security audit): gates writes to build/CI infrastructure
     (.git/, .crabcakes/, .github/, Makefile, *.toml, *.yml, *.yaml,
     *hook*, *venv*) and leading-dot files in any directory.
+    CONSOLIDATED audit Fix 1: also `.git/hooks/` at any depth and the
+    root-level git-executed config (`.gitattributes`, `.gitignore`).
+    CONSOLIDATED audit Fix 2: also the files the enforcement toolchain
+    reads or imports (conftest.py at any depth, pytest.ini, setup.cfg,
+    tox.ini, mypy.ini, eslint.config.js, package.json, requirements*.txt,
+    noxfile.py, sitecustomize.py, usercustomize.py).
+    CONSOLIDATED audit C-A: also a test file (`test_*.py`, `*_test.py`) —
+    the tests tier points pytest at exactly those names and pytest IMPORTS
+    what it collects. Scope is decided by `test_file_write_gate_applies`.
+    Re-audit M-1 adds the `<src_dir>/__tests__/{module}.py` convention; the
+    predicate is `agent.enforcement.is_tier_test_target` (see
+    `is_test_file_name`).
     These files can affect the enforcement pipeline, shell environment, or
     build/test execution graph. Tampering achieves RCE or supply-chain compromise.
     Per audit and Q5 user decision (2026-06-18).
+
+    Kind semantics are documented above `_SENSITIVE_PATH_PATTERNS`; the
+    "any depth" claim is carried by ``glob`` (basename) and ``component``,
+    NOT by ``prefix`` (which is root-anchored — CONSOLIDATED audit D3).
     """
     import fnmatch
     if not path:
@@ -391,8 +498,16 @@ def is_sensitive_path(path: str) -> bool:
     basename = norm.split("/")[-1]
     if not basename:
         return False
+    padded = "/" + norm.strip("/") + "/"
     for kind, pattern in _SENSITIVE_PATH_PATTERNS:
         if kind == "prefix" and norm.startswith(pattern):
+            return True
+        if kind == "component":
+            # The component sequence at ANY depth, as whole components only
+            # (`notes/.git/hooks/pre-commit` matches; `x.git/hooksy` does not).
+            if padded.find("/" + pattern.strip("/") + "/") >= 0:
+                return True
+        if kind == "exact" and norm == pattern:
             return True
         if kind == "glob":
             # For *venv* and *hook*, check full path since these names
@@ -403,6 +518,11 @@ def is_sensitive_path(path: str) -> bool:
                     return True
             elif fnmatch.fnmatch(basename, pattern):
                 return True
+    # CONSOLIDATED audit C-A: the test file the tier IMPORTS. Scope comes
+    # from the single switch `test_file_write_gate_applies` — this is the
+    # only call site, so a PM ruling on scope is one edit there.
+    if test_file_write_gate_applies(project_path) and is_test_file_name(norm):
+        return True
     # Leading-dot files in any directory (but not . or ..)
     if basename.startswith(".") and basename not in (".", ".."):
         return True
@@ -684,19 +804,146 @@ def _lexical_relpath(path: str, project_path: str) -> str:
 # destination.
 #
 # `.crabcakes/` and `.github/` are walked fully (they are small). `.git/` is
-# walked at the TOP LEVEL and in `refs/` only: `objects/` holds content-
-# addressed hash names that cannot be name-aliased to a working file, and a
-# full object walk costs tens of thousands of stats per write.
+# walked at the TOP LEVEL plus every subtree that is NAME-ALIASABLE and
+# BEHAVIOUR-BEARING:
+#
+#   hooks/      git EXECUTES every file here (C1 — the headline chain)
+#   info/       info/attributes is git-executed config (same class as
+#               .gitattributes: filter=/diff= name commands)
+#   worktrees/  a linked worktree's config.worktree drives that worktree
+#               (core.hooksPath=... reaches arbitrary executables)
+#   modules/    a submodule's git dir — its config/hooks are the same surface
+#   logs/       the reflog: rewriting history out from under the PM
+#   branches/   legacy branch config
+#   refs/       ref contents (SPEC-66 BUG #1 — already walked)
+#
+# `objects/` stays EXCLUDED, and the justification is the one the audit asked
+# for in writing: an object file's NAME is a content-addressed hash of its
+# BYTES, so no working-tree name can be chosen to alias one — the alias
+# direction cannot be constructed from the working tree. (A hard link OUT of
+# objects/ makes the OBJECT the sensitive side of a link whose plain name
+# lives elsewhere; that direction is a corruption vector for the object store,
+# not an approval-bypass for a file the agent names, and a full walk costs
+# tens of thousands of stats per write — recorded as known, not chased.)
 _SENSITIVE_ALIAS_DIRS = (".crabcakes", ".git", ".github")
-_GIT_ALIAS_SUBDIRS = ("refs",)
+_GIT_ALIAS_SUBDIRS = ("refs", "hooks", "info", "worktrees", "modules", "logs",
+                      "branches")
 
-# project_real → (dirs, mtimes_tuple, [(path, lstat, readlink_or_None)])
-# SPEC-66 BUG #1 perf: a write must not rescan .crabcakes/ + .git/ every
-# time. Adding or removing an entry bumps the containing directory's mtime,
-# so the signature is one (mtime_ns, dev, ino) triple per directory the last
-# walk VISITED — not per entry. A rejected signature costs a handful of
-# lstat calls; only a real change pays for a tree walk.
+# CONSOLIDATED audit M-A: a linked worktree's `.git` is a FILE holding
+# `gitdir: <path>`. The pointer is PROJECT-SUPPLIED and may name a directory
+# OUTSIDE the project root, so the chain it is followed through is bounded
+# and every link must pass `_looks_like_git_dir`. Four is enough for
+# worktree git dir → commondir → main repo, with slack for a nested
+# submodule; the bound is what stops a pointer loop.
+_GITDIR_POINTER_MAX_BYTES = 4096
+_GITDIR_CHAIN_LIMIT = 4
+
+# Root-level git-executed config names. The project ROOT is not one of the
+# walked dirs, so these have no alias scan there — CONSOLIDATED audit Fix 1
+# (M7) names them explicitly. Their own names are already sensitive
+# (leading-dot / exact in _SENSITIVE_PATH_PATTERNS); this list makes the
+# ALIAS direction (a plain hard link to one of them) visible too.
+_ROOT_GIT_CONFIG_FILES = (".gitattributes", ".gitignore")
+
+# CONSOLIDATED audit Fix 4 (M3): the alias scan's perf cache is GONE from
+# the security decision. The old `(mtime_ns, dev, ino)` dir signature could
+# be restored with `os.utime` after planting an entry — the planted alias
+# then rode the cached entry list forever. The audit's prescribed closure:
+# re-verify the ONE destination at use time against a fresh, UNCACHED scan.
+# `_sensitive_alias_of` now scans the sensitive dirs directly per call; the
+# dirs are small (`.crabcakes/`, `.github/`, `.git/` top level + the seven
+# name-aliasable subtrees; `objects/` stays excluded on the hash-name
+# argument documented above), so the walk is a handful of `scandir` calls —
+# no cache to defeat, no TTL to race.
 _ALIAS_ENTRY_CACHE: dict[str, tuple[tuple, tuple, list[tuple]]] = {}
+
+
+def _read_gitdir_file(path: str) -> str | None:
+    """The `gitdir:` target of a linked worktree's `.git` FILE, or None.
+
+    A linked worktree's `.git` is a ONE-LINE text file (CONSOLIDATED audit
+    M-A): `gitdir: /path/.git/worktrees/<name>`. Read as a file only — a
+    directory (an ordinary repo) yields None, and a huge or unreadable file
+    is refused rather than parsed.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > _GITDIR_POINTER_MAX_BYTES:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            line = fh.readline().strip()
+    except OSError:
+        return None
+    if not line.lower().startswith("gitdir:"):
+        return None
+    target = line[len("gitdir:"):].strip()
+    return target or None
+
+
+def _looks_like_git_dir(path: str) -> bool:
+    """Sanity gate for a pointer target: a git dir has `HEAD` or `commondir`.
+
+    M-A constraint — the `gitdir:` line is PROJECT-SUPPLIED and the resolved
+    dir may lie outside the project root, so the scan must not be steerable
+    at an arbitrary directory. This gate is what keeps it honest: the walk
+    only ever adds a directory git itself would call a git dir. It cannot
+    HIDE an alias either, because the chain we walk (worktree git dir →
+    `commondir` → main repo) is exactly the chain git resolves when it
+    decides which hooks to execute.
+    """
+    try:
+        if not os.path.isdir(path):
+            return False
+    except OSError:
+        return False
+    return (os.path.isfile(os.path.join(path, "HEAD"))
+            or os.path.isfile(os.path.join(path, "commondir")))
+
+
+def _worktree_git_dirs(project_real: str) -> list[str]:
+    """Git dirs a linked worktree's `.git` FILE points at (M-A), else [].
+
+    In a linked worktree `<worktree>/.git` is a FILE, so `os.scandir` on it
+    raises NotADirectoryError → the whole alias scan yielded ZERO entries and
+    the C1 chain was fully open in an agent's default working directory
+    (`<repo>/.worktrees/<agent_id>`, SPEC-09 SP0). This resolves the pointer
+    and returns the dirs that must be walked instead:
+
+      * the WORKTREE git dir itself (top level carries `config.worktree`,
+        which names commands git runs), and
+      * the COMMON dir it shares with the main repo (its `commondir` file),
+        which is where `hooks/` actually lives — T1 in the audit's probe 13.
+
+    The chain is bounded (``_GITDIR_CHAIN_LIMIT``) and every link must pass
+    `_looks_like_git_dir`, so a bogus pointer cannot point the walk
+    anywhere. The returned paths are used for the SCAN only — nothing here
+    widens what a write may target.
+    """
+    if os.path.isdir(os.path.join(project_real, ".git")):
+        return []  # ordinary repo: the directory walk below already covers it
+    pointer = _read_gitdir_file(os.path.join(project_real, ".git"))
+    if pointer is None:
+        return []
+    found: list[str] = []
+    current = os.path.normpath(os.path.join(project_real, pointer))
+    for _ in range(_GITDIR_CHAIN_LIMIT):
+        real = os.path.realpath(current)
+        if real in found or not _looks_like_git_dir(real):
+            break
+        found.append(real)
+        try:
+            with open(os.path.join(real, "commondir"), "r",
+                      encoding="utf-8", errors="replace") as fh:
+                common = fh.readline().strip()
+        except OSError:
+            break
+        if not common:
+            break
+        current = os.path.normpath(os.path.join(real, common))
+    return found
 
 
 def _alias_scan_roots(project_real: str) -> list[tuple[str, bool]]:
@@ -705,71 +952,136 @@ def _alias_scan_roots(project_real: str) -> list[tuple[str, bool]]:
     for name in _SENSITIVE_ALIAS_DIRS:
         top = os.path.join(project_real, name)
         if name == ".git":
-            # Top level only, plus refs/ — objects/ is content-addressed
-            # hash names and a full walk costs tens of thousands of stats.
-            roots.append((top, False))
-            for sub in _GIT_ALIAS_SUBDIRS:
-                roots.append((os.path.join(top, sub), True))
+            # Top level, plus every NAME-ALIASABLE subtree. objects/ stays
+            # out — see the hash-name justification above. A linked
+            # worktree's `.git` is a FILE (M-A), so the same two shapes are
+            # repeated for every git dir the pointer resolves to.
+            git_dirs = [top] if os.path.isdir(top) else []
+            git_dirs.extend(_worktree_git_dirs(project_real))
+            for git_dir in git_dirs:
+                roots.append((git_dir, False))
+                for sub in _GIT_ALIAS_SUBDIRS:
+                    roots.append((os.path.join(git_dir, sub), True))
         else:
             roots.append((top, True))
     return roots
 
 
-def _alias_signature(dirs: tuple) -> tuple:
-    """(dir, None) when absent, else (dir, mtime_ns, dev, ino) per dir."""
-    signature: list[tuple] = []
-    for directory in dirs:
-        try:
-            st = os.lstat(directory)
-        except OSError:
-            signature.append((directory, None))
-        else:
-            signature.append((directory, st.st_mtime_ns, st.st_dev, st.st_ino))
-    return tuple(signature)
+def _alias_scan_root_files(project_real: str) -> list[str]:
+    """Root-level sensitive FILES that have no walked dir (CONSOLIDATED M7).
+
+    The project root is not one of `_SENSITIVE_ALIAS_DIRS`, so a hard link
+    from a plain working-tree name to a root config file is invisible to the
+    directory walk. These are stat'd directly instead — O(1) each.
+    """
+    return [os.path.join(project_real, name) for name in _ROOT_GIT_CONFIG_FILES]
 
 
 def _alias_scan(project_real: str) -> list[tuple]:
-    """(path, lstat, readlink_or_None) for every entry in the sensitive dirs."""
-    roots = _alias_scan_roots(project_real)
-    root_dirs = tuple(root for root, _recurse in roots)
+    """(path, lstat, readlink_or_None) for every entry in the sensitive dirs.
 
-    cached = _ALIAS_ENTRY_CACHE.get(project_real)
-    if cached is not None and _alias_signature(cached[0]) == cached[1]:
-        return cached[2]
-
+    CONSOLIDATED audit Fix 4 (M3): UNCACHED. This list feeds a security
+    decision, and the previous mtime-signature cache was cheaply defeatable
+    (`os.utime` restores the signature after planting an entry). The walk
+    is bounded by the small sensitive dirs (see `_alias_scan_roots`), so it
+    runs on every gate evaluation. `_ALIAS_ENTRY_CACHE` is kept as a name
+    (empty, never read or written) so stale references fail loudly instead
+    of stranding an import; remove it in a later cleanup round.
+    """
     entries: list[tuple] = []
-    visited: list[str] = []
-
-    def visit(directory: str, recurse: bool) -> None:
-        visited.append(directory)
-        subdirs: list[str] = []
-        try:
-            with os.scandir(directory) as it:
-                paths = [e.path for e in it]
-        except OSError:
-            return
-        for path in paths:
-            try:
-                est = os.lstat(path)
-            except OSError:
-                continue
-            link = None
-            if stat.S_ISLNK(est.st_mode):
-                try:
-                    link = os.readlink(path)
-                except OSError:
-                    link = None
-            entries.append((path, est, link))
-            if recurse and stat.S_ISDIR(est.st_mode):
-                subdirs.append(path)
-        for sub in sorted(subdirs):
-            visit(sub, recurse)
-
-    for root, recurse in roots:
-        visit(root, recurse)
-    dirs = root_dirs + tuple(d for d in visited if d not in root_dirs)
-    _ALIAS_ENTRY_CACHE[project_real] = (dirs, _alias_signature(dirs), entries)
+    for root, recurse in _alias_scan_roots(project_real):
+        _alias_visit(root, recurse, entries)
     return entries
+
+
+def _alias_visit(directory: str, recurse: bool, entries: list[tuple]) -> None:
+    try:
+        with os.scandir(directory) as it:
+            paths = [e.path for e in it]
+    except OSError:
+        return
+    subdirs: list[str] = []
+    for path in paths:
+        try:
+            est = os.lstat(path)
+        except OSError:
+            continue
+        link = None
+        if stat.S_ISLNK(est.st_mode):
+            try:
+                link = os.readlink(path)
+            except OSError:
+                link = None
+        entries.append((path, est, link))
+        if recurse and stat.S_ISDIR(est.st_mode):
+            subdirs.append(path)
+    for sub in sorted(subdirs):
+        _alias_visit(sub, recurse, entries)
+
+
+def sensitive_reason(path_arg: str, project_path: str) -> str | None:
+    """The sensitive project-relative name a write/edit would touch, or None.
+
+    CONSOLIDATED audit Fix 6 (M1): one source of truth for the sensitive
+    gate. `_write_file`/`_edit_file` here and `_sensitive_relpath` in
+    `agent/runtime.py` used to each re-derive the decision (resolved form,
+    lexical form, alias walk) — two derivations that cannot disagree today
+    only because they were written the same, and both could go blind
+    together on the next edit. This function IS the derivation now:
+
+      1. RESOLVED form — where the bytes land (realpath'd).
+      2. LEXICAL form — a sensitive NAME spelled plainly still gates even
+         when it resolves somewhere plain (`.crabcakes/x -> notes/x`).
+      3. ALIAS — a sensitive name hard-linked or symlinked (including a
+         DANGLING link the write would create through) to the plain
+         destination. Detected by the uncached Fix 4 scan.
+
+    Returns the project-relative SENSITIVE name (for the approval card),
+    or None when nothing about the write touches a sensitive name. When
+    nothing is sensitive the resolved relative form is NOT returned —
+    callers that need it for other purposes compute it themselves; this
+    function answers exactly one question: is there a sensitive name
+    involved, and which one.
+
+    The runtime gate consumes this directly, so the approval gate and the
+    `bypass_approval` flag it derives remain in lockstep by construction.
+
+    SCOPE — what is BY DESIGN outside this gate (CONSOLIDATED Fix 13/L2, L3).
+    This function answers only for project-supplied PATHS handed to
+    write_file/edit_file. Several writing surfaces never come near it, and
+    that is intentional, because for each one the PATH is the app's own and
+    only the CONTENT is agent-controlled:
+
+      * `diary` → `.crabcakes/context.md`, via
+        `utils/project_awareness.append_project_context`
+      * write_file's append-only special branch for that same
+        `.crabcakes/context.md` (appends, never rewrites, and only there)
+      * `project_memory` → `.crabcakes/memory/` — a path-escape was probed
+        and refuted (audit R15)
+      * `agent/persistence` → the conversation transcript under `.crabcakes/`
+      * `feed_card`'s `file` field — validated project-relative (audit R16)
+
+    None of these is in this gate's threat model. The gate stops a
+    project-supplied path from steering the agent into host-sensitive
+    locations; it is not a content review of agent-authored text landing in
+    app-owned state directories. Do not "fix" these by routing them through
+    this function — see docs/ARCHITECTURE.md §3.21u.
+    """
+    if not isinstance(path_arg, str) or not path_arg.strip():
+        return None
+    resolved = _resolve_project_path(path_arg, project_path)
+    if resolved is None:
+        return None
+    rel = _project_relpath(resolved, project_path)
+    if is_sensitive_path(rel, project_path):
+        return rel
+    lexical = _lexical_relpath(path_arg, project_path)
+    if is_sensitive_path(lexical, project_path):
+        return lexical
+    alias = _sensitive_alias_of(resolved, project_path)
+    if alias is not None:
+        return _project_relpath(alias, project_path)
+    return None
 
 
 def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
@@ -792,11 +1104,17 @@ def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
           it, and there is no inode to compare).
 
     Performance: `.crabcakes/` and `.github/` are walked fully (small).
-    `.git/` walks ONLY the top level and `refs/` — `objects/` is
-    content-addressed hash names (not name-aliasable to a working file) and a
-    full object walk costs tens of thousands of stats per write. Cache the
-    per-project entry list keyed on the visited dirs' mtimes (any entry
-    add/remove bumps the dir mtime) so repeated writes don't rescan.
+    `.git/` walks the top level plus the NAME-ALIASABLE subtrees
+    (`hooks/`, `info/`, `worktrees/`, `modules/`, `logs/`, `branches/`,
+    `refs/`) — `objects/` is excluded on the hash-name argument documented
+    beside `_GIT_ALIAS_SUBDIRS`. Cache the per-project entry list keyed on
+    the visited dirs' mtimes (any entry add/remove bumps the dir mtime) so
+    repeated writes don't rescan.
+
+    CONSOLIDATED audit Fix 1 (M7): the project ROOT is not walked, so the
+    root-level git config files are stat'd directly (O(1) each) by the (a)
+    comparison below — a hard link from a working-tree name to
+    `.gitattributes` / `.gitignore` is a write to git-executed config.
     """
     if not resolved_dest or not project_path:
         return None
@@ -807,6 +1125,21 @@ def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
         dest_st = None
     dest_key = (dest_st.st_dev, dest_st.st_ino) if dest_st is not None else None
     dest_norm = os.path.normpath(resolved_dest)
+
+    # Root-level config FILES (M7): same inode as the destination? These have
+    # no walked directory, so they are not in the cached entry list.
+    if dest_key is not None:
+        for root_file in _alias_scan_root_files(project_real):
+            if os.path.normpath(root_file) == dest_norm:
+                continue  # the destination IS the root config; lexical has it
+            try:
+                rf_st = os.lstat(root_file)
+            except OSError:
+                continue
+            if stat.S_ISLNK(rf_st.st_mode):
+                continue  # symlink targets are handled by the lexical form
+            if (rf_st.st_dev, rf_st.st_ino) == dest_key:
+                return root_file
 
     for entry, entry_st, link in _alias_scan(project_real):
         if os.path.normpath(entry) == dest_norm:
@@ -830,6 +1163,37 @@ def _sensitive_alias_of(resolved_dest: str, project_path: str) -> str | None:
     return None
 
 
+def _atomic_write_nofollow(dest: str, data: bytes) -> None:
+    """Write bytes to dest, refusing a symlinked FINAL component.
+
+    CONSOLIDATED audit Fix 5 (hardening, pairs with Fix 4): the sensitive
+    gate checks an inode, and a plain `open(dest, "w")` follows whatever
+    sits at dest when it runs — a symlink swapped in after the check would
+    take the bytes instead. `O_NOFOLLOW` makes that swap a hard ELOOP
+    failure rather than a silent redirect, so the write lands on the inode
+    that was checked.
+
+    Scope, honestly stated: this binds the FINAL component only. A symlink
+    swapped into a leading directory component is still followed by the
+    kernel (a full openat-walk would close that; recorded as future work
+    with the audit). A hard link swapped for the checked inode cannot be
+    refused by ANY open flag — that direction is closed by Fix 4's
+    uncached scan at decision time, not here.
+
+    Truncation (O_TRUNC) plus a single full write preserves the old
+    `open(..., "w")` semantics for the approved inode.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(dest, flags, 0o666)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
+
+
 def _write_file(path: str, content: str, project_path: str, session_key: str = "", approval_callback=None) -> ToolResult:
     """Write content to a file relative to project_path."""
     resolved = _resolve_project_path(path, project_path)
@@ -837,25 +1201,13 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
         return ToolResult(success=False, error=f"Path escapes project sandbox: {path}")
 
     # HIGH-1: Sensitive-path guard — require PM approval before writing.
-    # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
-    # The raw model string (`./.crabcakes/x`, `foo/../.crabcakes/x`) does
-    # not start with `.crabcakes/`, so gating on it skipped approval.
-    # SPEC-66 BUG #2: also gate on the LEXICAL form. A symlink can give a
-    # sensitive NAME a plain target (`.crabcakes/enforcement.json ->
-    # notes/enforcement.json`), so the resolved form alone is blind. The
-    # resolved spelling wins in the approval args (it is where the bytes
-    # land); the lexical form is used when only it is sensitive.
-    rel = _project_relpath(resolved, project_path)
-    lex = _lexical_relpath(path, project_path)
-    sensitive_rel = rel if is_sensitive_path(rel) else (
-        lex if is_sensitive_path(lex) else None)
-    # SPEC-66 BUG #1 (report #6): neither form is sensitive when the plain
-    # TARGET name is written while the sensitive name is an alias (symlink or
-    # hard link) to it. Name the SENSITIVE side on the card.
-    if sensitive_rel is None:
-        alias = _sensitive_alias_of(resolved, project_path)
-        if alias is not None:
-            sensitive_rel = _project_relpath(alias, project_path)
+    # CONSOLIDATED audit Fix 6 (M1): the gate decision is ONE derivation
+    # now — `sensitive_reason` — shared with `agent/runtime.py`'s
+    # `_sensitive_relpath` so the tool gate and the runtime gate (and the
+    # `bypass_approval` flag it feeds) cannot disagree or drift blind.
+    # SPEC-66 §2.1/BUG #2/BUG #1 are preserved inside that function:
+    # resolved form, lexical form, alias walk.
+    sensitive_rel = sensitive_reason(path, project_path)
     if sensitive_rel is not None:
         approved = _get_approval(session_key, "write_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
@@ -897,8 +1249,23 @@ def _write_file(path: str, content: str, project_path: str, session_key: str = "
         byte_count = len(content.encode("utf-8"))
         if byte_count > MAX_WRITE_SIZE:
             return ToolResult(success=False, error=f"Content too large ({byte_count} bytes, max {MAX_WRITE_SIZE})")
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+        # CONSOLIDATED audit Fix 5: O_NOFOLLOW write — see
+        # `_atomic_write_nofollow`. ELOOP means dest became a symlink
+        # after the gate checked it; refuse rather than redirect.
+        try:
+            _atomic_write_nofollow(resolved, content.encode("utf-8"))
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Refusing to write {path}: destination became a "
+                        f"symlink after the sensitive-path check (ELOOP). "
+                        f"The bytes would land somewhere other than the "
+                        f"approved location."
+                    ),
+                )
+            raise
         return ToolResult(success=True, output=f"OK — wrote {byte_count} bytes to {path}")
     except PermissionError:
         return ToolResult(success=False, error=f"Permission denied: {path}")
@@ -1058,20 +1425,10 @@ def _edit_file(
         )
 
     # HIGH-1: Sensitive-path guard — require PM approval before editing.
-    # SPEC-66 §2.1: gate on the RESOLVED path's project-relative form.
-    # SPEC-66 BUG #2: the LEXICAL form is checked too — a symlinked
-    # sensitive name (`.crabcakes/enforcement.json -> notes/x.json`)
-    # resolves to a plain path and would otherwise edit without approval.
-    rel = _project_relpath(resolved, project_path)
-    lex = _lexical_relpath(path, project_path)
-    sensitive_rel = rel if is_sensitive_path(rel) else (
-        lex if is_sensitive_path(lex) else None)
-    # SPEC-66 BUG #1 (report #6): a plain TARGET name whose sensitive alias
-    # (symlink or hard link) points at it — gate on the SENSITIVE name.
-    if sensitive_rel is None:
-        alias = _sensitive_alias_of(resolved, project_path)
-        if alias is not None:
-            sensitive_rel = _project_relpath(alias, project_path)
+    # CONSOLIDATED audit Fix 6 (M1): same single derivation as
+    # `_write_file` — `sensitive_reason`. SPEC-66 §2.1/BUG #2/BUG #1 all
+    # live inside that one function now.
+    sensitive_rel = sensitive_reason(path, project_path)
     if sensitive_rel is not None:
         approved = _get_approval(session_key, "edit_file", {"path": sensitive_rel}, approval_callback=approval_callback)
         if not approved:
@@ -1172,8 +1529,23 @@ def _edit_file(
         byte_count = len(new_content.encode("utf-8"))
         if byte_count > MAX_WRITE_SIZE:
             return ToolResult(success=False, error=f"Resulting file too large ({byte_count} bytes, max {MAX_WRITE_SIZE})")
-        with open(resolved, "w", encoding="utf-8", newline="") as f:
-            f.write(new_content)
+        # CONSOLIDATED audit Fix 5: O_NOFOLLOW write — see
+        # `_atomic_write_nofollow`. newline="" semantics are preserved by
+        # writing the already-composed new_content bytes verbatim.
+        try:
+            _atomic_write_nofollow(resolved, new_content.encode("utf-8"))
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Refusing to write {path}: destination became a "
+                        f"symlink after the sensitive-path check (ELOOP). "
+                        f"The bytes would land somewhere other than the "
+                        f"approved location."
+                    ),
+                )
+            raise
         word = "occurrence" if replaced == 1 else "occurrences"
         snippet = _snippet_around(new_content, anchor)
         return ToolResult(
