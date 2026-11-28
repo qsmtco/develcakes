@@ -3165,6 +3165,228 @@ class TestConsolidatedCB1PytestPositionalRefused:
         assert result.passed is True, result.detail
 
 
+class TestBug2AttachedModuleRefused:
+    """SPEC-66 BUG #2 follow-up: the ATTACHED `-m<module>` spelling.
+
+    `_module_base` recognised `-m` only as its own token, so `python3 -mpwn`
+    never resolved a module, `_python_positional_refusal` saw no positional,
+    and the project's module RAN while the tier reported PASSED.
+
+    The attached forms here were measured on CPython 3.12, not guessed:
+    `-mpwn`, `-impwn`, `-OOmpwn`, `-umpwn`, `-Werror -mpwn` all run the
+    module; a `-W`/`-X`/`-Q`/`-c` token CONSUMES the rest as a value, so a
+    `-m` after one of those is inside the value, not an option.
+    """
+
+    def setup_method(self):
+        _TEST_CONFIG_CACHE.clear()
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+
+    @pytest.mark.parametrize("argv", [
+        ["python3", "-mpwn"],
+        ["python3", "-m", "pwn"],
+        ["python3", "-mpwn", "-q"],
+        ["python3", "-Werror", "-mpwn"],
+        ["python3", "-I", "-mpwn"],
+        ["python", "-mpwn"],
+        ["py", "-mpwn"],
+        # Measured cluster forms: no-argument letters before the `-m`.
+        ["python3", "-Impwn"],
+        ["python3", "-OOmpwn"],
+        ["python3", "-umpwn"],
+        ["python3", "-Xdev", "-mpwn"],
+        # The module-keyed rules must see the attached spelling too.
+        ["python3", "-mpytest", "-p", "evilplugin"],
+        ["python3", "-mpytest", "evil.py"],
+    ])
+    def test_attached_module_spelling_is_refused(self, argv):
+        from agent.enforcement import argv_refusal
+
+        assert argv_refusal(argv) is not None, f"BUG #2 OPEN: {argv} admitted"
+
+    @pytest.mark.parametrize("command", [
+        "python3 -mpwn",
+        "python3 -m pwn",
+        "python3 -mpwn -q",
+        "python3 -Werror -mpwn",
+        "python3 -I -mpwn",
+        "python -mpwn",
+        "py -mpwn",
+        "python3 -mpytest -p evilplugin",
+        "python3 -mpytest evil.py",
+    ])
+    def test_attached_module_command_field_is_refused(self, command):
+        from agent.enforcement import _validate_test_command
+
+        assert _validate_test_command(command) is False, command
+
+    @pytest.mark.parametrize("argv", [
+        ["python3", "-m", "pytest"],
+        ["python3", "-mpytest"],
+        ["python3", "-mpytest", "-q"],
+    ])
+    def test_legitimate_attached_runner_stays_allowed(self, argv):
+        """Pin the boundary: do not over-refuse the runner's own spelling."""
+        from agent.enforcement import argv_refusal
+
+        assert argv_refusal(argv) is None, argv
+
+    @pytest.mark.parametrize("command", [
+        "python3 -m pytest",
+        "python3 -mpytest",
+        "python3 -mpytest -q",
+    ])
+    def test_legitimate_attached_runner_command_field_allowed(self, command):
+        from agent.enforcement import _validate_test_command
+
+        assert _validate_test_command(command) is True, command
+
+    def test_attached_form_is_normalised_not_re_implemented(self):
+        """ONE fix: `_module_base` normalises, so every caller benefits."""
+        from agent.enforcement import _module_base
+
+        assert _module_base("python3", ["-mpwn", "-q"]) == (
+            "python3", ["-m", "pwn", "-q"])
+        assert _module_base("python3", ["-mpytest", "-p", "x"]) == (
+            "pytest", ["-p", "x"])
+        # A value-consuming option keeps its attached value: `-Werror` is the
+        # filter `error`, never module `rror`.
+        assert _module_base("python3", ["-Werror", "-mpwn"]) == (
+            "python3", ["-W", "error", "-m", "pwn"])
+        # Already-split flags pass through untouched (idempotent).
+        assert _module_base("python3", ["-m", "pytest", "-q"]) == (
+            "pytest", ["-q"])
+
+    def test_revert_guard_attached_m_handling_required(self):
+        """Fails if the attached-`-m` normalisation is removed.
+
+        Reverting `_split_attached_python_options` from `_module_base` puts
+        `-mpwn` back in `flags` unresolved: the first assertion (the module
+        is split out) breaks, and `python3 -mpwn` is admitted again.
+        """
+        from agent.enforcement import _module_base, argv_refusal
+
+        assert _module_base("python3", ["-mpwn"]) == (
+            "python3", ["-m", "pwn"]), "attached -m not split"
+        assert argv_refusal(["python3", "-mpwn"]) is not None, "BUG #2 OPEN"
+        assert argv_refusal(["python3", "-mpytest", "-p", "x"]) is not None
+
+    def _project(self, tmp_path):
+        proj = tmp_path / "proj"
+        (proj / "tests").mkdir(parents=True)
+        (proj / ".crabcakes").mkdir()
+        (proj / "pytest.ini").write_text("[pytest]\n")
+        (proj / "feature.py").write_text("x = 1\n")
+        (proj / "other.py").write_text("y = 2\n")
+        (proj / "tests" / "test_feature.py").write_text(
+            "def test_ok():\n    assert True\n")
+        return proj
+
+    def _add_payload(self, proj, marker):
+        """A root-level module `python3 -m pwn` resolves and executes."""
+        (proj / "pwn.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n")
+
+    def test_attached_m_command_is_a_visible_failed_tier(self, tmp_path):
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_BUG2_CMD"
+        self._add_payload(proj, marker)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"command": "python3 -mpwn", "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "BUG #2: the refusal SKIPPED the tier"
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail, result.detail
+        assert not marker.exists(), "BUG #2 OPEN: python3 -mpwn EXECUTED"
+
+    def test_attached_m_full_suite_is_a_visible_failed_tier(self, tmp_path):
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_BUG2_FULL"
+        self._add_payload(proj, marker)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"full_suite_command": "python3 -mpwn",
+                     "run_full_suite": True, "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "BUG #2: the refusal SKIPPED the tier"
+        assert result.passed is False, result.detail
+        assert "REFUSED" in result.detail, result.detail
+        assert not marker.exists(), "BUG #2 OPEN: full suite EXECUTED -mpwn"
+
+    def test_extra_args_attached_m_is_a_pytest_flag_not_an_option(
+        self, tmp_path
+    ):
+        """`extra_args` is appended AFTER `-m pytest`, so its `-mpwn` token is
+        a PYTEST argument (the `-m` marker expression), not an interpreter
+        option — no module is resolved or executed, and it behaves exactly
+        like the split spelling `-m pwn`. Asserting the PARITY is the honest
+        claim: the attached form opens no new surface here.
+        """
+        from agent.enforcement import _validate_test_extra_args
+
+        tier_argv = ["python3", "-m", "pytest"]
+        assert _validate_test_extra_args("-mpwn", tier_argv) is None
+        assert _validate_test_extra_args("-m pwn", tier_argv) is None
+
+        proj = self._project(tmp_path)
+        marker = tmp_path / "MARKER_BUG2_EXTRA"
+        self._add_payload(proj, marker)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"extra_args": "-mpwn", "venv_path": ".venv"},
+        })
+
+        attached = _check_tests("feature.py", str(proj), _make_config(),
+                                syntax_passed=True)
+        assert attached is not None, "the tests tier did not run at all"
+        assert not marker.exists(), "BUG #2 OPEN: -mpwn executed pwn.py"
+
+        _ENFORCEMENT_CONFIG_CACHE.clear()
+        _write_enforcement_json(str(proj), {
+            "test": {"extra_args": "-m pwn", "venv_path": ".venv"},
+        })
+        split = _check_tests("feature.py", str(proj), _make_config(),
+                             syntax_passed=True)
+        assert split is not None
+        assert attached.passed is split.passed, (attached.detail, split.detail)
+        assert attached.detail == split.detail, (
+            "the attached and split spellings must be indistinguishable: "
+            f"{attached.detail!r} vs {split.detail!r}")
+
+    def test_ordinary_project_tests_tier_still_runs(self, tmp_path):
+        """CONTROL: the tier's own `python3 -m pytest` argv is unaffected."""
+        proj = self._project(tmp_path)
+        _create_real_venv(str(proj))
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "the tests tier did not run at all"
+        assert result.passed is True, result.detail
+        assert "test_feature.py" in result.detail, result.detail
+
+    def test_ordinary_template_project_tests_tier_still_runs(self, tmp_path):
+        """CONTROL for `{test_file}`: the shipped template shape still runs."""
+        proj = self._project(tmp_path)
+        _create_real_venv(str(proj))
+        _write_enforcement_json(str(proj), {
+            "test": {"command": "python3 -m pytest {test_file} -q",
+                     "venv_path": ".venv"},
+        })
+
+        result = _check_tests("feature.py", str(proj), _make_config(),
+                              syntax_passed=True)
+        assert result is not None, "the tests tier did not run at all"
+        assert result.passed is True, result.detail
+
+
 class TestConsolidatedM1TestsDirConvention:
     """M-1 (re-audit): `<src_dir>/__tests__/{module}.py` is a gate bypass.
 

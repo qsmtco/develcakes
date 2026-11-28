@@ -316,6 +316,10 @@ def _validate_test_command(command: str | None) -> bool:
     emits: ``python3 -m pytest -p evilplugin`` passed while the bare
     ``pytest -p evilplugin`` was refused. `_module_base` resolves the
     module, so both spellings hit the same rules.
+
+    SPEC-66 BUG #2 follow-up: this covers the ATTACHED spelling too
+    (``python3 -mpwn``, ``python3 -Impwn``) — `_module_base` normalises it
+    to ``-m <module>`` before resolving, so it is judged by the same rules.
     """
     if not command or not command.strip():
         return False
@@ -342,6 +346,71 @@ _KNOWN_PYTHON_MODULES = ("pytest", "ruff", "mypy", "eslint", "go", "node")
 _PYTHON_BASES = ("python", "python3", "py")
 
 
+# SPEC-66 BUG #2 follow-up: short interpreter options whose VALUE can be
+# attached to the same token. Verified against CPython 3.12 (probe, this
+# repo's venv), not assumed:
+#
+#   python3 -mpwn     runs pwn      python3 -impwn   runs pwn
+#   python3 -OOmpwn   runs pwn      python3 -umpwn   runs pwn
+#   python3 -Werror -mpwn  runs pwn python3 -Xdev -mpwn  runs pwn
+#   python3 -Werror   NO module (a warning filter is the value)
+#
+# `-m`, `-c`, `-W`, `-X` and `-Q` all CONSUME the rest of their token as a
+# value, so a `-m` after one of them is part of that value, not an option.
+# Every OTHER short letter is a no-argument flag, which is why a cluster
+# (`-Impwn`, `-OOmpwn`) still ends in a module name.
+_PYTHON_ATTACHED_VALUE_LETTERS = ("c", "m", "W", "X", "Q")
+
+
+def _split_python_option_token(tok: str) -> list[str]:
+    """Split ONE attached interpreter option into its two-token spelling.
+
+    `-mpwn` -> `["-m", "pwn"]`; a cluster prefix is split out too
+    (`-Impwn` -> `["-I", "-m", "pwn"]`, `-OOmpwn` -> `["-OO", "-m", "pwn"]`).
+
+    The scan stops at the FIRST value-consuming letter
+    (`_PYTHON_ATTACHED_VALUE_LETTERS`), because from that point the rest of
+    the token is a VALUE: `-Werror` is the warning filter `error` and must
+    not read as module `rror`. A lone option (`-m`, `-W`) is returned
+    untouched — its value is the NEXT token, which needs no splitting.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 3:
+        return [tok]
+    letters = tok[1:]
+    for pos, ch in enumerate(letters):
+        if ch not in _PYTHON_ATTACHED_VALUE_LETTERS:
+            continue
+        value = letters[pos + 1:]
+        if not value:
+            return [tok]
+        if pos == 0:
+            return ["-" + ch, value]
+        # `tok[:pos + 1]` keeps the leading '-' AND the no-argument letters
+        # before the value letter: `-Impwn` (pos 1) -> "-I".
+        return [tok[:pos + 1], "-" + ch, value]
+    return [tok]
+
+
+def _split_attached_python_options(flags: list[str]) -> list[str]:
+    """Rewrite attached interpreter options in `flags` to two-token form.
+
+    SPEC-66 BUG #2 follow-up: `_module_base` only recognised `-m` as its own
+    token, so `python3 -mpwn` never resolved a module and
+    `_python_positional_refusal` saw no positional — the project's module
+    ran while the tier reported PASSED. Normalising HERE (one place, called
+    by `_module_base`) makes the attached spelling identical to `-m <name>`
+    for every caller of `argv_refusal`: unknown modules are refused, known
+    modules get their per-binary rules, and `python3 -mpytest` stays allowed.
+
+    Idempotent: already-split flags pass through unchanged, and a token with
+    no attached value letter is returned as-is.
+    """
+    out: list[str] = []
+    for tok in flags:
+        out.extend(_split_python_option_token(tok))
+    return out
+
+
 def _module_base(base: str, flags: list[str]) -> tuple[str, list[str]]:
     """(effective binary, the flags that binary owns) with `-m` resolved.
 
@@ -350,11 +419,17 @@ def _module_base(base: str, flags: list[str]) -> tuple[str, list[str]]:
     ``-m <known module>``, the rules key on the module and the flags AFTER
     it; everything else keeps the interpreter's own rules.
 
+    SPEC-66 BUG #2 follow-up: the ATTACHED spelling ``-m<module>`` (and a
+    cluster ending in one, ``-OOmpwn``) is normalised to ``-m <module>``
+    first, so ``python3 -mpwn`` resolves (or is refused) exactly like
+    ``python3 -m pwn`` and ``python3 -mpytest -p x`` hits the pytest rule.
+
     The interpreter's OWN flags are checked before this runs (see
     `argv_refusal`), so `python3 -ic -m pytest` is still an eval-flag
     refusal — resolving the module does not launder the flags before it.
     """
     if base in _PYTHON_BASES:
+        flags = _split_attached_python_options(flags)
         for i, tok in enumerate(flags):
             if tok == "-m" and i + 1 < len(flags):
                 module = os.path.basename(flags[i + 1]).lower()
